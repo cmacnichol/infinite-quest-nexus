@@ -94,7 +94,7 @@ Deferred follow-ups. None of these block A1/A2 correctness; they are scheduled f
 - **Activity privacy test (P3):** seed tracker names, values, nested private fields, and raw-error canaries in `activity-generation.integration.test.ts`, then assert those values are absent from the Activity payload. The current negative assertion has nothing seeded to find.
 - **Unexplained integration failures:** diagnose the three all-files failures (Activity illustration, authoring jobs, secure-storage repository) and get one uninterrupted green full run. They lie outside the A1/A2 change set.
 - **Test-database authentication:** configure valid dedicated integration-test authentication before the next PostgreSQL run.
-- **Branch hygiene:** the branch has since been rebased onto `origin/main` at `b0b57dd9` (implementation head `7aa6a99e`). Post-rebase validation is complete; commit/push/PR remain pending.
+- **Publication:** post-rebase validation is complete; documentation publication commit `e1063a1c` is pushed, and [PR #186](https://github.com/cmacnichol/infinite-quest-nexus/pull/186) is open and ready for review.
 
 Recorded for context:
 
@@ -102,11 +102,11 @@ Recorded for context:
 - The dedicated integration-test authentication was restored after all clients finished, privately verified, and its backup and task-created environment file were removed. No credential or backup contents are reproduced here. Future database test runs need valid dedicated test authentication configured again.
 - The three failures in the all-files PostgreSQL pass remain recorded even though unchanged isolated reruns passed; their causes remain unconfirmed, and there is no uninterrupted green full-suite claim.
 - Existing duplicate tracker pairs remain untouched and can retain conflicting values in future prompt context until explicitly consolidated through the state editor.
-- Pull-request publication is authorized and pending. CI, deployment, and live-provider verification have not been performed.
+- Pull-request publication is complete: [PR #186](https://github.com/cmacnichol/infinite-quest-nexus/pull/186) is open and ready for review. CI is running; deployment and live-provider verification have not been performed.
 
 ## Rebased publication validation (2026-10-03 local)
 
-Fresh validation ran on tested checkout HEAD `48290981` (implementation commit `7aa6a99e`) over `origin/main` at `b0b57dd9`. These results are separate from the pre-rebase counts above.
+Fresh validation ran on tested checkout HEAD `48290981` (implementation commit `7aa6a99e`) over `origin/main` at `b0b57dd9`. Documentation-only publication commit `e1063a1c` followed. These results are separate from the pre-rebase counts above.
 
 | Area | Result | Evidence and limits |
 | --- | --- | --- |
@@ -116,4 +116,4 @@ Fresh validation ran on tested checkout HEAD `48290981` (implementation commit `
 | Browser diagnostics | **Passed** | Post-rebase `generation-integrity-diagnostics.e2e.test.ts`: 54/54 passed, 0 skipped. Sol verified the 173-entry screenshot manifest with 0 mismatches after restoring 43 generated screenshot rewrites; the four approved tracker-identity screenshots were retained unchanged. |
 | PostgreSQL integration | **Not rerun** | The dedicated test authentication has been restored. The prior all-file aggregate and three unchanged focused reruns above remain pre-rebase evidence. |
 
-The pull-request description is prepared. Commit, push, and pull-request creation are authorized and remain pending. No deployment or live-provider verification is claimed.
+The pull-request description is prepared, and [PR #186](https://github.com/cmacnichol/infinite-quest-nexus/pull/186) is open and ready for review. CI is running; no deployment or live-provider verification is claimed.

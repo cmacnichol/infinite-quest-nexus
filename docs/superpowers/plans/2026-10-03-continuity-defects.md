@@ -16,7 +16,7 @@
 
 A1 and A2 were implemented and reviewed before rebase at `1ec9bb8f`, then cleanly rebased onto `origin/main` at `b0b57dd9`; the rebased implementation head is `7aa6a99e`. The first verification report/status commit was `ac242a75`, and the documentation follow-up began at `48290981`. Existing verification counts below are pre-rebase evidence. The [implementation verification report](../../review/2026-10-03-continuity-implementation-verification.md) preserves that evidence and records fresh post-rebase results separately.
 
-The pre-rebase Sol implementation review approved the code with 0 critical, 0 important, and 1 nonblocking P3 advisory for seeded private-canary assertions at the Activity boundary. All 128 PostgreSQL integration files were attempted before rebase: the initial aggregate had 3 unexplained failures; unchanged focused full-file reruns passed all three. There is no uninterrupted green full-suite claim. Post-rebase unit, check, build, and browser validation passed; PostgreSQL was not rerun because the dedicated test authentication had been restored. A3–A9 remain open. Pull-request publication is authorized; its description and post-rebase validation are prepared, while commit, push, and PR creation remain pending.
+The pre-rebase Sol implementation review approved the code with 0 critical, 0 important, and 1 nonblocking P3 advisory for seeded private-canary assertions at the Activity boundary. All 128 PostgreSQL integration files were attempted before rebase: the initial aggregate had 3 unexplained failures; unchanged focused full-file reruns passed all three. There is no uninterrupted green full-suite claim. Post-rebase unit, check, build, and browser validation passed; PostgreSQL was not rerun because the dedicated test authentication had been restored. A3–A9 remain open. [PR #186](https://github.com/cmacnichol/infinite-quest-nexus/pull/186) is open and ready for review; CI is running. Deployment and live-provider verification are not claimed.
 
 The pre-rebase independent review on 2026-10-03 confirmed both repairs and found no defects. It re-ran the focused unit suites (281/281) and confirmed that the new planner tests fail on the baseline planner; details are in the verification report's independent-review section. PostgreSQL and browser results were not re-run.
 
@@ -28,7 +28,7 @@ The pre-rebase independent review on 2026-10-03 confirmed both repairs and found
 **Authorized publication work**:
 - [x] Rebase `codex/continuity-defects` onto `origin/main` at `b0b57dd9`; rebased implementation head `7aa6a99e`.
 - [x] Finish fresh post-rebase unit, check, build, and browser validation and record the results; PostgreSQL was not rerun because its dedicated test authentication had been restored.
-- [ ] Commit and push the reviewed branch, then create and attach the pull request.
+- [x] Commit and push the reviewed branch, then create and attach the pull request: [PR #186](https://github.com/cmacnichol/infinite-quest-nexus/pull/186), open and ready for review.
 
 ## Global constraints
 
