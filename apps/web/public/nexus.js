@@ -2519,7 +2519,9 @@ function clearWorkflowReadFailure(host, key, retryId, message = "") {
   delete host.dataset.workflowReadFailure;
   const feedback = host.querySelector(".workflow-read-failure");
   feedback?.remove();
-  if (!host.textContent.trim()) host.classList.add("hidden");
+  if ((key === "worlds" || key === "campaigns") && managementSelectionErrorIsCurrent(key)) {
+    managementSelectionError(acceptedManagementRoute, managementSelectionErrorMessage);
+  } else if (!host.textContent.trim()) host.classList.add("hidden");
 }
 
 function projectDashboardWorkflowErrorToRoute(route) {
@@ -2594,7 +2596,8 @@ async function retryWorldWorkflowRead() {
   const intent = managementNavigationIntent;
   const selectionIntentEpoch = worldSelectionIntentEpoch;
   const preserveWorkflowFeedbackForWorldId = selectedWorld?.id || route?.selection?.kind === "world" && route.selection.id || "";
-  await loadWorlds("", { selectionIntentEpoch, preserveWorkflowFeedbackForWorldId });
+  const requestedWorldId = route?.selection?.kind === "world" ? route.selection.id : "";
+  await loadWorlds(requestedWorldId, { selectionIntentEpoch, preserveWorkflowFeedbackForWorldId, preferRequestedWorld: Boolean(requestedWorldId) });
   if (route === acceptedManagementRoute && intent === managementNavigationIntent) {
     await applyExplicitManagementSelection(route, intent, { selectionIntentEpoch, preserveWorkflowFeedbackForWorldId });
   }
@@ -2605,7 +2608,8 @@ async function retryCampaignWorkflowRead() {
   const intent = managementNavigationIntent;
   const preserveWorkflowFeedbackForCampaignId = selectedCampaign?.id || route?.selection?.kind === "campaign" && route.selection.id || "";
   const selectionRequest = campaignSelectionRequest;
-  await loadCampaigns(selectedCampaign?.id || "", { focusNoSelection: true, preserveWorkflowFeedbackForCampaignId, selectionRequest, navigationIntent: intent });
+  const requestedCampaignId = route?.selection?.kind === "campaign" ? route.selection.id : selectedCampaign?.id || "";
+  await loadCampaigns(requestedCampaignId, { focusNoSelection: true, preserveWorkflowFeedbackForCampaignId, selectionRequest, navigationIntent: intent });
   if (route === acceptedManagementRoute && intent === managementNavigationIntent) {
     await applyExplicitManagementSelection(route, intent, { preserveWorkflowFeedbackForCampaignId });
   }

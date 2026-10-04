@@ -396,6 +396,56 @@ test("campaign_selection_during_pending_retry_keeps_latest_route_and_editor", as
   expect(writes).toEqual([]);
   await page.screenshot({ path: `${evidenceDir}/fix4-campaign-selection-during-retry-desktop.png`, fullPage: false });
 });
+for (const kind of ["worlds", "campaigns"] as const) {
+  test(`${kind}_missing_link_during_pending_retry_keeps_recovery_until_target_available`, async ({ page }) => {
+    const fixture = { ...legacyUiFixture({ turnCount: 1, worldCount: 2, campaignCount: 2 }) };
+    const records = kind === "worlds" ? fixture.worlds : fixture.campaigns;
+    const first = records[0];
+    const target = records[1];
+    if (!first || !target) throw new Error("Two synthetic records are required.");
+    const routeName = kind === "worlds" ? "world-library" : "campaigns";
+    const parameter = kind === "worlds" ? "worldId" : "campaignId";
+    const retryId = kind === "worlds" ? "workflowRetryWorlds" : "workflowRetryCampaigns";
+    const statusId = kind === "worlds" ? "worldStatus" : "campaignStatusMessage";
+    let reads = 0;
+    let releaseRetry = () => {};
+    const gate = new Promise<void>(resolve => { releaseRetry = resolve; });
+    await installLegacyUiFixture(page, fixture);
+    await page.route(`**/api/v1/${kind}`, async route => {
+      if (route.request().method() !== "GET") return route.fallback();
+      reads += 1;
+      if (reads === 2) {
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private list diagnostics" }) });
+        return;
+      }
+      if (reads === 3) await gate;
+      if (reads >= 4 && kind === "campaigns") fixture.campaignId = String(target.id);
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ [kind]: reads >= 4 ? records : [first] }) });
+    });
+    await page.goto(`${origin}/nexus/index.html#${routeName}?${parameter}=${first.id}`);
+    if (kind === "worlds") await expect(page.locator("#worldEditorTitle")).toHaveText(String(first.title));
+    else await expect(page.locator("#campaignTitle")).toHaveValue(String(first.title));
+    await page.locator(kind === "worlds" ? "#refreshWorlds" : "#refreshCampaigns").click();
+    await expect(page.locator(`#${retryId}`)).toBeVisible();
+    await page.locator(`#${retryId}`).click();
+    await expect.poll(() => reads).toBe(3);
+    await page.goto(`${origin}/nexus/index.html#${routeName}?${parameter}=${target.id}`);
+    await expect(page.locator(`#${statusId}`)).toContainText(`${target.id} is not available`);
+    releaseRetry();
+    await page.waitForLoadState("networkidle");
+    await expect(page.locator(`#${statusId}`)).toContainText(`${target.id} is not available`);
+    await expect(page.locator(`#${retryId}`)).toBeVisible();
+    await expect(page.locator(`#${statusId}`)).not.toContainText("Private list diagnostics");
+    await page.locator(`#${retryId}`).click();
+    if (kind === "worlds") await expect(page.locator("#worldEditorTitle")).toHaveText(String(target.title));
+    else await expect(page.locator("#campaignTitle")).toHaveValue(String(target.title));
+    await expect(page.locator(`#${statusId}`)).not.toContainText(`${target.id} is not available`);
+    await expect(page.locator(`#${retryId}`)).toHaveCount(0);
+    await expect(page).toHaveURL(`${origin}/nexus/index.html#${routeName}?${parameter}=${target.id}`);
+    expect(reads).toBe(4);
+    await page.screenshot({ path: `${evidenceDir}/fix5-${kind}-missing-target-recovered-desktop.png`, fullPage: false });
+  });
+}
 test("provider_list_retry_keeps_current_save_error_after_profile_selection_refresh", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
   let providerReads = 0;
