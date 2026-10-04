@@ -117,4 +117,20 @@ describe("story-only runtime CLI shutdown", () => {
       else process.env.VITE_UI_COMPONENTS = originalRenderer;
     }
   });
+  it("forwards the explicit owned PostgreSQL container into the direct CLI fixture", async () => {
+    const originalContainer = process.env.STORY_ONLY_RUNTIME_POSTGRES_CONTAINER;
+    process.env.STORY_ONLY_RUNTIME_POSTGRES_CONTAINER = "iq-owned-test-postgres";
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      await startCli();
+      expect(seams.startRuntime).toHaveBeenCalledWith(expect.objectContaining({ postgresContainer: "iq-owned-test-postgres" }));
+    } finally {
+      process.stdin.emit("data", Buffer.from("stop"));
+      await vi.waitFor(() => expect(process.exitCode).toBe(1));
+      if (originalContainer === undefined) delete process.env.STORY_ONLY_RUNTIME_POSTGRES_CONTAINER;
+      else process.env.STORY_ONLY_RUNTIME_POSTGRES_CONTAINER = originalContainer;
+    }
+  });
+
 });

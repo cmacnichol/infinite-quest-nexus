@@ -202,9 +202,17 @@ function runCommand(command: string, args: readonly string[]): Promise<string> {
   });
 }
 
-function dockerDatabaseUrl(databaseUrl: string): string {
+export function resolveStoryOnlyRuntimePostgresContainer(value: unknown): string {
+  if (value === undefined) return STORY_ONLY_POSTGRES_CONTAINER;
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(value)) {
+    throw new Error("PostgreSQL container must be a safe, nonempty container name.");
+  }
+  return value;
+}
+
+function dockerDatabaseUrl(databaseUrl: string, postgresContainer: string): string {
   const url = new URL(databaseUrl);
-  url.hostname = STORY_ONLY_POSTGRES_CONTAINER;
+  url.hostname = postgresContainer;
   url.port = "5432";
   return url.toString();
 }
@@ -254,9 +262,10 @@ async function dropOwnedDatabase(target: StoryOnlyRuntimeTarget, databaseName: s
   } finally { await admin.end(); }
 }
 
-export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: string; root?: string; port?: number; renderer?: unknown; signal?: AbortSignal }> ): Promise<StoryOnlyRuntimeFixture> {
+export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: string; root?: string; port?: number; renderer?: unknown; postgresContainer?: unknown; signal?: AbortSignal }> ): Promise<StoryOnlyRuntimeFixture> {
   if (options.signal?.aborted) throw new Error("Story-only runtime startup was cancelled.");
   const renderer = resolveStoryOnlyRuntimeRenderer(options.renderer);
+  const postgresContainer = resolveStoryOnlyRuntimePostgresContainer(options.postgresContainer);
   const target = assertStoryOnlyRuntimeTarget(options.databaseUrl);
   const root = resolve(options.root ?? process.cwd());
   const port = options.port ?? RUNTIME_PORT;
@@ -303,7 +312,7 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
     if (docker) {
       await runCommand("docker", storyOnlyRuntimeDockerBuildArgs(renderer, dockerImage)); dockerImageBuilt = true;
       await runCommand("docker", ["network", "create", dockerNetwork]); dockerNetworkCreated = true;
-      await runCommand("docker", ["network", "connect", dockerNetwork, STORY_ONLY_POSTGRES_CONTAINER]); postgresConnected = true;
+      await runCommand("docker", ["network", "connect", dockerNetwork, postgresContainer]); postgresConnected = true;
       await runCommand("docker", ["run", "--detach", "--name", dockerProvider, "--network", dockerNetwork, "--env", "STORY_ONLY_SYNTHETIC_PROVIDER_HOST=0.0.0.0", dockerImage, "node", "node_modules/tsx/dist/cli.mjs", "scripts/story-only-synthetic-provider.ts"]); dockerProviderStarted = true;
     } else {
       provider = await createStoryOnlySyntheticProvider();
@@ -340,7 +349,7 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
     const runtimeBaseUrl = `http://127.0.0.1:${port}`;
     const runtimeEnvironment = {
       ...process.env,
-      APP_ROLE: "all", APP_HOST: "0.0.0.0", APP_PORT: docker ? "8080" : String(port), DATABASE_URL: docker ? dockerDatabaseUrl(databaseUrl) : databaseUrl,
+      APP_ROLE: "all", APP_HOST: "0.0.0.0", APP_PORT: docker ? "8080" : String(port), DATABASE_URL: docker ? dockerDatabaseUrl(databaseUrl, postgresContainer) : databaseUrl,
       DATABASE_MAX_CONNECTIONS: "12", CREDENTIAL_ENCRYPTION_KEY: CREDENTIAL_SECRET,
       PROVIDER_NETWORK_ALLOWLIST: docker ? dockerProvider : "127.0.0.1", LEGACY_WEB_ROOT: docker ? "/app/apps/web/dist" : resolve(root, "apps/web/dist"), NEXT_WEB_ROOT: docker ? "/app/apps/web-next/dist" : resolve(root, "apps/web-next/dist"),
       ASSET_STORAGE_ROOT: docker ? "/tmp/story-only/assets" : assetRoot, ARCHIVE_STORAGE_ROOT: docker ? "/tmp/story-only/archives" : archiveRoot, LOG_LEVEL: "silent"
@@ -372,7 +381,7 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
       ...(docker ? [
         ...(dockerRuntimeStarted ? [async () => { await runCommand("docker", ["rm", "--force", dockerRuntime]); }] : []),
         ...(dockerProviderStarted ? [async () => { await runCommand("docker", ["rm", "--force", dockerProvider]); }] : []),
-        ...(postgresConnected ? [async () => { await runCommand("docker", ["network", "disconnect", dockerNetwork, STORY_ONLY_POSTGRES_CONTAINER]); }] : []),
+        ...(postgresConnected ? [async () => { await runCommand("docker", ["network", "disconnect", dockerNetwork, postgresContainer]); }] : []),
         ...(dockerNetworkCreated ? [async () => { await runCommand("docker", ["network", "rm", dockerNetwork]); }] : []),
         ...(dockerImageBuilt ? [async () => { await runCommand("docker", ["image", "rm", "--force", dockerImage]); }] : [])
       ] : []),
@@ -393,7 +402,7 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
       ...(docker ? [
         ...(dockerRuntimeStarted ? [async () => { await runCommand("docker", ["rm", "--force", dockerRuntime]); }] : []),
         ...(dockerProviderStarted ? [async () => { await runCommand("docker", ["rm", "--force", dockerProvider]); }] : []),
-        ...(postgresConnected ? [async () => { await runCommand("docker", ["network", "disconnect", dockerNetwork, STORY_ONLY_POSTGRES_CONTAINER]); }] : []),
+        ...(postgresConnected ? [async () => { await runCommand("docker", ["network", "disconnect", dockerNetwork, postgresContainer]); }] : []),
         ...(dockerNetworkCreated ? [async () => { await runCommand("docker", ["network", "rm", dockerNetwork]); }] : []),
         ...(dockerImageBuilt ? [async () => { await runCommand("docker", ["image", "rm", "--force", dockerImage]); }] : [])
       ] : []),

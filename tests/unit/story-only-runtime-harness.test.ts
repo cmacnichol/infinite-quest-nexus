@@ -11,6 +11,7 @@ import {
   closeStoryOnlyRuntimeInput,
   storyOnlyDockerCleanupNames,
   resolveStoryOnlyRuntimeRenderer,
+  resolveStoryOnlyRuntimePostgresContainer,
   storyOnlyRuntimeDockerBuildArgs,
 } from "../helpers/story-only-runtime-fixture.js";
 import {
@@ -51,6 +52,14 @@ describe("story-only disposable runtime harness", () => {
     request.write(body);
     return { end: () => request.end(), response };
   }
+
+  it("resolves an explicit PostgreSQL container name without changing the default", () => {
+    expect(resolveStoryOnlyRuntimePostgresContainer(undefined)).toBe("infinitequest-story-only-test");
+    expect(resolveStoryOnlyRuntimePostgresContainer("iq-owned-test-postgres")).toBe("iq-owned-test-postgres");
+    for (const value of [null, "", " ", "--other", "name/other", "name\nother", "a".repeat(129), 42]) {
+      expect(() => resolveStoryOnlyRuntimePostgresContainer(value)).toThrow("PostgreSQL container");
+    }
+  });
 
   it("accepts only the dedicated runtime target or an isolated integration target", () => {
     expect(assertStoryOnlyRuntimeTarget("postgresql://test:secret@127.0.0.1:15439/infinitequest_storyonly_test"))
