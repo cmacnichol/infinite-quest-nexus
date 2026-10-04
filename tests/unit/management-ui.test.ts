@@ -714,7 +714,18 @@ describe("Nexus management UI contracts", () => {
 
   it("keeps context preview inputs separate from saved Semantic Retrieval settings", () => {
     expect(managementDocument.querySelector("#memoryQuery")?.closest("form")?.id).toBe("contextForm");
-    expect(managementDocument.querySelector("#budgetTokens")?.closest("form")?.id).toBe("contextForm");
+    const budgetTokens = managementDocument.querySelector<HTMLInputElement>("#budgetTokens");
+    expect(budgetTokens?.closest("form")?.id).toBe("contextForm");
+    expect(budgetTokens?.getAttribute("min")).toBe("512");
+    expect(budgetTokens?.getAttribute("max")).toBe("1000000");
+    expect(budgetTokens?.getAttribute("step")).toBe("1");
+    const clampBudget = managementFunctionWithBindings<(value: string) => number>("clampedMemoryContextBudget", {
+      MIN_MEMORY_CONTEXT_BUDGET_TOKENS: 512,
+      MAX_MEMORY_CONTEXT_BUDGET_TOKENS: 1_000_000,
+      DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS: 32_000
+    });
+    expect(clampBudget(budgetTokens?.value || "")).toBe(32_000);
+    expect(clampBudget("65536")).toBe(65_536);
     expect(managementDocument.querySelector("#compression")?.closest("form")?.id).toBe("contextForm");
     expect(managementDocument.querySelector("#embeddingProvider")?.closest("form")?.id).toBe("embeddingForm");
     expect(managementDocument.querySelector("#saveEmbeddingConfig")?.closest("form")?.id).toBe("embeddingForm");

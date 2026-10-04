@@ -171,6 +171,7 @@ test("advanced_requests_are_absent_until_open_and_context_preview_is_explicit", 
     if (request.method() === "GET" && new URL(request.url()).pathname === previewPath) previewUrl = request.url();
     await route.fallback();
   });
+  await expect(page.locator("#budgetTokens").evaluate((input: HTMLInputElement) => input.validity.stepMismatch)).resolves.toBe(false);
   await page.locator("#previewContext").click();
   await expect.poll(() => reads(api, previewPath).length).toBe(1);
   const query = new URL(previewUrl).searchParams;
@@ -244,6 +245,7 @@ test("overview_remains_usable_while_opened_chronicle_reads_and_preview_are_block
     await captureT26Screenshot(page, "T26-overview-first-1280x800.png");
     await page.locator("#campaignTabChronicle").click();
     await metricsGate.started;
+    await expect(page.locator("#budgetTokens").evaluate((input: HTMLInputElement) => input.validity.stepMismatch)).resolves.toBe(false);
     await page.locator("#previewContext").click();
     await previewGate.started;
     await page.setViewportSize({ width: 390, height: 844 });
@@ -433,6 +435,12 @@ test("hides_illustration_a_while_illustrations_b_fails_then_reveals_only_b_after
     }
     await route.fulfill({ json: illustrationConfigResponse(654) });
   });
+  await campaignSectionRoute(page, idB, "image-jobs", async (route) => {
+    await route.fulfill({ json: { jobs: [] } });
+  });
+  await campaignSectionRoute(page, idB, "illustration-segments", async (route) => {
+    await route.fulfill({ json: { segments: [] } });
+  });
 
   try {
     await page.goto(`${origin}/nexus/index.html#campaigns`);
@@ -514,9 +522,9 @@ test("keeps_advanced_values_hidden_across_empty_selection_before_loading_campaig
     await expect(chronicleBody).toBeHidden();
     await page.locator("#campaignTabChronicle").click();
     await bMetricsStarted.promise;
+    await expect(page.locator("#embeddingDocumentPrefix")).toHaveValue("B-current-document-prefix");
     await expect(chronicleBody).toBeHidden();
     await expect(page.locator("#campaignPanelChronicle [data-campaign-section-feedback]")).toContainText("Loading Chronicle");
-    await expect(page.locator("#embeddingDocumentPrefix")).toHaveValue("A-private-document-prefix");
 
     releaseBMetrics.resolve(undefined);
     await expect(chronicleBody).toBeVisible();
