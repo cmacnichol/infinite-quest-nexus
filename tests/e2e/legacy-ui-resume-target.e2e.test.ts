@@ -360,6 +360,10 @@ test("dashboard permits an archived campaign after an explicit Campaigns selecti
   ];
   await installDashboardApi(page, campaigns);
   await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator('#campaignList [data-campaign-id="active-default"]')).toBeVisible();
+  await page.locator("#managementCampaignStatus").selectOption("archived");
+  await expect(page.locator('#campaignList [data-campaign-id="archived-explicit"]')).toBeVisible();
   await page.locator('#campaignList [data-campaign-id="archived-explicit"]').click();
   await expect(page.locator("#storyViewLink")).toHaveAttribute("href", "/story/archived-explicit");
 });
