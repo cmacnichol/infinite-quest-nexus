@@ -32,6 +32,7 @@ import {
   resumeActiveGenerationConflict
 } from "./story-generation-monitor.js";
 import { handleStoryEscape } from "./story-keyboard.js";
+import { bindLegacyTabGroup } from "./legacy-tabs.js";
 import { createLegacyCastPanel } from "./campaign-cast-panel.js";
 import { createStoryStreamRenderer } from "./story-stream-renderer.js";
 import {
@@ -536,6 +537,7 @@ let storyTurnWindowEpoch = 0;
 let nextEditStateSessionId = 0;
 let nextCharacterProfileEditSessionId = 0;
 let characterProfileEditRequestToken = 0;
+let editStateTabBinding = null;
 let nextResponseEditSessionId = 0;
 let userProfileSaving = false;
 let userProfilePersistedTurnControlStyle = null;
@@ -1048,19 +1050,26 @@ function showBusy(msg) {
   state.busy = true;
   const el = $("llmWaitIndicator");
   const text = $("llmWaitIndicatorText");
-  if (text) text.textContent = msg || "Working…";
-  if (el) el.classList.add("show");
+  const message = msg || "Working…";
+  if (text && text.textContent !== message) text.textContent = message;
+  if (el && !el.classList.contains("show")) el.classList.add("show");
   const pill = $("busyPill");
-  if (pill) { pill.textContent = "Busy"; pill.classList.add("busy"); }
+  if (pill) {
+    if (pill.textContent !== "Busy") pill.textContent = "Busy";
+    if (!pill.classList.contains("busy")) pill.classList.add("busy");
+  }
   syncInputState();
 }
 
 function hideBusy() {
   state.busy = false;
   const el = $("llmWaitIndicator");
-  if (el) el.classList.remove("show");
+  if (el && el.classList.contains("show")) el.classList.remove("show");
   const pill = $("busyPill");
-  if (pill) { pill.textContent = "Ready"; pill.classList.remove("busy"); }
+  if (pill) {
+    if (pill.textContent !== "Ready") pill.textContent = "Ready";
+    if (pill.classList.contains("busy")) pill.classList.remove("busy");
+  }
   syncInputState();
 }
 
@@ -3749,8 +3758,8 @@ function updateGenerationProgress(job) {
   if (continuityReviewMessage !== "Retrying continuity review") showBusy(`Story Engine: ${stage}…`);
   const progressEl = $("generationProgress");
   if (progressEl) {
-    progressEl.classList.add("turn-progress");
-    progressEl.classList.remove("generation-progress");
+    if (!progressEl.classList.contains("turn-progress")) progressEl.classList.add("turn-progress");
+    if (progressEl.classList.contains("generation-progress")) progressEl.classList.remove("generation-progress");
 
     const steps = [
       { id: "queued", label: "Queued" },
@@ -3769,6 +3778,15 @@ function updateGenerationProgress(job) {
     const currentStep = steps[currentIndex];
     const percent = Math.round(((currentIndex + 1) / steps.length) * 100);
     const detailText = continuityReviewMessage || `Story Engine: ${stage}`;
+    const renderedStep = progressEl.querySelector(".turn-progress-head strong");
+    const renderedStepNumber = progressEl.querySelector(".turn-progress-step");
+    const renderedMeter = progressEl.querySelector(".turn-progress-meter");
+    const renderedDetail = progressEl.querySelector(".turn-progress-detail");
+    if (renderedStep?.textContent === currentStep.label
+      && renderedStepNumber?.textContent === `Step ${currentIndex + 1} of ${steps.length}`
+      && renderedMeter?.getAttribute("value") === String(percent)
+      && renderedMeter.getAttribute("aria-label") === currentStep.label
+      && renderedDetail?.textContent === detailText) return;
 
     progressEl.innerHTML = `
       <div class="turn-progress-head">
@@ -4552,6 +4570,22 @@ function switchEditStateTab(tabName) {
   ["overview", "scratch", "trackers", "mechanics"].forEach(sectionTab => {
     const el = $(`tab-${sectionTab}`);
     if (el) el.classList.toggle("hidden", sectionTab !== tabName);
+  });
+  editStateTabBinding?.sync();
+}
+
+const editStateTabRoot = $("editStateTabs");
+if (editStateTabRoot) {
+  const editStateTabs = [...editStateTabRoot.querySelectorAll(".tab[data-tab]")].flatMap((tab) => {
+    const key = tab.dataset.tab;
+    const panel = $(`tab-${key || ""}`);
+    return key && panel ? [{ key, tab, panel }] : [];
+  });
+  editStateTabBinding = bindLegacyTabGroup({
+    root: editStateTabRoot,
+    tabs: editStateTabs,
+    getSelectedKey: () => document.querySelector("#editStateDialog .tab.active")?.dataset.tab || "overview",
+    onActivate: switchEditStateTab
   });
 }
 
@@ -5376,6 +5410,11 @@ function revealSelectedHistoryCard() {
 
 function selectHistoryTurn(turnNumber) {
   if (!Number.isInteger(turnNumber) || !historyWindowContainsTurn(turnNumber)) return;
+  const historyDialog = $("turnHistoryDialog");
+  const focusedHistoryCard = historyDialog?.open
+    ? document.activeElement?.closest("#turnHistoryModalList .history-card")
+    : null;
+  const focusedTurnNumber = Number(focusedHistoryCard?.dataset.turnNumber);
   state.historySelectedTurnNumber = turnNumber;
   const selectedTurn = [...(state.historyWindow?.cachedPages || []).flatMap((page) => page.turns), state.historyWindow?.selectedPreview]
     .find((turn) => Number(turn?.turnNumber) === turnNumber) || null;
@@ -5390,6 +5429,10 @@ function selectHistoryTurn(turnNumber) {
   state.historyInspectionRequestId += 1;
   renderStoryHistoryWindow();
   revealSelectedHistoryCard();
+  if (historyDialog?.open && focusedTurnNumber === turnNumber) {
+    const selectedCard = historyDialog.querySelector(`#turnHistoryModalList .history-card[data-turn-number="${turnNumber}"]`);
+    if (selectedCard instanceof HTMLButtonElement) selectedCard.focus({ preventScroll: true });
+  }
   updateHistorySelectionActions();
 }
 

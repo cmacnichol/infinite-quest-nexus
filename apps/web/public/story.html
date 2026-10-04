@@ -229,7 +229,7 @@
     </form>
   </dialog>
 
-  <dialog id="messagePopupDialog" class="world-gen-dialog message-popup-dialog">
+  <dialog id="messagePopupDialog" class="world-gen-dialog message-popup-dialog" aria-labelledby="messagePopupTitle">
     <form method="dialog" class="world-gen-card">
       <div>
         <h3 id="messagePopupTitle">Notice</h3>
@@ -241,10 +241,10 @@
     </form>
   </dialog>
 
-  <dialog id="branchStoryDialog" class="world-gen-dialog app-dialog">
+  <dialog id="branchStoryDialog" class="world-gen-dialog app-dialog" aria-labelledby="branchStoryTitle">
     <form method="dialog" class="world-gen-card">
       <div>
-        <h3>Start again from an earlier turn?</h3>
+        <h3 id="branchStoryTitle">Start again from an earlier turn?</h3>
         <p id="branchStoryMessage" class="mini"></p>
       </div>
       <div class="world-gen-box stack">
@@ -259,11 +259,11 @@
     </form>
   </dialog>
 
-  <dialog id="gettingStartedDialog" class="world-gen-dialog app-dialog getting-started-dialog">
+  <dialog id="gettingStartedDialog" class="world-gen-dialog app-dialog getting-started-dialog" aria-labelledby="gettingStartedTitle">
     <div class="world-gen-card">
       <div class="dialog-header">
         <div>
-          <h3>Getting Started</h3>
+          <h3 id="gettingStartedTitle">Getting Started</h3>
           <p class="mini">Add a backend provider profile before starting a story.</p>
         </div>
       </div>
@@ -277,11 +277,11 @@
     </div>
   </dialog>
 
-  <dialog id="worldSetupDialog" class="world-gen-dialog app-dialog wide-dialog">
+  <dialog id="worldSetupDialog" class="world-gen-dialog app-dialog wide-dialog" aria-labelledby="worldSetupTitle">
     <div class="world-gen-card">
       <div class="dialog-header">
         <div>
-          <h3>Current World Setup</h3>
+          <h3 id="worldSetupTitle">Current World Setup</h3>
           <p class="mini">Static information pulled from the authoritative database for the current campaign and world version.</p>
         </div>
         <button id="btnCloseWorldSetup" class="small ghost" type="button" aria-label="Close world setup">✕</button>
@@ -334,11 +334,11 @@
     </div>
   </dialog>
 
-  <dialog id="editCharacterProfileDialog" class="world-gen-dialog app-dialog">
+  <dialog id="editCharacterProfileDialog" class="world-gen-dialog app-dialog" aria-labelledby="editCharacterProfileTitle">
     <div class="world-gen-card">
       <div class="dialog-header">
         <div>
-          <h3>Edit Character Profile</h3>
+          <h3 id="editCharacterProfileTitle">Edit Character Profile</h3>
           <p class="mini">Update this campaign's character profile for future story turns.</p>
         </div>
         <button id="btnCloseEditCharacterProfile" class="small ghost" type="button" aria-label="Close edit character profile">✕</button>
@@ -360,24 +360,24 @@
     </div>
   </dialog>
 
-  <dialog id="editStateDialog" class="world-gen-dialog app-dialog wide-dialog">
+  <dialog id="editStateDialog" class="world-gen-dialog app-dialog wide-dialog" aria-labelledby="editStateTitle">
     <div class="world-gen-card">
       <div class="dialog-header">
         <div>
-          <h3>Edit State</h3>
+          <h3 id="editStateTitle">Edit State</h3>
           <p class="mini">Review and edit the authoritative state used by the next story turn.</p>
         </div>
         <button id="btnCloseEditState" class="small ghost" type="button" aria-label="Close edit state">✕</button>
       </div>
       <div class="dialog-scroll">
-        <div class="tabs" role="tablist" aria-label="side panels">
-          <button class="tab active" data-tab="overview">Current State</button>
-          <button class="tab" data-tab="scratch">Scratchpad</button>
-          <button class="tab" data-tab="trackers">Trackers</button>
-          <button class="tab" data-tab="mechanics">Mechanics</button>
+        <div id="editStateTabs" class="tabs" role="tablist" aria-label="Edit state sections">
+          <button id="editStateTabOverview" class="tab active" data-tab="overview" aria-controls="tab-overview">Current State</button>
+          <button id="editStateTabScratch" class="tab" data-tab="scratch" aria-controls="tab-scratch">Scratchpad</button>
+          <button id="editStateTabTrackers" class="tab" data-tab="trackers" aria-controls="tab-trackers">Trackers</button>
+          <button id="editStateTabMechanics" class="tab" data-tab="mechanics" aria-controls="tab-mechanics">Mechanics</button>
         </div>
         <div class="panel-body">
-          <section id="tab-overview" class="stack">
+          <section id="tab-overview" class="stack" role="tabpanel" aria-labelledby="editStateTabOverview">
             <p id="editStateMeta" class="mini" role="status" aria-live="polite"></p>
             <div class="track-card">
               <label for="editStateContinuitySummary"><strong>Continuity summary</strong></label>
@@ -399,13 +399,13 @@
             </div>
           </section>
 
-          <section id="tab-scratch" class="stack hidden">
+          <section id="tab-scratch" class="stack hidden" role="tabpanel" aria-labelledby="editStateTabScratch" hidden>
             <p class="mini">The Story Engine replaces this private, fiction-only continuity scratchpad after every accepted turn. Saved edits apply to the next generation.</p>
             <textarea id="scratchpadEditor" placeholder="NPC secrets, unresolved hooks, character descriptions..."></textarea>
             <p id="scratchpadCharacterCount" class="mini">0 characters</p>
           </section>
 
-          <section id="tab-trackers" class="stack hidden">
+          <section id="tab-trackers" class="stack hidden" role="tabpanel" aria-labelledby="editStateTabTrackers" hidden>
             <p class="mini">Add or correct the current fictional trackers used by the next story turn.</p>
             <label>Tracker name
               <input id="trackerName" placeholder="Relationship: character name" />
@@ -420,7 +420,7 @@
             <div id="trackerList" class="stack"></div>
           </section>
 
-          <section id="tab-mechanics" class="stack hidden">
+          <section id="tab-mechanics" class="stack hidden" role="tabpanel" aria-labelledby="editStateTabMechanics" hidden>
             <p class="mini">Generated mechanics are static for this campaign and are shown for context.</p>
             <div class="track-card"><h4>RPG stats</h4><div id="editStateRpgStats"></div></div>
             <div class="track-card"><h4>Event triggers</h4><div id="editStateEventTriggers" class="stack mini"></div></div>
@@ -437,11 +437,11 @@
     </div>
   </dialog>
 
-  <dialog id="turnHistoryDialog" class="world-gen-dialog app-dialog wide-dialog">
+  <dialog id="turnHistoryDialog" class="world-gen-dialog app-dialog wide-dialog" aria-labelledby="turnHistoryTitle">
     <div class="world-gen-card">
       <div class="dialog-header">
         <div>
-          <h3>Turn History & State</h3>
+          <h3 id="turnHistoryTitle">Turn History & State</h3>
           <p class="mini">Navigate the accepted story and inspect the private state recorded at any turn. Historical state is read-only.</p>
         </div>
         <button id="btnCloseTurnHistory" class="small ghost" type="button" aria-label="Close turn history">✕</button>
@@ -504,11 +504,11 @@
     </div>
   </dialog>
 
-  <dialog id="activityLogDialog" class="world-gen-dialog app-dialog wide-dialog">
+  <dialog id="activityLogDialog" class="world-gen-dialog app-dialog wide-dialog" aria-labelledby="activityLogTitle">
     <div class="world-gen-card">
       <div class="dialog-header">
         <div>
-          <h3>Activity Log</h3>
+          <h3 id="activityLogTitle">Activity Log</h3>
           <p class="mini">Recent actions, provider calls, parsing decisions, and results. Stored only in memory and cleared when this page reloads.</p>
         </div>
         <button id="btnCloseActivityLog" class="small ghost" type="button" aria-label="Close activity log">✕</button>
@@ -526,7 +526,7 @@
     </div>
   </dialog>
 
-  <dialog id="imagePromptDialog" class="world-gen-dialog">
+  <dialog id="imagePromptDialog" class="world-gen-dialog" aria-labelledby="imagePromptDialogTitle">
     <form method="dialog" class="world-gen-card">
       <div>
         <h3 id="imagePromptDialogTitle">Image prompt preview</h3>
@@ -542,11 +542,11 @@
     </form>
   </dialog>
 
-  <dialog id="editResponseDialog" class="world-gen-dialog app-dialog wide-dialog">
+  <dialog id="editResponseDialog" class="world-gen-dialog app-dialog wide-dialog" aria-labelledby="editResponseTitle">
     <div class="world-gen-card">
       <div class="dialog-header">
         <div>
-          <h3>Edit Response</h3>
+          <h3 id="editResponseTitle">Edit Response</h3>
           <p class="mini">Correct the latest completed narration. This does not update Current State facts, choices, or existing illustrations.</p>
         </div>
         <button id="btnEditResponseClose" class="small ghost" type="button" aria-label="Close edit response">✕</button>
@@ -561,11 +561,11 @@
     </div>
   </dialog>
 
-  <dialog id="retryPromptDialog" class="world-gen-dialog app-dialog wide-dialog">
+  <dialog id="retryPromptDialog" class="world-gen-dialog app-dialog wide-dialog" aria-labelledby="retryPromptTitle">
     <div class="world-gen-card">
       <div class="dialog-header">
         <div>
-          <h3>Retry Turn with Edited Prompt</h3>
+          <h3 id="retryPromptTitle">Retry Turn with Edited Prompt</h3>
           <p class="mini">Review and edit the prompt for the turn you are retrying before submitting to generate a new response.</p>
         </div>
         <button id="btnRetryPromptClose" class="small ghost" type="button" aria-label="Cancel retry">✕</button>
@@ -590,11 +590,11 @@
     </div>
   </dialog>
 
-  <dialog id="userProfileDialog" class="world-gen-dialog app-dialog">
+  <dialog id="userProfileDialog" class="world-gen-dialog app-dialog" aria-labelledby="userProfileTitle">
     <div class="world-gen-card">
       <div class="dialog-header">
         <div>
-          <h3>User Profile & Settings</h3>
+          <h3 id="userProfileTitle">User Profile & Settings</h3>
           <p class="mini">Manage your profile and adventure preferences.</p>
         </div>
         <button id="btnCloseUserProfile" class="small ghost" type="button" aria-label="Close user profile">✕</button>

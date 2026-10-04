@@ -13,6 +13,7 @@ import {
 import { createProviderPresetsApi, nativePresetSupport } from "@infinite-quest/client-web";
 import { bindEditDialogDismissal, requestEditDismissal } from "./legacy-edit-session.js";
 import { createLegacySectionLoader } from "./legacy-section-loader.js";
+import { bindLegacyTabGroup } from "./legacy-tabs.js";
 
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
 const campaignSectionLoader = createLegacySectionLoader({
@@ -165,6 +166,7 @@ let worldAuthorSelectedCover = null;
 let worldAuthorBusy = false;
 let worldAuthorActiveStep = "basics";
 let worldAuthorBusyControlSnapshot = null;
+let worldAuthorTabBinding = null;
 let worldVersionReadiness = null;
 let worldVersionReadinessError = "";
 let worldVersionReadinessCheckedId = "";
@@ -3648,7 +3650,22 @@ function setWorldAuthorStep(id) {
   for (const panel of elements.worldAuthorDialog.querySelectorAll('.tab-content[data-tab-group="world-author"]')) {
     panel.classList.toggle("active", panel.id === step.panel);
   }
+  worldAuthorTabBinding?.sync();
   renderWorldAuthorChecklist();
+}
+
+if (elements.worldAuthorSteps) {
+  const worldAuthorTabs = [...elements.worldAuthorSteps.querySelectorAll("[data-world-author-step]")].flatMap((tab) => {
+    const key = tab.dataset.worldAuthorStep;
+    const panel = document.getElementById(tab.dataset.tabTarget || "");
+    return key && panel ? [{ key, tab, panel }] : [];
+  });
+  worldAuthorTabBinding = bindLegacyTabGroup({
+    root: elements.worldAuthorSteps,
+    tabs: worldAuthorTabs,
+    getSelectedKey: () => worldAuthorActiveStep,
+    onActivate: setWorldAuthorStep
+  });
 }
 
 function renderWorldAuthorChecklist() {
