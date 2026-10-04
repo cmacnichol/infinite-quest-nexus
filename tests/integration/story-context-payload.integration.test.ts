@@ -238,6 +238,68 @@ integration("story context payload baseline shape", () => {
     expect(system).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
   });
 
+  it("replays a name-only Action tracker update once under its stable ID in the next provider request", async () => {
+    const fixture = await importedCampaign("tracker-name-only-replay");
+    const foreign = await importedCampaign("tracker-name-only-foreign");
+    const updates = [{ name: "West lantern", value: "bright", tracker_private_canary: "PRIVATE_NESTED_TRACKER_CANARY",
+      private_nested: { note: "PRIVATE_NESTED_TRACKER_CANARY" } }];
+    await pool.query("UPDATE campaign_state SET trackers=$2::jsonb WHERE campaign_id=$1", [fixture.campaignId, JSON.stringify([
+      { id: "west-lantern", name: "West lantern", value: "dim", rules: "Follow the lantern's current light.", private_nested: "PRIVATE_NESTED_TRACKER_CANARY" }
+    ])]);
+    await pool.query("UPDATE campaign_state SET trackers=$2::jsonb WHERE campaign_id=$1", [foreign.campaignId, JSON.stringify([
+      { id: "foreign", name: "Foreign tracker", value: "FOREIGN_CAMPAIGN_TRACKER_CANARY", rules: "Private to another campaign." }
+    ])]);
+    replies.push(candidateReply({ tracker_updates: updates }));
+
+    const updateAction = "Light the west lantern.";
+    await dispatch(fixture.campaignId, updateAction);
+    const nextRequest = await dispatch(fixture.campaignId, "Describe the lantern's light.");
+    const trackers = (authoritativeContext(nextRequest).currentContinuity as { trackers: Array<Record<string, unknown>> }).trackers;
+    const accepted = await pool.query<{ state_snapshot_private: Record<string, any> }>(
+      "SELECT state_snapshot_private FROM turns WHERE campaign_id=$1 AND action=$2 ORDER BY turn_number DESC LIMIT 1", [fixture.campaignId, updateAction]
+    );
+
+    expect(trackers).toEqual([{ id: "west-lantern", name: "West lantern", value: "bright", rules: "Follow the lantern's current light." }]);
+    expect(accepted.rows[0]!.state_snapshot_private.acceptedTrackerUpdateEvidence).toEqual({ version: 1, updates });
+    expect(nextRequest.body).not.toContain("dim");
+    expect(nextRequest.body).not.toContain("PRIVATE_NESTED_TRACKER_CANARY");
+    expect(nextRequest.body).not.toContain("FOREIGN_CAMPAIGN_TRACKER_CANARY");
+  });
+
+  it("replays the legacy Location pair after its Lighthouse update without adding a third tracker", async () => {
+    const fixture = await importedCampaign("tracker-legacy-location-replay");
+    const foreign = await importedCampaign("tracker-legacy-location-foreign");
+    await pool.query("UPDATE campaign_state SET trackers=$2::jsonb WHERE campaign_id=$1", [fixture.campaignId, JSON.stringify([
+      { id: "location", name: "Location", value: "Harbor", rules: "Track the current place.", private_nested: "PRIVATE_NESTED_TRACKER_CANARY" },
+      { id: "Location", name: "Location", value: "Northern gate", rules: "", private_nested: "PRIVATE_NESTED_TRACKER_CANARY" }
+    ])]);
+    await pool.query("UPDATE campaign_state SET trackers=$2::jsonb WHERE campaign_id=$1", [foreign.campaignId, JSON.stringify([
+      { id: "foreign", name: "Foreign tracker", value: "FOREIGN_CAMPAIGN_TRACKER_CANARY", rules: "Private to another campaign." }
+    ])]);
+    replies.push(candidateReply({ tracker_updates: [{ name: "Location", value: "Lighthouse", tracker_private_canary: "PRIVATE_NESTED_TRACKER_CANARY" }] }));
+
+    const updateAction = "Move the Location tracker to the Lighthouse.";
+    await dispatch(fixture.campaignId, updateAction);
+    const nextRequest = await dispatch(fixture.campaignId, "Describe the current Location.");
+    const trackers = (authoritativeContext(nextRequest).currentContinuity as { trackers: Array<Record<string, unknown>> }).trackers;
+    const accepted = await pool.query<{ state_snapshot_private: Record<string, any> }>(
+      "SELECT state_snapshot_private FROM turns WHERE campaign_id=$1 AND action=$2 ORDER BY turn_number DESC LIMIT 1", [fixture.campaignId, updateAction]
+    );
+
+    expect(trackers).toEqual([
+      { id: "location", name: "Location", value: "Harbor", rules: "Track the current place." },
+      { id: "Location", name: "Location", value: "Lighthouse", rules: "" }
+    ]);
+    expect(accepted.rows[0]!.state_snapshot_private.trackers).toEqual(trackers);
+    expect(accepted.rows[0]!.state_snapshot_private.acceptedTrackerUpdateEvidence).toEqual({
+      version: 1, updates: [{ name: "Location", value: "Lighthouse", tracker_private_canary: "PRIVATE_NESTED_TRACKER_CANARY" }]
+    });
+    expect(JSON.stringify(trackers)).not.toContain("Northern gate");
+    expect(JSON.stringify(trackers)).not.toContain("PRIVATE_NESTED_TRACKER_CANARY");
+    expect(nextRequest.body).not.toContain("PRIVATE_NESTED_TRACKER_CANARY");
+    expect(nextRequest.body).not.toContain("FOREIGN_CAMPAIGN_TRACKER_CANARY");
+  });
+
   it("serializes the fact wire distinction after a non-enrolled acknowledged creative override for Action", async () => {
     const fixture = await importedCampaign("v16-non-enrolled-creative-action");
     const creativeOverride = "Input canonical facts are complete reference objects and should be repeated as additions.";

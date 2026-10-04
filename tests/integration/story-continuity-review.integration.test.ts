@@ -459,10 +459,9 @@ integration("T17 durable continuity review", () => {
     expect(saved.validatedMainDraft).toMatchObject({ factFormatRepair: { planHash } });
   });
 
-  it("keeps a nested private tracker through local fact repair, a crashed enforce review, and one reclaimed commit", async () => {
+  it("keeps a nested name-only tracker update through local fact repair, saved Keep, and one reclaimed commit", async () => {
     const nestedTracker = [{
       tracker_private_canary: "do-not-project",
-      id: "observatory-archive",
       name: "Observatory archive",
       value: "open",
       rules: "Fiction-only location state.",
@@ -476,10 +475,14 @@ integration("T17 durable continuity review", () => {
     await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ textResponseFormatPolicy: "auto" })]);
     nestedTrackerUpdates = nestedTracker;
     malformedFactFormatting = true;
-    reviewVerdict = "pass";
+    reviewVerdict = "conflict";
     requests.length = 0;
     try {
       const { job, application, campaignId } = await enqueue("enforce");
+      await pool.query(
+        "UPDATE campaign_state SET trackers=$2::jsonb WHERE campaign_id=$1",
+        [campaignId, JSON.stringify([{ id: "observatory-archive", name: "Observatory archive", value: "closed", rules: "Fiction-only location state." }])]
+      );
       const acceptedBefore = await acceptedAuthoritySnapshot(campaignId);
       const derivedBefore = await snapshotCorrectionEvidence(pool, campaignId);
 
@@ -512,36 +515,36 @@ integration("T17 durable continuity review", () => {
         illustrationInputs.push(JSON.stringify(args));
         return enqueueIllustrations(...args);
       };
-      let interrupted = false;
-      const crashingRepository = {
-        ...repository,
-        async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
-          const saved = await repository.saveOrchestration(scope, value);
-          if (!interrupted && value.continuityReview?.status === "completed") {
-            interrupted = true;
-            await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
-            throw Object.assign(new Error("Injected termination after persisted nested-tracker continuity review."), { code: "generation_cancelled" });
-          }
-          return saved;
-        }
-      };
-      const firstWorkerId = `nested-format-crash-a-${randomUUID()}`;
-      const firstClaim = await repository.claimNext({ workerId: firstWorkerId, leaseSeconds: 30 });
-      expect(firstClaim?.jobId).toBe(job.id);
-      await expect(createGenerationExecutor({ pool, repository: crashingRepository, collaborators })
-        .execute({ claim: firstClaim!, workerId: firstWorkerId, leaseSeconds: 30 })).resolves.toBe(true);
-      expect(interrupted).toBe(true);
+      await expect(runGenerationJob(pool, `nested-format-review-${randomUUID()}`, 30, credentialSecret)).resolves.toBe(true);
       expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
-      const checkpoint = (await pool.query<{ orchestration_private: Record<string, any>; attempts: number }>(
+      const savedReview = (await pool.query<{ orchestration_private: Record<string, any>; attempts: number }>(
         "SELECT orchestration_private,attempts FROM generation_jobs WHERE id=$1", [job.id]
       )).rows[0]!;
-      expect(checkpoint.orchestration_private.frozenResponseContracts).toEqual(frozenBeforeRepair);
-      expect(checkpoint.orchestration_private.primaryResult).toEqual(primaryBeforeRepair);
-      expect(checkpoint.orchestration_private.continuityReview).toMatchObject({ status: "completed", verdict: "pass" });
+      expect(savedReview.orchestration_private.frozenResponseContracts).toEqual(frozenBeforeRepair);
+      expect(savedReview.orchestration_private.primaryResult).toEqual(primaryBeforeRepair);
+      expect(savedReview.orchestration_private.continuityReview).toMatchObject({ status: "completed", verdict: "conflict" });
       const reviewRequest = requests.find((request) => request.includes("story-continuity-review-v1"));
       expect(reviewRequest).toBeDefined();
       expect(reviewRequest).not.toContain("tracker_private_canary");
       expect(requests).toHaveLength(callsBeforeRepair + 1);
+
+      const keepOffer = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(keepOffer).toMatchObject({ stage: "continuity", canKeep: true });
+      const candidateBeforeKeep = savedReview.orchestration_private.generationReview.gateCandidate;
+      const primaryRequestHash = savedReview.orchestration_private.primaryResult.requestPayloadHash;
+      const primaryResponse = savedReview.orchestration_private.primaryResult.response;
+      expect(candidateBeforeKeep.story.tracker_updates).toEqual(nestedTracker);
+      expect(candidateBeforeKeep.storyHash).toBe(sha256Hex(canonicalEvidenceJson(candidateBeforeKeep.story)));
+      expect(candidateBeforeKeep.producingRequestHash).toBe(primaryRequestHash);
+      await application.decideReview({ ownerUserId, jobId: job.id }, {
+        reviewId: keepOffer.reviewId, revision: keepOffer.revision, decision: "keep"
+      });
+      const savedKeep = (await pool.query<{ orchestration_private: Record<string, any> }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      const keepReceipt = savedKeep.generationReview.decisionJournal.find((entry: { decision: string }) => entry.decision === "keep");
+      expect(keepReceipt).toMatchObject({ decision: "keep", candidateHash: candidateBeforeKeep.storyHash });
+      const callsAfterKeep = requests.length;
 
       const secondWorkerId = `nested-format-crash-b-${randomUUID()}`;
       const secondClaim = await repository.claimNext({ workerId: secondWorkerId, leaseSeconds: 30 });
@@ -558,6 +561,7 @@ integration("T17 durable continuity review", () => {
       expect(accepted.state_snapshot_private.trackers).toEqual(expect.arrayContaining([{
         id: "observatory-archive", name: "Observatory archive", value: "open", rules: "Fiction-only location state."
       }]));
+      expect(accepted.state_snapshot_private.trackers.filter((tracker) => tracker.id === "observatory-archive")).toHaveLength(1);
       expect(accepted.state_snapshot_private.trackers).not.toContainEqual(expect.objectContaining({ private_nested: expect.anything() }));
       expect(illustrationInputs).toHaveLength(1);
       expect(illustrationInputs[0]).not.toContain("tracker_private_canary");
@@ -565,9 +569,17 @@ integration("T17 durable continuity review", () => {
         "SELECT status,attempts,orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
       )).rows[0]!;
       expect(completed).toMatchObject({ status: "completed" });
-      expect(completed.attempts).toBeGreaterThan(checkpoint.attempts);
+      expect(completed.attempts).toBeGreaterThan(savedReview.attempts);
       expect(completed.orchestration_private.frozenResponseContracts).toEqual(frozenBeforeRepair);
       expect(completed.orchestration_private.primaryResult).toEqual(primaryBeforeRepair);
+      expect(completed.orchestration_private.primaryResult.response).toEqual(primaryResponse);
+      expect(completed.orchestration_private.primaryResult.requestPayloadHash).toBe(primaryRequestHash);
+      expect(completed.orchestration_private.generationReview.gateCandidate).toEqual(candidateBeforeKeep);
+      expect(completed.orchestration_private.generationReview.gateCandidate.producingRequestHash).toBe(primaryRequestHash);
+      expect(completed.orchestration_private.generationReview.decisionJournal.find((entry: { decision: string }) => entry.decision === "keep"))
+        .toEqual(keepReceipt);
+      expect(completed.orchestration_private.acceptedTrackerUpdateEvidence).toBeUndefined();
+      expect(callsAfterKeep).toBe(callsBeforeRepair + 1);
       expect(requests).toHaveLength(callsBeforeRepair + 1);
       expect(await runGenerationJob(pool, `nested-format-crash-idempotent-${randomUUID()}`, 30, credentialSecret)).toBe(false);
       expect(requests).toHaveLength(callsBeforeRepair + 1);

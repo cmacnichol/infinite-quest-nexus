@@ -54,7 +54,7 @@ function recoveryFixture() {
           preflightDiagnostic: null,
           diagnosticCode: null
         },
-        privatePromptAndProviderError: PRIVATE_CANARY
+        privatePromptAndProviderError: `${PRIVATE_CANARY} PRIVATE_TRACKER_CANARY`
       }
     }
   };
@@ -470,10 +470,11 @@ for (const surface of ["legacy", "web-next"] as const) {
 }
 
 for (const surface of ["legacy", "web-next"] as const) {
-  for (const status of ["off", "observed", "passed", "conflict", "uncertain", "unavailable", "old", "unknown", "profile_changed"] as const) {
+  for (const status of ["off", "observed", "passed", "conflict", "uncertain", "unavailable", "old", "unknown", "profile_changed", "tracker_identity"] as const) {
     test(`${surface} recovery safely presents ${status} and preserves discard`, async ({ page }) => {
       const messages = { off: "Continuity review was off.", observed: "Continuity review was observed; it did not block this generation.", passed: "Continuity review passed for the supplied scope only.", conflict: "Continuity review found a conflict in the supplied scope.", uncertain: "Continuity review is uncertain; it was not a full-history pass.", unavailable: "Continuity review was unavailable; no pass was recorded." };
       const diagnostic = status === "unknown" ? { code: "future_unknown_code", action: "retry", private: PRIVATE_CANARY }
+        : status === "tracker_identity" ? { code: "tracker_update_identity_invalid", operation: "story_generation", action: "repair_authority" }
         : status === "profile_changed" ? { code: "authoritative_context_invalid", operation: "story_generation", action: "repair_authority" }
         : status === "old" ? undefined : { code: "context_evidence_omitted", operation: "story_generation", action: "adjust_context", review: { status, automaticRepair: status === "conflict" ? "consumed" : "not_consumed" } };
       const payloads = await installRecoveryApi(page, { legacyDiagnostic: status === "old", diagnostic });
@@ -487,8 +488,12 @@ for (const surface of ["legacy", "web-next"] as const) {
       await expect(recovery).toBeVisible();
       if (status in messages) await expect(recovery).toContainText(messages[status as keyof typeof messages]);
       if (status === "conflict") await expect(recovery).toContainText("The one automatic repair attempt was already used.");
-      if (status === "profile_changed") { await expect(recovery).toContainText("correct the campaign state or character profile"); await expect(recovery.getByRole("button", { name: /^Retry generation/ })).toBeHidden(); }
+      if (status === "profile_changed" || status === "tracker_identity") {
+        await expect(recovery).toContainText("Discard this attempt, correct the campaign state or character profile, then generate a new turn.");
+        await expect(recovery.getByRole("button", { name: /^Retry generation/ })).toBeHidden();
+      }
       await expect(page.locator("body")).not.toContainText(PRIVATE_CANARY);
+      if (status === "tracker_identity") await expect(page.locator("body")).not.toContainText("PRIVATE_TRACKER_CANARY");
       await expect(page.locator("vite-error-overlay")).toHaveCount(0);
       const discard = recovery.getByRole("button", { name: "Discard generation job", exact: true });
       await discard.focus(); await expect(discard).toBeFocused();

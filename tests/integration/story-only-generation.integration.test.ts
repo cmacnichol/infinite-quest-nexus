@@ -188,6 +188,9 @@ integration("Story Direction composed PostgreSQL generation", () => {
         WHERE campaign_id=$1 AND owner_user_id=$5`,
       [primary.campaignId, JSON.stringify(mechanics.rpgStats), JSON.stringify(mechanics.eventTriggers), JSON.stringify(mechanics.pending), ownerUserId]
     );
+    const currentTrackers = [{ id: "west-door", name: "west door", value: "closed", rules: "Track whether the west door is open." }];
+    await pool.query("UPDATE campaign_state SET trackers=$2::jsonb WHERE campaign_id=$1 AND owner_user_id=$3",
+      [primary.campaignId, JSON.stringify(currentTrackers), ownerUserId]);
     const foreignBefore = await pool.query("SELECT to_jsonb(campaign_state) AS state FROM campaign_state WHERE campaign_id=$1", [foreign.campaignId]);
     const queued = await enqueueStoryOnly(primary.campaignId);
     const repository = createPostgresGenerationExecutionRepository(pool);
@@ -211,17 +214,19 @@ integration("Story Direction composed PostgreSQL generation", () => {
     expect(requests[0]).not.toContain("rpg_stats");
     const accepted = await pool.query<{
       narration: string; choices: unknown; generation_policy: { playMode?: string } | null;
-      model_metadata: { generationPolicy?: { playMode?: string } } | null; private: { rpgStats?: unknown; eventTriggers?: unknown; pendingEventTriggers?: unknown };
+      model_metadata: { generationPolicy?: { playMode?: string } } | null; private: { trackers?: unknown; rpgStats?: unknown; eventTriggers?: unknown; pendingEventTriggers?: unknown };
     }>(`SELECT t.narration,t.choices,t.generation_policy,t.model_metadata,t.state_snapshot_private AS private FROM generation_jobs j
           JOIN turns t ON t.id=j.result_turn_id AND t.owner_user_id=j.owner_user_id
          WHERE j.campaign_id=$1 AND j.id=$2`, [primary.campaignId, queued.id]);
     expect(accepted.rows).toHaveLength(1);
     expect(accepted.rows[0]).toMatchObject({ narration: expect.stringContaining("observatory glass"), choices: expect.any(Array),
       generation_policy: { playMode: "story_only" }, model_metadata: { generationPolicy: { playMode: "story_only" } },
-      private: { rpgStats: mechanics.rpgStats, eventTriggers: mechanics.eventTriggers, pendingEventTriggers: mechanics.pending } });
+      private: { trackers: [{ id: "west-door", name: "west door", value: "open", rules: "Track whether the west door is open." }],
+        rpgStats: mechanics.rpgStats, eventTriggers: mechanics.eventTriggers, pendingEventTriggers: mechanics.pending } });
     expect((accepted.rows[0]?.choices as unknown[])).toHaveLength(4);
-    await expect(pool.query("SELECT rpg_stats,event_triggers,pending_event_triggers FROM campaign_state WHERE campaign_id=$1", [primary.campaignId]))
-      .resolves.toMatchObject({ rows: [{ rpg_stats: mechanics.rpgStats, event_triggers: mechanics.eventTriggers, pending_event_triggers: mechanics.pending }] });
+    await expect(pool.query("SELECT rpg_stats,event_triggers,pending_event_triggers,trackers FROM campaign_state WHERE campaign_id=$1", [primary.campaignId]))
+      .resolves.toMatchObject({ rows: [{ rpg_stats: mechanics.rpgStats, event_triggers: mechanics.eventTriggers, pending_event_triggers: mechanics.pending,
+        trackers: [{ id: "west-door", name: "west door", value: "open", rules: "Track whether the west door is open." }] }] });
     await expect(pool.query("SELECT to_jsonb(campaign_state) AS state FROM campaign_state WHERE campaign_id=$1", [foreign.campaignId]))
       .resolves.toEqual(foreignBefore);
     await expect(pool.query("SELECT status FROM generation_jobs WHERE id=$1", [queued.id])).resolves.toMatchObject({ rows: [{ status: "completed" }] });
