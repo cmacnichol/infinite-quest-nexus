@@ -258,7 +258,14 @@ for (const turnCount of [317, 2000]) {
       await testInfo.attach("continuous-startup-desktop-317", { path: desktopPath, contentType: "image/png" });
 
       await page.setViewportSize({ width: 390, height: 844 });
-      await expect(page.locator("#scene-317")).toBeVisible();
+      const narrowScene = page.locator("#scene-317");
+      await expect(narrowScene).toBeVisible();
+      await narrowScene.scrollIntoViewIfNeeded();
+      await expect(narrowScene).toBeInViewport();
+      await page.evaluate(() => new Promise<void>(resolve => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }));
+      await expect(narrowScene).toBeInViewport();
       const narrowPath = testInfo.outputPath("t16-continuous-startup-narrow-390.png");
       await page.screenshot({ path: narrowPath });
       await testInfo.attach("continuous-startup-narrow-390", { path: narrowPath, contentType: "image/png" });

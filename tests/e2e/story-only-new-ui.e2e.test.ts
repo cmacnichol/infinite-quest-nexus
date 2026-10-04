@@ -144,15 +144,24 @@ async function setAutomaticChoiceSubmission(page: Page, enabled: boolean): Promi
 
 async function selectWebAwesomeProfileTurnStyle(page: Page, value: "flexible_action" | "flexible_scene"): Promise<void> {
   const turnStyle = page.locator("[data-profile='turn-control-style']");
-  const label = value === "flexible_action" ? "Action" : "Story Direction";
-  expect(await turnStyle.locator("wa-option").evaluateAll((options) => options.map((option) => option.getAttribute("value"))))
-    .toEqual(["action_only", "flexible_action", "flexible_scene"]);
+  const allowedValues = ["action_only", "flexible_action", "flexible_scene"] as const;
+  const optionValues = await turnStyle.locator("wa-option").evaluateAll((options) => options.map((option) => option.getAttribute("value")));
+  expect(optionValues).toEqual(allowedValues);
   await expect(turnStyle).toBeEnabled();
   const current = await turnStyle.evaluate((element) => (element as HTMLElement & { value?: string }).value);
   if (current === value) return;
+  const currentIndex = allowedValues.indexOf(current as typeof allowedValues[number]);
+  const targetIndex = allowedValues.indexOf(value);
+  expect(currentIndex, `Unexpected current Story turn style: ${String(current)}`).toBeGreaterThanOrEqual(0);
+  const downSteps = (targetIndex - currentIndex + allowedValues.length) % allowedValues.length;
+  const upSteps = (currentIndex - targetIndex + allowedValues.length) % allowedValues.length;
+  const key = downSteps <= upSteps ? "ArrowDown" : "ArrowUp";
+  const steps = Math.min(downSteps, upSteps);
+  const combobox = turnStyle.getByRole("combobox");
   await waitForProfilePatch(page, async () => {
-    await turnStyle.click();
-    await page.getByRole("option", { name: label, exact: true }).click();
+    await combobox.click();
+    for (let step = 0; step < steps; step += 1) await combobox.press(key);
+    await combobox.press("Enter");
   });
   await expect(turnStyle).toHaveJSProperty("value", value);
 }

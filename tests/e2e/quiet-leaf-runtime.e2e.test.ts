@@ -40,7 +40,7 @@ test("both Story clients render the same current disposable campaign turn", asyn
   await expect(replacementTitle).toBeVisible();
   await expect(replacementContext).toHaveText(/^Turn \d+$/u);
   await expect(replacementNarration.first()).toBeVisible();
-  const replacementTurn = Number((await replacementContext.innerText()).replace("Turn ", ""));
+  const replacementTurn = Number(normalizedVisibleText(await replacementContext.textContent() ?? "").match(/^Turn (\d+)$/u)?.[1]);
   expect(Number.isSafeInteger(replacementTurn)).toBe(true);
 
   const legacy = await context.newPage();

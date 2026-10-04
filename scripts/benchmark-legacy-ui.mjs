@@ -14,6 +14,8 @@ const origin = `http://127.0.0.1:${port}`;
 const warmups = Number(process.env.LEGACY_UI_BENCHMARK_WARMUPS ?? 5);
 const sampleCount = Number(process.env.LEGACY_UI_BENCHMARK_SAMPLES ?? 30);
 const fixtureCounts = { turnCount: 317, worldCount: 3, campaignCount: 2 };
+const requestedDelayMs = 20;
+const manualDelayReleaseTimeoutMs = 10_000;
 
 if (!Number.isSafeInteger(warmups) || warmups < 0 || !Number.isSafeInteger(sampleCount) || sampleCount < 1) {
   throw new RangeError("Warmups must be non-negative and samples must be positive integers.");
@@ -100,7 +102,13 @@ async function gitValue(args) {
   const child = spawn("git", args, { cwd: repoRoot, stdio: ["ignore", "pipe", "ignore"] });
   let output = "";
   child.stdout.setEncoding("utf8").on("data", value => { output += value; });
-  const [code] = await once(child, "close");
+  let code;
+  try {
+    [code] = await once(child, "close");
+  } catch (error) {
+    if (error?.code === "ENOENT") return "unknown";
+    throw error;
+  }
   if (code !== 0) return "unknown";
   return output.trim();
 }
@@ -121,7 +129,8 @@ try {
     const page = await context.newPage();
     const fixture = legacyUiFixture(fixtureCounts);
     const instrumentation = await installLegacyUiFixture(page, fixture, {
-      delays: { [`/api/v1/campaigns/${fixture.campaignId}/turns`]: 20 }
+      delays: { [`/api/v1/campaigns/${fixture.campaignId}/turns`]: requestedDelayMs },
+      manualDelayReleaseTimeoutMs
     });
     const runtimeErrors = [];
     const externalRequests = [];
@@ -268,7 +277,7 @@ try {
       nativeLongTaskSupported,
       longTasksByPhase,
       delayedTurnRequestCount: delayedTurnRequests.length,
-      delayedRouteEvidence: delayedTurnRequests.map(request => ({ method: request.method, path: request.path, configuredDelayMs: request.configuredDelayMs, delayReleaseKind: request.delayReleaseKind, releasedAfterMs: request.delayReleasedAt === undefined ? null : request.delayReleasedAt - request.startedAt })),
+      delayedRouteEvidence: delayedTurnRequests.map(request => ({ method: request.method, path: request.path, configuredDelayMs: request.configuredDelayMs, delayReleaseTimeoutMs: request.delayReleaseTimeoutMs, delayReleaseKind: request.delayReleaseKind, releasedAfterMs: request.delayReleasedAt === undefined ? null : request.delayReleasedAt - request.startedAt })),
       requestEvidence: instrumentation.requests.map(request => ({ method: request.method, path: request.path, requestBytes: request.requestBytes, responseBytes: request.responseBytes, status: request.status })),
       assetEvidence: staticAssetEvidence,
       assetReadFailures,
@@ -276,8 +285,9 @@ try {
       externalRequests
     };
     if (record.writeCount || runtimeErrors.length || externalRequests.length || delayedTurnRequests.length === 0
-      || delayedTurnRequests.some(request => request.configuredDelayMs !== 20)
-      || !delayedTurnRequests.some(request => request.delayReleaseKind === "explicit")
+      || delayedTurnRequests.some(request => request.configuredDelayMs !== requestedDelayMs
+        || request.delayReleaseTimeoutMs !== manualDelayReleaseTimeoutMs
+        || request.delayReleaseKind !== "explicit")
       || assetReadFailures.length || staticAssetEvidence.some(asset => asset.bytes === null)) {
       throw new Error(`Synthetic browser sample failed its guard: ${JSON.stringify(record)}`);
     }
@@ -293,6 +303,11 @@ try {
     commit,
     dirty,
     buildMode: "Vite development server with deterministic synthetic API routes",
+    delayedRouteControl: {
+      configuredDelayMs: requestedDelayMs,
+      manualReleaseFallbackMs: manualDelayReleaseTimeoutMs,
+      note: "The configured 20 ms is a fixture setting; the 10,000 ms fallback is a manual-release safety bound, not a claimed network latency."
+    },
     fixture: fixtureCounts,
     warmups,
     samples: sampleCount,
@@ -319,10 +334,13 @@ try {
     zeroWrites: samples.every(sample => sample.writeCount === 0),
     noExternalRequests: samples.every(sample => sample.externalRequests.length === 0),
     noRuntimeErrors: samples.every(sample => sample.runtimeErrors.length === 0),
-    delayedRouteHeldAndExplicitlyReleasedDuringHistoryEverySample: samples.every(sample => sample.delayedRouteEvidence.some(route => route.configuredDelayMs === 20 && route.delayReleaseKind === "explicit")),
+    delayedRouteHeldAndExplicitlyReleasedDuringHistoryEverySample: samples.every(sample => sample.delayedRouteEvidence.length > 0
+      && sample.delayedRouteEvidence.every(route => route.configuredDelayMs === requestedDelayMs
+        && route.delayReleaseTimeoutMs === manualDelayReleaseTimeoutMs
+        && route.delayReleaseKind === "explicit")),
     assetBodyReadFailures: samples.reduce((sum, sample) => sum + sample.assetReadFailures.length, 0),
     sampleResults: samples,
-    timingNote: "Browser timing is recorded evidence for this local Vite/mock-route profile, not an absolute assertion or PostgreSQL/provider measurement."
+    timingNote: "Browser timing is recorded evidence for this local Vite/mock-route profile, not an absolute assertion or PostgreSQL/provider measurement. The configured 20 ms delayed route is a fixture setting; its 10,000 ms automatic fallback is a manual-release safety bound, not a claimed network latency."
   };
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 } finally {

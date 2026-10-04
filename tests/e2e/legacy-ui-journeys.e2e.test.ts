@@ -24,6 +24,7 @@ const campaignIds = [
 ] as const;
 
 type WriteRecord = Readonly<{ method: string; path: string; body: unknown }>;
+type JourneyScreenshot = (name: string) => Promise<void>;
 type WorldVersion = Readonly<{ id: string; versionNumber: number; releaseNotes: string; content: Record<string, unknown> }>;
 type JourneyWorld = {
   id: string;
@@ -468,14 +469,19 @@ async function installJourneyApi(page: Page, options: { readonly imageFailure?: 
   };
 }
 
-async function openNewWorld(page: Page, title: string): Promise<void> {
+async function openNewWorld(page: Page, title: string, capture?: JourneyScreenshot): Promise<void> {
   await page.goto(`${legacyOrigin}/nexus/index.html#world-library`);
   await page.locator("#newWorld").click();
   await page.locator("#worldTitle").fill(title);
+  await expect(page.locator("#worldTitle")).toHaveValue(title);
+  if (capture) await capture("world-basics");
   await page.locator('[data-world-author-step="character"]').click();
   await page.locator("#addPlayableCharacter").click();
   await page.locator("#characterName").fill("Mira Vale");
   await page.locator("#characterRole").fill("A patient guide");
+  await expect(page.locator("#characterName")).toHaveValue("Mira Vale");
+  await expect(page.locator("#characterRole")).toHaveValue("A patient guide");
+  if (capture) await capture("world-character-filled-before-save");
   await page.locator("#saveCharacter").click();
   await expect(page.locator("#playableCharacterRoster")).toContainText("Mira Vale");
   await page.locator("#saveWorldDraft").click();
@@ -486,23 +492,26 @@ async function selectJourneyWorld(page: Page, title: string): Promise<void> {
   await page.locator("#worldManagementCarousel").getByRole("button", { name: `Select ${title}` }).click();
 }
 
-async function createJourneyCampaign(page: Page, title: string, start = false): Promise<void> {
+async function createJourneyCampaign(page: Page, title: string, start = false, capture?: JourneyScreenshot): Promise<void> {
   await page.locator("#createCampaignModalBtn").click();
   await expect(page.locator("#createCampaignDialog")).toBeVisible();
   await page.locator("#newCampaignTitle").fill(title);
   await page.locator("#newCampaignCharacter").selectOption({ label: "Mira Vale" });
+  await expect(page.locator("#newCampaignTitle")).toHaveValue(title);
+  await expect(page.locator("#newCampaignCharacter option:checked")).toHaveText("Mira Vale");
+  if (capture) await capture("campaign-basics-before-create");
   await page.getByRole("button", { name: start ? "Create and start" : "Create only" }).click();
 }
 
-async function createAndPublishJourneyWorld(page: Page, title = "T35 Journey World"): Promise<void> {
-  await openNewWorld(page, title);
+async function createAndPublishJourneyWorld(page: Page, title = "T35 Journey World", capture?: JourneyScreenshot): Promise<void> {
+  await openNewWorld(page, title, capture);
   await selectJourneyWorld(page, title);
   await page.locator("#publishWorld").click();
   await expect(page.locator("#worldStatus")).toContainText("Version 1 published");
 }
 
-async function startJourneyCampaign(page: Page, api: JourneyApi, title: string): Promise<string> {
-  await createJourneyCampaign(page, title, true);
+async function startJourneyCampaign(page: Page, api: JourneyApi, title: string, capture?: JourneyScreenshot): Promise<string> {
+  await createJourneyCampaign(page, title, true, capture);
   const campaignId = api.campaignCreates.at(-1)?.id;
   if (!campaignId) throw new Error("Campaign creation did not return a synthetic campaign identity.");
   await expect(page).toHaveURL(new RegExp(`/story/${campaignId}$`, "u"));
@@ -558,8 +567,12 @@ async function readSavedReaderPosition(page: Page, userId: string, campaignId: s
 
 test("whole_journey_no_lost_draft: new world, character, publish, campaign, reload, older history and latest resume", async ({ page }, testInfo) => {
   const api = await installJourneyApi(page);
-  await createAndPublishJourneyWorld(page);
-  const campaignId = await startJourneyCampaign(page, api, "T35 First Campaign");
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const captureJourneyState: JourneyScreenshot = async name => {
+    await page.screenshot({ path: testInfo.outputPath(`whole-${name}.png`), fullPage: true });
+  };
+  await createAndPublishJourneyWorld(page, "T35 Journey World", captureJourneyState);
+  const campaignId = await startJourneyCampaign(page, api, "T35 First Campaign", captureJourneyState);
 
   await fillAndSubmitAction(page, api, campaignId, "Look for the quiet platform signal.");
   await fillAndSubmitAction(page, api, campaignId, "Follow the marked path to the signal.");
@@ -579,6 +592,7 @@ test("whole_journey_no_lost_draft: new world, character, publish, campaign, relo
   await page.locator("[data-story-reader-toolbar]").getByRole("button", { name: "History" }).click();
   const firstTurn = page.locator('#turnHistoryModalList .history-card[data-turn-number="1"]');
   await expect(firstTurn).toBeVisible();
+  await captureJourneyState("history-open-first-turn-visible");
   await firstTurn.click();
   await expect(firstTurn).toHaveAttribute("aria-pressed", "true");
   await page.locator("#btnTurnHistoryJump").click();

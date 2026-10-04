@@ -188,6 +188,11 @@ export async function installLegacyUiFixture(
   fixture: LegacyUiFixture,
   options: LegacyUiRouteOptions = {}
 ): Promise<LegacyUiRouteInstrumentation> {
+  const manualDelayReleaseTimeoutMs = options.manualDelayReleaseTimeoutMs;
+  if (manualDelayReleaseTimeoutMs !== undefined
+    && (!Number.isSafeInteger(manualDelayReleaseTimeoutMs) || manualDelayReleaseTimeoutMs <= 0)) {
+    throw new RangeError("manualDelayReleaseTimeoutMs must be a positive safe integer");
+  }
   const requests: LegacyUiRequestRecord[] = [];
   const writes: LegacyUiRouteInstrumentation["writes"] = [];
   const pendingDelays: Array<() => void> = [];
@@ -206,13 +211,17 @@ export async function installLegacyUiFixture(
     const requestBody = request.postData() ?? "";
     const key = `${method} ${path}`;
     const configuredDelayMs = options.delays?.[key] ?? options.delays?.[path] ?? 0;
+    const delayReleaseTimeoutMs = configuredDelayMs > 0
+      ? manualDelayReleaseTimeoutMs ?? configuredDelayMs
+      : 0;
     const record: LegacyUiRequestRecord = {
       method,
       path,
       requestBytes: Buffer.byteLength(requestBody),
       responseBytes: 0,
       startedAt: performance.now(),
-      configuredDelayMs
+      configuredDelayMs,
+      delayReleaseTimeoutMs
     };
     requests.push(record);
     if (method !== "GET" && method !== "HEAD") {
@@ -233,7 +242,7 @@ export async function installLegacyUiFixture(
             resolve();
           }
         };
-        const timer = setTimeout(() => release("timeout"), configuredDelayMs);
+        const timer = setTimeout(() => release("timeout"), delayReleaseTimeoutMs);
         pendingDelays.push(() => release("explicit"));
       });
     }

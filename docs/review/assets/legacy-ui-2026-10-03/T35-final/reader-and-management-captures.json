@@ -1,0 +1,340 @@
+{
+  "captures": [
+    {
+      "file": "t16-continuous-startup-desktop-317.png",
+      "sha256": "A97BBD62FE1DF25D9F6132A9BBBA18DFA45D3EAA0E6C4FE8F6A311167F005201",
+      "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R02-final-artifacts\\test-results\\legacy-ui-continuous-readi-9539d-d-without-walking-317-turns\\t16-continuous-startup-desktop-317.png",
+      "run": "T35-postguard-R02-final",
+      "runMetadata": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R02-final-run-metadata.json",
+      "runMetadataSha256": "4713DA3F9D6833D88D688B470D05A8A737C9EAE40A33BFD7F5D38A4318C6416E",
+      "startedUtc": "2026-10-04T15:20:07.1483019Z",
+      "endedUtc": "2026-10-04T15:20:40.6016334Z",
+      "exitCode": 0,
+      "selectedTests": [
+        {
+          "path": "tests/e2e/legacy-ui-accessibility.e2e.test.ts",
+          "sha256": "D88D3636729FDDD060E11BCF3897E71B6E8E9799400A6A8C858C78D6B0685E4C"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-continuous-reading.e2e.test.ts",
+          "sha256": "92E78C7164DF55187F7655103ADA220C9D4282D6C15C71EFDDCD1CD8E2AC57B6"
+        }
+      ],
+      "graphBeforeSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "graphAfterSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "pixelWidth": 1280,
+      "pixelHeight": 720,
+      "evidenceClass": "Mocked rendered Chromium, frozen final product source",
+      "visualReview": "Coordinator inspected pixels: synthetic UI visible, no private canary or credentials; full-page sticky bar placement is capture state, not geometry proof"
+    },
+    {
+      "file": "t34-narrow-nexus-world-rail.png",
+      "sha256": "C32A3238736D9710357D919E4E3BD5A1AEEB2170CDDEEE5F942E132479E2B3C5",
+      "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R02-final-artifacts\\test-results\\legacy-ui-accessibility.e2-836b6-page-no-horizontal-overflow\\t34-narrow-nexus-world-rail.png",
+      "run": "T35-postguard-R02-final",
+      "runMetadata": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R02-final-run-metadata.json",
+      "runMetadataSha256": "4713DA3F9D6833D88D688B470D05A8A737C9EAE40A33BFD7F5D38A4318C6416E",
+      "startedUtc": "2026-10-04T15:20:07.1483019Z",
+      "endedUtc": "2026-10-04T15:20:40.6016334Z",
+      "exitCode": 0,
+      "selectedTests": [
+        {
+          "path": "tests/e2e/legacy-ui-accessibility.e2e.test.ts",
+          "sha256": "D88D3636729FDDD060E11BCF3897E71B6E8E9799400A6A8C858C78D6B0685E4C"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-continuous-reading.e2e.test.ts",
+          "sha256": "92E78C7164DF55187F7655103ADA220C9D4282D6C15C71EFDDCD1CD8E2AC57B6"
+        }
+      ],
+      "graphBeforeSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "graphAfterSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "pixelWidth": 390,
+      "pixelHeight": 844,
+      "evidenceClass": "Mocked rendered Chromium, frozen final product source",
+      "visualReview": "Coordinator inspected pixels: synthetic UI visible, no private canary or credentials; full-page sticky bar placement is capture state, not geometry proof"
+    },
+    {
+      "file": "t34-focus-nexus-desktop.png",
+      "sha256": "2C5D80DAB58226D9415A03822A9A9C7BB2679E52F2999690F14B6ED059C59F81",
+      "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R02-final-artifacts\\test-results\\legacy-ui-accessibility.e2-17e08-ot-hidden-by-sticky-toolbar\\t34-focus-nexus-desktop.png",
+      "run": "T35-postguard-R02-final",
+      "runMetadata": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R02-final-run-metadata.json",
+      "runMetadataSha256": "4713DA3F9D6833D88D688B470D05A8A737C9EAE40A33BFD7F5D38A4318C6416E",
+      "startedUtc": "2026-10-04T15:20:07.1483019Z",
+      "endedUtc": "2026-10-04T15:20:40.6016334Z",
+      "exitCode": 0,
+      "selectedTests": [
+        {
+          "path": "tests/e2e/legacy-ui-accessibility.e2e.test.ts",
+          "sha256": "D88D3636729FDDD060E11BCF3897E71B6E8E9799400A6A8C858C78D6B0685E4C"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-continuous-reading.e2e.test.ts",
+          "sha256": "92E78C7164DF55187F7655103ADA220C9D4282D6C15C71EFDDCD1CD8E2AC57B6"
+        }
+      ],
+      "graphBeforeSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "graphAfterSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "pixelWidth": 1262,
+      "pixelHeight": 704,
+      "evidenceClass": "Mocked rendered Chromium, frozen final product source",
+      "visualReview": "Coordinator inspected pixels: synthetic UI visible, no private canary or credentials; full-page sticky bar placement is capture state, not geometry proof"
+    },
+    {
+      "file": "t27-images-pending-desktop.png",
+      "sha256": "0E4081AA34E4B89D935A6BA2EF225CF3370B2C7291A5B39BF120AEF84337D892",
+      "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R03-final-artifacts\\test-results\\legacy-ui-reader-loading.e-8a740--or-the-accepted-turn-count\\t27-images-pending-desktop.png",
+      "run": "T35-postguard-R03-final",
+      "runMetadata": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R03-final-run-metadata.json",
+      "runMetadataSha256": "D901F938EDB66EF99615E6ACA4398F8B004B2857AF48A74AA0351A01C1DFD0CE",
+      "startedUtc": "2026-10-04T15:20:54.3873851Z",
+      "endedUtc": "2026-10-04T15:21:20.8136785Z",
+      "exitCode": 0,
+      "selectedTests": [
+        {
+          "path": "tests/e2e/legacy-ui-history-search.e2e.test.ts",
+          "sha256": "FBE4CDFC433CC61993486469F7E79178830214E726E156896508170AC4424ACD"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-reader-loading.e2e.test.ts",
+          "sha256": "17313EB7004A26DB93A8F0C279FD4B9E97D7C2003C309D9781A5E2C943E94627"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-reader-preferences.e2e.test.ts",
+          "sha256": "750B712674F2F3E579E3B0E6E70E13AA58BA6B2C21A90603382013555B921D0A"
+        }
+      ],
+      "graphBeforeSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "graphAfterSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "pixelWidth": 1280,
+      "pixelHeight": 1124,
+      "evidenceClass": "Mocked rendered Chromium, frozen final product source",
+      "visualReview": "Coordinator inspected pixels: synthetic UI visible, no private canary or credentials; full-page sticky bar placement is capture state, not geometry proof"
+    },
+    {
+      "file": "t27-images-pending-narrow.png",
+      "sha256": "70869F84E8BE23E08BA86B2021F6B8F5EA84A90D4B2063F491190C472F78687D",
+      "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R03-final-artifacts\\test-results\\legacy-ui-reader-loading.e-8a740--or-the-accepted-turn-count\\t27-images-pending-narrow.png",
+      "run": "T35-postguard-R03-final",
+      "runMetadata": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R03-final-run-metadata.json",
+      "runMetadataSha256": "D901F938EDB66EF99615E6ACA4398F8B004B2857AF48A74AA0351A01C1DFD0CE",
+      "startedUtc": "2026-10-04T15:20:54.3873851Z",
+      "endedUtc": "2026-10-04T15:21:20.8136785Z",
+      "exitCode": 0,
+      "selectedTests": [
+        {
+          "path": "tests/e2e/legacy-ui-history-search.e2e.test.ts",
+          "sha256": "FBE4CDFC433CC61993486469F7E79178830214E726E156896508170AC4424ACD"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-reader-loading.e2e.test.ts",
+          "sha256": "17313EB7004A26DB93A8F0C279FD4B9E97D7C2003C309D9781A5E2C943E94627"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-reader-preferences.e2e.test.ts",
+          "sha256": "750B712674F2F3E579E3B0E6E70E13AA58BA6B2C21A90603382013555B921D0A"
+        }
+      ],
+      "graphBeforeSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "graphAfterSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "pixelWidth": 390,
+      "pixelHeight": 1348,
+      "evidenceClass": "Mocked rendered Chromium, frozen final product source",
+      "visualReview": "Coordinator inspected pixels: synthetic UI visible, no private canary or credentials; full-page sticky bar placement is capture state, not geometry proof"
+    },
+    {
+      "file": "sparse-history-initial.png",
+      "sha256": "0371EC1F8DAF62BF37D99064DADD36D8EF4E698CCF325886783D1FE26FDAF489",
+      "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R04-final-artifacts\\test-results\\legacy-ui-sparse-history.e-c1894-ithout-probing-ordinal-gaps\\sparse-history-initial.png",
+      "run": "T35-postguard-R04-final",
+      "runMetadata": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R04-final-run-metadata.json",
+      "runMetadataSha256": "09BF413A6B86D220341BF90C2C2D179EB8968873FAA0559D7E2F99C23FE390D9",
+      "startedUtc": "2026-10-04T15:21:31.0754261Z",
+      "endedUtc": "2026-10-04T15:21:51.1943244Z",
+      "exitCode": 0,
+      "selectedTests": [
+        {
+          "path": "tests/e2e/legacy-ui-image-polling.e2e.test.ts",
+          "sha256": "3A1EF6DA09509CDA87B788B9DFD4A1EBBFE96AFA9B818C6B46104E5ABB11BBE5"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-sparse-history.e2e.test.ts",
+          "sha256": "9681CE35F2FA32209D464D4315E14C0A503832F0CA100839B88D92B5D284847C"
+        }
+      ],
+      "graphBeforeSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "graphAfterSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "pixelWidth": 1280,
+      "pixelHeight": 1124,
+      "evidenceClass": "Mocked rendered Chromium, frozen final product source",
+      "visualReview": "Coordinator inspected pixels: synthetic UI visible, no private canary or credentials; full-page sticky bar placement is capture state, not geometry proof"
+    },
+    {
+      "file": "sparse-history-replay.png",
+      "sha256": "5B1587E06B8D89914CF0B0A14D46A5E77B0C8EDBBA0D0ADDD19B620EC0F2E403",
+      "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R04-final-artifacts\\test-results\\legacy-ui-sparse-history.e-1087a-rdinal-gaps-or-excess-cards\\sparse-history-replay.png",
+      "run": "T35-postguard-R04-final",
+      "runMetadata": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R04-final-run-metadata.json",
+      "runMetadataSha256": "09BF413A6B86D220341BF90C2C2D179EB8968873FAA0559D7E2F99C23FE390D9",
+      "startedUtc": "2026-10-04T15:21:31.0754261Z",
+      "endedUtc": "2026-10-04T15:21:51.1943244Z",
+      "exitCode": 0,
+      "selectedTests": [
+        {
+          "path": "tests/e2e/legacy-ui-image-polling.e2e.test.ts",
+          "sha256": "3A1EF6DA09509CDA87B788B9DFD4A1EBBFE96AFA9B818C6B46104E5ABB11BBE5"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-sparse-history.e2e.test.ts",
+          "sha256": "9681CE35F2FA32209D464D4315E14C0A503832F0CA100839B88D92B5D284847C"
+        }
+      ],
+      "graphBeforeSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "graphAfterSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "pixelWidth": 1280,
+      "pixelHeight": 1124,
+      "evidenceClass": "Mocked rendered Chromium, frozen final product source",
+      "visualReview": "Coordinator inspected pixels: synthetic UI visible, no private canary or credentials; full-page sticky bar placement is capture state, not geometry proof"
+    },
+    {
+      "file": "streaming-partial.png",
+      "sha256": "19A2DAE08DDA95C0A8229AE86513A22D29CEE2AEF8D298A774DA648598BB7AF9",
+      "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R05-final-artifacts\\test-results\\legacy-ui-stream-rendering-ecd47-tes-to-one-scheduled-render\\streaming-partial.png",
+      "run": "T35-postguard-R05-final",
+      "runMetadata": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R05-final-run-metadata.json",
+      "runMetadataSha256": "36CE968F16963F2ACE23606EEDC88C434BCD0AFDCB8FDA0294FE3D8C9BCFF819",
+      "startedUtc": "2026-10-04T15:24:18.252678Z",
+      "endedUtc": "2026-10-04T15:24:39.5167908Z",
+      "exitCode": 0,
+      "selectedTests": [
+        {
+          "path": "tests/e2e/legacy-ui-reader-navigation.e2e.test.ts",
+          "sha256": "2C9043400B81B446974B63DAA94143B3AA89EDEC77014C0BB99EDD1E9C706BBD"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-stream-rendering.e2e.test.ts",
+          "sha256": "07A79B115AB1E6FBC86CEEC14949A1F1E8E811D04022CF1BA178448A044AB92C"
+        }
+      ],
+      "graphBeforeSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "graphAfterSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "pixelWidth": 1280,
+      "pixelHeight": 1406,
+      "evidenceClass": "Mocked rendered Chromium, frozen final product source",
+      "visualReview": "Coordinator inspected pixels: synthetic UI visible, no private canary or credentials; full-page sticky bar placement is capture state, not geometry proof"
+    },
+    {
+      "file": "streaming-terminal-recovery.png",
+      "sha256": "C502C0B7C7A9C2E6D4B20E85F5E8599007EB81A02FCA06E77E315EBEB5AE846D",
+      "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R05-final-artifacts\\test-results\\legacy-ui-stream-rendering-7c5d3--explicit-recovery-controls\\streaming-terminal-recovery.png",
+      "run": "T35-postguard-R05-final",
+      "runMetadata": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R05-final-run-metadata.json",
+      "runMetadataSha256": "36CE968F16963F2ACE23606EEDC88C434BCD0AFDCB8FDA0294FE3D8C9BCFF819",
+      "startedUtc": "2026-10-04T15:24:18.252678Z",
+      "endedUtc": "2026-10-04T15:24:39.5167908Z",
+      "exitCode": 0,
+      "selectedTests": [
+        {
+          "path": "tests/e2e/legacy-ui-reader-navigation.e2e.test.ts",
+          "sha256": "2C9043400B81B446974B63DAA94143B3AA89EDEC77014C0BB99EDD1E9C706BBD"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-stream-rendering.e2e.test.ts",
+          "sha256": "07A79B115AB1E6FBC86CEEC14949A1F1E8E811D04022CF1BA178448A044AB92C"
+        }
+      ],
+      "graphBeforeSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "graphAfterSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "pixelWidth": 1280,
+      "pixelHeight": 1263,
+      "evidenceClass": "Mocked rendered Chromium, frozen final product source",
+      "visualReview": "Coordinator inspected pixels: synthetic UI visible, no private canary or credentials; full-page sticky bar placement is capture state, not geometry proof"
+    },
+    {
+      "file": "streaming-manual-follow.png",
+      "sha256": "94E1BE14A11649020CCEEC355F25614EC5EBFD46B05B39470D0B936C293274BA",
+      "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R05-final-artifacts\\test-results\\legacy-ui-stream-rendering-19c6d-until-the-reader-resumes-it\\streaming-manual-follow.png",
+      "run": "T35-postguard-R05-final",
+      "runMetadata": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R05-final-run-metadata.json",
+      "runMetadataSha256": "36CE968F16963F2ACE23606EEDC88C434BCD0AFDCB8FDA0294FE3D8C9BCFF819",
+      "startedUtc": "2026-10-04T15:24:18.252678Z",
+      "endedUtc": "2026-10-04T15:24:39.5167908Z",
+      "exitCode": 0,
+      "selectedTests": [
+        {
+          "path": "tests/e2e/legacy-ui-reader-navigation.e2e.test.ts",
+          "sha256": "2C9043400B81B446974B63DAA94143B3AA89EDEC77014C0BB99EDD1E9C706BBD"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-stream-rendering.e2e.test.ts",
+          "sha256": "07A79B115AB1E6FBC86CEEC14949A1F1E8E811D04022CF1BA178448A044AB92C"
+        }
+      ],
+      "graphBeforeSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "graphAfterSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "pixelWidth": 1280,
+      "pixelHeight": 2815,
+      "evidenceClass": "Mocked rendered Chromium, frozen final product source",
+      "visualReview": "Coordinator inspected pixels: synthetic UI visible, no private canary or credentials; full-page sticky bar placement is capture state, not geometry proof"
+    }
+  ],
+  "rejectedCaptures": [
+    {
+      "file": "t16-continuous-startup-narrow-390.png",
+      "sha256": "96AE91C120F990A6B45A8103D582E7596A117C549961AB27930DA825242C1DCC",
+      "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R02-final-artifacts\\test-results\\legacy-ui-continuous-readi-9539d-d-without-walking-317-turns\\t16-continuous-startup-narrow-390.png",
+      "run": "T35-postguard-R02-final",
+      "runMetadata": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R02-final-run-metadata.json",
+      "runMetadataSha256": "4713DA3F9D6833D88D688B470D05A8A737C9EAE40A33BFD7F5D38A4318C6416E",
+      "startedUtc": "2026-10-04T15:20:07.1483019Z",
+      "endedUtc": "2026-10-04T15:20:40.6016334Z",
+      "exitCode": 0,
+      "selectedTests": [
+        {
+          "path": "tests/e2e/legacy-ui-accessibility.e2e.test.ts",
+          "sha256": "D88D3636729FDDD060E11BCF3897E71B6E8E9799400A6A8C858C78D6B0685E4C"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-continuous-reading.e2e.test.ts",
+          "sha256": "92E78C7164DF55187F7655103ADA220C9D4282D6C15C71EFDDCD1CD8E2AC57B6"
+        }
+      ],
+      "graphBeforeSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "graphAfterSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "pixelWidth": 390,
+      "pixelHeight": 844,
+      "evidenceClass": "Mocked rendered Chromium, frozen final product source",
+      "visualReview": "Rejected: upper screenshot region is unrendered; retained local source only"
+    },
+    {
+      "file": "t34-reduced-motion-nexus.png",
+      "sha256": "4B77B319AD006FE9CEADCD7910DD62F9934B85AF687AE545970D0BB347742464",
+      "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R02-final-artifacts\\test-results\\legacy-ui-accessibility.e2e-reduced-motion-no-smooth-scroll\\t34-reduced-motion-nexus.png",
+      "run": "T35-postguard-R02-final",
+      "runMetadata": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-postguard-R02-final-run-metadata.json",
+      "runMetadataSha256": "4713DA3F9D6833D88D688B470D05A8A737C9EAE40A33BFD7F5D38A4318C6416E",
+      "startedUtc": "2026-10-04T15:20:07.1483019Z",
+      "endedUtc": "2026-10-04T15:20:40.6016334Z",
+      "exitCode": 0,
+      "selectedTests": [
+        {
+          "path": "tests/e2e/legacy-ui-accessibility.e2e.test.ts",
+          "sha256": "D88D3636729FDDD060E11BCF3897E71B6E8E9799400A6A8C858C78D6B0685E4C"
+        },
+        {
+          "path": "tests/e2e/legacy-ui-continuous-reading.e2e.test.ts",
+          "sha256": "92E78C7164DF55187F7655103ADA220C9D4282D6C15C71EFDDCD1CD8E2AC57B6"
+        }
+      ],
+      "graphBeforeSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "graphAfterSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "pixelWidth": 631,
+      "pixelHeight": 352,
+      "evidenceClass": "Mocked rendered Chromium, frozen final product source",
+      "visualReview": "Rejected: blank pixels; retained local source only"
+    }
+  ],
+  "rejectedPortableFilesRemoved": true,
+  "inspectionDateUtc": "2026-10-04T16:20:57.8392559Z"
+}

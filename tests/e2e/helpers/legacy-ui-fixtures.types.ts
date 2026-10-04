@@ -26,6 +26,7 @@ export interface LegacyUiRequestRecord {
   responseBytes: number;
   readonly startedAt: number;
   readonly configuredDelayMs: number;
+  readonly delayReleaseTimeoutMs: number;
   delayReleasedAt?: number;
   delayReleaseKind?: "explicit" | "timeout";
   finishedAt?: number;
@@ -35,6 +36,8 @@ export interface LegacyUiRequestRecord {
 export interface LegacyUiRouteOptions {
   readonly delays?: Readonly<Record<string, number>>;
   readonly failures?: Readonly<Record<string, number>>;
+  /** Overrides automatic release only when explicitly set for a controlled delayed route. */
+  readonly manualDelayReleaseTimeoutMs?: number;
 }
 
 export interface LegacyUiRouteInstrumentation {

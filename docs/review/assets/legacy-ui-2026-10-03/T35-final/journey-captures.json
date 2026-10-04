@@ -1,0 +1,94 @@
+{
+  "status": "Eight current-source journey captures accepted for portable review; broader matrix pending",
+  "copiedUtc": "2026-10-04T15:46:42.6567819Z",
+  "captures": [
+    {
+      "file": "advanced-mechanics-saved-and-reopened.png",
+      "source": ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T35-L07-journeys-second-corrected-final-artifacts/test-results/legacy-ui-journeys.e2e-adv-d0cfa-hout-moving-an-existing-pin/advanced-mechanics-saved-and-reopened.png",
+      "sha256": "781C27A72633CB87E90A62D26EB904DD4BC1AE8FFFDCDFA642C25C25B953C94B",
+      "run": "T35-L07-journeys-second-corrected-final",
+      "testSha256": "836A294D4DA2C7DFDD8C495603E8DAB6A4B7889721227A6F424BCD0B09239760",
+      "productGraphSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "evidenceClass": "Mocked Vite/browser journey",
+      "visualReview": "Root viewed each of the eight captures; synthetic visible narration/settings/draft, no private canary or credentials",
+      "captureNote": "Full-page screenshots retain browser sticky toolbar position; viewport geometry and behavioral assertions are separate evidence"
+    },
+    {
+      "file": "campaign-b-public-scene-private-hidden.png",
+      "source": ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T35-L07-journeys-second-corrected-final-artifacts/test-results/legacy-ui-journeys.e2e-cro-91e1a-ate-remain-correctly-scoped/campaign-b-public-scene-private-hidden.png",
+      "sha256": "F7D824939F223EC1C08FD378726708EF13AD27384BBFE7C8603E527CF111D755",
+      "run": "T35-L07-journeys-second-corrected-final",
+      "testSha256": "836A294D4DA2C7DFDD8C495603E8DAB6A4B7889721227A6F424BCD0B09239760",
+      "productGraphSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "evidenceClass": "Mocked Vite/browser journey",
+      "visualReview": "Root viewed each of the eight captures; synthetic visible narration/settings/draft, no private canary or credentials",
+      "captureNote": "Full-page screenshots retain browser sticky toolbar position; viewport geometry and behavioral assertions are separate evidence"
+    },
+    {
+      "file": "existing-campaign-v1-setup.png",
+      "source": ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T35-L07-journeys-second-corrected-final-artifacts/test-results/legacy-ui-journeys.e2e-exi-e9f1b-migrating-current-campaigns/existing-campaign-v1-setup.png",
+      "sha256": "894EBE2F1E221A828BCE671C5CC144CD5E941E5B07582C9187A0DC834E9F2A99",
+      "run": "T35-L07-journeys-second-corrected-final",
+      "testSha256": "836A294D4DA2C7DFDD8C495603E8DAB6A4B7889721227A6F424BCD0B09239760",
+      "productGraphSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "evidenceClass": "Mocked Vite/browser journey",
+      "visualReview": "Root viewed each of the eight captures; synthetic visible narration/settings/draft, no private canary or credentials",
+      "captureNote": "Full-page screenshots retain browser sticky toolbar position; viewport geometry and behavioral assertions are separate evidence"
+    },
+    {
+      "file": "published-v2-existing-campaign-pins.png",
+      "source": ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T35-L07-journeys-second-corrected-final-artifacts/test-results/legacy-ui-journeys.e2e-exi-e9f1b-migrating-current-campaigns/published-v2-existing-campaign-pins.png",
+      "sha256": "4EA3064920B4E29C9407F34D6BAC0DE902EC7B803E7CC23EFBB1772763D3E67E",
+      "run": "T35-L07-journeys-second-corrected-final",
+      "testSha256": "836A294D4DA2C7DFDD8C495603E8DAB6A4B7889721227A6F424BCD0B09239760",
+      "productGraphSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "evidenceClass": "Mocked Vite/browser journey",
+      "visualReview": "Root viewed each of the eight captures; synthetic visible narration/settings/draft, no private canary or credentials",
+      "captureNote": "Full-page screenshots retain browser sticky toolbar position; viewport geometry and behavioral assertions are separate evidence"
+    },
+    {
+      "file": "whole-accepted-reader.png",
+      "source": ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T35-L07-journeys-second-corrected-final-artifacts/test-results/legacy-ui-journeys.e2e-who-16af6-r-history-and-latest-resume/whole-accepted-reader.png",
+      "sha256": "AF2ED30066698F53E885687473142F6BE1FD80E51B1B51673FC3E0F64C8FF350",
+      "run": "T35-L07-journeys-second-corrected-final",
+      "testSha256": "836A294D4DA2C7DFDD8C495603E8DAB6A4B7889721227A6F424BCD0B09239760",
+      "productGraphSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "evidenceClass": "Mocked Vite/browser journey",
+      "visualReview": "Root viewed each of the eight captures; synthetic visible narration/settings/draft, no private canary or credentials",
+      "captureNote": "Full-page screenshots retain browser sticky toolbar position; viewport geometry and behavioral assertions are separate evidence"
+    },
+    {
+      "file": "whole-history-older.png",
+      "source": ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T35-L07-journeys-second-corrected-final-artifacts/test-results/legacy-ui-journeys.e2e-who-16af6-r-history-and-latest-resume/whole-history-older.png",
+      "sha256": "0F304A45CBCF4E4F699C84D442D73FD0C0274C817F3DFF66720A2A6D5A8F9D76",
+      "run": "T35-L07-journeys-second-corrected-final",
+      "testSha256": "836A294D4DA2C7DFDD8C495603E8DAB6A4B7889721227A6F424BCD0B09239760",
+      "productGraphSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "evidenceClass": "Mocked Vite/browser journey",
+      "visualReview": "Root viewed each of the eight captures; synthetic visible narration/settings/draft, no private canary or credentials",
+      "captureNote": "Full-page screenshots retain browser sticky toolbar position; viewport geometry and behavioral assertions are separate evidence"
+    },
+    {
+      "file": "whole-latest-resume.png",
+      "source": ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T35-L07-journeys-second-corrected-final-artifacts/test-results/legacy-ui-journeys.e2e-who-16af6-r-history-and-latest-resume/whole-latest-resume.png",
+      "sha256": "26EB87B839F30BACCFE9AF4A30991EE21095C284818FDB55F0E79ABDCF3C57A6",
+      "run": "T35-L07-journeys-second-corrected-final",
+      "testSha256": "836A294D4DA2C7DFDD8C495603E8DAB6A4B7889721227A6F424BCD0B09239760",
+      "productGraphSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "evidenceClass": "Mocked Vite/browser journey",
+      "visualReview": "Root viewed each of the eight captures; synthetic visible narration/settings/draft, no private canary or credentials",
+      "captureNote": "Full-page screenshots retain browser sticky toolbar position; viewport geometry and behavioral assertions are separate evidence"
+    },
+    {
+      "file": "whole-reloaded-unsent-draft.png",
+      "source": ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T35-L07-journeys-second-corrected-final-artifacts/test-results/legacy-ui-journeys.e2e-who-16af6-r-history-and-latest-resume/whole-reloaded-unsent-draft.png",
+      "sha256": "F9F3BA400D9FC7C2D883C874386E76A46286ADC81046F6047E289FBE07ABF4A3",
+      "run": "T35-L07-journeys-second-corrected-final",
+      "testSha256": "836A294D4DA2C7DFDD8C495603E8DAB6A4B7889721227A6F424BCD0B09239760",
+      "productGraphSha256": "FC1D6AEB115C3A9E3D4EDC9F3975D01B1663A47A4ECC2DD298276B0FA7938C33",
+      "evidenceClass": "Mocked Vite/browser journey",
+      "visualReview": "Root viewed each of the eight captures; synthetic visible narration/settings/draft, no private canary or credentials",
+      "captureNote": "Full-page screenshots retain browser sticky toolbar position; viewport geometry and behavioral assertions are separate evidence"
+    }
+  ]
+}
