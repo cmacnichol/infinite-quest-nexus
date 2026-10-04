@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
@@ -67,6 +67,8 @@ test("archived_excluded_from_default_resume_and_recent_panel_is_compact", async 
   await expect(page.locator("#dashboardStoryLink")).toHaveAttribute("href", `/story/${activeIds[0]}`);
 
   await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 58 of 59 campaigns");
   await page.locator("#managementCampaignStatus").selectOption("archived");
   await expect(page.locator(`#campaignList [data-campaign-id="${archivedId}"]`)).toHaveCount(1);
   await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 1 of 59 campaigns");
@@ -76,6 +78,8 @@ test("same_titles_distinct_ids_and_equal_sort_keys_are_stable", async ({ page })
   const fixture = collectionsFixture();
   await installLegacyUiFixture(page, fixture);
   await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 58 of 59 campaigns");
   const sameTitleIds = fixture.campaigns.slice(1, 3).map((campaign) => String(campaign.id)).sort();
   await page.locator("#managementCampaignSearch").fill("Repeated Expedition");
   await expect(page.locator("#campaignList [data-campaign-id]")).toHaveCount(2);
@@ -96,6 +100,7 @@ test("search_debounces_collection_render_for_250ms", async ({ page }) => {
   const fixture = collectionsFixture();
   await installLegacyUiFixture(page, fixture);
   await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
   await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 58 of 59 campaigns");
   const collectionClockTime = new Date("2030-01-01T00:00:00.000Z");
   await page.clock.install({ time: collectionClockTime });
@@ -114,6 +119,8 @@ test("search_and_status_combine_and_no_results_has_clear_filters", async ({ page
   const fixture = collectionsFixture();
   await installLegacyUiFixture(page, fixture);
   await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 58 of 59 campaigns");
   await page.locator("#managementCampaignStatus").selectOption("archived");
   await page.locator("#managementCampaignSearch").fill("Archived Expedition");
   await expect(page.locator("#campaignList [data-campaign-id]")).toHaveCount(1);
@@ -134,6 +141,8 @@ test("narrow_empty_states_keep_messages_and_keyboard_clear_inside_the_collection
   await page.setViewportSize({ width: 390, height: 844 });
 
   await page.goto(`${origin}/nexus/index.html#world-library`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#managementWorldResults")).toHaveText("Showing 39 of 39 worlds");
   await page.locator("#managementWorldSearch").fill("no synthetic world matches");
   await expect(page.locator("#managementWorldResults")).toHaveText("Showing 0 of 39 worlds");
   const worldMessage = await collectionElementVisibility(page, "#worldManagementCarousel", ".collection-empty");
@@ -141,12 +150,14 @@ test("narrow_empty_states_keep_messages_and_keyboard_clear_inside_the_collection
   await page.screenshot({ path: join(evidenceDirectory, "narrow-empty-worlds-fixed.png"), fullPage: false });
 
   await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 58 of 59 campaigns");
   await page.locator("#managementCampaignSearch").fill("no synthetic campaign matches");
   await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 0 of 59 campaigns");
   const campaignMessage = await collectionElementVisibility(page, "#campaignList", ".collection-empty");
   const campaignClear = await collectionElementVisibility(page, "#campaignList", ".collection-clear");
   await page.screenshot({ path: join(evidenceDirectory, "narrow-empty-campaigns-fixed.png"), fullPage: false });
-  console.log(JSON.stringify({ viewport: 390, world: { message: worldMessage, clear: worldClear }, campaign: { message: campaignMessage, clear: campaignClear } }));
+  await writeFile(join(evidenceDirectory, "narrow-empty-collections-measurements.json"), JSON.stringify({ viewport: 390, world: { message: worldMessage, clear: worldClear }, campaign: { message: campaignMessage, clear: campaignClear } }, null, 2), "utf8");
   expect(worldMessage).toMatchObject({ scrollLeft: 0, withinCollectionClip: true, withinViewport: true });
   expect(worldClear).toMatchObject({ scrollLeft: 0, withinCollectionClip: true, withinViewport: true });
   expect(campaignMessage).toMatchObject({ scrollLeft: 0, withinCollectionClip: true, withinViewport: true });
@@ -158,6 +169,15 @@ test("narrow_empty_states_keep_messages_and_keyboard_clear_inside_the_collection
   await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 58 of 59 campaigns");
 
   await page.goto(`${origin}/nexus/index.html#world-library`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await page.locator("#managementWorldSearch").fill("");
+  await expect(page.locator("#managementWorldResults")).toHaveText("Showing 39 of 39 worlds");
+  await page.locator("#managementWorldFilters [data-world-filter='draft']").click();
+  await expect(page.locator("#managementWorldFilters [data-world-filter='draft']")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#managementWorldResults")).toHaveText("Showing 1 of 39 worlds");
+  await page.locator("#managementWorldSearch").fill("no synthetic world matches");
+  await expect(page.locator("#managementWorldResults")).toHaveText("Showing 0 of 39 worlds");
+  await expect(page.locator("#worldManagementCarousel .collection-clear")).toBeVisible();
   await page.locator("#worldManagementCarousel .collection-clear").focus();
   await page.keyboard.press("Enter");
   await expect(page.locator("#managementWorldSearch")).toHaveValue("");
@@ -170,6 +190,8 @@ test("keyboard_selection_persists_through_collection_rerenders", async ({ page }
   const fixture = collectionsFixture();
   await installLegacyUiFixture(page, fixture);
   await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 58 of 59 campaigns");
   const search = page.locator("#managementCampaignSearch");
   await search.fill("Repeated");
   const firstId = String(fixture.campaigns[1]?.id);
@@ -239,6 +261,8 @@ test("world_summaries_need_no_detail_requests_for_collection_search", async ({ p
   await page.screenshot({ path: join(evidenceDirectory, "dashboard-collections-narrow.png"), fullPage: false });
 
   await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 58 of 59 campaigns");
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.screenshot({ path: join(evidenceDirectory, "campaign-collections-desktop.png"), fullPage: false });

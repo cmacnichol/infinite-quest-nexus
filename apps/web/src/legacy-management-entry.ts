@@ -43,5 +43,18 @@ export type {
 
 if (typeof document !== "undefined" && document.querySelector("#dashboard")) {
   const controllerUrl = "/nexus/nexus.js";
-  void import(/* @vite-ignore */ controllerUrl);
+  const interactiveRoot = document.getElementById("managementInteractiveRoot");
+  const bootStatus = document.getElementById("managementBootStatus");
+  const bootMessage = document.getElementById("managementBootMessage");
+  const reloadButton = document.getElementById("managementBootReload");
+  reloadButton?.addEventListener("click", () => window.location.reload());
+  void import(/* @vite-ignore */ controllerUrl).then(() => {
+    interactiveRoot?.removeAttribute("inert");
+    interactiveRoot?.setAttribute("aria-busy", "false");
+    if (bootStatus) bootStatus.hidden = true;
+  }).catch(() => {
+    interactiveRoot?.setAttribute("aria-busy", "false");
+    if (bootMessage) bootMessage.textContent = "Management controls could not load. Reload the page to try again.";
+    if (reloadButton) reloadButton.hidden = false;
+  });
 }

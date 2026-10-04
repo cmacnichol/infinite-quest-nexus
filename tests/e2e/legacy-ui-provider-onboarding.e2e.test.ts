@@ -220,6 +220,7 @@ async function selectDiscoveredModel(page: Page, expectedName: RegExp) {
 
 async function openNewProvider(page: Page) {
   await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
   await page.getByRole("button", { name: "New provider profile" }).click();
   await expect(page.locator("#providerDialog")).toBeVisible();
 }
@@ -287,6 +288,7 @@ test("role readiness uses explicit inventory checks and preserves independent pr
   const api = await installProviderApi(page, { providers: [providerFixture({ responseFormatCapability: verifiedCapability })], failFirstInventory: true });
   await page.clock.install({ time: new Date(now) });
   await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
   const text = page.locator('[data-provider-readiness="text"]');
   const image = page.locator('[data-provider-readiness="image"]');
   await expect(text).toHaveAttribute("data-readiness-state", "unavailable");
@@ -310,6 +312,7 @@ test("role readiness uses explicit inventory checks and preserves independent pr
 test("opening and saving a provider profile never probes story generation", async ({ page }) => {
   const api = await installProviderApi(page);
   await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   await expect(page.locator("#providerDialog")).toBeVisible();
   expect(api.getInventoryCalls()).toBe(0);
@@ -341,6 +344,7 @@ test("text profile setup succeeds while illustration provider is absent", async 
 test("Model-mode Advanced structured settings are visible by keyboard and round-trip", async ({ page }) => {
   const api = await installProviderApi(page, { providers: [providerFixture({ configuration: { textResponseFormatPolicy: "legacy" } })] });
   await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/T23-provider-basic.png", fullPage: true });
   const advanced = page.locator("#providerAdvancedSettings");
@@ -383,6 +387,7 @@ test("Model-mode Advanced structured settings are visible by keyboard and round-
 test("a successful inventory listing without the selected model remains not ready", async ({ page }) => {
   const api = await installProviderApi(page, { inventoryModelIds: ["vendor/other-model"] });
   await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
   const text = page.locator('[data-provider-readiness="text"]');
   await expect(text).toHaveAttribute("data-readiness-state", "unavailable");
   await text.getByRole("button", { name: "Check model inventory" }).click();
@@ -399,6 +404,7 @@ test("stale inventory results cannot lock or overwrite readiness after the profi
   const imageOther = providerFixture({ id: "33333333-3333-4333-8333-333333333333", name: "Synthetic other image", providerRole: "image", baseUrl: "https://image-other.example.test/v1", defaultModel: "vendor/image-other", isDefault: false, responseFormatCapability: undefined });
   const api = await installProviderApi(page, { providers: [textProfile, imageDefault, imageOther], failFirstListAfterWrite: true, holdFirstModelListResponse: true });
   await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
   const text = page.locator('[data-provider-readiness="text"]');
   const inventoryCheck = text.locator("[data-readiness-check]");
   await expect(inventoryCheck).toHaveCount(1);
@@ -455,6 +461,7 @@ test("stale inventory results cannot lock or overwrite readiness after the profi
 test("unknown structured-output capability remains not ready", async ({ page }) => {
   const api = await installProviderApi(page, { providers: [providerFixture({ responseFormatCapability: undefined })] });
   await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   const capability = page.locator("#providerResponseFormatCapability");
   await expect(capability).toContainText("unknown");
@@ -469,6 +476,7 @@ test("expired schema capability stays not ready for a healthy text provider", as
   expect(provider.healthStatus).toBe("healthy");
   const api = await installProviderApi(page, { providers: [provider] });
   await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   const capability = page.locator("#providerResponseFormatCapability");
   await expect(capability).not.toContainText("verified");
@@ -486,6 +494,7 @@ test("preset Advanced override edits are saved and Inherit clears the saved over
   });
   const api = await installProviderApi(page, { providers: [text] });
   await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   const advanced = page.locator("#providerAdvancedSettings");
   await advanced.locator("summary").click();
@@ -530,6 +539,7 @@ test("provider tuning stays advanced and round-trips text and Sogni profile valu
   const sogni = providerFixture({ id: imageProfileId, name: "Sogni image profile", providerType: "sogni_sdk", providerRole: "image", baseUrl: "https://image.example.test/v1", defaultModel: "synthetic/image-model", isDefault: false, configuration: { defaultWidth: 1536, defaultHeight: 1024, defaultAspectRatio: "3:2", defaultImageCount: 2, defaultOutputFormat: "webp", defaultQuality: "high", generationTimeoutMs: 240000, network: "relaxed", tokenType: "spark", contentFilter: "enabled", defaultSizePreset: "landscape", defaultSteps: 32, defaultGuidance: 6.5, defaultSeed: 12345, defaultSampler: "dpmpp_2m", defaultScheduler: "karras", defaultPreviewCount: 3 } });
   const api = await installProviderApi(page, { providers: [text, sogni] });
   await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   const advanced = page.locator("#providerAdvancedSettings");
   await expect(page.locator("#providerName")).toBeVisible();

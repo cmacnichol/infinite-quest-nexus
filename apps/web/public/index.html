@@ -9,6 +9,11 @@
   <link rel="stylesheet" href="/nexus/image-library-browser.css">
 </head>
 <body>
+  <section id="managementBootStatus" class="management-boot-status" role="status" aria-live="polite" aria-atomic="true">
+    <p id="managementBootMessage">Loading management controls…</p>
+    <button id="managementBootReload" class="button secondary" type="button" hidden>Reload page</button>
+  </section>
+  <div id="managementInteractiveRoot" inert aria-busy="true">
   <header class="universal-nav">
     <a class="nexus-brand" href="/nexus/" aria-label="Infinite Quest Nexus dashboard">
       <img src="/nexus/nexus-mark.png" alt="">
@@ -1323,6 +1328,7 @@
     </form>
   </dialog>
 
+  </div>
   <script type="module" src="/nexus/legacy-management.js"></script>
 </body>
 </html>
