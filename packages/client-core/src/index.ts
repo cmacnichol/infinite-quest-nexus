@@ -121,3 +121,19 @@ export type {
   ProviderReadinessState,
   ProviderReadinessCapabilityState
 } from "./provider-readiness.js";
+export {
+  STORY_HISTORY_PAGE_LIMIT,
+  STORY_HISTORY_RAW_CACHE_LIMIT,
+  createStoryHistoryWindow,
+  installStoryHistoryWindowPage,
+  selectStoryHistoryPreview,
+  storyHistoryVisibleTurns,
+  storyHistoryPageRequest
+} from "./story-history-window.js";
+export type {
+  StoryHistoryTurn,
+  StoryHistoryPage,
+  StoryHistoryPageRequest,
+  StoryHistoryWindowState,
+  StoryHistoryVisibleWindow
+} from "./story-history-window.js";
