@@ -60,7 +60,6 @@ import {
   validateStoryHistoryJumpTarget,
   STORY_CONTINUOUS_READER_WINDOW_LIMIT,
   createStoryContinuousReaderState,
-  selectStoryReadIdentity,
   beginStoryContinuousReaderGroup,
   settleStoryContinuousReaderResponse,
   settleStoryContinuousReaderFailure,
@@ -266,9 +265,14 @@ function captureContinuousReaderAnchor(request) {
   return { turnNumber, turnId, top: scene.getBoundingClientRect().top };
 }
 
-function restoreContinuousReaderAnchor(anchor) {
+function restoreContinuousReaderAnchor(anchor, expectedState, interactionEpoch) {
   if (!anchor) return;
   window.requestAnimationFrame(() => {
+    if (state.continuousReader !== expectedState
+      || state.campaignId !== expectedState.scope.campaignId
+      || campaignLoadSequence !== expectedState.scope.loadEpoch
+      || !state.user?.settings?.continuousReading
+      || readerPositionInteractionEpoch !== interactionEpoch) return;
     const scene = $(`scene-${anchor.turnNumber}`);
     if (!scene || scene.dataset.turnId !== anchor.turnId) return;
     const difference = scene.getBoundingClientRect().top - anchor.top;
@@ -278,53 +282,101 @@ function restoreContinuousReaderAnchor(anchor) {
   });
 }
 
-function continuousReaderRequestIsCurrent(request) {
+function continuousReaderRequestIsCurrent(request, interactionEpoch) {
   return state.continuousReader?.pendingRequest === request
     && state.continuousReader.scope.campaignId === request.campaignId
     && state.continuousReader.scope.loadEpoch === request.loadEpoch
     && state.campaignId === request.campaignId
-    && campaignLoadSequence === request.loadEpoch;
+    && campaignLoadSequence === request.loadEpoch
+    && state.user?.settings?.continuousReading
+    && readerPositionInteractionEpoch === interactionEpoch;
 }
 
-async function executeContinuousReaderRequest(request, anchor) {
+function continuousReaderKeyboardFocusWasActive() {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLButtonElement)) return false;
+  try {
+    return active.matches(":focus-visible")
+      && (active.hasAttribute("data-continuous-reader-direction")
+        || active.hasAttribute("data-continuous-reader-retry"));
+  } catch {
+    return false;
+  }
+}
+
+function restoreContinuousReaderKeyboardFocus(shouldRestore) {
+  if (!shouldRestore) return;
+  const controls = ensureContinuousReaderControls();
+  if (!controls) return;
+  const active = document.activeElement;
+  if (active instanceof HTMLButtonElement && !active.disabled && controls.contains(active)) return;
+  const retry = controls.querySelector('[data-continuous-reader-retry]:not([hidden])');
+  const nextDirection = [...controls.querySelectorAll("[data-continuous-reader-direction]")]
+    .find((button) => button instanceof HTMLButtonElement && !button.disabled);
+  const target = state.continuousReader?.status === "error" ? retry : nextDirection || retry;
+  if (target instanceof HTMLButtonElement) target.focus({ preventScroll: true });
+}
+
+async function executeContinuousReaderRequest(request, anchor, interactionEpoch, restoreKeyboardFocus) {
   const controller = new AbortController();
   continuousReaderAbortController?.abort();
   continuousReaderAbortController = controller;
   try {
     const response = await readerHistoryApi.getSceneWindow(request.campaignId, request.apiRequest, controller.signal);
-    if (!continuousReaderRequestIsCurrent(request)) return false;
+    if (!continuousReaderRequestIsCurrent(request, interactionEpoch)) return false;
     state.continuousReader = settleStoryContinuousReaderResponse(state.continuousReader, request, response);
     if (state.continuousReader.status === "idle") {
+      const installedState = state.continuousReader;
       renderAllScenes({ autoScroll: false });
-      restoreContinuousReaderAnchor(anchor);
+      restoreContinuousReaderKeyboardFocus(restoreKeyboardFocus);
+      restoreContinuousReaderAnchor(anchor, installedState, interactionEpoch);
       updateStatusBar();
       return true;
     }
     syncContinuousReaderControls();
     return false;
   } catch (error) {
-    if (!continuousReaderRequestIsCurrent(request)) return false;
+    if (!continuousReaderRequestIsCurrent(request, interactionEpoch)) return false;
     state.continuousReader = settleStoryContinuousReaderFailure(
       state.continuousReader,
       request,
       continuousReaderFailureKind(error)
     );
     syncContinuousReaderControls();
+    restoreContinuousReaderKeyboardFocus(restoreKeyboardFocus);
     return false;
   } finally {
     if (continuousReaderAbortController === controller) continuousReaderAbortController = null;
   }
 }
 
+function retirePendingContinuousReaderRequest() {
+  const readerState = state.continuousReader;
+  if (!readerState?.pendingRequest) return;
+  continuousReaderAbortController?.abort();
+  continuousReaderAbortController = null;
+  state.continuousReader = {
+    ...readerState,
+    requestEpoch: readerState.requestEpoch + 1,
+    pendingRequest: null,
+    status: "idle",
+    failureKind: null,
+    retryPlan: null
+  };
+  syncContinuousReaderControls();
+}
+
 async function loadContinuousReaderGroup(direction) {
   const readerState = state.continuousReader;
   if (!state.user?.settings?.continuousReading || !readerState) return false;
+  const restoreKeyboardFocus = continuousReaderKeyboardFocusWasActive();
   const started = beginStoryContinuousReaderGroup(readerState, direction);
   if (!started.request) return false;
+  const interactionEpoch = readerPositionInteractionEpoch;
   const anchor = captureContinuousReaderAnchor(started.request);
   state.continuousReader = started.state;
   syncContinuousReaderControls();
-  return executeContinuousReaderRequest(started.request, anchor);
+  return executeContinuousReaderRequest(started.request, anchor, interactionEpoch, restoreKeyboardFocus);
 }
 
 async function retryContinuousReaderGroup() {
@@ -333,10 +385,12 @@ async function retryContinuousReaderGroup() {
   const started = beginStoryContinuousReaderRetry(readerState);
   if (!started.request && !started.anchorRefreshRequest) return false;
   const failedRequest = started.request || started.anchorRefreshRequest.failedRequest;
-  const anchor = captureContinuousReaderAnchor(failedRequest);
+  let anchor = captureContinuousReaderAnchor(failedRequest);
+  const interactionEpoch = readerPositionInteractionEpoch;
+  const restoreKeyboardFocus = continuousReaderKeyboardFocusWasActive();
   state.continuousReader = started.state;
   syncContinuousReaderControls();
-  if (started.request) return executeContinuousReaderRequest(started.request, anchor);
+  if (started.request) return executeContinuousReaderRequest(started.request, anchor, interactionEpoch, restoreKeyboardFocus);
 
   const refresh = started.anchorRefreshRequest;
   const controller = new AbortController();
@@ -345,16 +399,22 @@ async function retryContinuousReaderGroup() {
   try {
     const response = await readerHistoryApi.getTurn(refresh.campaignId, refresh.turnNumber, controller.signal);
     if (state.continuousReader?.pendingRequest !== refresh || state.campaignId !== refresh.campaignId
-      || campaignLoadSequence !== refresh.loadEpoch) return false;
+      || campaignLoadSequence !== refresh.loadEpoch || !state.user?.settings?.continuousReading
+      || readerPositionInteractionEpoch !== interactionEpoch) return false;
     const refreshed = settleStoryContinuousReaderAnchorRefresh(state.continuousReader, refresh, response);
     state.continuousReader = refreshed.state;
-    if (refreshed.request) return executeContinuousReaderRequest(refreshed.request, anchor);
+    if (refreshed.request) {
+      if (anchor) anchor = { ...anchor, turnId: refreshed.request.apiRequest.anchorTurnId };
+      return executeContinuousReaderRequest(refreshed.request, anchor, interactionEpoch, restoreKeyboardFocus);
+    }
     syncContinuousReaderControls();
     return false;
   } catch {
-    if (state.continuousReader?.pendingRequest !== refresh) return false;
+    if (state.continuousReader?.pendingRequest !== refresh || readerPositionInteractionEpoch !== interactionEpoch
+      || !state.user?.settings?.continuousReading) return false;
     state.continuousReader = settleStoryContinuousReaderAnchorRefreshFailure(state.continuousReader, refresh);
     syncContinuousReaderControls();
+    restoreContinuousReaderKeyboardFocus(restoreKeyboardFocus);
     return false;
   } finally {
     if (continuousReaderAbortController === controller) continuousReaderAbortController = null;
@@ -800,6 +860,7 @@ function noteReaderPositionIntent(event) {
   if (!event.isTrusted) return;
   if (event.target instanceof Element && event.target.closest("#btnResumeReading")) return;
   readerPositionInteractionEpoch += 1;
+  retirePendingContinuousReaderRequest();
   if (readerPositionChoicePending) readerPositionChoicePending = false;
 
 }
@@ -1574,6 +1635,9 @@ async function saveCurrentResponseCorrection() {
     const turn = latestCompletedResponseTurn();
     if (!turn) return;
     turn.narration = correction.effectiveNarration;
+    if (state.continuousReader) {
+      state.continuousReader = reconcileStoryAcceptedSceneReplacement(state.continuousReader, turn);
+    }
     renderAllScenes();
     if (dialog.close) dialog.close();
     clearResponseEditSession();
@@ -3444,6 +3508,7 @@ function navigateToTurn(turnNumber) {
   const target = turnNumber === null ? latest : Number(turnNumber);
   if (!target || turnIndexForNumber(state.turns, target) < 0) return;
   readerPositionInteractionEpoch += 1;
+  retirePendingContinuousReaderRequest();
   readerPositionChoicePending = false;
   state.readerPinnedTurn = null;
   hideReaderResumePrompt();
@@ -3464,9 +3529,11 @@ function navigateToTurn(turnNumber) {
       } : {});
       renderAllScenes({ autoScroll: false });
     } else if (state.continuousReader) {
-      state.continuousReader = selectStoryReadIdentity(state.continuousReader, { turnNumber: target, id: turnId });
-      renderStoryIllustration();
-      syncContinuousReaderControls();
+      initializeContinuousReader({
+        selectedReadIdentity: { turnNumber: target, id: turnId },
+        selectedTurn: targetTurn
+      });
+      renderAllScenes({ autoScroll: false });
     }
   }
   updateStatusBar();
@@ -4338,6 +4405,10 @@ async function saveUserProfile() {
   const readerPreferences = readerPreferencesFromControls();
   const wasContinuousReading = Boolean(state.user?.settings?.continuousReading);
   const readerPositionBeforeSave = wasContinuousReading !== continuousReading ? captureReaderPosition() : null;
+  if (wasContinuousReading !== continuousReading) {
+    readerPositionInteractionEpoch += 1;
+    retirePendingContinuousReaderRequest();
+  }
 
   if (!displayName) {
     toast("Display name is required.", 2600);

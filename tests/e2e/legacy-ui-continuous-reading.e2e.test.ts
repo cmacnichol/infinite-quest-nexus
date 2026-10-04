@@ -158,7 +158,7 @@ async function prepareStoryPage(page: Page, campaignId: string): Promise<void> {
 
 async function seedReaderPosition(page: Page, fixture: ReturnType<typeof legacyUiFixture>, turn: Record<string, unknown>): Promise<void> {
   await page.goto(`${origin}/nexus/index.html`);
-  await page.evaluate(async ({ userId, campaignId, turn }) => {
+  await page.evaluate(async ({ userId, campaignId, turn, timestamp }) => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open("infiniteQuest-reader-positions-v1", 1);
       request.onupgradeneeded = () => request.result.createObjectStore("positions");
@@ -183,7 +183,7 @@ async function seedReaderPosition(page: Page, fixture: ReturnType<typeof legacyU
       transaction.onerror = () => reject(transaction.error);
     });
     database.close();
-  }, { userId: fixtureUserId(fixture), campaignId: fixture.campaignId, turn });
+  }, { userId: fixtureUserId(fixture), campaignId: fixture.campaignId, turn, timestamp });
 }
 
 async function renderedSceneTurns(page: Page): Promise<number[]> {
@@ -441,8 +441,8 @@ test("an accepted replacement updates one visible keyed scene without duplicatin
   const beforeReplacement = await renderedSceneTurns(page);
   expect(beforeReplacement.length).toBeLessThanOrEqual(10);
   expect(beforeReplacement).toContain(317);
-  await page.locator("#scene-317 [data-story-more] summary").click();
-  await page.locator("#scene-317 #btnRetry").click();
+  await page.locator("#scene-317 .story-more > summary").click();
+  await page.locator("#btnRetry").click();
   await page.locator("#retryPromptEditor").fill("Replacement action.");
   await page.locator("#btnRetryPromptSubmit").click();
   await expect(page.locator("#scene-317 .scene-narration")).toContainText("Replacement accepted scene.");

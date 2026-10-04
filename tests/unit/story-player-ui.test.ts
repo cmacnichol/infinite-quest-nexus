@@ -36,6 +36,7 @@ async function bootLegacyStory({
     campaignId,
     turn: makeTurns(turnNumber, turnNumber)[0]
   })),
+  getSceneWindow = vi.fn(),
   searchReaderHistory = vi.fn(async () => ({ campaignId: "campaign-1", items: [], nextCursor: null })),
   getTurnCorrection = vi.fn().mockResolvedValue({ effectiveNarration: "", correctionRevision: 0 }),
   correctTurnNarration = vi.fn().mockResolvedValue({ effectiveNarration: "", correctionRevision: 0 }),
@@ -58,6 +59,7 @@ async function bootLegacyStory({
   rewindCampaign?: ReturnType<typeof vi.fn>;
   fetchCampaignState?: ReturnType<typeof vi.fn>;
   getReaderHistoryTurn?: ReturnType<typeof vi.fn>;
+  getSceneWindow?: ReturnType<typeof vi.fn>;
   searchReaderHistory?: ReturnType<typeof vi.fn>;
   getTurnCorrection?: ReturnType<typeof vi.fn>;
   correctTurnNarration?: ReturnType<typeof vi.fn>;
@@ -135,7 +137,7 @@ async function bootLegacyStory({
       segments: loadIllustrationSegments ?? (async () => ({ segments: illustrationSegments })),
       imageJobs: async () => ({ jobs: [] })
     },
-    readerHistory: { getTurn: getReaderHistoryTurn, searchHistory: searchReaderHistory },
+    readerHistory: { getTurn: getReaderHistoryTurn, searchHistory: searchReaderHistory, getSceneWindow },
     workflow,
     ...(failedTurnPrompts ? { failedTurnPrompts } : {}),
     pendingSubmissions: { clear: () => undefined },
@@ -151,6 +153,7 @@ async function bootLegacyStory({
     fetchCampaignState,
     rewindCampaign,
     getReaderHistoryTurn,
+    getSceneWindow,
     searchReaderHistory,
     updateCampaignState,
     getTurnCorrection,
@@ -198,6 +201,21 @@ const makeAcceptedTurns = (first: number, last: number) => makeTurns(first, last
   chronicleRetrieval: null,
   reportedCost: null
 }));
+
+const T16_CAMPAIGN_ID = "11111111-1111-4111-8111-111111111111";
+
+function sceneWindowResponse(direction: "older" | "newer", first: number, last: number, anchorTurnNumber: number, turns = makeAcceptedTurns(first, last)) {
+  const anchor = turns.find((turn) => turn.turnNumber === anchorTurnNumber);
+  if (!anchor) throw new Error(`Missing scene-window anchor ${anchorTurnNumber}.`);
+  return {
+    campaignId: T16_CAMPAIGN_ID,
+    anchor: { turnNumber: anchorTurnNumber, id: anchor.id },
+    direction,
+    turns,
+    hasMore: true,
+    historyToken: "t16-window-token"
+  };
+}
 
 function selectOption(select: HTMLSelectElement, value: string) {
   select.querySelectorAll("option").forEach((option) => { option.selected = false; });
@@ -2967,6 +2985,359 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       expect(scenes[0]?.id).toBe("scene-91");
       expect(scenes[9]?.id).toBe("scene-100");
       expect(document.getElementById("toast")?.textContent).not.toContain("profile history failed");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("updates the continuous scene after a saved narration correction", async () => {
+    const held = deferred<unknown>();
+    const getSceneWindow = vi.fn(() => held.promise);
+    const correctTurnNarration = vi.fn().mockResolvedValue({ effectiveNarration: "Corrected latest narration", correctionRevision: 1 });
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeAcceptedTurns(51, 100),
+        pathname: `/story/${T16_CAMPAIGN_ID}`,
+        continuousReading: true,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 100, storyLengthProfile: "standard" },
+          world: {},
+          turns: { campaignId: T16_CAMPAIGN_ID, turns: makeAcceptedTurns(51, 100), nextCursor: null }
+        }),
+        getSceneWindow,
+        getTurnCorrection: vi.fn().mockResolvedValue({ effectiveNarration: "Narration 100", correctionRevision: 0 }),
+        correctTurnNarration
+      });
+
+      document.querySelector<HTMLButtonElement>('[data-continuous-reader-direction="older"]')?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(getSceneWindow).toHaveBeenCalledTimes(1));
+      document.getElementById("btnOpenEditResponse")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      (document.getElementById("responseEditor") as HTMLTextAreaElement).value = "Corrected latest narration";
+      document.getElementById("btnEditResponseSave")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(correctTurnNarration).toHaveBeenCalledTimes(1));
+      held.resolve(sceneWindowResponse("older", 82, 91, 91));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(document.querySelector("#scene-100 .narration")?.textContent).toContain("Corrected latest narration");
+      expect(document.getElementById("scene-82")).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps explicit Previous selection when a pending older scene group resolves", async () => {
+    const held = deferred<unknown>();
+    const getSceneWindow = vi.fn(() => held.promise);
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeAcceptedTurns(51, 100),
+        pathname: `/story/${T16_CAMPAIGN_ID}`,
+        continuousReading: true,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 100 },
+          world: {},
+          turns: { campaignId: T16_CAMPAIGN_ID, turns: makeAcceptedTurns(51, 100), nextCursor: null }
+        }),
+        getSceneWindow
+      });
+      Object.defineProperty(window.HTMLElement.prototype, "getBoundingClientRect", {
+        value: () => ({ top: 100, bottom: 200, height: 100, left: 0, right: 100, width: 100 }),
+        configurable: true
+      });
+      Object.defineProperty(window, "requestAnimationFrame", { value: (callback: () => void) => { callback(); return 1; }, configurable: true });
+
+      document.querySelector<HTMLButtonElement>('[data-continuous-reader-direction="older"]')?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(getSceneWindow).toHaveBeenCalledTimes(1));
+      document.getElementById("btnPrev")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(document.getElementById("readerTurnCount")?.textContent).toContain("Turn 99 of 100");
+
+      held.resolve(sceneWindowResponse("older", 82, 91, 91));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(document.getElementById("readerTurnCount")?.textContent).toContain("Turn 99 of 100");
+      expect(document.getElementById("scene-99")).not.toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not surface a stale group failure after explicit Previous navigation", async () => {
+    const held = deferred<unknown>();
+    const getSceneWindow = vi.fn(() => held.promise);
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeAcceptedTurns(51, 100),
+        pathname: `/story/${T16_CAMPAIGN_ID}`,
+        continuousReading: true,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 100 },
+          world: {},
+          turns: { campaignId: T16_CAMPAIGN_ID, turns: makeAcceptedTurns(51, 100), nextCursor: null }
+        }),
+        getSceneWindow
+      });
+      Object.defineProperty(window.HTMLElement.prototype, "getBoundingClientRect", {
+        value: () => ({ top: 100, bottom: 200, height: 100, left: 0, right: 100, width: 100 }),
+        configurable: true
+      });
+      document.querySelector<HTMLButtonElement>('[data-continuous-reader-direction="older"]')?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(getSceneWindow).toHaveBeenCalledTimes(1));
+      document.getElementById("btnPrev")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      held.reject(new Error("late group failure"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(document.getElementById("readerTurnCount")?.textContent).toContain("Turn 99 of 100");
+      expect(document.getElementById("scene-99")).not.toBeNull();
+      expect(document.getElementById("continuousReaderStatus")?.textContent).toBe("");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not run a queued scene-anchor restore after explicit Previous navigation", async () => {
+    const held = deferred<unknown>();
+    const getSceneWindow = vi.fn(() => held.promise);
+    const frames: Array<() => void> = [];
+    let sceneTop = 100;
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeAcceptedTurns(51, 100),
+        pathname: `/story/${T16_CAMPAIGN_ID}`,
+        continuousReading: true,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 100 },
+          world: {},
+          turns: { campaignId: T16_CAMPAIGN_ID, turns: makeAcceptedTurns(51, 100), nextCursor: null }
+        }),
+        getSceneWindow
+      });
+      Object.defineProperty(window.HTMLElement.prototype, "getBoundingClientRect", {
+        value: () => ({ top: sceneTop, bottom: sceneTop + 100, height: 100, left: 0, right: 100, width: 100 }),
+        configurable: true
+      });
+      Object.defineProperty(window, "requestAnimationFrame", { value: (callback: () => void) => { frames.push(callback); return frames.length; }, configurable: true });
+      const scrollTo = vi.fn();
+      Object.defineProperty(window, "scrollTo", { value: scrollTo, configurable: true });
+      Object.defineProperty(window, "scrollY", { value: 1000, configurable: true });
+
+      document.querySelector<HTMLButtonElement>('[data-continuous-reader-direction="older"]')?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      held.resolve(sceneWindowResponse("older", 82, 91, 91));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(document.getElementById("scene-82")).not.toBeNull();
+      expect(frames).toHaveLength(1);
+
+      document.getElementById("btnPrev")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(document.getElementById("readerTurnCount")?.textContent).toContain("Turn 99 of 100");
+      sceneTop = 500;
+      scrollTo.mockClear();
+      frames[0]?.();
+      expect(scrollTo).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not run a queued scene-anchor restore after native manual scroll intent", async () => {
+    const held = deferred<unknown>();
+    const getSceneWindow = vi.fn(() => held.promise);
+    const frames: Array<() => void> = [];
+    let sceneTop = 100;
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeAcceptedTurns(51, 100),
+        pathname: `/story/${T16_CAMPAIGN_ID}`,
+        continuousReading: true,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 100 },
+          world: {},
+          turns: { campaignId: T16_CAMPAIGN_ID, turns: makeAcceptedTurns(51, 100), nextCursor: null }
+        }),
+        getSceneWindow
+      });
+      Object.defineProperty(window.HTMLElement.prototype, "getBoundingClientRect", {
+        value: () => ({ top: sceneTop, bottom: sceneTop + 100, height: 100, left: 0, right: 100, width: 100 }),
+        configurable: true
+      });
+      Object.defineProperty(window, "requestAnimationFrame", { value: (callback: () => void) => { frames.push(callback); return frames.length; }, configurable: true });
+      const scrollTo = vi.fn();
+      Object.defineProperty(window, "scrollTo", { value: scrollTo, configurable: true });
+      Object.defineProperty(window, "scrollY", { value: 1000, configurable: true });
+      document.querySelector<HTMLButtonElement>('[data-continuous-reader-direction="older"]')?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      held.resolve(sceneWindowResponse("older", 82, 91, 91));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(frames).toHaveLength(1);
+
+      const wheel = new window.Event("wheel", { bubbles: true });
+      Object.defineProperty(wheel, "isTrusted", { value: true });
+      document.dispatchEvent(wheel);
+      sceneTop = 500;
+      frames[0]?.();
+      expect(scrollTo).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not run a queued scene-anchor restore after a same-campaign reload", async () => {
+    const held = deferred<unknown>();
+    const getSceneWindow = vi.fn(() => held.promise);
+    const frames: Array<() => void> = [];
+    let sceneTop = 100;
+    const syncStatus = vi.fn().mockResolvedValue({
+      campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 100 },
+      world: {},
+      turns: { campaignId: T16_CAMPAIGN_ID, turns: makeAcceptedTurns(51, 100), nextCursor: null }
+    });
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeAcceptedTurns(51, 100),
+        pathname: `/story/${T16_CAMPAIGN_ID}`,
+        continuousReading: true,
+        syncStatus,
+        getSceneWindow
+      });
+      vi.stubGlobal("confirm", () => true);
+      Object.defineProperty(window.HTMLElement.prototype, "getBoundingClientRect", {
+        value: () => ({ top: sceneTop, bottom: sceneTop + 100, height: 100, left: 0, right: 100, width: 100 }),
+        configurable: true
+      });
+      Object.defineProperty(window, "requestAnimationFrame", { value: (callback: () => void) => { frames.push(callback); return frames.length; }, configurable: true });
+      const scrollTo = vi.fn();
+      Object.defineProperty(window, "scrollTo", { value: scrollTo, configurable: true });
+      Object.defineProperty(window, "scrollY", { value: 1000, configurable: true });
+      document.querySelector<HTMLButtonElement>('[data-continuous-reader-direction="older"]')?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      held.resolve(sceneWindowResponse("older", 82, 91, 91));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(frames).toHaveLength(1);
+      const oldAnchorId = document.getElementById("scene-91")?.dataset.turnId;
+      expect(oldAnchorId).toBe(makeAcceptedTurns(91, 91)[0]?.id);
+
+      document.getElementById("btnUndo")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(syncStatus).toHaveBeenCalledTimes(2));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(document.getElementById("scene-91")?.dataset.turnId).toBe(oldAnchorId);
+      sceneTop = 500;
+      frames[0]?.();
+      expect(scrollTo).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retires pending groups on manual scroll intent", async () => {
+    const held = deferred<unknown>();
+    const getSceneWindow = vi.fn(() => held.promise);
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeAcceptedTurns(51, 100),
+        pathname: `/story/${T16_CAMPAIGN_ID}`,
+        continuousReading: true,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 100 },
+          world: {},
+          turns: { campaignId: T16_CAMPAIGN_ID, turns: makeAcceptedTurns(51, 100), nextCursor: null }
+        }),
+        getSceneWindow
+      });
+      Object.defineProperty(window.HTMLElement.prototype, "getBoundingClientRect", {
+        value: () => ({ top: 100, bottom: 200, height: 100, left: 0, right: 100, width: 100 }),
+        configurable: true
+      });
+      document.querySelector<HTMLButtonElement>('[data-continuous-reader-direction="older"]')?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(getSceneWindow).toHaveBeenCalledTimes(1));
+      const wheel = new window.Event("wheel", { bubbles: true });
+      Object.defineProperty(wheel, "isTrusted", { value: true });
+      document.dispatchEvent(wheel);
+      held.resolve(sceneWindowResponse("older", 82, 91, 91));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(document.getElementById("scene-100")).not.toBeNull();
+      expect(document.getElementById("scene-82")).toBeNull();
+      expect(document.getElementById("continuousReaderStatus")?.textContent).toBe("");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retires a pending group when continuous reading is disabled", async () => {
+    const held = deferred<unknown>();
+    const getSceneWindow = vi.fn(() => held.promise);
+    const updateProfile = vi.fn(async (profile: Record<string, unknown>) => ({
+      user: { displayName: profile.displayName, settings: profile.settings }
+    }));
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeAcceptedTurns(51, 100),
+        pathname: `/story/${T16_CAMPAIGN_ID}`,
+        continuousReading: true,
+        updateProfile,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 100 },
+          world: {},
+          turns: { campaignId: T16_CAMPAIGN_ID, turns: makeAcceptedTurns(51, 100), nextCursor: null }
+        }),
+        getSceneWindow
+      });
+      document.querySelector<HTMLButtonElement>('[data-continuous-reader-direction="older"]')?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(getSceneWindow).toHaveBeenCalledTimes(1));
+      document.getElementById("btnOpenUserProfile")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      (document.getElementById("userProfileContinuousReading") as HTMLInputElement).checked = false;
+      document.getElementById("btnSaveUserProfile")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(updateProfile).toHaveBeenCalledTimes(1));
+      held.resolve(sceneWindowResponse("older", 82, 91, 91));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(document.querySelector("#storyArea .scene")?.id).toBe("scene-100");
+      expect(document.getElementById("scene-82")).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("restores the captured offset under the validated replacement anchor UUID", async () => {
+    const frames: Array<() => void> = [];
+    let sceneTop = 100;
+    const replacement = { ...makeAcceptedTurns(91, 91)[0]!, id: "99999999-9999-4999-8999-999999999991" };
+    const getReaderHistoryTurn = vi.fn().mockResolvedValue({ campaignId: T16_CAMPAIGN_ID, turn: replacement });
+    const getSceneWindow = vi.fn()
+      .mockRejectedValueOnce({ statusCode: 409, domainCode: "reader_anchor_changed" })
+      .mockImplementationOnce(async () => {
+        sceneTop = 500;
+        return sceneWindowResponse("older", 82, 91, 91, [...makeAcceptedTurns(82, 90), replacement]);
+      });
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeAcceptedTurns(51, 100),
+        pathname: `/story/${T16_CAMPAIGN_ID}`,
+        continuousReading: true,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 100 },
+          world: {},
+          turns: { campaignId: T16_CAMPAIGN_ID, turns: makeAcceptedTurns(51, 100), nextCursor: null }
+        }),
+        getSceneWindow,
+        getReaderHistoryTurn
+      });
+      Object.defineProperty(window.HTMLElement.prototype, "getBoundingClientRect", {
+        value: () => ({ top: sceneTop, bottom: sceneTop + 100, height: 100, left: 0, right: 100, width: 100 }),
+        configurable: true
+      });
+      Object.defineProperty(window, "requestAnimationFrame", { value: (callback: () => void) => { frames.push(callback); return frames.length; }, configurable: true });
+      const scrollTo = vi.fn();
+      Object.defineProperty(window, "scrollTo", { value: scrollTo, configurable: true });
+      Object.defineProperty(window, "scrollY", { value: 1000, configurable: true });
+
+      document.querySelector<HTMLButtonElement>('[data-continuous-reader-direction="older"]')?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(document.getElementById("continuousReaderStatus")?.textContent).toContain("replaced"));
+      document.querySelector<HTMLButtonElement>("[data-continuous-reader-retry]")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(getSceneWindow).toHaveBeenCalledTimes(2));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(getReaderHistoryTurn).toHaveBeenCalledTimes(1);
+      expect(document.getElementById("scene-91")?.dataset.turnId).toBe(replacement.id);
+      expect(frames).toHaveLength(1);
+      frames[0]?.();
+      expect(scrollTo).toHaveBeenCalledWith({ top: 1400, behavior: "auto" });
     } finally {
       vi.unstubAllGlobals();
     }
