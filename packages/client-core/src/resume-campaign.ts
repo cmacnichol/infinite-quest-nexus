@@ -5,7 +5,7 @@ export interface ResumeCampaign {
   readonly updatedAt: string;
 }
 
-function compareUtcTimestamps(left: string, right: string): number {
+export function compareUtcTimestamps(left: string, right: string): number {
   const pattern = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/u;
   const leftParts = pattern.exec(left);
   const rightParts = pattern.exec(right);

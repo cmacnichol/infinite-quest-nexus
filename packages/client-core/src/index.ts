@@ -110,3 +110,5 @@ export { resolveResumeCampaign } from "./resume-campaign.js";
 export type { ResumeCampaign } from "./resume-campaign.js";
 export { DEFAULT_READER_PREFERENCES, normalizeReaderPreferences } from "./reader-preferences.js";
 export type { ReaderPreferences } from "./reader-preferences.js";
+export { filterSortCampaigns, filterSortWorlds } from "./management-collections.js";
+export type { CampaignCollectionOptions, WorldCollectionOptions } from "./management-collections.js";
