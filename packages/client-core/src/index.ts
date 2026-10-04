@@ -137,3 +137,17 @@ export type {
   StoryHistoryWindowState,
   StoryHistoryVisibleWindow
 } from "./story-history-window.js";
+export {
+  normalizeStoryHistorySearchQuery,
+  createStoryHistorySearchState,
+  beginStoryHistorySearch,
+  beginStoryHistorySearchPage,
+  settleStoryHistorySearch,
+  validateStoryHistoryJumpTarget
+} from "./story-history-search.js";
+export type {
+  StoryHistorySearchScope,
+  StoryHistorySearchRequest,
+  StoryHistorySearchOutcome,
+  StoryHistorySearchState
+} from "./story-history-search.js";
