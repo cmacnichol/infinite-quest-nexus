@@ -114,6 +114,8 @@ let actionDraftNavigationTarget = null;
 let actionDraftCurrentScopeKey = null;
 let actionDraftSessionEpoch = 0;
 let actionDraftSubmissionNonce = 0;
+let actionDraftConflictRemoval = null;
+let actionSubmissionIntent = null;
 
 let resolveInitialization;
 let rejectInitialization;
@@ -1228,6 +1230,7 @@ async function loadReaderIllustrations(campaignId, loadEpoch) {
 
 async function loadCampaign(campaignId, options = {}) {
   const loadSequence = ++campaignLoadSequence;
+  retireActionSubmissionIntent();
   const loadEpoch = ++storyTurnWindowEpoch;
   invalidateStoryStreamRenderer();
   const positionInteractionEpoch = readerPositionInteractionEpoch;
@@ -1409,14 +1412,21 @@ async function showBackgroundStoryBeforeStart() {
 }
 
 async function startAdventure(options = {}) {
-  if (state.busy || !state.campaignLoaded) return;
-  await showBackgroundStoryBeforeStart();
-  const inputMode = defaultTurnInputMode();
-  await runGeneration(firstActionForNewAdventure(), {
-    requestedInputMode: inputMode,
-    resolvedInputMode: inputMode,
-    inputModeSource: "opening_action"
-  });
+  const intent = acquireActionSubmissionIntent();
+  if (!intent) return;
+  try {
+    await showBackgroundStoryBeforeStart();
+    if (!isCurrentActionSubmissionIntent(intent)) return;
+    const inputMode = defaultTurnInputMode();
+    await runGeneration(firstActionForNewAdventure(), {
+      requestedInputMode: inputMode,
+      resolvedInputMode: inputMode,
+      inputModeSource: "opening_action",
+      actionSubmissionIntent: intent
+    });
+  } finally {
+    releaseActionSubmissionIntent(intent);
+  }
 }
 
 
@@ -2064,6 +2074,37 @@ function actionDraftScopeKey(scope) {
   return scope ? `${scope.userId}:${scope.campaignId}` : null;
 }
 
+function isCurrentActionSubmissionIntent(intent) {
+  return Boolean(intent)
+    && actionSubmissionIntent === intent
+    && intent.campaignId === state.campaignId
+    && intent.loadSequence === campaignLoadSequence
+    && intent.sessionEpoch === actionDraftSessionEpoch
+    && intent.scopeKey === actionDraftCurrentScopeKey;
+}
+
+function acquireActionSubmissionIntent() {
+  if (!state.campaignLoaded || state.busy) return null;
+  if (actionSubmissionIntent && isCurrentActionSubmissionIntent(actionSubmissionIntent)) return null;
+  actionSubmissionIntent = null;
+  const intent = {
+    campaignId: state.campaignId,
+    loadSequence: campaignLoadSequence,
+    sessionEpoch: actionDraftSessionEpoch,
+    scopeKey: actionDraftCurrentScopeKey
+  };
+  actionSubmissionIntent = intent;
+  return intent;
+}
+
+function releaseActionSubmissionIntent(intent) {
+  if (actionSubmissionIntent === intent) actionSubmissionIntent = null;
+}
+
+function retireActionSubmissionIntent() {
+  actionSubmissionIntent = null;
+}
+
 function actionDraftStatusText() {
   if (actionDraftSaving || actionDraftScheduled) return "Draft saving";
   if (actionDraftSaveFailed) return "Draft not saved";
@@ -2172,8 +2213,17 @@ async function writeActionDraftGeneration(snapshot, editGeneration, expectedRevi
       actionDraftCurrent = { ...snapshot };
     }
   } else if (result.outcome === "conflict") {
+    const pendingRemoval = actionDraftConflictRemoval;
+    if (pendingRemoval?.promise) {
+      await pendingRemoval.promise;
+      if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return { outcome: "superseded" };
+    }
     const currentDraft = await composition.actionDrafts.read(record.scope);
     if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return { outcome: "superseded" };
+    if (!currentDraft && expectedRevision && actionDraftPersistedRevision === null && !actionDraftConflict) {
+      return { outcome: "retry" };
+    }
+    if (actionDraftSaveFailed && actionDraftConflict) return { outcome: "unavailable" };
     if (currentDraft) {
       presentActionDraftConflict(currentDraft, "revision", "This action draft changed in another tab. Choose which version to keep.");
     } else {
@@ -2240,6 +2290,7 @@ async function drainActionDraftWrites() {
       continue;
     }
     const result = await writeActionDraftGeneration(snapshot, editGeneration, actionDraftPersistedRevision, scope);
+    if (result.outcome === "retry") continue;
     if (result.outcome !== "saved") {
       allSaved = false;
       break;
@@ -2275,6 +2326,7 @@ async function restoreActionDraftForCampaign(campaignId, loadSequence) {
   }
   const scopeKey = actionDraftScopeKey(scope);
   if (actionDraftCurrentScopeKey !== scopeKey) {
+    retireActionSubmissionIntent();
     actionDraftSessionEpoch += 1;
     actionDraftLocalGeneration = 0;
     actionDraftPersistedGeneration = -1;
@@ -2446,24 +2498,109 @@ async function reconcileActionDraftConflict(choice) {
     return false;
   }
   if (choice === "discard" && conflict.kind === "base" && conflict.draft) {
-    const result = await composition.actionDrafts.removeIfRevision(scope, conflict.draft.draftRevision);
+    return discardStaleBaseActionDraft(conflict, scope, scopeKey, sessionEpoch, editGeneration);
+  }
+  return false;
+}
+
+async function discardStaleBaseActionDraft(conflict, scope, scopeKey, sessionEpoch, editGeneration) {
+  const discardedRevision = conflict.draft.draftRevision;
+  const removalOperation = { promise: null };
+  const promise = (async () => {
+    let result;
+    try {
+      result = await composition.actionDrafts.removeIfRevision(scope, discardedRevision);
+    } catch {
+      result = { outcome: "unavailable" };
+    }
     if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+    if (actionDraftConflict && actionDraftConflict !== conflict) return false;
+
     if (result.outcome === "removed" || result.outcome === "absent") {
-      actionDraftConflict = null;
-      actionDraftCurrent = null;
-      actionDraftPersistedRevision = null;
-      actionDraftPersistedGeneration = actionDraftLocalGeneration;
+      const editChanged = actionDraftLocalGeneration !== editGeneration;
+      const stillOwnsDiscardedRevision = actionDraftPersistedRevision === discardedRevision;
+      if (stillOwnsDiscardedRevision) actionDraftPersistedRevision = null;
+      if (actionDraftConflict === conflict) actionDraftConflict = null;
+
+      if (!editChanged && (stillOwnsDiscardedRevision || actionDraftPersistedRevision === null)) {
+        actionDraftCurrent = null;
+        actionDraftPersistedGeneration = actionDraftLocalGeneration;
+        actionDraftSaveFailed = false;
+        actionDraftClearPending = false;
+      } else if (stillOwnsDiscardedRevision) {
+        actionDraftPersistedGeneration = -1;
+      }
       updateActionDraftConflict();
       updateActionDraftStatus();
       return true;
     }
+
     if (result.outcome === "conflict") {
-      const latest = await composition.actionDrafts.read(scope);
+      let latest;
+      try {
+        latest = await composition.actionDrafts.read(scope);
+      } catch {
+        if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey
+          || (actionDraftConflict && actionDraftConflict !== conflict)) return false;
+        actionDraftSaveFailed = true;
+        updateActionDraftStatus();
+        return false;
+      }
       if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+      if (actionDraftConflict && actionDraftConflict !== conflict) return false;
+
+      const editChanged = actionDraftLocalGeneration !== editGeneration;
+      const latestIsAcknowledged = Boolean(latest?.draftRevision)
+        && latest.draftRevision === actionDraftPersistedRevision;
+      if (latestIsAcknowledged) {
+        if (actionDraftConflict === conflict) actionDraftConflict = null;
+        updateActionDraftConflict();
+        updateActionDraftStatus();
+        return true;
+      }
+
+      if (!latest) {
+        if (actionDraftPersistedRevision === discardedRevision) actionDraftPersistedRevision = null;
+        if (actionDraftConflict === conflict) actionDraftConflict = null;
+        if (editChanged && actionDraftPersistedRevision === null) actionDraftPersistedGeneration = -1;
+        else if (!editChanged) {
+          actionDraftCurrent = null;
+          actionDraftPersistedGeneration = actionDraftLocalGeneration;
+        }
+        updateActionDraftConflict();
+        updateActionDraftStatus();
+        return true;
+      }
+
+      if (editChanged && latest.draftRevision === discardedRevision) {
+        if (actionDraftConflict === conflict) actionDraftConflict = null;
+        updateActionDraftConflict();
+        updateActionDraftStatus();
+        return true;
+      }
+
       presentActionDraftConflict(latest, "revision", "This action draft changed in another tab. Choose which version to keep.");
+      return false;
     }
+
+    const newerWriteIsAcknowledged = actionDraftPersistedRevision !== discardedRevision
+      && actionDraftPersistedGeneration === actionDraftLocalGeneration;
+    if (newerWriteIsAcknowledged) {
+      if (actionDraftConflict === conflict) actionDraftConflict = null;
+      actionDraftSaveFailed = false;
+    } else {
+      actionDraftSaveFailed = true;
+    }
+    updateActionDraftStatus();
+    return false;
+  })();
+  removalOperation.promise = promise;
+  actionDraftConflictRemoval = removalOperation;
+  try {
+    return await promise;
+  } finally {
+    if (actionDraftConflictRemoval === removalOperation) actionDraftConflictRemoval = null;
   }
-  return false;
 }
 
 function actionDraftNeedsNavigationGuard() {
@@ -2679,14 +2816,16 @@ function renderTurnInput() {
   }
 }
 
-async function submitResolvedTurn(action, details) {
+async function submitResolvedTurn(action, details, intent) {
+  if (!isCurrentActionSubmissionIntent(intent)) return;
   if (details.operationKind !== "replace_latest") {
     // Keep this in-memory only until enqueue returns an authoritative job ID.
     // An enqueue failure must not erase what the player just typed.
-    state.retainedAppendDraft = { campaignId: state.campaignId, expectedTurnNumber: appendExpectedTurnNumber(state.campaign), action, requestedInputMode: details.requestedInputMode };
+    state.retainedAppendDraft = { campaignId: intent.campaignId, expectedTurnNumber: appendExpectedTurnNumber(state.campaign), action, requestedInputMode: details.requestedInputMode };
   }
   const freeAction = $("freeAction");
   const submittedDraft = await captureSubmittedActionDraft(action, details);
+  if (!isCurrentActionSubmissionIntent(intent)) return;
   const canClearSubmittedInput = submittedDraft
     && freeAction?.value.trim() === action
     && submittedDraft.editGeneration === actionDraftLocalGeneration
@@ -2695,21 +2834,37 @@ async function submitResolvedTurn(action, details) {
   if (freeAction && canClearSubmittedInput) freeAction.value = "";
   if (canClearSubmittedInput) resetChoiceSelectionFromDraft("");
   updateTurnInputCharacterCount();
-  await runGeneration(action, { ...details, actionDraftSubmissionCandidate: canClearSubmittedInput ? submittedDraft : null });
+  await runGeneration(action, {
+    ...details,
+    actionDraftSubmissionCandidate: canClearSubmittedInput ? submittedDraft : null,
+    actionSubmissionIntent: intent
+  });
 }
 
 async function submitAction(actionText, options = {}) {
   if (state.busy || !state.campaignLoaded) return;
-  let action = (actionText || "").trim();
-  if (!action && state.turns.length === 0) {
-    action = firstActionForNewAdventure();
+  const intent = acquireActionSubmissionIntent();
+  if (!intent) return;
+  try {
+    let action = (actionText || "").trim();
+    if (!action && state.turns.length === 0) {
+      action = firstActionForNewAdventure();
+    }
+    if (!action) { toast("Enter an action first."); return; }
+    const storyLengthProfileOverride = selectedStoryLengthOverride("turnStoryLengthProfileOverride");
+    const requestedInputMode = campaignTurnControlStyle() === "flexible_action" ? state.turnInputMode : defaultTurnInputMode();
+    const inputModeSource = options.inputModeSource || state.nextTurnInputModeSource || "explicit";
+    state.nextTurnInputModeSource = null;
+    await submitResolvedTurn(action, {
+      requestedInputMode,
+      resolvedInputMode: requestedInputMode,
+      inputModeSource,
+      storyLengthProfileOverride,
+      actionDraftEligible: true
+    }, intent);
+  } finally {
+    releaseActionSubmissionIntent(intent);
   }
-  if (!action) { toast("Enter an action first."); return; }
-  const storyLengthProfileOverride = selectedStoryLengthOverride("turnStoryLengthProfileOverride");
-  const requestedInputMode = campaignTurnControlStyle() === "flexible_action" ? state.turnInputMode : defaultTurnInputMode();
-  const inputModeSource = options.inputModeSource || state.nextTurnInputModeSource || "explicit";
-  state.nextTurnInputModeSource = null;
-  await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource, storyLengthProfileOverride, actionDraftEligible: true });
 }
 
 // ── Generation Pipeline ───────────────────────────────────────
@@ -2763,8 +2918,13 @@ function captureHydratedAppendDraft(syncData) {
 }
 
 async function runGeneration(action, options = {}) {
-  if (!state.campaignLoaded) return;
-  const submissionCampaignId = state.campaignId;
+  const intent = options.actionSubmissionIntent || acquireActionSubmissionIntent();
+  const ownsIntent = !options.actionSubmissionIntent;
+  if (!isCurrentActionSubmissionIntent(intent)) {
+    if (ownsIntent && intent) releaseActionSubmissionIntent(intent);
+    return;
+  }
+  const submissionCampaignId = intent.campaignId;
   showBusy("Queueing turn with the Story Engine…");
   state.abortController = new AbortController();
   const progressEl = $("generationProgress");
@@ -2807,13 +2967,16 @@ async function runGeneration(action, options = {}) {
     let run;
     let attachedConflict = false;
     let conflictPendingGeneration = null;
+    if (!isCurrentActionSubmissionIntent(intent)) return;
     try {
       run = await composition.workflow.submit(
         submissionCampaignId,
         generationSubmissionInput(submission, request)
       );
     } catch (error) {
+      if (!isCurrentActionSubmissionIntent(intent)) return;
       const conflict = await resumeActiveGenerationConflict(error, submissionCampaignId, composition.workflow);
+      if (!isCurrentActionSubmissionIntent(intent)) return;
       if (!conflict) throw error;
       toast(conflict.message);
       recordActivity("system", "Attached to active generation", `jobId=${conflict.pendingGeneration.id || "unknown"}`);
@@ -2821,7 +2984,8 @@ async function runGeneration(action, options = {}) {
       attachedConflict = true;
       conflictPendingGeneration = conflict.pendingGeneration;
     }
-    if (state.campaignId !== submissionCampaignId
+    if (!isCurrentActionSubmissionIntent(intent)
+      || state.campaignId !== submissionCampaignId
       || (operationKind === "append" && appendExpectedTurnNumber(state.campaign) !== expectedTurnNumber)) return;
     const actionDraftCandidate = options.actionDraftSubmissionCandidate;
     if (actionDraftCandidate && !attachedConflict
@@ -2857,6 +3021,7 @@ async function runGeneration(action, options = {}) {
       : { id: run.jobId, action, operationKind, expectedTurnNumber };
     completeButLoading = await observeGenerationRun(run, attachedConflict ? (conflictPendingGeneration?.action || "") : action) === "result_unavailable";
   } catch (err) {
+    if (!isCurrentActionSubmissionIntent(intent)) return;
     if (err.pendingGeneration) state.pendingGeneration = err.pendingGeneration;
     restoreGenerationDisplay();
     if (options.operationKind !== "replace_latest") restoreRetainedAppendDraft();
@@ -2872,10 +3037,13 @@ async function runGeneration(action, options = {}) {
       recordActivity("error", "Generation failed", err.message);
     }
   } finally {
-    if (!completeButLoading) clearStreamingPreview();
-    if (progressEl) progressEl.classList.add("hidden");
-    hideBusy();
-    state.abortController = null;
+    if (isCurrentActionSubmissionIntent(intent)) {
+      if (!completeButLoading) clearStreamingPreview();
+      if (progressEl) progressEl.classList.add("hidden");
+      hideBusy();
+      state.abortController = null;
+    }
+    if (ownsIntent) releaseActionSubmissionIntent(intent);
   }
 }
 
@@ -3275,6 +3443,7 @@ function resetGenerationStateForCampaignLoad() {
   state.cancellationConfirmed = false;
   state.characterProfileEditSession = null;
   characterProfileEditRequestToken += 1;
+  $("generationProgress")?.classList.add("hidden");
   clearStreamingPreview();
   hideGenerationRecovery();
 }
@@ -3823,15 +3992,22 @@ async function executeRetryWithPrompt(submittedPromptText) {
   const originalTurn = state.turns.at(-1) || {};
   const resolvedInputMode = originalTurn.resolvedInputMode || originalTurn.inputMode || "action";
   const storyLengthProfileOverride = selectedStoryLengthOverride("retryStoryLengthProfileOverride");
-  await runGeneration(action, {
-    operationKind: "replace_latest",
-    expectedCurrentTurnNumber: currentTurnNumber,
-    requestedInputMode: originalTurn.requestedInputMode || resolvedInputMode,
-    resolvedInputMode,
-    inputModeSource: originalTurn.inputModeSource || "explicit",
-    storyLengthProfileOverride,
-    onAttached: closeRetryPromptDialog
-  });
+  const intent = acquireActionSubmissionIntent();
+  if (!intent) return;
+  try {
+    await runGeneration(action, {
+      operationKind: "replace_latest",
+      expectedCurrentTurnNumber: currentTurnNumber,
+      requestedInputMode: originalTurn.requestedInputMode || resolvedInputMode,
+      resolvedInputMode,
+      inputModeSource: originalTurn.inputModeSource || "explicit",
+      storyLengthProfileOverride,
+      onAttached: closeRetryPromptDialog,
+      actionSubmissionIntent: intent
+    });
+  } finally {
+    releaseActionSubmissionIntent(intent);
+  }
 }
 
 function promptBranchOrReset(turnNumber) {

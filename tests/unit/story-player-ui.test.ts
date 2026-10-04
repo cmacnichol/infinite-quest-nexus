@@ -1175,7 +1175,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       selectOption(retryLength, "brief");
       document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       await vi.waitFor(() => expect(workflow.submit).toHaveBeenCalledTimes(1), { timeout: 5_000 });
-      await vi.waitFor(() => expect(retryDialog.hasAttribute("open")).toBe(true), { timeout: 5_000 });
+      await vi.waitFor(() => expect((document.getElementById("generationProgress") as HTMLElement).classList.contains("hidden")).toBe(true), { timeout: 5_000 });
+      expect(retryDialog.hasAttribute("open")).toBe(true);
       expect(retryLength.value).toBe("brief");
       expect(workflow.submit.mock.calls[0]).toEqual(["campaign-1", expect.objectContaining({
         operationKind: "replace_latest",
