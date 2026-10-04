@@ -171,11 +171,15 @@ test("provider_startup_failure_reaches_workspace_before_dashboard_retry", async 
 });
 
 test("workspace_read_retry_coexists_with_newer_world_action_error", async ({ page }) => {
-  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 0 });
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 2, campaignCount: 0 });
   const world = fixture.worlds[0];
+  const otherWorld = fixture.worlds[1];
   if (!world) throw new Error("The world fixture was not created.");
+  if (!otherWorld) throw new Error("The second world fixture was not created.");
   let worldReads = 0;
   let archiveWrites = 0;
+  let playableCharacterReads = 0;
+  let releaseRetryPlayableCharacters: (() => void) | undefined;
   await installLegacyUiFixture(page, fixture);
   await page.route("**/api/v1/worlds", async route => {
     worldReads += 1;
@@ -190,6 +194,13 @@ test("workspace_read_retry_coexists_with_newer_world_action_error", async ({ pag
       archiveWrites += 1;
       await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private archive diagnostics" }) });
       return;
+    }
+    await route.fallback();
+  });
+  await page.route(`**/api/v1/world-versions/${fixture.worldVersionId}/playable-characters`, async route => {
+    playableCharacterReads += 1;
+    if (playableCharacterReads === 2) {
+      await new Promise<void>(resolve => { releaseRetryPlayableCharacters = resolve; });
     }
     await route.fallback();
   });
@@ -216,16 +227,175 @@ test("workspace_read_retry_coexists_with_newer_world_action_error", async ({ pag
   await expect(page.locator("#worldStatus")).toContainText("Worlds could not be refreshed");
   await expect(page.locator("#worldStatus")).not.toContainText("Private archive diagnostics");
   await expect(page.locator("#workflowRetryWorlds")).toBeVisible();
-  await page.screenshot({ path: `${evidenceDir}/fix2-worlds-coexisting-errors-desktop.png`, fullPage: false });
+  await page.screenshot({ path: `${evidenceDir}/fix3-worlds-coexisting-errors-desktop.png`, fullPage: false });
 
   await page.locator("#workflowRetryWorlds").click();
+  await expect.poll(() => playableCharacterReads).toBe(2);
+  await expect(page.locator("#worldCampaignReadiness")).toHaveText("Checking whether the selected world version is campaign-ready…");
+  if (!releaseRetryPlayableCharacters) throw new Error("The retried playable-character request was not held.");
+  releaseRetryPlayableCharacters();
+  await expect(page.locator("#worldCampaignReadiness")).toHaveText("Campaign-ready with one playable character.");
   await expect(page.locator("#worldStatus")).toContainText("World archive status could not be changed.");
   await expect(page.locator("#worldStatus")).not.toContainText("Worlds could not be refreshed");
   await expect(page.locator("#workflowRetryWorlds")).toHaveCount(0);
   await expect(page.locator("#dashboardWorkflowStatus")).toBeHidden();
-  await page.screenshot({ path: `${evidenceDir}/fix2-worlds-action-error-after-retry-desktop.png`, fullPage: false });
+  await page.screenshot({ path: `${evidenceDir}/fix3-worlds-action-error-after-retry-desktop.png`, fullPage: false });
   expect(worldReads).toBe(3);
   expect(archiveWrites).toBe(1);
+
+  await page.locator(`#worldManagementCarousel [data-world-id="${otherWorld.id}"]`).click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText(String(otherWorld.title));
+  await expect(page.locator("#worldStatus")).not.toContainText("World archive status could not be changed.");
+});
+
+test("campaign_list_retry_keeps_current_archive_export_error_after_selection_refresh", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 2 });
+  const campaign = fixture.campaigns[0];
+  const otherCampaign = fixture.campaigns[1];
+  if (!campaign) throw new Error("The one-campaign fixture was not created.");
+  if (!otherCampaign) throw new Error("The second campaign fixture was not created.");
+  let campaignReads = 0;
+  let embeddingConfigReads = 0;
+  await installLegacyUiFixture(page, fixture);
+  await page.route("**/api/v1/campaigns", async route => {
+    if (route.request().method() !== "GET") return route.fallback();
+    campaignReads += 1;
+    if (campaignReads === 2) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private campaign list diagnostics" }) });
+      return;
+    }
+    await route.fallback();
+  });
+  await page.route(`**/api/v1/campaigns/${campaign.id}/export`, async route => {
+    await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Campaign Archive export is unavailable." }) });
+  });
+  await page.route(`**/api/v1/campaigns/${campaign.id}/memory/embedding-config`, async route => {
+    if (route.request().method() !== "GET") return route.fallback();
+    embeddingConfigReads += 1;
+    if (embeddingConfigReads > 1) {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        enabled: true,
+        retrievalImplementation: "pgvector",
+        retrievalShadowEnabled: false,
+        providerProfileId: null,
+        model: "retry-complete-marker",
+        documentPrefix: "",
+        queryPrefix: "",
+        batchSize: 32,
+        effectiveDocumentPrefix: "",
+        effectiveQueryPrefix: ""
+      }) });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`${origin}/nexus/index.html#campaigns?campaignId=${campaign.id}`);
+  await expect(page.locator("#campaignTitle")).toHaveValue(String(campaign.title));
+  await page.locator("#refreshCampaigns").click();
+  await expect(page.locator("#campaignStatusMessage")).toContainText("Campaigns could not be refreshed");
+  await page.locator("#exportCampaign").click();
+  await expect(page.locator("#campaignStatusMessage")).toContainText("Campaign Archive export is unavailable.");
+  await expect(page.locator("#workflowRetryCampaigns")).toBeVisible();
+
+  await page.locator("#workflowRetryCampaigns").click();
+  await expect(page.locator("#embeddingStatus")).toContainText("retry-complete-marker");
+  await expect(page.locator("#campaignStatusMessage")).toBeVisible();
+  await expect(page.locator("#campaignStatusMessage")).toContainText("Campaign Archive export is unavailable.");
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText("Campaigns could not be refreshed");
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText("Private campaign list diagnostics");
+  await expect(page.locator("#workflowRetryCampaigns")).toHaveCount(0);
+  await page.screenshot({ path: `${evidenceDir}/fix3-campaigns-error-after-retry-desktop.png`, fullPage: false });
+  expect(campaignReads).toBe(3);
+  expect(embeddingConfigReads).toBe(2);
+
+  await page.locator(`#campaignList [data-campaign-id="${otherCampaign.id}"]`).click();
+  await expect(page.locator("#campaignTitle")).toHaveValue(String(otherCampaign.title));
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText("Campaign Archive export is unavailable.");
+});
+
+test("campaign_manual_selection_keeps_pending_list_retry_visible", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 2 });
+  const campaign = fixture.campaigns[0];
+  const otherCampaign = fixture.campaigns[1];
+  if (!campaign) throw new Error("The one-campaign fixture was not created.");
+  if (!otherCampaign) throw new Error("The second campaign fixture was not created.");
+  let campaignReads = 0;
+  await installLegacyUiFixture(page, fixture);
+  await page.route("**/api/v1/campaigns", async route => {
+    if (route.request().method() !== "GET") return route.fallback();
+    campaignReads += 1;
+    if (campaignReads === 2) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private campaign list diagnostics" }) });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto(`${origin}/nexus/index.html#campaigns?campaignId=${campaign.id}`);
+  await expect(page.locator("#campaignTitle")).toHaveValue(String(campaign.title));
+  await page.locator("#refreshCampaigns").click();
+  await expect(page.locator("#campaignStatusMessage")).toContainText("Campaigns could not be refreshed");
+  await page.locator(`#campaignList [data-campaign-id="${otherCampaign.id}"]`).click();
+  await expect(page.locator("#campaignTitle")).toHaveValue(String(otherCampaign.title));
+  await expect(page.locator("#campaignStatusMessage")).toContainText("Campaigns could not be refreshed");
+  await expect(page.locator("#workflowRetryCampaigns")).toBeVisible();
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText("Private campaign list diagnostics");
+
+  await page.locator("#workflowRetryCampaigns").click();
+  await expect(page.locator("#campaignTitle")).toHaveValue(String(otherCampaign.title));
+  await expect(page.locator("#workflowRetryCampaigns")).toHaveCount(0);
+  await expect(page.locator("#campaignStatusMessage")).toBeHidden();
+  expect(campaignReads).toBe(3);
+});
+
+test("provider_list_retry_keeps_current_save_error_after_profile_selection_refresh", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
+  let providerReads = 0;
+  await installLegacyUiFixture(page, fixture);
+  await page.route("**/api/v1/providers", async route => {
+    if (route.request().method() === "GET") {
+      providerReads += 1;
+      if (providerReads === 1) {
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private provider list diagnostics" }) });
+        return;
+      }
+      return route.fallback();
+    }
+    if (route.request().method() === "POST") {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private provider save diagnostics" }) });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#providerStatus")).toContainText("Provider profiles could not be loaded");
+  await page.locator("#newProviderButton").click();
+  await page.locator("#providerForm button[type=submit]").click();
+  await expect(page.locator("#providerStatus")).toContainText("Provider profile could not be saved.");
+  await expect(page.locator("#providerStatus")).not.toContainText("Private provider save diagnostics");
+  await expect(page.locator("#workflowRetryProviders")).toBeVisible();
+  await page.locator("#cancelProviderEdit").click();
+  if (await page.locator("#discardChangesDialog").isVisible()) {
+    await page.locator('#discardChangesDialog button[value="discard"]').click();
+  }
+  await expect(page.locator("#providerDialog")).toBeHidden();
+
+  await page.locator("#workflowRetryProviders").click();
+  await expect(page.locator("#providerProfileList")).toContainText("Synthetic text profile");
+  await expect(page.locator("#providerStatus")).toHaveText("Provider profile could not be saved.");
+  await expect(page.locator("#providerStatus")).not.toContainText("Provider profiles could not be loaded");
+  await expect(page.locator("#providerStatus")).not.toContainText("Private provider list diagnostics");
+  await expect(page.locator("#workflowRetryProviders")).toHaveCount(0);
+  await page.screenshot({ path: `${evidenceDir}/fix3-providers-error-after-retry-desktop.png`, fullPage: false });
+  expect(providerReads).toBe(2);
+
+  await page.locator("#providerProfileList .provider-profile").filter({ hasText: "Synthetic text profile" }).getByRole("button", { name: "Edit" }).click();
+  await expect(page.locator("#providerDialog")).toBeVisible();
+  await expect(page.locator("#providerStatus")).toHaveText("Editing Synthetic text profile. Leave the API key blank to keep the stored credential.");
 });
 
 test("operation_errors_do_not_offer_unrelated_list_retries", async ({ page }) => {

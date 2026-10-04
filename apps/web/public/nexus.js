@@ -661,6 +661,7 @@ let managementNavigationIntent = 0;
 let managementSelectionErrorIntent = null;
 let managementSelectionErrorMessage = "";
 let managementSelectionActionErrorMessage = "";
+let managementSelectionActionErrorTargetId = "";
 let acceptedManagementHash = window.location.hash || "#dashboard";
 let acceptedManagementRoute = null;
 let acceptedManagementHistoryIndex = Number.NaN;
@@ -729,7 +730,10 @@ function managementSelectionHash(view, kind, id) {
 }
 
 function managementSelectionError(route, message) {
-  if (managementSelectionErrorIntent !== managementNavigationIntent) managementSelectionActionErrorMessage = "";
+  if (managementSelectionErrorIntent !== managementNavigationIntent) {
+    managementSelectionActionErrorMessage = "";
+    managementSelectionActionErrorTargetId = "";
+  }
   managementSelectionErrorIntent = managementNavigationIntent;
   managementSelectionErrorMessage = message;
   const visibleMessage = [managementSelectionActionErrorMessage, message].filter(Boolean).join(" ");
@@ -757,10 +761,12 @@ function managementSelectionErrorIsCurrent(view) {
 function clearResolvedManagementSelectionError(view) {
   if (!managementSelectionErrorIsCurrent(view)) return;
   const host = view === "worlds" ? elements.worldStatus : elements.campaignStatusMessage;
-  const message = managementSelectionActionErrorMessage;
+  const selectedId = view === "worlds" ? selectedWorld?.id : selectedCampaign?.id;
+  const message = managementSelectionActionErrorTargetId === selectedId ? managementSelectionActionErrorMessage : "";
   managementSelectionErrorIntent = null;
   managementSelectionErrorMessage = "";
   managementSelectionActionErrorMessage = "";
+  managementSelectionActionErrorTargetId = "";
   const readFailure = host.querySelector(".workflow-read-failure");
   for (const retry of host.querySelectorAll("#workflowRetryWorlds, #workflowRetryCampaigns")) {
     if (!readFailure?.contains(retry)) retry.remove();
@@ -785,7 +791,7 @@ function showManagementSelectionReadFailure(view, message) {
   setWorkflowReadFailure(host, view, message, retryId, label, retry);
 }
 
-async function applyExplicitManagementSelection(route, intent) {
+async function applyExplicitManagementSelection(route, intent, selectionOptions = {}) {
   if (intent !== managementNavigationIntent || acceptedManagementRoute !== route) return;
   if (route.selectionError) {
     managementSelectionError(route, route.selectionError);
@@ -799,8 +805,8 @@ async function applyExplicitManagementSelection(route, intent) {
       managementSelectionError(route, `World ${route.selection.id} is not available in this library. Select an available world or check the link.`);
       return;
     }
-    const selectionIntentEpoch = ++worldSelectionIntentEpoch;
-    await selectWorld(target.id, { selectionIntentEpoch });
+    const selectionIntentEpoch = selectionOptions.selectionIntentEpoch ?? ++worldSelectionIntentEpoch;
+    await selectWorld(target.id, { selectionIntentEpoch, preserveWorkflowFeedbackForWorldId: selectionOptions.preserveWorkflowFeedbackForWorldId });
     if (intent === managementNavigationIntent && acceptedManagementRoute === route && selectedWorld?.id === target.id) clearResolvedManagementSelectionError("worlds");
     return;
   }
@@ -810,7 +816,7 @@ async function applyExplicitManagementSelection(route, intent) {
     managementSelectionError(route, `Campaign ${route.selection.id} is not available in this library. Select an available campaign or check the link.`);
     return;
   }
-  if (selectedCampaign?.id !== target.id) await selectCampaign(target);
+  if (selectedCampaign?.id !== target.id) await selectCampaign(target, { preserveWorkflowFeedbackForCampaignId: selectionOptions.preserveWorkflowFeedbackForCampaignId });
   if (intent === managementNavigationIntent && acceptedManagementRoute === route && selectedCampaign?.id === target.id) clearResolvedManagementSelectionError("campaigns");
 }
 
@@ -2449,6 +2455,7 @@ function worldMessage(message, type = "") {
   if (managementSelectionErrorIsCurrent("worlds")) {
     if (type === "error") {
       managementSelectionActionErrorMessage = message;
+      managementSelectionActionErrorTargetId = selectedWorld?.id || "";
       elements.worldStatus.textContent = `${message} ${managementSelectionErrorMessage}`;
       elements.worldStatus.className = "status error";
       const pendingReadFailure = dashboardWorkflowErrors.get("worlds");
@@ -2469,6 +2476,7 @@ function campaignMessage(message, type = "") {
   if (managementSelectionErrorIsCurrent("campaigns")) {
     if (type === "error") {
       managementSelectionActionErrorMessage = message;
+      managementSelectionActionErrorTargetId = selectedCampaign?.id || "";
       elements.campaignStatusMessage.textContent = `${message} ${managementSelectionErrorMessage}`;
       elements.campaignStatusMessage.className = "status error";
       elements.campaignStatusMessage.classList.remove("hidden");
@@ -2520,7 +2528,7 @@ function projectDashboardWorkflowErrorToRoute(route) {
     : route.view === "campaigns"
       ? { key: "campaigns", host: elements.campaignStatusMessage, retryId: "workflowRetryCampaigns", label: "Retry campaign list", retry: () => retryCampaignWorkflowRead() }
       : route.view === "providers"
-        ? { key: "providers", host: elements.providerStatus, retryId: "workflowRetryProviders", label: "Retry provider profiles", retry: () => loadProviders() }
+        ? { key: "providers", host: elements.providerStatus, retryId: "workflowRetryProviders", label: "Retry provider profiles", retry: () => retryProviderWorkflowRead() }
         : null;
   if (!target) return;
   const failure = dashboardWorkflowErrors.get(target.key);
@@ -2545,9 +2553,9 @@ function reportCampaignListReadFailure(message) {
 
 function reportProviderListReadFailure(message) {
   if (acceptedManagementRoute?.view === "providers") {
-    setWorkflowReadFailure(elements.providerStatus, "providers", message, "workflowRetryProviders", "Retry provider profiles", () => loadProviders());
+    setWorkflowReadFailure(elements.providerStatus, "providers", message, "workflowRetryProviders", "Retry provider profiles", () => retryProviderWorkflowRead());
   }
-  reportDashboardWorkflowError("providers", message, () => loadProviders());
+  reportDashboardWorkflowError("providers", message, () => retryProviderWorkflowRead());
 }
 
 function addWorkflowRetry(host, id, label, retry) {
@@ -2582,13 +2590,28 @@ function addWorkflowRetry(host, id, label, retry) {
 }
 
 async function retryWorldWorkflowRead() {
-  await loadWorlds();
-  await applyExplicitManagementSelection(acceptedManagementRoute, managementNavigationIntent);
+  const route = acceptedManagementRoute;
+  const intent = managementNavigationIntent;
+  const selectionIntentEpoch = worldSelectionIntentEpoch;
+  const preserveWorkflowFeedbackForWorldId = selectedWorld?.id || route?.selection?.kind === "world" && route.selection.id || "";
+  await loadWorlds("", { selectionIntentEpoch, preserveWorkflowFeedbackForWorldId });
+  if (route === acceptedManagementRoute && intent === managementNavigationIntent) {
+    await applyExplicitManagementSelection(route, intent, { selectionIntentEpoch, preserveWorkflowFeedbackForWorldId });
+  }
 }
 
 async function retryCampaignWorkflowRead() {
-  await loadCampaigns(selectedCampaign?.id || "", { focusNoSelection: true });
-  await applyExplicitManagementSelection(acceptedManagementRoute, managementNavigationIntent);
+  const route = acceptedManagementRoute;
+  const intent = managementNavigationIntent;
+  const preserveWorkflowFeedbackForCampaignId = selectedCampaign?.id || route?.selection?.kind === "campaign" && route.selection.id || "";
+  await loadCampaigns(selectedCampaign?.id || "", { focusNoSelection: true, preserveWorkflowFeedbackForCampaignId });
+  if (route === acceptedManagementRoute && intent === managementNavigationIntent) {
+    await applyExplicitManagementSelection(route, intent, { preserveWorkflowFeedbackForCampaignId });
+  }
+}
+
+async function retryProviderWorkflowRead() {
+  await loadProviders("", { preserveWorkflowFeedback: true });
 }
 
 function safeWorkflowFailure(label, error) {
@@ -3108,6 +3131,7 @@ async function loadWorlds(preselectId = "", selectionOptions = {}) {
   void loadDashboardStats();
   if (selectionIntentEpoch !== worldSelectionIntentEpoch) return;
   if (!worlds.length) {
+    const missingWorldId = selectedWorld?.id;
     worldSelectionId = "";
     worldSelectionEpoch += 1;
     selectedWorld = null;
@@ -3117,6 +3141,10 @@ async function loadWorlds(preselectId = "", selectionOptions = {}) {
     elements.worldSelectionPanel.classList.add("hidden");
     setWorldEditorDisabled(true);
     elements.worldCampaignReadiness.textContent = "Create a world before checking campaign readiness.";
+    if (missingWorldId && selectionOptions.preserveWorkflowFeedbackForWorldId === missingWorldId && !managementSelectionErrorIsCurrent("worlds")) {
+      elements.worldStatus.replaceChildren();
+      elements.worldStatus.className = "status";
+    }
     return;
   }
   const targetId = selectionOptions.preferRequestedWorld && preselectId
@@ -3124,12 +3152,17 @@ async function loadWorlds(preselectId = "", selectionOptions = {}) {
     : worldSelectionId || preselectId || selectedWorld?.id;
   if (targetId && worlds.some((world) => world.id === targetId)) await selectWorld(targetId, { ...selectionOptions, selectionIntentEpoch });
   else if (selectedWorld && !worlds.some((world) => world.id === selectedWorld.id)) {
+    const missingWorldId = selectedWorld.id;
     worldSelectionId = "";
     worldSelectionEpoch += 1;
     selectedWorld = null;
     elements.worldSelectionPanel.classList.add("hidden");
     setWorldEditorDisabled(true);
     renderManagementWorlds();
+    if (selectionOptions.preserveWorkflowFeedbackForWorldId === missingWorldId && !managementSelectionErrorIsCurrent("worlds")) {
+      elements.worldStatus.replaceChildren();
+      elements.worldStatus.className = "status";
+    }
   } else if (!selectedWorld) {
     elements.worldSelectionPanel.classList.add("hidden");
     setWorldEditorDisabled(true);
@@ -3159,7 +3192,8 @@ async function selectWorld(worldId, selectionOptions = {}) {
   setWorldEditorDisabled(true);
   elements.worldVersionSelect.disabled = true;
   elements.newCampaignCharacter.disabled = true;
-  worldMessage("Loading selected world…");
+  const preserveWorkflowFeedback = selectionOptions.preserveWorkflowFeedbackForWorldId === worldId;
+  if (!preserveWorkflowFeedback) worldMessage("Loading selected world…");
   try {
     const world = await api(`/api/v1/worlds/${encodeURIComponent(worldId)}`);
     if (!isCurrentWorldSelection(worldId, selectionEpoch)) return;
@@ -3191,7 +3225,7 @@ async function selectWorld(worldId, selectionOptions = {}) {
     updateCharacterGeneratorAvailability();
     await loadWorldVersionPlayableCharacters({ worldId, selectionEpoch });
     if (!isCurrentWorldSelection(worldId, selectionEpoch)) return;
-    worldMessage(archived ? "This world is archived. Restore it before editing or publishing." : "World selected. Draft editing opens in the authoring modal.");
+    if (!preserveWorkflowFeedback) worldMessage(archived ? "This world is archived. Restore it before editing or publishing." : "World selected. Draft editing opens in the authoring modal.");
     void resumeWorldCoverJob(worldId, coverPollSequence);
   } catch (error) {
     if (!isCurrentWorldSelection(worldId, selectionEpoch)) return;
@@ -4680,7 +4714,7 @@ function openCommittedCampaignStory() {
   }
 }
 
-async function loadCampaigns(preselectId = "", { focusNoSelection = false, explicitPreselect = false } = {}) {
+async function loadCampaigns(preselectId = "", { focusNoSelection = false, explicitPreselect = false, preserveWorkflowFeedbackForCampaignId = "" } = {}) {
   try {
     ({ campaigns } = await api("/api/v1/campaigns"));
   } catch (error) {
@@ -4739,7 +4773,10 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false, expli
     || (!explicitPreselect && selectedCampaign && campaigns.find((campaign) => campaign.id === selectedCampaign.id));
   if (target) {
     const preservesExplicitSelection = selectedCampaignIsExplicit && selectedCampaign?.id === target.id;
-    await selectCampaign(target, { explicit: explicitPreselect || preservesExplicitSelection });
+    await selectCampaign(target, {
+      explicit: explicitPreselect || preservesExplicitSelection,
+      preserveWorkflowFeedbackForCampaignId
+    });
   }
   else {
     if (!(await canLeaveCampaignEditor(null))) return;
@@ -4751,7 +4788,7 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false, expli
   }
 }
 
-async function selectCampaign(campaign, { explicit = true } = {}) {
+async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedbackForCampaignId = "" } = {}) {
   if (!(await canLeaveCampaignEditor(campaign.id))) return;
   elements.embeddingProgress.classList.add("hidden");
   const selectionRequest = ++campaignSelectionRequest;
@@ -4798,9 +4835,13 @@ async function selectCampaign(campaign, { explicit = true } = {}) {
   elements.campaignWorldVersion.value = campaign.worldVersionId;
   setCampaignSettingsPanel(activeCampaignSettingsPanel);
   elements.migrateCampaign.disabled = !world.versions.some((version) => version.versionNumber > campaign.worldVersionNumber);
-  if (!managementSelectionErrorIsCurrent("campaigns")) {
+  if (!managementSelectionErrorIsCurrent("campaigns") && preserveWorkflowFeedbackForCampaignId !== campaign.id) {
     if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
-    else elements.campaignStatusMessage.classList.add("hidden");
+    else {
+      const hasPendingListReadFailure = dashboardWorkflowErrors.has("campaigns");
+      campaignMessage("");
+      if (!hasPendingListReadFailure) elements.campaignStatusMessage.classList.add("hidden");
+    }
   }
   const metrics = await refreshCampaignMemoryMetrics();
   if (selectionRequest !== campaignSelectionRequest) return;
@@ -5397,7 +5438,7 @@ function providerMessage(message, type = "") {
   elements.providerStatus.querySelector("#workflowRetryProviders")?.remove();
   elements.providerStatus.textContent = message;
   elements.providerStatus.className = `status ${type}`.trim();
-  if (pendingReadFailure) setWorkflowReadFailure(elements.providerStatus, "providers", pendingReadFailure.message, "workflowRetryProviders", "Retry provider profiles", () => loadProviders());
+  if (pendingReadFailure) setWorkflowReadFailure(elements.providerStatus, "providers", pendingReadFailure.message, "workflowRetryProviders", "Retry provider profiles", () => retryProviderWorkflowRead());
 }
 
 function providerTypeLabel(providerType) {
@@ -6124,7 +6165,7 @@ function beginProviderEdit(provider) {
   }
 }
 
-async function loadProviders(preselectId = "") {
+async function loadProviders(preselectId = "", { preserveWorkflowFeedback = false } = {}) {
   ({ providers } = await api("/api/v1/providers"));
   clearDashboardWorkflowError("providers");
   clearWorkflowReadFailure(elements.providerStatus, "providers", "workflowRetryProviders");
@@ -6144,7 +6185,9 @@ async function loadProviders(preselectId = "") {
   elements.providerSelect.value = target && target.id !== defaultProvider("text")?.id ? target.id : "";
   selectedProvider = target;
   elements.discoverModels.disabled = !target;
-  if (target) providerMessage(`${target.name} selected. Profile context is ${number(target.contextWindowTokens)} tokens; maximum output is ${number(target.maxOutputTokens)} tokens.`);
+  if (target && !preserveWorkflowFeedback) {
+    providerMessage(`${target.name} selected. Profile context is ${number(target.contextWindowTokens)} tokens; maximum output is ${number(target.maxOutputTokens)} tokens.`);
+  }
   if (selectedCampaign) {
     elements.campaignTextProvider.value = selectedCampaign.textProviderProfileId || "";
     elements.campaignImageProvider.value = selectedCampaign.imageProviderProfileId || "";
@@ -7997,7 +8040,7 @@ elements.managementWorldFilters.addEventListener("click", (event) => {
 });
 elements.managementWorldPrev.addEventListener("click", () => scrollCarousel(elements.worldManagementCarousel, -1));
 elements.managementWorldNext.addEventListener("click", () => scrollCarousel(elements.worldManagementCarousel, 1));
-elements.refreshWorlds.addEventListener("click", () => loadWorlds().catch((error) => reportWorldListReadFailure(safeWorkflowFailure("Worlds could not be refreshed.", error))));
+elements.refreshWorlds.addEventListener("click", () => loadWorlds("", { selectionIntentEpoch: worldSelectionIntentEpoch, preserveWorkflowFeedbackForWorldId: selectedWorld?.id || "" }).catch((error) => reportWorldListReadFailure(safeWorkflowFailure("Worlds could not be refreshed.", error))));
 elements.worldForm.addEventListener("submit", saveWorldDraft);
 elements.worldAuthorNextStep.addEventListener("click", () => {
   const step = worldAuthorStep(worldAuthorActiveStep);
@@ -8088,7 +8131,7 @@ elements.revokeWorldShare.addEventListener("click", revokeSelectedWorldShare);
 elements.deleteWorldVersion.addEventListener("click", deleteSelectedWorldVersion);
 elements.archiveWorld.addEventListener("click", toggleWorldArchive);
 elements.deleteWorld.addEventListener("click", deleteSelectedWorld);
-elements.refreshCampaigns.addEventListener("click", () => loadCampaigns(selectedCampaign?.id || "", { focusNoSelection: true }).catch((error) => reportCampaignListReadFailure(safeWorkflowFailure("Campaigns could not be refreshed.", error))));
+elements.refreshCampaigns.addEventListener("click", () => loadCampaigns(selectedCampaign?.id || "", { focusNoSelection: true, preserveWorkflowFeedbackForCampaignId: selectedCampaign?.id || "" }).catch((error) => reportCampaignListReadFailure(safeWorkflowFailure("Campaigns could not be refreshed.", error))));
 elements.campaignForm.addEventListener("submit", saveSelectedCampaign);
 for (const control of [elements.campaignTitle, elements.campaignStatus, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.campaignStoryContextBudgetTokens]) {
   control.addEventListener("input", () => renderCampaignSaveFeedback(campaignEditGuard.isDirty(campaignSettingsSnapshot()) ? "unsaved" : "saved"));

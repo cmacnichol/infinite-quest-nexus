@@ -67,6 +67,7 @@ describe("Nexus management UI contracts", () => {
     });
     const functions = managementFunctions<{ selectCampaign: (campaign: Record<string, unknown>) => Promise<void> }>(["selectCampaign", "normalizedTurnControlStyle"], {
       elements, document, api, selectedCampaign: null, campaignSelectionRequest: 0,
+      dashboardWorkflowErrors: new Map(),
       UUID_ROUTE_PATTERN,
       managementSelectionHash,
       managementSelectionErrorIsCurrent,
