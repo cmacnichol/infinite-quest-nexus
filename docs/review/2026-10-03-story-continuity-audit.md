@@ -151,7 +151,7 @@ This is a configuration/design gap, not a claim that every deployment currently 
 
 **Acceptance:** configuration tests cover the complete flag dependency matrix; the player can tell which mechanisms are active for newly queued turns; already-frozen jobs retain their captured policy.
 
-Sources: [runtime configuration](../../packages/database/src/config.ts), [policy snapshot selection](../../packages/database/src/story-memory-policy-repository.ts), [new-campaign review default](../../database/migrations/0112_continuity_review_opt_in.sql).
+Sources: [runtime configuration](../../packages/database/src/config.ts), [policy snapshot selection](../../packages/database/src/story-memory-policy-repository.ts), [new-campaign review default](https://github.com/cmacnichol/infinite-quest-nexus/blob/94853d2d859f57b8a75bb69edd532c016570dffa/database/migrations/0112_continuity_review_opt_in.sql).
 
 ## Action A4 Preserve accepted history across replacement and rewind
 
