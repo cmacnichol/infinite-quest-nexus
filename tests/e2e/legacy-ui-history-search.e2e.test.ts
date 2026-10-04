@@ -46,6 +46,16 @@ function exactTurnPath(campaignId: string, turnNumber: number): string {
   return `/api/v1/campaigns/${campaignId}/reader/turns/${turnNumber}`;
 }
 
+function historicalStateRequests(requests: CapturedRequest[], campaignId: string, turnNumber: number): CapturedRequest[] {
+  const currentStatePath = `/api/v1/campaigns/${campaignId}/state`;
+  return requests.filter(request => {
+    const url = new URL(request.url);
+    return request.method === "GET"
+      && (request.pathname === currentStatePath || request.pathname === `${currentStatePath}/inspection`)
+      && url.searchParams.get("turnNumber") === String(turnNumber);
+  });
+}
+
 function historyItem(turn: Record<string, unknown>, excerpt = String(turn.action ?? turn.narration ?? "")): HistoryItem {
   return {
     id: String(turn.id),
@@ -432,11 +442,12 @@ test("selecting a result does not inspect state; Inspect stays explicit and keyb
   await result.focus();
   await page.keyboard.press("Enter");
   await expect(page.locator("#readerTurnCount")).toHaveText("Turn 12 of 317");
-  expect(requests.filter(request => request.pathname.endsWith("/state/inspection"))).toHaveLength(0);
+  expect(historicalStateRequests(requests, fixture.campaignId, 12)).toHaveLength(0);
 
   await openHistory(page);
   await page.locator("#btnTurnHistoryInspect").click();
-  await expect.poll(() => requests.filter(request => request.pathname.endsWith("/state/inspection")).length).toBe(1);
+  await expect.poll(() => historicalStateRequests(requests, fixture.campaignId, 12).length).toBe(1);
+  expect(new URL(historicalStateRequests(requests, fixture.campaignId, 12)[0]!.url).searchParams.get("turnNumber")).toBe("12");
   await expect(page.locator("#turnHistoryStatePanel")).toBeVisible();
   await page.locator("#btnTurnHistoryDone").click();
   await expect(page.locator("#turnHistoryDialog")).not.toHaveAttribute("open", "");

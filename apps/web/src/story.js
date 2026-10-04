@@ -4552,8 +4552,8 @@ function revealSelectedHistoryCard() {
   const card = selected.getBoundingClientRect();
   const viewportTop = viewport.top + scroller.clientTop;
   const viewportBottom = viewportTop + scroller.clientHeight;
-  if (card.top < viewportTop) scroller.scrollTop += card.top - viewportTop;
-  else if (card.bottom > viewportBottom) scroller.scrollTop += card.bottom - viewportBottom;
+  if (card.top < viewportTop) scroller.scrollTop = Math.floor(scroller.scrollTop + card.top - viewportTop);
+  else if (card.bottom > viewportBottom) scroller.scrollTop = Math.ceil(scroller.scrollTop + card.bottom - viewportBottom);
 }
 
 function selectHistoryTurn(turnNumber) {

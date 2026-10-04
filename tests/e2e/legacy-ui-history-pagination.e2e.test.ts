@@ -78,6 +78,71 @@ async function selectedHistoryCardGeometry(page: Page, turnNumber: number): Prom
   }, turnNumber);
 }
 
+type SelectedHistoryGeometrySample = {
+  readonly turnNumber: number;
+  readonly fullyVisible: boolean;
+  readonly scrollerTop: number;
+  readonly scrollerClientTop: number;
+  readonly scrollerClientHeight: number;
+  readonly scrollerScrollHeight: number;
+  readonly cardTop: number;
+  readonly cardBottom: number;
+  readonly entryTop: number;
+  readonly entryBottom: number;
+  readonly viewportTop: number;
+  readonly viewportBottom: number;
+  readonly scrollTop: number;
+};
+
+async function selectHistoryCardWithGeometrySamples(page: Page, turnNumber: number): Promise<{
+  readonly before: SelectedHistoryGeometrySample;
+  readonly immediate: SelectedHistoryGeometrySample;
+  readonly microtask: SelectedHistoryGeometrySample;
+  readonly animationFrame: SelectedHistoryGeometrySample;
+}> {
+  return page.locator(`#turnHistoryModalList .history-card[data-turn-number="${turnNumber}"]`).evaluate(async (element, selectedTurnNumber) => {
+    const clickedCard = element as HTMLElement;
+    const scroller = clickedCard.closest<HTMLElement>(".dialog-scroll");
+    if (!scroller) throw new Error(`Missing History scroller for Turn ${selectedTurnNumber}.`);
+    const measure = () => {
+      const card = scroller.querySelector<HTMLElement>(`.history-card[aria-pressed="true"][data-turn-number="${selectedTurnNumber}"]`)
+        || scroller.querySelector<HTMLElement>(`.history-card[data-turn-number="${selectedTurnNumber}"]`);
+      const entry = card?.closest<HTMLElement>(".history-entry");
+      if (!card || !entry) throw new Error(`Missing live History Turn ${selectedTurnNumber} entry.`);
+      const scrollerRect = scroller.getBoundingClientRect();
+      const cardRect = card.getBoundingClientRect();
+      const entryRect = entry.getBoundingClientRect();
+      const viewportTop = scrollerRect.top + scroller.clientTop;
+      const viewportBottom = viewportTop + scroller.clientHeight;
+      return {
+        turnNumber: Number(card.dataset.turnNumber),
+        fullyVisible: entryRect.top >= viewportTop && entryRect.bottom <= viewportBottom,
+        scrollerTop: scrollerRect.top,
+        scrollerClientTop: scroller.clientTop,
+        scrollerClientHeight: scroller.clientHeight,
+        scrollerScrollHeight: scroller.scrollHeight,
+        cardTop: cardRect.top,
+        cardBottom: cardRect.bottom,
+        clickedNodeConnected: clickedCard.isConnected,
+        measuredNodeConnected: card.isConnected,
+        entryTop: entryRect.top,
+        entryBottom: entryRect.bottom,
+        viewportTop,
+        viewportBottom,
+        scrollTop: scroller.scrollTop,
+      };
+    };
+    const before = measure();
+    clickedCard.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const immediate = measure();
+    await Promise.resolve();
+    const microtask = measure();
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    const animationFrame = measure();
+    return { before, immediate, microtask, animationFrame };
+  }, turnNumber);
+}
+
 async function traverseHistory(page: Page, testInfo: import("@playwright/test").TestInfo, turnCount: number): Promise<void> {
   const fixture = legacyUiFixture({ turnCount, worldCount: 1, campaignCount: 1 });
   const instrumentation = await installLegacyUiFixture(page, fixture);
@@ -262,10 +327,10 @@ test("History reveals the selected card on open, reopen, and explicit selection"
   expect(mobileGeometry.fullyVisible).toBe(true);
 
   const offscreenCard = page.locator('#turnHistoryModalList .history-card[data-turn-number="268"]');
-  await offscreenCard.evaluate(element => element.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  const selectionGeometrySamples = await selectHistoryCardWithGeometrySamples(page, 268);
   await expect(offscreenCard).toHaveAttribute("aria-pressed", "true");
   const explicitlySelectedGeometry = await selectedHistoryCardGeometry(page, 268);
-  await writeFile(`${evidenceDirectory}/history-explicit-selection-geometry.json`, JSON.stringify(explicitlySelectedGeometry, null, 2));
+  await writeFile(`${evidenceDirectory}/history-explicit-selection-geometry.json`, JSON.stringify({ samples: selectionGeometrySamples, final: explicitlySelectedGeometry }, null, 2));
   expect(explicitlySelectedGeometry.fullyVisible).toBe(true);
 });
 
@@ -278,12 +343,22 @@ test("History keeps native scrolling and pages only on explicit Older/Newer with
   await openHistory(page);
 
   const scroller = page.locator("#turnHistoryDialog .dialog-scroll");
-  const initialScrollTop = await scroller.evaluate(element => element.scrollTop);
+  const initialScrollMetrics = await scroller.evaluate(element => ({
+    scrollTop: element.scrollTop,
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight
+  }));
   const scrollBox = await scroller.boundingBox();
   if (!scrollBox) throw new Error("History scroll container has no rendered box.");
+  const scrollUp = initialScrollMetrics.scrollTop + initialScrollMetrics.clientHeight >= initialScrollMetrics.scrollHeight - 1;
   await page.mouse.move(scrollBox.x + scrollBox.width / 2, scrollBox.y + scrollBox.height / 2);
-  await page.mouse.wheel(0, 180);
-  await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBeGreaterThan(initialScrollTop);
+  await page.mouse.wheel(0, scrollUp ? -180 : 180);
+  if (scrollUp) {
+    await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBeLessThan(initialScrollMetrics.scrollTop);
+  } else {
+    await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBeGreaterThan(initialScrollMetrics.scrollTop);
+  }
+  expect(instrumentation.requests.filter(request => request.path === `/api/v1/campaigns/${fixture.campaignId}/turns`)).toHaveLength(0);
 
   const pageBeforeOlder = await pageTurns(page);
   const turnBeforePaging = await page.locator("#readerTurnCount").textContent();
