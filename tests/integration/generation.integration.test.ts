@@ -538,6 +538,183 @@ integration("durable Story Engine integration", () => {
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
   });
 
+  it("applies a name-only append update to the explicit-ID tracker in current state and accepted snapshot", async () => {
+    const imported = await campaign();
+    await pool.query(
+      "UPDATE campaign_state SET trackers = $2 WHERE campaign_id = $1",
+      [imported.campaignId, JSON.stringify([
+        { id: "location", name: "Location Gamma", value: "closed", rules: "Keep this rule." }
+      ])]
+    );
+    const story = JSON.parse(validStory());
+    story.tracker_updates = [{ name: "Location Gamma", value: "open" }];
+    replies.push({ content: JSON.stringify(story) });
+    const job = await queue(imported.campaignId);
+
+    expect(await runGenerationJob(pool, "story-worker-tracker-name", 30, credentialSecret)).toBe(true);
+
+    const persisted = await pool.query<{
+      trackers: Array<{ id: string; name: string; value: string; rules: string }>;
+      snapshotTrackers: Array<{ id: string; name: string; value: string; rules: string }>;
+      trackerUpdateEvidence: { version: number; updates: unknown[] } | null;
+    }>(
+      `SELECT cs.trackers, t.state_snapshot_private->'trackers' AS "snapshotTrackers",
+              t.state_snapshot_private->'acceptedTrackerUpdateEvidence' AS "trackerUpdateEvidence"
+         FROM campaign_state cs
+         JOIN turns t ON t.campaign_id = cs.campaign_id
+        WHERE cs.campaign_id = $1 AND t.turn_number = 3`,
+      [imported.campaignId]
+    );
+    const expected = [{ id: "location", name: "Location Gamma", value: "open", rules: "Keep this rule." }];
+    expect(persisted.rows[0]?.trackers).toEqual(expected);
+    expect(persisted.rows[0]?.snapshotTrackers).toEqual(expected);
+    expect(persisted.rows[0]?.trackerUpdateEvidence).toEqual({ version: 1, updates: [{ name: "Location Gamma", value: "open" }] });
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+  });
+
+  it("uses an explicit tracker ID when display names are duplicated", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaign_state SET trackers = $2 WHERE campaign_id = $1", [imported.campaignId, JSON.stringify([
+      { id: "north", name: "Gate", value: "closed north", rules: "north rules" },
+      { id: "south", name: "Gate", value: "closed south", rules: "south rules" }
+    ])]);
+    const story = JSON.parse(validStory());
+    story.tracker_updates = [{ id: "south", name: "Gate", value: "open south" }];
+    replies.push({ content: JSON.stringify(story) });
+    const job = await queue(imported.campaignId);
+
+    await runGenerationJob(pool, "story-worker-tracker-explicit", 30, credentialSecret);
+
+    const state = await pool.query<{ trackers: Array<{ id: string; value: string }> }>(
+      "SELECT trackers FROM campaign_state WHERE campaign_id = $1", [imported.campaignId]
+    );
+    expect(state.rows[0]?.trackers).toEqual([
+      expect.objectContaining({ id: "north", value: "closed north" }),
+      expect.objectContaining({ id: "south", value: "open south" })
+    ]);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+  });
+
+  it("resolves a legacy duplicate pair by its unique legacy ID on append", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaign_state SET trackers = $2 WHERE campaign_id = $1", [imported.campaignId, JSON.stringify([
+      { id: "location", name: "Location", value: "old canonical", rules: "lowercase identity" },
+      { id: "Location", name: "Location", value: "old legacy", rules: "legacy display identity" }
+    ])]);
+    const story = JSON.parse(validStory());
+    story.tracker_updates = [{ name: "Location", value: "updated legacy" }];
+    replies.push({ content: JSON.stringify(story) });
+    const job = await queue(imported.campaignId);
+
+    await runGenerationJob(pool, "story-worker-tracker-legacy", 30, credentialSecret);
+
+    const state = await pool.query<{ trackers: Array<{ id: string; value: string }> }>(
+      "SELECT trackers FROM campaign_state WHERE campaign_id = $1", [imported.campaignId]
+    );
+    expect(state.rows[0]?.trackers).toHaveLength(2);
+    expect(state.rows[0]?.trackers).toEqual([
+      expect.objectContaining({ id: "location", value: "old canonical" }),
+      expect.objectContaining({ id: "Location", value: "updated legacy" })
+    ]);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
+  });
+
+  it("keeps an ambiguous tracker update recoverable without committing or exposing tracker data", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaign_state SET trackers = $2 WHERE campaign_id = $1", [imported.campaignId, JSON.stringify([
+      { id: "north", name: "Gate", value: "north private value", rules: "north rules" },
+      { id: "south", name: "Gate", value: "south private value", rules: "south rules" }
+    ])]);
+    const before = await generationAuthoritySnapshot(pool, imported.campaignId);
+    const imagesBefore = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM image_jobs WHERE campaign_id=$1", [imported.campaignId]);
+    const story = JSON.parse(validStory());
+    story.tracker_updates = [{ name: "Gate", value: "PRIVATE-AMBIGUOUS-VALUE" }];
+    replies.push({ content: JSON.stringify(story) });
+    const job = await queue(imported.campaignId);
+
+    expect(await runGenerationJob(pool, "story-worker-tracker-ambiguous", 30, credentialSecret)).toBe(true);
+
+    const after = await generationAuthoritySnapshot(pool, imported.campaignId);
+    const imagesAfter = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM image_jobs WHERE campaign_id=$1", [imported.campaignId]);
+    expect(after).toEqual(before);
+    expect(imagesAfter.rows[0]?.count).toBe(imagesBefore.rows[0]?.count);
+    const stored = await pool.query<{ status: string; error_code: string; error_message: string; recovery_metadata: unknown }>(
+      "SELECT status,error_code,error_message,recovery_metadata FROM generation_jobs WHERE id=$1", [job.id]
+    );
+    expect(stored.rows[0]).toMatchObject({
+      status: "recoverable",
+      error_code: "tracker_update_identity_invalid",
+      error_message: "Tracker updates could not be matched safely. Discard this attempt and resolve the tracker identity before generating again.",
+      recovery_metadata: {
+        reason: "tracker_update_identity_invalid",
+        diagnostic: { code: "tracker_update_identity_invalid", operation: "story_generation", action: "repair_authority" }
+      }
+    });
+    expect(JSON.stringify(stored.rows[0])).not.toContain("PRIVATE-AMBIGUOUS-VALUE");
+  });
+
+  it("rejects an unknown explicit tracker ID that conflicts with an existing display name", async () => {
+    const imported = await campaign();
+    await pool.query("UPDATE campaign_state SET trackers = $2 WHERE campaign_id = $1", [imported.campaignId,
+      JSON.stringify([{ id: "location", name: "Location Gamma", value: "closed", rules: "Keep this rule." }])]);
+    const before = await generationAuthoritySnapshot(pool, imported.campaignId);
+    const story = JSON.parse(validStory());
+    story.tracker_updates = [{ id: "invented-location", name: "Location Gamma", value: "open" }];
+    replies.push({ content: JSON.stringify(story) });
+    const job = await queue(imported.campaignId);
+
+    await runGenerationJob(pool, "story-worker-tracker-conflict", 30, credentialSecret);
+
+    expect(await generationAuthoritySnapshot(pool, imported.campaignId)).toEqual(before);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "recoverable", errorCode: "tracker_update_identity_invalid" });
+  });
+
+  it("applies replacement tracker updates to the saved pre-turn tracker base", async () => {
+    const imported = await campaign();
+    const baseTrackers = [{ id: "location", name: "Location Gamma", value: "pre-turn", rules: "Saved base rules." }];
+    await pool.query("UPDATE turns SET state_snapshot_private = jsonb_set(state_snapshot_private, '{trackers}', $2::jsonb, true) WHERE campaign_id=$1 AND turn_number=1",
+      [imported.campaignId, JSON.stringify(baseTrackers)]);
+    await pool.query("UPDATE campaign_state SET trackers = $2 WHERE campaign_id=$1", [imported.campaignId,
+      JSON.stringify([{ id: "location", name: "Location Gamma", value: "latest-turn", rules: "Latest turn rules." }])]);
+    const job = await enqueueLatestReplacement(pool, imported.campaignId, replacementRequest("Replace the latest turn."));
+    const story = JSON.parse(validStory("A replacement scene is accepted."));
+    story.tracker_updates = [{ name: "Location Gamma", value: "replacement" }];
+    replies.push({ content: JSON.stringify(story) });
+
+    await runGenerationJob(pool, "story-worker-tracker-replacement", 30, credentialSecret);
+
+    const persisted = await pool.query<{ trackers: Array<Record<string, unknown>>; snapshotTrackers: Array<Record<string, unknown>> }>(
+      `SELECT cs.trackers, t.state_snapshot_private->'trackers' AS "snapshotTrackers"
+         FROM campaign_state cs JOIN turns t ON t.campaign_id=cs.campaign_id
+        WHERE cs.campaign_id=$1 AND t.turn_number=2`, [imported.campaignId]
+    );
+    const expected = [{ id: "location", name: "Location Gamma", value: "replacement", rules: "Saved base rules." }];
+    expect(persisted.rows[0]?.trackers).toEqual(expected);
+    expect(persisted.rows[0]?.snapshotTrackers).toEqual(expected);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed", operationKind: "replace_latest" });
+  });
+
+  it("preserves the previously accepted turn when replacement tracker identity is ambiguous", async () => {
+    const imported = await campaign();
+    const ambiguous = [
+      { id: "north", name: "Gate", value: "north", rules: "north rules" },
+      { id: "south", name: "Gate", value: "south", rules: "south rules" }
+    ];
+    await pool.query("UPDATE turns SET state_snapshot_private = jsonb_set(state_snapshot_private, '{trackers}', $2::jsonb, true) WHERE campaign_id=$1 AND turn_number=1",
+      [imported.campaignId, JSON.stringify(ambiguous)]);
+    await pool.query("UPDATE campaign_state SET trackers = $2 WHERE campaign_id=$1", [imported.campaignId, JSON.stringify(ambiguous)]);
+    const before = await generationAuthoritySnapshot(pool, imported.campaignId);
+    const job = await enqueueLatestReplacement(pool, imported.campaignId, replacementRequest("Replace with an ambiguous tracker."));
+    const story = JSON.parse(validStory("This candidate must not replace the accepted turn."));
+    story.tracker_updates = [{ name: "Gate", value: "uncertain" }];
+    replies.push({ content: JSON.stringify(story) });
+
+    await runGenerationJob(pool, "story-worker-tracker-replacement-ambiguous", 30, credentialSecret);
+
+    expect(await generationAuthoritySnapshot(pool, imported.campaignId)).toEqual(before);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "recoverable", errorCode: "tracker_update_identity_invalid" });
+  });
+
   it("allows exactly one concurrent generation to claim and commit a campaign turn", async () => {
     const imported = await campaign();
     const submissions = await Promise.allSettled([

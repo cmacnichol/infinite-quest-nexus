@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CampaignSyncStatus, GenerationActionResponse, GenerationEnqueueResponse, GenerationResult, GenerationReviewDecisionRequest, GenerationReviewDetail, GenerationStreamSnapshot } from "../../../packages/contracts/src/index.js";
 import { createGenerationWorkflow, GenerationWorkflowProtocolError } from "../../../packages/client-core/src/index.js";
+import { generationDiagnosticPresentation } from "../../../packages/client-core/src/generation/projection.js";
 import type { AbortSignalLike, PendingSubmissionStore } from "../../../packages/client-core/src/ports.js";
 import type {
   GenerationApiPort,
@@ -168,6 +169,16 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
 }
 
 describe("generation workflow", () => {
+  it("presents tracker identity recovery as a non-retryable discard and authority repair", () => {
+    expect(generationDiagnosticPresentation({
+      code: "tracker_update_identity_invalid",
+      operation: "story_generation",
+      action: "repair_authority"
+    })).toMatchObject({
+      retryable: false,
+      message: "Discard this attempt, correct the campaign state or character profile, then generate a new turn. Your draft can be reused."
+    });
+  });
   it("keeps watching duplicate pending reviews until an explicit retry completes", async () => {
     const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
     const pending = snapshot({ status: "recoverable", review: reviewSummary() });
