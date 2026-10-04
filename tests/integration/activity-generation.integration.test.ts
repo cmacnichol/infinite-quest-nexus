@@ -183,6 +183,45 @@ integration("Persistent generation activity", () => {
     expect(stored.activity.diagnostic).toEqual({ code: "provider_transport_error", message: ACTIVITY_DIAGNOSTIC_MESSAGES.provider_transport_error });
     expect(JSON.stringify(stored.activity)).not.toContain("PRIVATE-");
   });
+  it("captures tracker identity recovery with the generic Activity diagnostic and private job-specific recovery", async () => {
+    const imported = await campaign(), queued = await queue(imported.campaignId, "PRIVATE-TRACKER-ACTION");
+    const execution = createPostgresGenerationExecutionRepository(pool);
+    await execution.claimNext({ workerId: "tracker-recovery", leaseSeconds: 30 });
+    const scope = { ownerUserId, jobId: queued.id, workerId: "tracker-recovery" };
+    const errorMessage = "Tracker updates could not be matched safely. Discard this attempt and resolve the tracker identity before generating again.";
+
+    expect(await execution.markRecoverable({ ...scope, errorCode: "tracker_update_identity_invalid", errorMessage,
+      recoveryMetadata: { reason: "tracker_update_identity_invalid", diagnostic: { code: "tracker_update_identity_invalid",
+        operation: "story_generation", action: "repair_authority" } }, providerResponseId: null, providerFinishReason: null
+    })).toBe(true);
+
+    const activity = (await events(queued.id)).at(-1)?.snapshot;
+    expect(activity).toMatchObject({ kind: "generation.recoverable", status: "recoverable",
+      diagnostic: { code: "generation_failed", message: "The generation could not be completed." } });
+    const stored = await pool.query<{ status: string; recovery_metadata: Record<string, unknown> }>(
+      "SELECT status,recovery_metadata FROM generation_jobs WHERE id=$1", [queued.id]
+    );
+    expect(stored.rows[0]).toMatchObject({ status: "recoverable", recovery_metadata: {
+      reason: "tracker_update_identity_invalid", diagnostic: { code: "tracker_update_identity_invalid",
+        operation: "story_generation", action: "repair_authority" }
+    } });
+    expect(JSON.stringify(activity)).not.toMatch(/PRIVATE-|Gate|north private value|south private value|ambiguous_name|conflicting_identity/);
+  });
+  it("does not let an expired tracker-recovery lease overwrite the new claimant", async () => {
+    const imported = await campaign(), queued = await queue(imported.campaignId, "Inspect.");
+    const execution = createPostgresGenerationExecutionRepository(pool);
+    await execution.claimNext({ workerId: "tracker-stale", leaseSeconds: 30 });
+    await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id]);
+    await execution.claimNext({ workerId: "tracker-current", leaseSeconds: 30 });
+
+    expect(await execution.markRecoverable({ ownerUserId, jobId: queued.id, workerId: "tracker-stale",
+      errorCode: "tracker_update_identity_invalid", errorMessage: "fixed tracker recovery message",
+      recoveryMetadata: { reason: "tracker_update_identity_invalid" }, providerResponseId: null, providerFinishReason: null
+    })).toBe(false);
+    expect(await pool.query<{ status: string; lease_owner: string }>(
+      "SELECT status,lease_owner FROM generation_jobs WHERE id=$1", [queued.id]
+    )).toMatchObject({ rows: [{ status: "assessing", lease_owner: "tracker-current" }] });
+  });
   it("staleWorkerCapturesNothing and foreign owners cannot capture", async () => {
     const imported = await campaign(), queued = await queue(imported.campaignId, "Inspect.");
     const execution = createPostgresGenerationExecutionRepository(pool);

@@ -11,8 +11,14 @@ import { sha256 } from "../../packages/domain/src/index.js";
 import { bindManifestToProducingRequest } from "../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { castGenerationSnapshotFingerprint } from "../../packages/contracts/src/campaign-cast-context.js";
 import { sentCanonicalFactIds } from "../../services/runtime/src/generation-executor-adapter.js";
-import { historyCoverageDiagnosticsSchema } from "../../packages/application/src/memory/generation-context.js";
-  function plannerContext(characterAuthority: unknown, version: "legacy" | "v3" = "v3") {
+import { historyCoverageDiagnosticsSchema, type GenerationContextCandidate } from "../../packages/application/src/memory/generation-context.js";
+import type { MemoryGenerationAuthorityContext } from "../../packages/application/src/index.js";
+  function plannerContext(
+    characterAuthority: unknown,
+    version: "legacy" | "v3" = "v3",
+    canonicalFacts: MemoryGenerationAuthorityContext["authority"]["currentContinuity"]["canonicalFacts"] = [],
+    candidates: readonly GenerationContextCandidate[] = []
+  ): MemoryGenerationAuthorityContext {
     const baseIdentity = version === "v3"
       ? { version: "generation-base-v3", operationKind: "append", expectedTurnNumber: 1, baseTurnNumber: 0, campaignActiveTurnNumber: 0, campaignStateRevision: 1, stateEditRevision: null, narrationCorrectionRevision: null, baseTurnId: null, stateFingerprint: "a".repeat(64), narrationFingerprint: null, characterProfileRevision: 1, characterProfileFingerprint: "b".repeat(64) }
       : { operationKind: "append", expectedTurnNumber: 1, baseTurnNumber: 0, campaignActiveTurnNumber: 0, campaignStateRevision: 1, stateEditRevision: null, narrationCorrectionRevision: null, baseTurnId: null, stateFingerprint: "a".repeat(64), narrationFingerprint: null };
@@ -20,10 +26,10 @@ import { historyCoverageDiagnosticsSchema } from "../../packages/application/src
       authority: {
         rules: ["World rule."], worldCanon: { title: "World" }, selectedCharacterId: "mira",
         ...(version === "v3" ? { characterAuthority } : {}),
-        currentContinuity: { continuitySummary: "", scratchpad: "", canonicalFacts: [], openThreads: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] },
+        currentContinuity: { continuitySummary: "", scratchpad: "", canonicalFacts, openThreads: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] },
         scratchpad: "", openThreads: [], canonicalFacts: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [], latestTurn: null
-      }, candidates: [], baseIdentity
-    } as never;
+      }, candidates, baseIdentity
+    } as MemoryGenerationAuthorityContext;
   }
 
   function plannerProvider() {
@@ -146,6 +152,191 @@ describe("layered generation context planner", () => {
     });
     expect(result.sourceManifest!.entries.filter((entry) => entry.selectionGroup === "retrieved" && entry.source.id === "opaque-turn-canary")).toHaveLength(1);
     expect(JSON.stringify(diagnostic)).not.toMatch(/ledger-one|turn-2|Complete private fact|opaque-source-canary|opaque-turn-canary|Private/);
+  });
+
+  it("retains a retrieved fact omitted from protected allocation", () => {
+    const context: any = recentContext();
+    const olderFact = { id: "00000001-1111-4111-8111-111111111111", turnNumber: 1,
+      content: "The sealed gate opens with the brass key." };
+    context.authority.protectedFacts = [olderFact, ...Array.from({ length: 40 }, (_, index) => ({
+      id: `${String(index + 2).padStart(8, "0")}-1111-4111-8111-111111111111`,
+      turnNumber: index + 2,
+      content: `Protected campaign detail ${index + 2}. ${"The keeper records the harbor tide. ".repeat(7)}`
+    }))];
+    context.candidates = [{ id: olderFact.id, turnId: "fact-turn-1", ordinal: 1, kind: "canonical_fact",
+      content: olderFact.content, tokenEstimate: 12, rank: 0 }];
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Use the brass key at the gate", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 8_000, 7_900,
+      "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.promptContext.protectedFacts?.some((fact) => fact.id === olderFact.id)).toBe(false);
+    expect(result.promptContext.chronicle.some((candidate: { id: string }) => candidate.id === olderFact.id)).toBe(true);
+    expect(result.storyInput.split(olderFact.content)).toHaveLength(2);
+    expect(result.layerDiagnostics.omitted).toContainEqual({ id: `protected-fact:${olderFact.id}`, reason: "context_limit" });
+    expect(result.layerDiagnostics.omitted).not.toContainEqual({ id: olderFact.id, reason: "duplicate_source" });
+    const manifestFactIds = result.sourceManifest!.entries.flatMap((entry) => entry.canonicalFactId ? [entry.canonicalFactId] : []).sort();
+    expect(sentCanonicalFactIds(result.contextPlan.serializedRequest).sort()).toEqual(manifestFactIds);
+  });
+
+  it("retains retrieved evidence when an older fact is absent from the protected source pool", () => {
+    const fact = { id: "00000001-1111-4111-8111-111111111111", turnNumber: 1,
+      content: "The sealed gate opens with the brass key." };
+    const otherProtectedFacts = Array.from({ length: 40 }, (_, index) => ({
+      id: `${String(index + 2).padStart(8, "0")}-1111-4111-8111-111111111111`,
+      turnNumber: index + 2,
+      content: `Protected campaign detail ${index + 2}. ${"The keeper records the harbor tide. ".repeat(7)}`
+    }));
+    const results = [otherProtectedFacts, [fact, ...otherProtectedFacts]].map((protectedFacts) => {
+      const context: any = recentContext();
+      context.authority.protectedFacts = protectedFacts;
+      context.candidates = [{ id: fact.id, turnId: "fact-turn-1", ordinal: 1, kind: "canonical_fact",
+        content: fact.content, tokenEstimate: 12, rank: 0 }];
+      return planGenerationPromptContext(context, plannerProvider(), "System", "Use the brass key at the gate", [],
+        { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 8_000, 7_900,
+        "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+        HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    });
+
+    expect(results.map((result) => result.promptContext.chronicle.map((candidate: { id: string }) => candidate.id))).toEqual([[fact.id], [fact.id]]);
+    expect(results.every((result) => result.storyInput.split(fact.content).length === 2)).toBe(true);
+  });
+
+  it("deduplicates a fact actually sent as protected authority", () => {
+    const fact = { id: "11111111-1111-4111-8111-111111111111", turnNumber: 2,
+      content: "The sealed gate opens with the brass key." };
+    const context: any = recentContext();
+    context.authority.protectedFacts = [fact];
+    context.candidates = [{ id: fact.id, turnId: "fact-turn-2", ordinal: 2, kind: "canonical_fact",
+      content: fact.content, tokenEstimate: 12, rank: 0 }];
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Use the brass key at the gate", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.promptContext.protectedFacts?.map((entry) => entry.id)).toEqual([fact.id]);
+    expect(result.promptContext.chronicle).toEqual([]);
+    expect(result.storyInput.split(fact.content)).toHaveLength(2);
+    expect(result.layerDiagnostics.omitted).toContainEqual({ id: fact.id, reason: "duplicate_source" });
+    expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).toContain(fact.id);
+  });
+
+  it("deduplicates a fact actually sent in current continuity", () => {
+    const fact = { id: "11111111-1111-4111-8111-111111111111", content: "The sealed gate opens with the brass key." };
+    const context: any = recentContext();
+    context.authority.currentContinuity.canonicalFacts = [fact];
+    context.candidates = [{ id: fact.id, turnId: "fact-turn-2", ordinal: 2, kind: "canonical_fact",
+      content: fact.content, tokenEstimate: 12, rank: 0 }];
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Use the brass key at the gate", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.promptContext.currentContinuity.canonicalFacts).toEqual([fact]);
+    expect(result.promptContext.chronicle).toEqual([]);
+    expect(result.layerDiagnostics.omitted).toContainEqual({ id: fact.id, reason: "duplicate_source" });
+    expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).toContain(fact.id);
+  });
+
+  it("does not classify a different verified fact source as duplicate by ID alone", () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const protectedFact = { id, turnNumber: 2, content: "The sealed gate opens with the brass key." };
+    const retrievedContent = "The brass key was forged beneath the old harbor.";
+    const context: any = recentContext();
+    context.authority.protectedFacts = [protectedFact];
+    context.candidates = [{ id, turnId: "fact-turn-1", ordinal: 1, kind: "canonical_fact",
+      content: retrievedContent, tokenEstimate: 12, rank: 0 }];
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Use the brass key at the gate", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.promptContext.protectedFacts).toEqual([protectedFact]);
+    expect(result.promptContext.chronicle.map((candidate: { content: string }) => candidate.content)).toEqual([retrievedContent]);
+    expect(result.layerDiagnostics.omitted).not.toContainEqual({ id, reason: "duplicate_source" });
+  });
+
+  it("retains a Chronicle fact when the selected protected fact set is empty", () => {
+    const fact = { id: "11111111-1111-4111-8111-111111111111", turnNumber: 1,
+      content: "The sealed gate opens with the brass key." };
+    const context: any = recentContext();
+    context.authority.protectedFacts = [{ ...fact, content: "The D20 roll lands on the table." }];
+    context.candidates = [{ id: fact.id, turnId: "fact-turn-1", ordinal: 1, kind: "canonical_fact",
+      content: "The sealed gate opens with the brass key.", tokenEstimate: 12, rank: 0 }];
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Use the brass key at the gate", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 8_000, 7_900,
+      "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.promptContext.protectedFacts).toEqual([]);
+    expect(result.promptContext.chronicle.map((candidate: { id: string }) => candidate.id)).toEqual([fact.id]);
+    expect(result.layerDiagnostics.omitted).not.toContainEqual({ id: fact.id, reason: "duplicate_source" });
+  });
+
+  it("plans an empty Chronicle candidate set with protected facts", () => {
+    const context: any = recentContext();
+    const fact = { id: "11111111-1111-4111-8111-111111111111", turnNumber: 2, content: "The sealed gate opens with the brass key." };
+    context.authority.protectedFacts = [fact];
+    context.candidates = [];
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.promptContext.protectedFacts).toEqual([fact]);
+    expect(result.promptContext.chronicle).toEqual([]);
+  });
+
+  it.each([
+    { id: "00000001-1111-4111-8111-111111111111", turnNumber: 4, turnId: "latest", ordinal: 4, label: "latest" },
+    { id: "00000002-1111-4111-8111-111111111111", turnNumber: 3, turnId: "turn-3", ordinal: 3, label: "selected predecessor" }
+  ])("keeps an omitted canonical fact from the $label turn while suppressing its narration duplicate", (factSource) => {
+    const fact = { ...factSource, content: `The ${factSource.label} turn established the brass key.` };
+    const context: any = recentContext();
+    context.authority.protectedFacts = [fact, ...Array.from({ length: 40 }, (_, index) => ({
+      id: `${String(index + 3).padStart(8, "0")}-1111-4111-8111-111111111111`, turnNumber: index + 5,
+      content: `Protected campaign detail ${index + 5}. ${"The keeper records the harbor tide. ".repeat(7)}`
+    }))];
+    context.candidates = [
+      { id: fact.id, turnId: fact.turnId, ordinal: fact.ordinal, kind: "canonical_fact", content: fact.content, tokenEstimate: 12, rank: 0 },
+      { id: `${factSource.label}-narration`, turnId: fact.turnId, ordinal: fact.ordinal, kind: "turn_fiction",
+        content: `Duplicate ${factSource.label} narration.`, tokenEstimate: 5, rank: 1 }
+    ];
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Continue the story", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 8_000, 7_900,
+      "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.promptContext.protectedFacts?.some((entry) => entry.id === fact.id)).toBe(false);
+    expect(result.promptContext.chronicle.map((candidate: { id: string }) => candidate.id)).toEqual([fact.id]);
+    expect(result.storyInput).not.toContain(`Duplicate ${factSource.label} narration.`);
+  });
+
+  it("keeps fact candidate order stable and leaves the non-history frozen policy unchanged", () => {
+    const context: any = recentContext();
+    const first = { id: "11111111-1111-4111-8111-111111111111", turnNumber: 1, content: "First retrieved fact." };
+    const second = { id: "22222222-2222-4222-8222-222222222222", turnNumber: 2, content: "Second retrieved fact." };
+    context.candidates = [
+      { id: second.id, turnId: "fact-turn-2", ordinal: 2, kind: "canonical_fact", content: second.content, tokenEstimate: 5, rank: 2 },
+      { id: first.id, turnId: "fact-turn-1", ordinal: 1, kind: "canonical_fact", content: first.content, tokenEstimate: 5, rank: 1 }
+    ];
+    const makePlan = () => planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const firstPlan = makePlan();
+    expect(makePlan().promptContext.chronicle.map((candidate: { id: string }) => candidate.id))
+      .toEqual(firstPlan.promptContext.chronicle.map((candidate: { id: string }) => candidate.id));
+    expect(firstPlan.promptContext.chronicle.map((candidate: { id: string }) => candidate.id)).toEqual([second.id, first.id]);
+
+    const legacy = plannerContext(null, "v3", [{ id: first.id, content: first.content }], [{
+      id: first.id, turnId: "fact-turn-1", ordinal: 1, kind: "canonical_fact", content: first.content, tokenEstimate: 5, rank: 1
+    }]);
+    const legacyPlan = planGenerationPromptContext(legacy, plannerProvider(), "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "attempt", "story_memory", defaultStoryMemoryPolicy("r2"));
+    expect(legacyPlan.promptContext.chronicle).toEqual([]);
+    expect(legacyPlan.layerDiagnostics.omitted).toContainEqual({ id: first.id, reason: "duplicate_source" });
   });
 
   it("retains a whole narration fallback but withholds an unverified canonical-fact source", () => {
@@ -707,20 +898,78 @@ describe("layered generation context planner", () => {
     expect(result.promptContext.chronicle[0]).toMatchObject({ id: "economical", content });
     expect(result.promptContext.chronicle[0]?.evidenceForm).toBeUndefined();
   });
-  it("falls back to certified excerpt when an economical whole parent loses to protected authority", () => {
+  it("retries an omitted whole parent as a certified excerpt and retains fact deduplication", () => {
     const context = recentContext(); context.recentTurns = [];
+    const fact = { id: "11111111-1111-4111-8111-111111111111", content: "The keeper holds the sealed gate key." };
+    context.authority.currentContinuity.canonicalFacts = [fact];
     const content = `${"Old scenery. ".repeat(90)}The sapphire is hidden. Its hiding place is unknown to Vale. ${"More scenery. ".repeat(90)}`.trim();
-    context.candidates = [{ id: "middle", turnId: "old", ordinal: 1, kind: "turn_fiction", content, tokenEstimate: 900, rank: 1,
-      narrativeSource: { normalizationVersion: "story-fiction-source-v1", sourceHash: sha256(content), spans: [{ start: content.indexOf("The sapphire"), end: content.indexOf("The sapphire") + 22 }] } }];
+    context.candidates = [
+      { id: fact.id, turnId: "fact-turn-1", ordinal: 1, kind: "canonical_fact", content: fact.content, tokenEstimate: 10, rank: 0 },
+      { id: "middle", turnId: "old", ordinal: 1, kind: "turn_fiction", content, tokenEstimate: 900, rank: 1,
+        narrativeSource: { normalizationVersion: "story-fiction-source-v1", sourceHash: sha256(content), spans: [{ start: content.indexOf("The sapphire"), end: content.indexOf("The sapphire") + 22 }] } }
+    ];
     const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
-    const plan = () => planGenerationPromptContext(context, plannerProvider(), "System", "Find sapphire", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 8000, 7900, undefined, "story_memory", policy);
-    let result = plan();
+    const capturedRequests: { input: string; body: string }[] = [];
+    const serializeRequest = (input: string) => {
+      const body = serializeProviderRequest({ ...plannerProvider() as any, baseUrl: "" }, { systemPrompt: "System", input }).body;
+      capturedRequests.push({ input, body });
+      return body;
+    };
+    const plan = () => planGenerationPromptContext(context, plannerProvider(), "System", "Find sapphire", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 8_000, 7_900,
+      undefined, "story_memory", policy, serializeRequest);
+    const initiallyRetained = plan();
+    expect(initiallyRetained.promptContext.chronicle[0]).toMatchObject({ id: "middle", content });
+    let result = initiallyRetained;
+    let retrySummary = "";
     for (let words = 0; words < 4500; words += 20) {
-      context.authority.currentContinuity.continuitySummary = "History ".repeat(words);
+      retrySummary = "History ".repeat(words);
+      context.authority.currentContinuity.continuitySummary = retrySummary;
       try { result = plan(); } catch { break; }
       if (result.promptContext.chronicle[0]?.evidenceForm === "excerpt") break;
     }
+
+    const retryIterationRequests = capturedRequests.filter((request) => request.input.includes(retrySummary));
+    const fullParentRequestIndex = retryIterationRequests.findIndex((request) => request.body.includes(content));
+    const excerptRequestIndex = retryIterationRequests.findIndex((request) => !request.body.includes(content)
+      && request.body.includes("The sapphire is hidden."));
     expect(result.promptContext.chronicle[0]?.evidenceForm).toBe("excerpt");
+    expect(fullParentRequestIndex).toBeGreaterThanOrEqual(0);
+    expect(excerptRequestIndex).toBeGreaterThan(fullParentRequestIndex);
+    expect(retryIterationRequests.at(-1)?.body).toBe(result.contextPlan.serializedRequest);
+    expect(result.promptContext.currentContinuity.canonicalFacts).toEqual([fact]);
+    expect(result.promptContext.chronicle.map((candidate) => candidate.id)).toEqual(["middle"]);
+    expect(result.layerDiagnostics.omitted).toContainEqual({ id: fact.id, reason: "duplicate_source" });
+    expect(result.storyInput.split(fact.content)).toHaveLength(2);
+    expect(result.contextPlan.serializedRequest.split(fact.content)).toHaveLength(2);
+    expect(result.storyInput).toContain("The sapphire is hidden.");
+  });
+  it("keeps selected fact deduplication during history-coverage early excerpt selection", () => {
+    const context = recentContext(); context.recentTurns = [];
+    const protectedFact = { id: "11111111-1111-4111-8111-111111111111", turnNumber: 1, content: "The keeper holds the sealed gate key." };
+    const content = `${"Old scenery. ".repeat(200)}The sapphire is hidden. Its hiding place is unknown to Vale. ${"More scenery. ".repeat(200)}`.trim();
+    context.authority.protectedFacts = [protectedFact];
+    context.candidates = [
+      { id: protectedFact.id, turnId: "fact-turn-1", ordinal: 1, kind: "canonical_fact", content: protectedFact.content, tokenEstimate: 10, rank: 0 },
+      { id: "middle", turnId: "old", ordinal: 1, kind: "turn_fiction", content, tokenEstimate: 1800, rank: 1,
+        narrativeSource: { normalizationVersion: "story-fiction-source-v1", sourceHash: sha256(content), spans: [{ start: content.indexOf("The sapphire"), end: content.indexOf("The sapphire") + 22 }] } }
+    ];
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
+    const plan = () => planGenerationPromptContext(context, plannerProvider(), "System", "Find sapphire", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 8_000, 7_900,
+      "attempt", "story_memory", policy, undefined, undefined, undefined, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    let result = plan();
+    for (let words = 0; words <= 2_000; words += 5) {
+      context.authority.currentContinuity.continuitySummary = "History ".repeat(words);
+      try { result = plan(); } catch { break; }
+      if (result.promptContext.chronicle.find((candidate) => candidate.id === "middle")?.evidenceForm === "excerpt") break;
+    }
+
+    expect(result.promptContext.chronicle.map((candidate) => candidate.id)).toEqual(["middle"]);
+    expect(result.promptContext.chronicle[0]?.evidenceForm).toBe("excerpt");
+    expect(result.promptContext.protectedFacts).toEqual([protectedFact]);
+    expect(result.layerDiagnostics.omitted).toContainEqual({ id: protectedFact.id, reason: "duplicate_source" });
+    expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).toContain(protectedFact.id);
     expect(result.storyInput).toContain("The sapphire is hidden.");
   });
   it("reports safe component estimates on protected overflow without exposing profile text", () => {

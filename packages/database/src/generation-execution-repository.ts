@@ -60,7 +60,6 @@ import {
   playerEventTriggerSchema,
   playerRpgStatSchema,
   storyTurnOutputSchema,
-  type CampaignTracker,
   type PlayerEventTrigger,
   type PlayerRpgStat,
   type StoryTurnOutput
@@ -86,7 +85,7 @@ import {
 import { mechanicsLeakFields } from "../../story-engine/src/output.js";
 import {
   buildScopedEntityCatalog,
-  normalizeCampaignTrackers,
+  applyCampaignTrackerUpdates,
   resolveEntityMetadata,
   stableStringify,
   sha256
@@ -1306,18 +1305,6 @@ function orchestrationInputs(row: ExecutionPayloadRow): GenerationOrchestrationI
   };
 }
 
-function mergedTrackers(current: unknown, updates: Array<Record<string, unknown>>): CampaignTracker[] {
-  const existing = normalizeCampaignTrackers(current);
-  const map = new Map<string, Record<string, unknown>>(
-    existing.map((item) => [item.id, { ...item }])
-  );
-  for (const update of updates) {
-    const key = String(update.id || update.name || crypto.randomUUID());
-    map.set(key, { ...(map.get(key) || {}), ...update });
-  }
-  return normalizeCampaignTrackers([...map.values()]);
-}
-
 /** A main Keep remains active only until a later retry authorizes a rewrite. */
 function assertActiveMainKeepPreservation(
   checkpoint: GenerationReviewCheckpoint,
@@ -1634,7 +1621,7 @@ async function commitAcceptedTurn(
   const trackerBase = isReplacement && Array.isArray(job.base_state_private?.trackers)
     ? job.base_state_private.trackers
     : stateResult.rows[0]?.trackers;
-  const trackers = mergedTrackers(trackerBase, story.tracker_updates);
+  const trackers = applyCampaignTrackerUpdates(trackerBase, story.tracker_updates);
   const storyOnly = job.generation_policy?.playMode === "story_only";
   const lockedMechanics = stateResult.rows[0];
   if (orchestration.extension && (

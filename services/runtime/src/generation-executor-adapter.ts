@@ -126,6 +126,7 @@ import {
   sha256,
   stableStringify
 } from "../../../packages/domain/src/index.js";
+import { CampaignTrackerUpdateError } from "../../../packages/domain/src/campaign-trackers.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { providerPromptProtocolVersion } from "./provider-application-composition.js";
 import type { ResponseContractRuntimeProfile } from "./generation-response-contract.js";
@@ -4945,6 +4946,29 @@ async function executeLoadedGeneration(
       durationMs: Date.now() - generationStartedAt
     });
   } catch (error) {
+    if (error instanceof CampaignTrackerUpdateError) {
+      const errorMessage = "Tracker updates could not be matched safely. Discard this attempt and resolve the tracker identity before generating again.";
+      const recovered = await repository.markRecoverable({
+        ...scope,
+        providerResponseId: null,
+        providerFinishReason: null,
+        errorCode: error.code,
+        errorMessage,
+        recoveryMetadata: {
+          reason: error.code,
+          diagnostic: { code: error.code, operation: "story_generation", action: "repair_authority" }
+        }
+      });
+      if (recovered) {
+        logger.warn({
+          event: "turn_generation_recoverable",
+          ...generationLogContext(job, workerId),
+          errorCode: error.code,
+          durationMs: Date.now() - generationStartedAt
+        });
+      }
+      return true;
+    }
     if (isRecoverableIntegrityError(error)) {
       const diagnostic = recoverableIntegrityDiagnostic(error);
       const recovered = await repository.markRecoverable({

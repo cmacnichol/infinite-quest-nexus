@@ -1,4 +1,5 @@
 import { generationRecoverySchema } from "../../packages/contracts/src/client-api.js";
+import { generationStreamSnapshotSchema } from "../../packages/contracts/src/generation.js";
 import { describe, expect, it } from "vitest";
 import { projectSafeGenerationContextDiagnostic, projectSafeGenerationDiagnostic, safeGenerationDiagnosticSchema } from "../../packages/contracts/src/story-prompt.js";
 import { projectGenerationFailureDiagnostic } from "../../packages/contracts/src/generation-review.js";
@@ -28,6 +29,25 @@ describe("safe public generation diagnostics", () => {
       errorCode: "generation_failed", errorMessage: "Generation could not be completed.", failureDiagnostic });
     expect(recovery.failureDiagnostic).toEqual(failureDiagnostic);
     expect(JSON.stringify(recovery)).not.toContain("PRIVATE_PROVIDER_CANARY");
+  });
+  it("accepts only the repair-authority action for tracker identity diagnostics", () => {
+    const diagnostic = {
+      code: "tracker_update_identity_invalid",
+      operation: "story_generation",
+      action: "repair_authority"
+    };
+    expect(safeGenerationDiagnosticSchema.parse(diagnostic)).toEqual(diagnostic);
+    expect(safeGenerationDiagnosticSchema.safeParse({ ...diagnostic, action: "discard_and_reenqueue" }).success).toBe(false);
+    expect(JSON.stringify(projectSafeGenerationDiagnostic(diagnostic))).not.toMatch(/tracker name|tracker value|private/i);
+    const snapshot = {
+      id: "55555555-5555-4555-8555-555555555555", campaignId: "66666666-6666-4666-8666-666666666666",
+      expectedTurnNumber: 2, status: "recoverable", action: "Open the gate", operationKind: "append",
+      replacementTurnId: null, attempts: 1, partialNarration: null, errorCode: "generation_failed",
+      errorMessage: "Generation could not be completed.", resultTurnId: null, diagnostic
+    };
+    expect(generationStreamSnapshotSchema.parse(snapshot).diagnostic).toEqual(diagnostic);
+    expect(generationRecoverySchema.parse({ ...snapshot, resultTurnId: null }).diagnostic).toEqual(diagnostic);
+    expect(JSON.stringify(snapshot)).not.toMatch(/PRIVATE|Gate tracker value/);
   });
   it("uses server review eligibility ahead of an older discard-and-reenqueue diagnostic", () => {
     const presentation = generationReviewPresentation({
