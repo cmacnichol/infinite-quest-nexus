@@ -1930,3 +1930,108 @@ describe("transfer target world detail epoch fences", () => {
     expect(elements.transferPreviewSummary.className).toBe("status error");
   });
 });
+
+function campaignImportVersionHarness(api: (path: string) => Promise<Record<string, unknown>>) {
+  const { document } = parseHTML(managementHtml);
+  const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
+  Object.defineProperty(elements.campaignImportWorld, "value", { value: "world-a", writable: true, configurable: true });
+  const worlds = [{ id: "world-a" }];
+  const detailCache = new Map<string, Record<string, unknown>>();
+  const detailRequests = new Map<string, Promise<Record<string, unknown>>>();
+  const detailEpochs = new Map<string, number>();
+  const statuses: Array<{ message: string; type: string }> = [];
+  const previewCalls = vi.fn(async () => undefined);
+  const clearPreview = vi.fn();
+  const sourceNames = [
+    "getDashboardWorldDetails", "beginDashboardWorldDetailRequest", "isDashboardWorldDetailRequestCurrent",
+    "invalidateDashboardWorldDetails", "isCampaignImportRefreshCurrent", "handleCampaignImportRefreshError", "loadCampaignImportVersions"
+  ];
+  const functions = managementFunctions<Record<string, (...args: never[]) => unknown>>(sourceNames, {
+    elements,
+    api,
+    worlds,
+    dashboardWorldDetails: detailCache,
+    dashboardWorldDetailRequests: detailRequests,
+    dashboardWorldDetailRequestEpochs: detailEpochs,
+    campaignArchiveImportActive: () => false,
+    refreshCampaignImportPreview: previewCalls,
+    clearCampaignArchivePreview: clearPreview,
+    setStatus: (message: string, type = "") => statuses.push({ message, type }),
+    campaignImportRefreshSequence: 1,
+    Option: function Option(label: string, value: string) {
+      const option = document.createElement("option");
+      option.textContent = label;
+      option.value = value;
+      return option;
+    }
+  });
+  return {
+    elements,
+    detailCache,
+    detailEpochs,
+    statuses,
+    previewCalls,
+    clearPreview,
+    load: functions.loadCampaignImportVersions as (sequence: number) => Promise<void>,
+    invalidate: functions.invalidateDashboardWorldDetails as (worldId: string) => void,
+    handleError: functions.handleCampaignImportRefreshError as (error: unknown, sequence: number) => void
+  };
+}
+
+describe("campaign import version detail generations", () => {
+  it("does not install or preview a destination invalidated while its detail read is pending", async () => {
+    let resolveDetail!: (detail: Record<string, unknown>) => void;
+    const pendingDetail = new Promise<Record<string, unknown>>((resolve) => { resolveDetail = resolve; });
+    const api = vi.fn()
+      .mockImplementationOnce(() => pendingDetail)
+      .mockResolvedValueOnce({ id: "world-a", versions: [{ id: "current-version", versionNumber: 2 }] });
+    const harness = campaignImportVersionHarness(api);
+
+    const loading = harness.load(1);
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith("/api/v1/worlds/world-a"));
+    harness.invalidate("world-a");
+    resolveDetail({ id: "world-a", versions: [{ id: "retired-version", versionNumber: 1 }] });
+    await loading;
+
+    expect([...harness.elements.campaignImportVersion.querySelectorAll("option")].map((option: HTMLOptionElement) => option.value)).toEqual(["", "current-version"]);
+    expect(harness.previewCalls).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not present a failure from an invalidated destination detail read", async () => {
+    let rejectDetail!: (error: Error) => void;
+    const pendingDetail = new Promise<Record<string, unknown>>((_resolve, reject) => { rejectDetail = reject; });
+    const api = vi.fn()
+      .mockImplementationOnce(() => pendingDetail)
+      .mockResolvedValueOnce({ id: "world-a", versions: [{ id: "current-version", versionNumber: 2 }] });
+    const harness = campaignImportVersionHarness(api);
+
+    const loading = harness.load(1).catch((error) => harness.handleError(error, 1));
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith("/api/v1/worlds/world-a"));
+    harness.invalidate("world-a");
+    rejectDetail(new Error("Retired destination detail failed"));
+    await loading;
+
+    expect(harness.statuses).toEqual([]);
+    expect([...harness.elements.campaignImportVersion.querySelectorAll("option")].map((option: HTMLOptionElement) => option.value)).toEqual(["", "current-version"]);
+    expect(harness.previewCalls).toHaveBeenCalledTimes(1);
+    expect(harness.clearPreview).not.toHaveBeenCalled();
+  });
+
+  it("keeps a current detail failure visible and lets an explicit retry load fresh versions", async () => {
+    const currentWorld = { id: "world-a", versions: [{ id: "current-version", versionNumber: 2 }] };
+    const api = vi.fn()
+      .mockRejectedValueOnce(new Error("Current destination detail failed"))
+      .mockResolvedValueOnce(currentWorld);
+    const harness = campaignImportVersionHarness(api);
+
+    await harness.load(1).catch((error) => harness.handleError(error, 1));
+    expect(harness.statuses).toHaveLength(1);
+    expect(harness.statuses[0].message).toContain("Current destination detail failed");
+    expect(harness.elements.campaignImportVersion.textContent).toContain("Could not load versions. Select the destination again to retry.");
+
+    await harness.load(1);
+    expect(api).toHaveBeenCalledTimes(2);
+    expect([...harness.elements.campaignImportVersion.querySelectorAll("option")].map((option: HTMLOptionElement) => option.value)).toEqual(["", "current-version"]);
+    expect(harness.previewCalls).toHaveBeenCalledTimes(1);
+  });
+});

@@ -3333,9 +3333,19 @@ async function selectWorld(worldId, selectionOptions = {}) {
   elements.newCampaignCharacter.disabled = true;
   const preserveWorkflowFeedback = selectionOptions.preserveWorkflowFeedbackForWorldId === worldId;
   if (!preserveWorkflowFeedback) worldMessage("Loading selected world…");
+  const detailRetryCount = selectionOptions.detailRetryCount ?? 0;
+  const detailRequest = getDashboardWorldDetails(worldId);
+  const detailRequestEpoch = dashboardWorldDetailRequestEpochs.get(worldId);
   try {
-    const world = await getDashboardWorldDetails(worldId);
+    const world = await detailRequest;
     if (!isCurrentWorldSelection(worldId, selectionEpoch)) return;
+    if (!isDashboardWorldDetailRequestCurrent(worldId, detailRequestEpoch)) {
+      if (detailRetryCount < 1) {
+        return selectWorld(worldId, { ...selectionOptions, selectionIntentEpoch, detailRetryCount: detailRetryCount + 1 });
+      }
+      worldMessage("World details changed while loading. Select this world again to retry.", "error");
+      return;
+    }
     if (world?.id !== worldId) throw new Error("The selected world response did not match the requested world.");
     selectedWorld = world;
     renderManagementWorlds();
@@ -3368,6 +3378,13 @@ async function selectWorld(worldId, selectionOptions = {}) {
     void resumeWorldCoverJob(worldId, coverPollSequence);
   } catch (error) {
     if (!isCurrentWorldSelection(worldId, selectionEpoch)) return;
+    if (!isDashboardWorldDetailRequestCurrent(worldId, detailRequestEpoch)) {
+      if (detailRetryCount < 1) {
+        return selectWorld(worldId, { ...selectionOptions, selectionIntentEpoch, detailRetryCount: detailRetryCount + 1 });
+      }
+      worldMessage("World details changed while loading. Select this world again to retry.", "error");
+      return;
+    }
     worldMessage(safeWorkflowFailure("The selected world could not be loaded.", error), "error");
   }
 }
@@ -7727,7 +7744,7 @@ async function refreshPortableCampaignPreview() {
   await previewPortableCampaign(selectedImportSource.sourceName, story);
 }
 
-async function loadCampaignImportVersions(refreshSequence) {
+async function loadCampaignImportVersions(refreshSequence, detailRetryCount = 0) {
   if (campaignArchiveImportActive()) elements.importStory.disabled = true;
   elements.campaignImportVersion.replaceChildren(new Option("Loading published versions…", ""));
   const worldId = elements.campaignImportWorld.value;
@@ -7737,15 +7754,35 @@ async function loadCampaignImportVersions(refreshSequence) {
     await refreshCampaignImportPreview();
     return;
   }
-  const world = await getDashboardWorldDetails(worldId);
+  const detailRequest = getDashboardWorldDetails(worldId);
+  const detailRequestEpoch = dashboardWorldDetailRequestEpochs.get(worldId);
+  let world;
+  try {
+    world = await detailRequest;
+  } catch (error) {
+    if (!isCampaignImportRefreshCurrent(refreshSequence) || worldId !== elements.campaignImportWorld.value) return;
+    if (!isDashboardWorldDetailRequestCurrent(worldId, detailRequestEpoch)) {
+      if (detailRetryCount < 1) return loadCampaignImportVersions(refreshSequence, detailRetryCount + 1);
+      elements.campaignImportVersion.replaceChildren(new Option("Destination changed while loading. Select it again to retry.", ""));
+      return;
+    }
+    elements.campaignImportVersion.replaceChildren(new Option("Could not load versions. Select the destination again to retry.", ""));
+    throw error;
+  }
   if (!isCampaignImportRefreshCurrent(refreshSequence) || worldId !== elements.campaignImportWorld.value) return;
+  if (!isDashboardWorldDetailRequestCurrent(worldId, detailRequestEpoch)) {
+    if (detailRetryCount < 1) return loadCampaignImportVersions(refreshSequence, detailRetryCount + 1);
+    elements.campaignImportVersion.replaceChildren(new Option("Destination changed while loading. Select it again to retry.", ""));
+    return;
+  }
   const versions = [...(world.versions || [])].sort((a, b) => b.versionNumber - a.versionNumber);
   elements.campaignImportVersion.replaceChildren(
     new Option(versions.length ? "Choose a published version" : "No published versions", ""),
     ...versions.map((version) => new Option(`Version ${version.versionNumber}${version.releaseNotes ? ` · ${version.releaseNotes}` : ""}`, version.id))
   );
   if (versions.length === 1) elements.campaignImportVersion.value = versions[0].id;
-  if (!isCampaignImportRefreshCurrent(refreshSequence) || worldId !== elements.campaignImportWorld.value) return;
+  if (!isCampaignImportRefreshCurrent(refreshSequence) || worldId !== elements.campaignImportWorld.value
+    || !isDashboardWorldDetailRequestCurrent(worldId, detailRequestEpoch)) return;
   await refreshCampaignImportPreview();
 }
 
