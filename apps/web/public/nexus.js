@@ -331,15 +331,16 @@ function setCampaignSettingsSectionFeedback(panelId, status, message, selectionR
 }
 
 function setCampaignSettingsSectionContentVisibility(panelId, visible) {
-  const body = document.querySelector(`[data-campaign-section-body="${panelId}"]`);
-  if (!body) return;
-  if (visible) {
-    if (body.dataset.selectionHidden !== "true") return;
-    body.classList.remove("hidden");
-    delete body.dataset.selectionHidden;
-  } else if (!body.classList.contains("hidden")) {
-    body.dataset.selectionHidden = "true";
-    body.classList.add("hidden");
+  const bodies = document.querySelectorAll(`[data-campaign-section-body="${panelId}"]`);
+  for (const body of bodies) {
+    if (visible) {
+      if (body.dataset.selectionHidden !== "true") continue;
+      body.classList.remove("hidden");
+      delete body.dataset.selectionHidden;
+    } else if (!body.classList.contains("hidden")) {
+      body.dataset.selectionHidden = "true";
+      body.classList.add("hidden");
+    }
   }
 }
 
@@ -393,7 +394,7 @@ function loadCampaignSettingsSectionForPanel(panelId) {
     setCampaignSettingsSectionFeedback(
       panelId,
       "error",
-      `${CAMPAIGN_SETTINGS_SECTION_LABELS[section]} could not be loaded: ${error?.message || String(error)}`,
+      safeWorkflowFailure(`${CAMPAIGN_SETTINGS_SECTION_LABELS[section]} could not be loaded.`, error),
       selectionRequest,
       campaignId
     );
@@ -551,9 +552,17 @@ function syncCampaignSettingsRailOrientation(mediaQuery) {
   elements.campaignSettingsRail.setAttribute("aria-orientation", mediaQuery.matches ? "horizontal" : "vertical");
 }
 
+function clearContextPreviewPresentation() {
+  contextPreviewSequence += 1;
+  elements.contextSummary.className = "status hidden";
+  elements.contextSummary.textContent = "";
+  elements.contextPreview.textContent = "The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.";
+}
+
 function clearCampaignEditorSelection({ focus = false } = {}) {
   campaignCoreReady = false;
   campaignSectionLoader.setSelection("", campaignSelectionRequest);
+  clearContextPreviewPresentation();
   for (const panelId of CAMPAIGN_SETTINGS_PANEL_IDS) {
     if (panelId !== "overview") setCampaignSettingsSectionContentVisibility(panelId, false);
   }
@@ -5177,6 +5186,7 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   };
   selectedCampaignIsExplicit = explicit;
   campaign = selectedCampaign;
+  if (previousCampaignId !== campaign.id) clearContextPreviewPresentation();
   if (previousCampaignId && previousCampaignId !== campaign.id) {
     for (const panelId of CAMPAIGN_SETTINGS_PANEL_IDS) {
       if (panelId !== "overview") setCampaignSettingsSectionContentVisibility(panelId, false);
@@ -5221,11 +5231,11 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   elements.campaignWorldVersion.replaceChildren();
   elements.campaignWorldVersion.disabled = true;
   let world = null;
-  let worldDetailsError = "";
+  let worldDetailsError = null;
   try {
     world = await api(`/api/v1/worlds/${campaign.worldId}`);
   } catch (error) {
-    worldDetailsError = error?.message || String(error);
+    worldDetailsError = error;
   }
   if (selectionRequest !== campaignSelectionRequest) return;
   if (world) {
@@ -5242,7 +5252,7 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   }
   updateCampaignMigrationAvailability();
   if (!managementSelectionErrorIsCurrent("campaigns") && preserveWorkflowFeedbackForCampaignId !== campaign.id) {
-    if (worldDetailsError) campaignMessage(`Campaign selected, but its world details could not be loaded: ${worldDetailsError}`, "error");
+    if (worldDetailsError) campaignMessage(safeWorkflowFailure("Campaign selected, but its world details could not be loaded.", worldDetailsError), "error");
     else if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
     else {
       const hasPendingListReadFailure = dashboardWorkflowErrors.has("campaigns");
@@ -8400,7 +8410,7 @@ async function previewContext(event) {
     if (sequence !== contextPreviewSequence || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     elements.contextSummary.classList.remove("hidden");
     elements.contextSummary.classList.add("error");
-    elements.contextSummary.textContent = error.message || String(error);
+    elements.contextSummary.textContent = safeWorkflowFailure("Context preview unavailable.", error);
     elements.contextPreview.textContent = "Context preview unavailable.";
   } finally {
     if (sequence === contextPreviewSequence && selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) elements.previewContext.disabled = false;

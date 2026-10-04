@@ -42,6 +42,7 @@ function managementFunctions<T extends Record<string, (...args: never[]) => unkn
     setCampaignSettingsSectionControls: vi.fn(),
     setCampaignSettingsAvailability: vi.fn(),
     updateCampaignMigrationAvailability: vi.fn(),
+    contextPreviewSequence: 0,
     setCampaignSettingsPanel: vi.fn(),
     CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
     campaignSettingsSectionLoadEpochs: new Map(),
@@ -81,6 +82,7 @@ describe("Nexus management UI contracts", () => {
   it("ignores an old campaign world response after another campaign is selected", async () => {
     const { document } = parseHTML(managementHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const originalPreviewPlaceholder = (elements.contextPreview as HTMLElement).textContent;
     for (const select of document.querySelectorAll("select")) {
       Object.defineProperty(select, "value", { value: "", writable: true, configurable: true });
     }
@@ -100,7 +102,7 @@ describe("Nexus management UI contracts", () => {
       if (path === `/api/v1/worlds/${worldAId}`) return oldWorld;
       return currentWorld;
     });
-    const functions = managementFunctions<{ selectCampaign: (campaign: Record<string, unknown>) => Promise<void> }>(["selectCampaign", "normalizedTurnControlStyle"], {
+    const functions = managementFunctions<{ selectCampaign: (campaign: Record<string, unknown>) => Promise<void> }>(["selectCampaign", "clearContextPreviewPresentation", "normalizedTurnControlStyle"], {
       elements, document, api, selectedCampaign: null, campaignSelectionRequest: 0,
       dashboardWorkflowErrors: new Map(),
       UUID_ROUTE_PATTERN,
@@ -134,10 +136,16 @@ describe("Nexus management UI contracts", () => {
     const campaign = (suffix: string) => ({ id: `campaign-${suffix}`, title: `Campaign ${suffix}`, status: "active", worldId: suffix === "a" ? worldAId : worldBId, worldVersionId: `version-${suffix}`, worldVersionNumber: 1, turnControlStyle: "flexible_scene" });
     const firstSelection = functions.selectCampaign(campaign("a"));
     await vi.waitFor(() => expect(api).toHaveBeenCalledWith(`/api/v1/worlds/${worldAId}`));
+    (elements.contextSummary as HTMLElement).textContent = "A_PRIVATE_CONTEXT_CANARY";
+    (elements.contextSummary as HTMLElement).classList.remove("hidden");
+    (elements.contextPreview as HTMLElement).textContent = "A_PRIVATE_CONTEXT_CANARY";
     const currentSelection = functions.selectCampaign(campaign("b"));
     await vi.waitFor(() => expect(api).toHaveBeenCalledWith(`/api/v1/worlds/${worldBId}`));
     expect((elements.campaignWorldVersion as HTMLSelectElement).disabled).toBe(true);
     expect((elements.migrateCampaign as HTMLButtonElement).disabled).toBe(true);
+    expect((elements.contextSummary as HTMLElement).classList.contains("hidden")).toBe(true);
+    expect((elements.contextSummary as HTMLElement).textContent).toBe("");
+    expect((elements.contextPreview as HTMLElement).textContent).toBe(originalPreviewPlaceholder);
     resolveOldWorld({ versions: [{ id: "version-a", versionNumber: 1 }] });
     await firstSelection;
     expect((elements.campaignWorldVersion as HTMLSelectElement).disabled).toBe(true);
@@ -158,6 +166,7 @@ describe("Nexus management UI contracts", () => {
     const setAvailability = vi.fn();
     const selectCampaign = managementFunctions<{ selectCampaign: (campaign: Record<string, unknown>) => Promise<void> }>([
       "selectCampaign",
+      "clearContextPreviewPresentation",
       "setCampaignSettingsSectionContentVisibility",
       "normalizedTurnControlStyle"
     ], {
@@ -261,7 +270,14 @@ describe("Nexus management UI contracts", () => {
       expect(panel?.getAttribute("role")).toBe("tabpanel");
       expect(panel?.getAttribute("aria-labelledby")).toBe(tabId);
       if (panelId !== "campaignPanelOverview") {
-        expect(panel?.querySelector(`[data-campaign-section-body="${panelId.slice("campaignPanel".length).toLowerCase()}"]`)?.parentElement).toBe(panel);
+        const sectionBodies = [...panel!.querySelectorAll(`[data-campaign-section-body="${panelId.slice("campaignPanel".length).toLowerCase()}"]`)];
+        expect(sectionBodies.length).toBeGreaterThan(0);
+        expect(sectionBodies.every((body) => panel!.contains(body))).toBe(true);
+        if (panelId === "campaignPanelChronicle") {
+          expect(sectionBodies.every((body) => body.parentElement?.id === "campaignContextSection")).toBe(true);
+        } else {
+          expect(sectionBodies[0]?.parentElement).toBe(panel);
+        }
       }
     }
 
@@ -289,6 +305,19 @@ describe("Nexus management UI contracts", () => {
     expect(conditionalCostSection.classList.contains("hidden")).toBe(true);
   });
 
+  it("hides and restores every separately gated Chronicle body together", () => {
+    const setSectionContentVisibility = managementFunctionWithBindings<(panelId: string, visible: boolean) => void>("setCampaignSettingsSectionContentVisibility", {
+      document: managementDocument
+    });
+    const bodies = [...managementDocument.querySelectorAll<HTMLElement>('[data-campaign-section-body="chronicle"]')];
+    expect(bodies).toHaveLength(2);
+
+    setSectionContentVisibility("chronicle", false);
+    expect(bodies.every((body) => body.classList.contains("hidden"))).toBe(true);
+    setSectionContentVisibility("chronicle", true);
+    expect(bodies.every((body) => !body.classList.contains("hidden"))).toBe(true);
+  });
+
   it("loads only core campaign dependencies during Overview selection", async () => {
     const { document } = parseHTML(managementHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
@@ -313,7 +342,7 @@ describe("Nexus management UI contracts", () => {
     const managementSelectionErrorIsCurrent = () => false;
     const functions = managementFunctions<{
       selectCampaign: (campaign: Record<string, unknown>) => Promise<void>;
-    }>(["selectCampaign", "setCampaignSettingsSectionContentVisibility", "normalizedTurnControlStyle"], {
+    }>(["selectCampaign", "clearContextPreviewPresentation", "setCampaignSettingsSectionContentVisibility", "normalizedTurnControlStyle"], {
       elements,
       document,
       api,
@@ -404,7 +433,7 @@ describe("Nexus management UI contracts", () => {
     });
     const functions = managementFunctions<{
       selectCampaign: (campaign: Record<string, unknown>) => Promise<void>;
-    }>(["selectCampaign", "setCampaignSettingsSectionContentVisibility", "normalizedTurnControlStyle"], {
+    }>(["selectCampaign", "clearContextPreviewPresentation", "setCampaignSettingsSectionContentVisibility", "normalizedTurnControlStyle"], {
       elements,
       document,
       api,
@@ -732,6 +761,98 @@ describe("Nexus management UI contracts", () => {
     expect(managementDocument.querySelector("#memoryQuery")?.parentElement?.textContent).toContain("Preview retrieval query");
   });
 
+  it("keeps explicit preview controls and prior-result slots outside optional Chronicle body loading", () => {
+    const chronicleBodies = [...managementDocument.querySelectorAll('[data-campaign-section-body="chronicle"]')];
+    expect(chronicleBodies.length).toBeGreaterThan(0);
+    for (const id of ["contextForm", "contextSummary", "contextPreview"]) {
+      const node = managementDocument.querySelector(`#${id}`);
+      expect(node).not.toBeNull();
+      expect(chronicleBodies.some((body) => body.contains(node))).toBe(false);
+    }
+  });
+
+  it("keeps current Chronicle errors private while preserving explicit retry", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const privateError = Object.assign(new Error("PRIVATE_CHRONICLE_BODY_CANARY"), { correlationId: "chronicle-safe-321" });
+    const loadSection = vi.fn(() => Promise.reject(privateError));
+    const functions = managementFunctions<{ loadCampaignSettingsSectionForPanel: (panelId: string) => void }>([
+      "campaignSettingsSectionFeedback",
+      "setCampaignSettingsSectionFeedback",
+      "safeWorkflowFailure",
+      "loadCampaignSettingsSectionForPanel"
+    ], {
+      document,
+      elements,
+      CAMPAIGN_SETTINGS_SECTIONS: { chronicle: "chronicle" },
+      CAMPAIGN_SETTINGS_SECTION_LABELS: { chronicle: "Chronicle" },
+      campaignSelectionRequest: 8,
+      selectedCampaign: { id: "campaign-current" },
+      campaignCoreReady: true,
+      campaignSettingsSectionLoadEpochs: new Map(),
+      campaignSectionLoader: { loadSection }
+    });
+
+    functions.loadCampaignSettingsSectionForPanel("chronicle");
+    await vi.waitFor(() => expect(document.querySelector("[data-campaign-section-feedback='chronicle']")?.textContent).toContain("Chronicle could not be loaded"));
+    const feedback = document.querySelector<HTMLElement>("[data-campaign-section-feedback='chronicle']");
+    expect(feedback?.textContent).toBe("Chronicle could not be loaded. Reference: chronicle-safe-321.Retry Chronicle");
+    expect(feedback?.textContent).not.toContain("PRIVATE_CHRONICLE_BODY_CANARY");
+    expect(loadSection).toHaveBeenCalledTimes(1);
+
+    feedback?.querySelector<HTMLButtonElement>("[data-action='retry-campaign-section']")?.click();
+    await vi.waitFor(() => expect(loadSection).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(feedback?.textContent).toContain("Chronicle could not be loaded"));
+    expect(feedback?.textContent).not.toContain("PRIVATE_CHRONICLE_BODY_CANARY");
+  });
+
+  it("shows safe preview errors and only retries after another explicit preview request", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const privateBodyError = Object.assign(new Error("PRIVATE_PREVIEW_BODY_CANARY"), { correlationId: "preview-safe-123" });
+    const malformedReferenceError = Object.assign(new Error("PRIVATE_PREVIEW_RETRY_CANARY"), { correlationId: "private/reference" });
+    const result = {
+      selectedCompression: "balanced",
+      retrieval: { mode: "hybrid" },
+      budget: { estimatedSelectedTokens: 120, configuredTokens: 32_000, truncated: false },
+      scopes: { chronicle: [] }
+    };
+    const api = vi.fn()
+      .mockRejectedValueOnce(privateBodyError)
+      .mockRejectedValueOnce(malformedReferenceError)
+      .mockResolvedValueOnce(result);
+    const functions = managementFunctions<{ previewContext: (event?: { preventDefault(): void }) => Promise<void> }>(["safeWorkflowFailure", "previewContext"], {
+      elements,
+      selectedCampaign: { id: "campaign-preview" },
+      campaignSelectionRequest: 5,
+      contextPreviewSequence: 0,
+      clampedMemoryContextBudget: (value: string) => Number(value),
+      api,
+      number: (value: number) => String(value)
+    });
+    const preview = elements.contextPreview as HTMLElement;
+    const summary = elements.contextSummary as HTMLElement;
+    const previewButton = elements.previewContext as HTMLButtonElement;
+    const event = { preventDefault: vi.fn() };
+
+    await functions.previewContext(event);
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(summary.textContent).toBe("Context preview unavailable. Reference: preview-safe-123.");
+    expect(summary.textContent).not.toContain("PRIVATE_PREVIEW_BODY_CANARY");
+    expect(previewButton.disabled).toBe(false);
+
+    await functions.previewContext(event);
+    expect(api).toHaveBeenCalledTimes(2);
+    expect(summary.textContent).toBe("Context preview unavailable.");
+    expect(summary.textContent).not.toContain("PRIVATE_PREVIEW_RETRY_CANARY");
+    expect(summary.textContent).not.toContain("private/reference");
+
+    await functions.previewContext(event);
+    expect(api).toHaveBeenCalledTimes(3);
+    expect(preview.textContent).toContain('"selectedCompression": "balanced"');
+    expect(summary.textContent).toContain("balanced compression selected");
+  });
+
   it("keeps campaign persistence separate from migration and panel navigation", () => {
     for (const id of [
       "campaignTitle",
@@ -790,6 +911,7 @@ describe("Nexus management UI contracts", () => {
       "setCampaignSettingsPanel",
       "setCampaignSettingsAvailability",
       "setCampaignSettingsSectionContentVisibility",
+      "clearContextPreviewPresentation",
       "clearCampaignEditorSelection",
       "loadCampaigns"
     ], {
@@ -891,6 +1013,7 @@ describe("Nexus management UI contracts", () => {
     }>([
       "setCampaignSettingsPanel",
       "setCampaignSettingsAvailability",
+      "clearContextPreviewPresentation",
       "clearCampaignEditorSelection",
       "loadCampaigns",
       "campaignMessage",

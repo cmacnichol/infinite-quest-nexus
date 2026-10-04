@@ -386,7 +386,6 @@
 
             <section id="campaignPanelChronicle" role="tabpanel" aria-labelledby="campaignTabChronicle" data-campaign-settings-content="chronicle" hidden>
 
-        <div data-campaign-section-body="chronicle">
         <section id="campaignContextSection" class="campaign-settings-section chronicle-settings-section" aria-labelledby="campaignContextTitle">
           <div class="campaign-settings-heading">
             <div>
@@ -395,6 +394,7 @@
             </div>
           </div>
 
+          <div class="chronicle-section-data-body" data-campaign-section-body="chronicle">
         <section id="chronicleHealthRegion" class="chronicle-health-region" aria-label="Chronicle health">
           <div id="memoryMetrics" class="metrics" aria-live="polite"></div>
 
@@ -409,57 +409,59 @@
           </div>
         </section>
 
-        <section class="chronicle-context-workbench" aria-labelledby="chronicleContextWorkbenchTitle">
-          <header class="chronicle-subheading">
-            <div>
-              <h3 id="chronicleContextWorkbenchTitle">Context preview</h3>
-              <p>Preview only — does not change campaign settings. It does not submit a story turn.</p>
-            </div>
-          </header>
-          <div class="chronicle-context-grid">
-            <div class="chronicle-context-controls">
-              <form id="contextForm" class="context-controls">
-                <label>
-                  Context budget
-                  <input id="budgetTokens" type="number" min="512" max="1000000" step="1" value="32000" aria-describedby="budgetTokensSource">
-                  <span id="budgetTokensSource" class="field-note">The selected text provider supplies the available input limit.</span>
-                </label>
-                <label>
-                  Compression
-                  <select id="compression" title="Choose how Chronicle fits story history into the context budget.">
-                    <option value="auto" title="Selects the richest level that fits the current context budget.">Automatic</option>
-                    <option value="full" title="Includes complete accepted narration and actions until the budget is exhausted.">Full history</option>
-                    <option value="balanced" title="Keeps important scene detail while shortening older accepted turns.">Balanced</option>
-                    <option value="compact" title="Uses concise per-turn memory so more chronology fits in the same budget.">Compact</option>
-                    <option value="summary" title="Uses campaign summaries plus the most recent verbatim turns.">Summary + recent</option>
-                  </select>
-                </label>
-                <label class="query-field">
-                  Preview retrieval query
-                  <input id="memoryQuery" type="text" maxlength="4000" placeholder="Optional: name, location, event, or intended action">
-                </label>
-                <button class="button primary" type="submit" disabled id="previewContext">Build context preview</button>
-              </form>
-              <details class="field-help">
-                <summary>What do the compression options include?</summary>
-                <dl>
-                  <dt>Automatic</dt><dd>Selects the richest representation that fits.</dd>
-                  <dt>Full history</dt><dd>Prefers complete accepted narration and actions.</dd>
-                  <dt>Balanced</dt><dd>Shortens older turns while preserving important scene detail.</dd>
-                  <dt>Compact</dt><dd>Uses concise per-turn memory to retain more chronology.</dd>
-                  <dt>Summary + recent</dt><dd>Uses campaign summaries with recent verbatim turns.</dd>
-                </dl>
-              </details>
-            </div>
-            <div class="chronicle-context-preview-pane">
-              <div id="contextSummary" class="status hidden" role="status" aria-live="polite"></div>
-              <details class="context-preview-details">
-                <summary>View context preview</summary>
-                <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>
-              </details>
-            </div>
           </div>
-        </section>
+          <section class="chronicle-context-workbench" aria-labelledby="chronicleContextWorkbenchTitle">
+            <header class="chronicle-subheading">
+              <div>
+                <h3 id="chronicleContextWorkbenchTitle">Context preview</h3>
+                <p>Preview only — does not change campaign settings. It does not submit a story turn.</p>
+              </div>
+            </header>
+            <div class="chronicle-context-grid">
+              <div class="chronicle-context-controls">
+                <form id="contextForm" class="context-controls">
+                  <label>
+                    Context budget
+                    <input id="budgetTokens" type="number" min="512" max="1000000" step="1" value="32000" aria-describedby="budgetTokensSource">
+                    <span id="budgetTokensSource" class="field-note">The selected text provider supplies the available input limit.</span>
+                  </label>
+                  <label>
+                    Compression
+                    <select id="compression" title="Choose how Chronicle fits story history into the context budget.">
+                      <option value="auto" title="Selects the richest level that fits the current context budget.">Automatic</option>
+                      <option value="full" title="Includes complete accepted narration and actions until the budget is exhausted.">Full history</option>
+                      <option value="balanced" title="Keeps important scene detail while shortening older accepted turns.">Balanced</option>
+                      <option value="compact" title="Uses concise per-turn memory so more chronology fits in the same budget.">Compact</option>
+                      <option value="summary" title="Uses campaign summaries plus the most recent verbatim turns.">Summary + recent</option>
+                    </select>
+                  </label>
+                  <label class="query-field">
+                    Preview retrieval query
+                    <input id="memoryQuery" type="text" maxlength="4000" placeholder="Optional: name, location, event, or intended action">
+                  </label>
+                  <button class="button primary" type="submit" disabled id="previewContext">Build context preview</button>
+                </form>
+                <details class="field-help">
+                  <summary>What do the compression options include?</summary>
+                  <dl>
+                    <dt>Automatic</dt><dd>Selects the richest representation that fits.</dd>
+                    <dt>Full history</dt><dd>Prefers complete accepted narration and actions.</dd>
+                    <dt>Balanced</dt><dd>Shortens older turns while preserving important scene detail.</dd>
+                    <dt>Compact</dt><dd>Uses concise per-turn memory to retain more chronology.</dd>
+                    <dt>Summary + recent</dt><dd>Uses campaign summaries with recent verbatim turns.</dd>
+                  </dl>
+                </details>
+              </div>
+              <div class="chronicle-context-preview-pane">
+                <div id="contextSummary" class="status hidden" role="status" aria-live="polite"></div>
+                <details class="context-preview-details">
+                  <summary>View context preview</summary>
+                  <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>
+                </details>
+              </div>
+            </div>
+          </section>
+          <div class="chronicle-section-data-body" data-campaign-section-body="chronicle">
 
         <section class="chronicle-retrieval-config" aria-labelledby="semanticRetrievalTitle">
           <header class="chronicle-subheading">
@@ -510,8 +512,8 @@
             </div>
           </div>
         </section>
+          </div>
         </section>
-        </div>
             </section>
 
             <section id="campaignPanelUsage" role="tabpanel" aria-labelledby="campaignTabUsage" data-campaign-settings-content="usage" hidden>

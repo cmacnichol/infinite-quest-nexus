@@ -50,6 +50,17 @@ async function selectCampaign(page: Page, fixture: LegacyUiFixture, index = 0): 
   await expect(page.locator("#saveCampaign")).toBeEnabled();
 }
 
+async function expectCampaignSectionBodies(page: Page, section: "chronicle" | "illustrations", visible: boolean): Promise<void> {
+  const panel = section === "chronicle" ? "Chronicle" : "Illustrations";
+  const bodies = page.locator(`#campaignPanel${panel} [data-campaign-section-body="${section}"]`);
+  const count = await bodies.count();
+  expect(count).toBeGreaterThan(0);
+  for (let index = 0; index < count; index += 1) {
+    if (visible) await expect(bodies.nth(index)).toBeVisible();
+    else await expect(bodies.nth(index)).toBeHidden();
+  }
+}
+
 async function installCampaignWorkspace(page: Page, campaignCount = 1) {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount });
   const api = await installLegacyUiFixture(page, fixture);
@@ -263,6 +274,113 @@ test("overview_remains_usable_while_opened_chronicle_reads_and_preview_are_block
   }
 });
 
+test("current_section_world_and_preview_errors_hide_private_bodies_and_keep_explicit_retries", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 2 });
+  await installLegacyUiFixture(page, fixture);
+  const idA = campaignId(fixture, 0);
+  const idB = campaignId(fixture, 1);
+  const worldPath = `/api/v1/worlds/${String(campaign(fixture, 1).worldId)}`;
+  let worldDetailReads = 0;
+  let metricsAttempts = 0;
+  let previewAttempts = 0;
+  const previewQueries: string[] = [];
+  const previewResponse = {
+    selectedCompression: "balanced",
+    retrieval: { mode: "hybrid" },
+    budget: { estimatedSelectedTokens: 120, configuredTokens: 32_000, truncated: false },
+    scopes: { chronicle: [] }
+  };
+
+  await page.route("**/api/v1/**", async (route: Route) => {
+    const request = route.request();
+    if (request.method() === "GET" && new URL(request.url()).pathname === worldPath) {
+      worldDetailReads += 1;
+      if (worldDetailReads === 2) {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ message: "PRIVATE_WORLD_BODY_CANARY", correlationId: "private/reference" })
+        });
+        return;
+      }
+    }
+    await route.fallback();
+  });
+  await campaignSectionRoute(page, idB, "memory/metrics", async (route) => {
+    metricsAttempts += 1;
+    if (metricsAttempts === 1) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({
+        message: "PRIVATE_CHRONICLE_BODY_CANARY", correlationId: "chronicle-safe-321"
+      }) });
+      return;
+    }
+    if (metricsAttempts === 2) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({
+        message: "PRIVATE_CHRONICLE_RETRY_CANARY", correlationId: "private/reference"
+      }) });
+      return;
+    }
+    await route.fulfill({ json: chronicleMetricsResponse(29) });
+  });
+  await campaignSectionRoute(page, idB, "memory/embedding-config", async (route) => {
+    await route.fulfill({ json: embeddingConfigResponse("B-current-document-prefix") });
+  });
+  await campaignSectionRoute(page, idB, "memory/context-preview", async (route) => {
+    previewAttempts += 1;
+    previewQueries.push(new URL(route.request().url()).searchParams.get("query") || "");
+    if (previewAttempts === 1) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({
+        message: "PRIVATE_PREVIEW_BODY_CANARY", correlationId: "preview-safe-456"
+      }) });
+      return;
+    }
+    await route.fulfill({ json: previewResponse });
+  });
+
+  await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await selectCampaign(page, fixture, 0);
+  await page.locator(`#campaignList [data-campaign-id="${idB}"]`).click();
+  await expect(page.locator("#memoryTitle")).toHaveText(String(campaign(fixture, 1).title));
+  const campaignStatus = page.locator("#campaignStatusMessage");
+  await expect(campaignStatus).toContainText("Campaign selected, but its world details could not be loaded.");
+  await expect(campaignStatus).not.toContainText("PRIVATE_WORLD_BODY_CANARY");
+  await expect(campaignStatus).not.toContainText("private/reference");
+  await expect(page.locator("#migrateCampaign")).toBeDisabled();
+
+  const sectionFeedback = page.locator('#campaignPanelChronicle [data-campaign-section-feedback="chronicle"]');
+  await page.locator("#campaignTabChronicle").click();
+  await expect(sectionFeedback).toContainText("Chronicle could not be loaded.");
+  await expect(sectionFeedback).toContainText("Reference: chronicle-safe-321.");
+  await expect(sectionFeedback).not.toContainText("PRIVATE_CHRONICLE_BODY_CANARY");
+  await expectCampaignSectionBodies(page, "chronicle", false);
+  await expect.poll(() => metricsAttempts).toBe(1);
+
+  await page.locator('#campaignPanelChronicle [data-action="retry-campaign-section"]').click();
+  await expect(sectionFeedback).toContainText("Chronicle could not be loaded.");
+  await expect(sectionFeedback).not.toContainText("PRIVATE_CHRONICLE_RETRY_CANARY");
+  await expect(sectionFeedback).not.toContainText("private/reference");
+  await expectCampaignSectionBodies(page, "chronicle", false);
+  await expect.poll(() => metricsAttempts).toBe(2);
+  await page.locator('#campaignPanelChronicle [data-action="retry-campaign-section"]').click();
+  await expectCampaignSectionBodies(page, "chronicle", true);
+  await expect.poll(() => metricsAttempts).toBe(3);
+
+  expect(previewAttempts).toBe(0);
+  await page.locator("#memoryQuery").fill("clock tower");
+  await page.locator("#previewContext").click();
+  const previewSummary = page.locator("#contextSummary");
+  await expect(previewSummary).toHaveText("Context preview unavailable. Reference: preview-safe-456.");
+  await expect(previewSummary).not.toContainText("PRIVATE_PREVIEW_BODY_CANARY");
+  expect(previewAttempts).toBe(1);
+  await expect(page.locator("#previewContext")).toBeEnabled();
+
+  await page.locator("#previewContext").click();
+  await expect(previewSummary).toContainText("balanced compression selected");
+  await expect.poll(() => previewAttempts).toBe(2);
+  expect(previewQueries).toEqual(["clock tower", "clock tower"]);
+  expect(idA).not.toBe(idB);
+});
+
 test("late_story_memory_success_from_campaign_a_does_not_replace_campaign_b", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 2 });
   await installLegacyUiFixture(page, fixture);
@@ -359,7 +477,6 @@ test("hides_chronicle_a_while_chronicle_b_fails_then_reveals_only_b_after_retry"
   const releaseFirstBMetrics = deferred<void>();
   let aMetricsReads = 0;
   let bMetricsAttempts = 0;
-  const chronicleBody = page.locator('#campaignPanelChronicle [data-campaign-section-body="chronicle"]');
 
   await campaignSectionRoute(page, idA, "memory/metrics", async (route) => {
     aMetricsReads += 1;
@@ -387,19 +504,19 @@ test("hides_chronicle_a_while_chronicle_b_fails_then_reveals_only_b_after_retry"
     await selectCampaign(page, fixture, 0);
     await page.locator("#campaignTabChronicle").click();
     await expect(page.locator("#embeddingDocumentPrefix")).toHaveValue("A-private-document-prefix");
-    await expect(chronicleBody).toBeVisible();
+    await expectCampaignSectionBodies(page, "chronicle", true);
 
     await page.locator(`#campaignList [data-campaign-id="${idB}"]`).click();
     await bMetricsStarted.promise;
     await expect(page.locator("#memoryTitle")).toHaveText(String(campaign(fixture, 1).title));
-    await expect(chronicleBody).toBeHidden();
+    await expectCampaignSectionBodies(page, "chronicle", false);
     await expect(page.locator("#campaignPanelChronicle [data-campaign-section-feedback]")).toContainText("Loading Chronicle");
 
     releaseFirstBMetrics.resolve(undefined);
     await expect(page.locator("#campaignPanelChronicle [data-campaign-section-feedback]")).toContainText("Chronicle could not be loaded");
-    await expect(chronicleBody).toBeHidden();
+    await expectCampaignSectionBodies(page, "chronicle", false);
     await page.locator('#campaignPanelChronicle [data-action="retry-campaign-section"]').click();
-    await expect(chronicleBody).toBeVisible();
+    await expectCampaignSectionBodies(page, "chronicle", true);
     await expect(page.locator("#embeddingDocumentPrefix")).toHaveValue("B-current-document-prefix");
     await expect(page.locator("#memoryMetrics")).toContainText("29");
     await expect(page.locator("#embeddingDocumentPrefix")).not.toHaveValue("A-private-document-prefix");
@@ -419,7 +536,6 @@ test("hides_illustration_a_while_illustrations_b_fails_then_reveals_only_b_after
   const releaseFirstBConfig = deferred<void>();
   let aConfigReads = 0;
   let bConfigAttempts = 0;
-  const illustrationsBody = page.locator('#campaignPanelIllustrations [data-campaign-section-body="illustrations"]');
 
   await campaignSectionRoute(page, idA, "illustration-config", async (route) => {
     aConfigReads += 1;
@@ -447,19 +563,19 @@ test("hides_illustration_a_while_illustrations_b_fails_then_reveals_only_b_after
     await selectCampaign(page, fixture, 0);
     await page.locator("#campaignTabIllustrations").click();
     await expect(page.locator("#illustrationSegmentWordCount")).toHaveValue("321");
-    await expect(illustrationsBody).toBeVisible();
+    await expectCampaignSectionBodies(page, "illustrations", true);
 
     await page.locator(`#campaignList [data-campaign-id="${idB}"]`).click();
     await bConfigStarted.promise;
     await expect(page.locator("#memoryTitle")).toHaveText(String(campaign(fixture, 1).title));
-    await expect(illustrationsBody).toBeHidden();
+    await expectCampaignSectionBodies(page, "illustrations", false);
     await expect(page.locator("#campaignPanelIllustrations [data-campaign-section-feedback]")).toContainText("Loading Illustrations");
 
     releaseFirstBConfig.resolve(undefined);
     await expect(page.locator("#campaignPanelIllustrations [data-campaign-section-feedback]")).toContainText("Illustrations could not be loaded");
-    await expect(illustrationsBody).toBeHidden();
+    await expectCampaignSectionBodies(page, "illustrations", false);
     await page.locator('#campaignPanelIllustrations [data-action="retry-campaign-section"]').click();
-    await expect(illustrationsBody).toBeVisible();
+    await expectCampaignSectionBodies(page, "illustrations", true);
     await expect(page.locator("#illustrationSegmentWordCount")).toHaveValue("654");
     expect(aConfigReads).toBe(1);
     expect(bConfigAttempts).toBe(2);
@@ -473,7 +589,6 @@ test("keeps_advanced_values_hidden_across_empty_selection_before_loading_campaig
   await installLegacyUiFixture(page, fixture);
   const idA = campaignId(fixture, 0);
   const idB = campaignId(fixture, 1);
-  const chronicleBody = page.locator('#campaignPanelChronicle [data-campaign-section-body="chronicle"]');
   const bMetricsStarted = deferred<void>();
   const releaseBMetrics = deferred<void>();
   let listReads = 0;
@@ -510,24 +625,24 @@ test("keeps_advanced_values_hidden_across_empty_selection_before_loading_campaig
     await selectCampaign(page, fixture, 0);
     await page.locator("#campaignTabChronicle").click();
     await expect(page.locator("#embeddingDocumentPrefix")).toHaveValue("A-private-document-prefix");
-    await expect(chronicleBody).toBeVisible();
+    await expectCampaignSectionBodies(page, "chronicle", true);
 
     await page.locator("#refreshCampaigns").click();
     await expect(page.locator("#memoryTitle")).toHaveText("Select a campaign");
-    await expect(chronicleBody).toBeHidden();
+    await expectCampaignSectionBodies(page, "chronicle", false);
 
     await page.locator("#refreshCampaigns").click();
     await selectCampaign(page, fixture, 1);
     await expect(page.locator("#memoryTitle")).toHaveText(String(campaign(fixture, 1).title));
-    await expect(chronicleBody).toBeHidden();
+    await expectCampaignSectionBodies(page, "chronicle", false);
     await page.locator("#campaignTabChronicle").click();
     await bMetricsStarted.promise;
     await expect(page.locator("#embeddingDocumentPrefix")).toHaveValue("B-current-document-prefix");
-    await expect(chronicleBody).toBeHidden();
+    await expectCampaignSectionBodies(page, "chronicle", false);
     await expect(page.locator("#campaignPanelChronicle [data-campaign-section-feedback]")).toContainText("Loading Chronicle");
 
     releaseBMetrics.resolve(undefined);
-    await expect(chronicleBody).toBeVisible();
+    await expectCampaignSectionBodies(page, "chronicle", true);
     await expect(page.locator("#embeddingDocumentPrefix")).toHaveValue("B-current-document-prefix");
     await expect(page.locator("#memoryMetrics")).toContainText("29");
     expect(listReads).toBe(3);
