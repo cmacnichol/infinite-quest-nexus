@@ -546,9 +546,36 @@ integration("T17 durable continuity review", () => {
       expect(keepReceipt).toMatchObject({ decision: "keep", candidateHash: candidateBeforeKeep.storyHash });
       const callsAfterKeep = requests.length;
 
+      expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+      const firstWorkerId = `nested-format-crash-a-${randomUUID()}`;
+      const firstClaim = await repository.claimNext({ workerId: firstWorkerId, leaseSeconds: 30 });
+      expect(firstClaim?.jobId).toBe(job.id);
+      let interrupted = false;
+      const crashingRepository = {
+        ...repository,
+        async commitAcceptedTurn(input: Parameters<typeof repository.commitAcceptedTurn>[0]) {
+          interrupted = true;
+          await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+          throw Object.assign(new Error("Injected worker interruption after saved Keep, immediately before accepted-turn commit."), { code: "generation_cancelled" });
+        }
+      };
+      await createGenerationExecutor({ pool, repository: crashingRepository, collaborators })
+        .execute({ claim: firstClaim!, workerId: firstWorkerId, leaseSeconds: 30 });
+      expect(interrupted).toBe(true);
+      const expiredClaim = (await pool.query<{ status: string; lease_owner: string; lease_expired: boolean }>(
+        "SELECT status,lease_owner,lease_expires_at < now() AS lease_expired FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!;
+      expect(expiredClaim).toEqual({ status: "committing", lease_owner: firstWorkerId, lease_expired: true });
+      expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+
       const secondWorkerId = `nested-format-crash-b-${randomUUID()}`;
       const secondClaim = await repository.claimNext({ workerId: secondWorkerId, leaseSeconds: 30 });
       expect(secondClaim?.jobId).toBe(job.id);
+      expect(secondClaim!.attempts).toBe(firstClaim!.attempts + 1);
+      const reclaimedLease = (await pool.query<{ status: string; lease_owner: string; attempts: number; lease_expired: boolean }>(
+        "SELECT status,lease_owner,attempts,lease_expires_at < now() AS lease_expired FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!;
+      expect(reclaimedLease).toEqual({ status: "assessing", lease_owner: secondWorkerId, attempts: secondClaim!.attempts, lease_expired: false });
       await expect(createGenerationExecutor({ pool, repository, collaborators })
         .execute({ claim: secondClaim!, workerId: secondWorkerId, leaseSeconds: 30 })).resolves.toBe(true);
       const accepted = (await pool.query<{ state_snapshot_private: {
@@ -586,6 +613,8 @@ integration("T17 durable continuity review", () => {
       expect((await pool.query<{ count: number }>(
         "SELECT count(*)::int AS count FROM turns WHERE id=(SELECT result_turn_id FROM generation_jobs WHERE id=$1)", [job.id]
       )).rows[0]!.count).toBe(1);
+      expect((await acceptedAuthoritySnapshot(campaignId)).turns as unknown[])
+        .toHaveLength((acceptedBefore.turns as unknown[]).length + 1);
     } finally {
       await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyContinuityResponseFormatConfiguration)]);
     }
