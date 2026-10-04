@@ -31,11 +31,16 @@ function selectionHarness({
   elements.worldAuthorDialog.open = authorOpen;
   const messages: string[] = [];
   const loadCharacters = vi.fn(async () => undefined);
-  const source = functionSources(["selectWorld", "isCurrentWorldSelection"]);
+  const detailCache = new Map<string, Record<string, unknown>>();
+  const detailRequests = new Map<string, Promise<Record<string, unknown>>>();
+  const detailEpochs = new Map<string, number>();
+  const availableWorlds = [world("world-a", "World Alpha"), world("world-b", "World Beta")];
+  const source = functionSources(["selectWorld", "isCurrentWorldSelection", "getDashboardWorldDetails", "beginDashboardWorldDetailRequest", "isDashboardWorldDetailRequestCurrent"]);
   const names = [
     "elements", "api", "dismissEditDialog", "worldAuthorBusy", "editDialogSessions", "renderManagementWorlds",
     "setWorldEditorDisabled", "number", "Option", "updateWorldVersionDeleteAvailability", "updateCharacterGeneratorAvailability",
-    "loadWorldVersionPlayableCharacters", "worldMessage", "resumeWorldCoverJob", "initialWorld"
+    "loadWorldVersionPlayableCharacters", "worldMessage", "resumeWorldCoverJob", "initialWorld", "worlds",
+    "dashboardWorldDetails", "dashboardWorldDetailRequests", "dashboardWorldDetailRequestEpochs", "safeWorkflowFailure"
   ];
   const implementation = Function(
     ...names,
@@ -60,7 +65,12 @@ function selectionHarness({
     loadCharacters,
     (message: string) => messages.push(message),
     async () => undefined,
-    initialWorld
+    initialWorld,
+    availableWorlds,
+    detailCache,
+    detailRequests,
+    detailEpochs,
+    (fallback: string, error: unknown) => (error as Error)?.message || fallback
   ) as {
     selectWorld(worldId: string): Promise<void>;
     isCurrentWorldSelection(worldId: string, epoch: number): boolean;

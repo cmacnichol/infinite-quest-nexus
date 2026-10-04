@@ -186,15 +186,15 @@ test("keyboard_selection_persists_through_collection_rerenders", async ({ page }
   await expect(page.locator("#campaignTitle")).toHaveValue("Repeated Expedition");
 });
 
-test("zero_extra_detail_requests_on_search_after_initial_hydration", async ({ page }) => {
+test("world_summaries_need_no_detail_requests_for_collection_search", async ({ page }) => {
   const fixture = collectionsFixture();
   const api = await installLegacyUiFixture(page, fixture);
   await mkdir(evidenceDirectory, { recursive: true });
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto(`${origin}/nexus/index.html#world-library`);
   await expect(page.locator("#managementWorldResults")).toHaveText("Showing 39 of 39 worlds");
-  await expect.poll(() => worldDetailRequests(api.requests).length).toBe(37);
-  await expect.poll(() => worldDetailRequests(api.requests).every((request) => request.finishedAt !== undefined)).toBe(true);
+  await expect.poll(() => api.requests.filter((request) => request.path === "/api/v1/worlds" && request.finishedAt !== undefined).length).toBeGreaterThan(0);
+  expect(worldDetailRequests(api.requests)).toHaveLength(0);
   const initialDetailRequestCount = worldDetailRequests(api.requests).length;
 
   await page.locator("#managementWorldSearch").fill("Fixture World 39");

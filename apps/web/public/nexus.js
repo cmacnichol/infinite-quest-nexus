@@ -140,7 +140,10 @@ const editDialogSessions = new WeakMap();
 const editDialogBindingDisposers = new WeakMap();
 let dashboardWorld = null;
 const dashboardWorldDetails = new Map();
+const dashboardWorldDetailRequests = new Map();
 const dashboardWorldDetailRequestEpochs = new Map();
+const dashboardInitialStatsSources = new Set(["worlds", "campaigns"]);
+let dashboardInitialStatsPromise = null;
 let dashboardWorldDetailsSelectionEpoch = 0;
 let worldVersionCharacters = [];
 let worldVersionCampaignReady = false;
@@ -190,6 +193,7 @@ let illustrationRefinementPromptValue = "";
 let defaultIllustrationRefinementPrompt = "";
 let sessionUser = null;
 let transferPreviewSequence = 0;
+let transferTargetVersionsRequestEpoch = 0;
 let transferPreview = null;
 let transferIdempotencyKey = "";
 let promptLibrary = null;
@@ -2222,7 +2226,7 @@ function worldPreview(world, detail = dashboardWorldDetails.get(world.id)) {
     tone: String(content.tone || "Open-ended"),
     description: String(content.premise || content.backgroundStory || "A published world ready for a new campaign."),
     firstAction: String(content.firstAction || "Begin the adventure."),
-    imageUrl: detail?.imageUrl || content.imageUrl || content.artworkUrl || ""
+    imageUrl: detail?.imageUrl || world?.imageUrl || content.imageUrl || content.artworkUrl || ""
   };
 }
 
@@ -2288,21 +2292,25 @@ function renderDashboardWorlds() {
   reconcileKeyedCollection(elements.dashboardWorlds, available, "world-id", createDashboardWorldCard, (card, world) => createDashboardWorldCard(world, card));
 }
 
-async function hydrateDashboardWorlds() {
-  const available = worlds.filter((world) => world.status !== "archived" && world.latestVersionId);
-  await Promise.all(available.map(async (world) => {
-    if (dashboardWorldDetails.has(world.id)) return;
-    const requestEpoch = beginDashboardWorldDetailRequest(world.id);
-    try {
-      const detail = await api(`/api/v1/worlds/${encodeURIComponent(world.id)}`);
-      if (!isDashboardWorldDetailRequestCurrent(world.id, requestEpoch)) return;
-      if (!worlds.some((current) => current.id === world.id)) return;
-      dashboardWorldDetails.set(world.id, detail);
-    } catch {
-      // The summary card remains usable if optional detail hydration fails.
-    }
-  }));
-  renderDashboardWorlds();
+async function getDashboardWorldDetails(worldId) {
+  if (dashboardWorldDetails.has(worldId)) return dashboardWorldDetails.get(worldId);
+  const pending = dashboardWorldDetailRequests.get(worldId);
+  if (pending) return pending;
+
+  const requestEpoch = beginDashboardWorldDetailRequest(worldId);
+  const request = Promise.resolve()
+    .then(() => api(`/api/v1/worlds/${encodeURIComponent(worldId)}`))
+    .then((detail) => {
+      if (isDashboardWorldDetailRequestCurrent(worldId, requestEpoch) && worlds.some((world) => world.id === worldId)) {
+        dashboardWorldDetails.set(worldId, detail);
+      }
+      return detail;
+    })
+    .finally(() => {
+      if (dashboardWorldDetailRequests.get(worldId) === request) dashboardWorldDetailRequests.delete(worldId);
+    });
+  dashboardWorldDetailRequests.set(worldId, request);
+  return request;
 }
 
 function beginDashboardWorldDetailRequest(worldId) {
@@ -2318,6 +2326,7 @@ function isDashboardWorldDetailRequestCurrent(worldId, requestEpoch) {
 function invalidateDashboardWorldDetails(worldId) {
   if (!worldId) return;
   dashboardWorldDetails.delete(worldId);
+  if (typeof dashboardWorldDetailRequests !== "undefined") dashboardWorldDetailRequests.delete(worldId);
   dashboardWorldDetailRequestEpochs.set(worldId, (dashboardWorldDetailRequestEpochs.get(worldId) || 0) + 1);
 }
 
@@ -2470,8 +2479,29 @@ function dashboardReportedCost(costs) {
   return { total, providers: [...new Set(providers)].join(" · ") || "Reported by configured providers" };
 }
 
-async function loadDashboardStats() {
-  if (!elements.dashboardStatsGrid) return;
+function loadDashboardStats(source = "") {
+  if (!elements.dashboardStatsGrid) return Promise.resolve();
+  const initialSource = dashboardInitialStatsSources.delete(source);
+  if (!initialSource) dashboardInitialStatsPromise = null;
+  let request = initialSource ? dashboardInitialStatsPromise : null;
+  if (!request) {
+    request = readAndRenderDashboardStats();
+    if (initialSource) dashboardInitialStatsPromise = request;
+    void request.then((succeeded) => {
+      if ((!succeeded || dashboardInitialStatsSources.size === 0) && dashboardInitialStatsPromise === request) {
+        dashboardInitialStatsPromise = null;
+      }
+    });
+  }
+  if (initialSource && dashboardInitialStatsSources.size === 0) {
+    void request.then(() => {
+      if (dashboardInitialStatsPromise === request) dashboardInitialStatsPromise = null;
+    });
+  }
+  return request;
+}
+
+async function readAndRenderDashboardStats() {
   try {
     const stats = await api("/api/v1/dashboard/stats");
     const reportedCost = dashboardReportedCost(stats.providerCosts);
@@ -2483,6 +2513,7 @@ async function loadDashboardStats() {
     elements.statCostProviders.textContent = reportedCost.providers;
     elements.statCostProviders.title = reportedCost.providers;
     elements.dashboardStatsStatus.textContent = `${number(stats.worlds?.total)} worlds · ${number(stats.campaigns?.total)} campaigns total`;
+    return true;
   } catch (error) {
     elements.statWorlds.textContent = number(worlds.filter((world) => world.status !== "archived" && world.latestVersionId).length);
     elements.statCampaigns.textContent = number(campaigns.filter((campaign) => campaign.status === "active").length);
@@ -2491,6 +2522,7 @@ async function loadDashboardStats() {
     elements.statCost.textContent = "Unavailable";
     elements.statCostProviders.textContent = "Refresh to retry provider totals";
     elements.dashboardStatsStatus.textContent = error.message || "Dashboard statistics are temporarily unavailable.";
+    return false;
   }
 }
 
@@ -2498,20 +2530,17 @@ async function openWorldDetails(worldId) {
   const selectionEpoch = ++dashboardWorldDetailsSelectionEpoch;
   const summary = worlds.find((world) => world.id === worldId);
   if (!summary) return;
-  let detail = dashboardWorldDetails.get(worldId);
-  if (!detail) {
-    const requestEpoch = beginDashboardWorldDetailRequest(worldId);
-    try {
-      detail = await api(`/api/v1/worlds/${encodeURIComponent(worldId)}`);
-      if (selectionEpoch !== dashboardWorldDetailsSelectionEpoch || !isDashboardWorldDetailRequestCurrent(worldId, requestEpoch)) return;
-      dashboardWorldDetails.set(worldId, detail);
-    } catch (error) {
-      if (selectionEpoch !== dashboardWorldDetailsSelectionEpoch || !isDashboardWorldDetailRequestCurrent(worldId, requestEpoch)) return;
-      elements.dashboardStatsStatus.textContent = error.message || String(error);
-      return;
-    }
+  let detail;
+  const detailRequest = getDashboardWorldDetails(worldId);
+  const requestEpoch = dashboardWorldDetailRequestEpochs.get(worldId);
+  try {
+    detail = await detailRequest;
+  } catch (error) {
+    if (selectionEpoch !== dashboardWorldDetailsSelectionEpoch || !isDashboardWorldDetailRequestCurrent(worldId, requestEpoch)) return;
+    elements.dashboardStatsStatus.textContent = error.message || String(error);
+    return;
   }
-  if (selectionEpoch !== dashboardWorldDetailsSelectionEpoch || !worlds.some((world) => world.id === worldId)) return;
+  if (selectionEpoch !== dashboardWorldDetailsSelectionEpoch || !isDashboardWorldDetailRequestCurrent(worldId, requestEpoch) || !worlds.some((world) => world.id === worldId)) return;
   dashboardWorld = { ...summary, ...detail, latestVersionId: summary.latestVersionId, latestVersionNumber: summary.latestVersionNumber };
   const preview = worldPreview(summary, detail);
   elements.worldDetailsTitle.textContent = summary.title;
@@ -3238,8 +3267,7 @@ async function loadWorlds(preselectId = "", selectionOptions = {}) {
   clearWorkflowReadFailure(elements.worldStatus, "worlds", "workflowRetryWorlds", "World content is stored in PostgreSQL, never embedded in this client.");
   renderDashboardWorlds();
   renderManagementWorlds();
-  void hydrateDashboardWorlds();
-  void loadDashboardStats();
+  void loadDashboardStats("worlds");
   if (selectionIntentEpoch !== worldSelectionIntentEpoch) return;
   if (!worlds.length) {
     const missingWorldId = selectedWorld?.id;
@@ -3306,7 +3334,7 @@ async function selectWorld(worldId, selectionOptions = {}) {
   const preserveWorkflowFeedback = selectionOptions.preserveWorkflowFeedbackForWorldId === worldId;
   if (!preserveWorkflowFeedback) worldMessage("Loading selected world…");
   try {
-    const world = await api(`/api/v1/worlds/${encodeURIComponent(worldId)}`);
+    const world = await getDashboardWorldDetails(worldId);
     if (!isCurrentWorldSelection(worldId, selectionEpoch)) return;
     if (world?.id !== worldId) throw new Error("The selected world response did not match the requested world.");
     selectedWorld = world;
@@ -4846,7 +4874,7 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false, expli
   }
   renderDashboardCampaigns();
   updateStoryViewLink();
-  void loadDashboardStats();
+  void loadDashboardStats("campaigns");
   if ((selectionRequest !== null && selectionRequest !== campaignSelectionRequest)
     || (navigationIntent !== null && navigationIntent !== managementNavigationIntent)) return;
   renderManagementCampaigns();
@@ -5067,27 +5095,46 @@ elements.discardChangesTitle.textContent = "Discard unsaved changes?";
 
 async function migrateSelectedCampaign() {
   if (!selectedCampaign) return;
-  const world = await api(`/api/v1/worlds/${selectedCampaign.worldId}`);
+  const campaign = selectedCampaign;
+  const campaignId = campaign.id;
+  const worldId = campaign.worldId;
+  const selectionRequest = campaignSelectionRequest;
+  const campaignWorldVersionId = campaign.worldVersionId;
+  const campaignWorldVersionNumber = campaign.worldVersionNumber;
   const targetId = elements.campaignWorldVersion.value;
+  const detailRequest = getDashboardWorldDetails(worldId);
+  const requestEpoch = dashboardWorldDetailRequestEpochs.get(worldId);
+  const isCurrentCampaign = () => selectionRequest === campaignSelectionRequest
+    && selectedCampaign?.id === campaignId
+    && selectedCampaign?.worldId === worldId
+    && selectedCampaign?.worldVersionId === campaignWorldVersionId
+    && selectedCampaign?.worldVersionNumber === campaignWorldVersionNumber;
+  const isCurrentIntent = () => isCurrentCampaign()
+    && elements.campaignWorldVersion.value === targetId
+    && isDashboardWorldDetailRequestCurrent(worldId, requestEpoch);
+  const world = await detailRequest;
+  if (!isCurrentIntent()) return;
   const target = world.versions.find((version) => version.id === targetId);
-  if (!target || target.versionNumber <= selectedCampaign.worldVersionNumber) {
+  if (!target || target.versionNumber <= campaignWorldVersionNumber) {
     campaignMessage("Select a newer published version before migrating.", "error");
     return;
   }
-  if (!window.confirm(`Migrate this campaign from world version ${selectedCampaign.worldVersionNumber} to version ${target.versionNumber}? Accepted turns will remain append-only.`)) return;
+  if (!window.confirm(`Migrate this campaign from world version ${campaignWorldVersionNumber} to version ${target.versionNumber}? Accepted turns will remain append-only.`)) return;
+  if (!isCurrentIntent()) return;
   elements.migrateCampaign.disabled = true;
   try {
-    await api(`/api/v1/campaigns/${selectedCampaign.id}/migrate-world`, {
+    await api(`/api/v1/campaigns/${campaignId}/migrate-world`, {
       method: "POST",
       body: JSON.stringify({ worldVersionId: target.id, note: "Explicit migration from the World Library interface." })
     });
-    await loadCampaigns(selectedCampaign.id);
+    if (!isCurrentCampaign()) return;
+    await loadCampaigns(campaignId, { selectionRequest });
+    if (selectedCampaign?.id !== campaignId || selectedCampaign?.worldId !== worldId) return;
     campaignMessage(`Campaign migrated to world version ${target.versionNumber}. The next generation will bootstrap a fresh model chain from database state.`, "success");
   } catch (error) {
-    campaignMessage(error.message || String(error), "error");
+    if (isCurrentIntent()) campaignMessage(error.message || String(error), "error");
   }
 }
-
 function transferRequest() {
   return {
     targetWorldVersionId: elements.transferTargetVersion.value,
@@ -5157,13 +5204,20 @@ async function previewCampaignTransfer() {
 }
 
 async function loadTransferTargetVersions() {
+  const sequence = ++transferTargetVersionsRequestEpoch;
   const worldId = elements.transferTargetWorld.value;
   resetTransferPreview(worldId ? "Loading published versions…" : undefined);
   elements.transferTargetVersion.replaceChildren(new Option(worldId ? "Loading published versions…" : "Select a target world first", ""));
   elements.transferTargetVersion.disabled = true;
   if (!worldId) return;
+  const detailRequest = getDashboardWorldDetails(worldId);
+  const requestEpoch = dashboardWorldDetailRequestEpochs.get(worldId);
+  const isCurrentRequest = () => sequence === transferTargetVersionsRequestEpoch
+    && worldId === elements.transferTargetWorld.value
+    && isDashboardWorldDetailRequestCurrent(worldId, requestEpoch);
   try {
-    const world = await api(`/api/v1/worlds/${worldId}`);
+    const world = await detailRequest;
+    if (!isCurrentRequest()) return;
     elements.transferTargetVersion.replaceChildren(new Option("Select a published version", ""));
     for (const version of [...(world.versions || [])].reverse()) {
       elements.transferTargetVersion.append(new Option(`Version ${version.versionNumber}${version.releaseNotes ? ` · ${version.releaseNotes}` : ""}`, version.id));
@@ -5171,11 +5225,11 @@ async function loadTransferTargetVersions() {
     elements.transferTargetVersion.disabled = !(world.versions || []).length;
     resetTransferPreview((world.versions || []).length ? undefined : "This world has no published version available for transfer.");
   } catch (error) {
+    if (!isCurrentRequest()) return;
     resetTransferPreview(error.message || String(error));
     elements.transferPreviewSummary.className = "status error";
   }
 }
-
 async function openCampaignTransfer() {
   if (!selectedCampaign) return;
   transferIdempotencyKey = crypto.randomUUID();
@@ -7683,7 +7737,7 @@ async function loadCampaignImportVersions(refreshSequence) {
     await refreshCampaignImportPreview();
     return;
   }
-  const world = await api(`/api/v1/worlds/${worldId}`);
+  const world = await getDashboardWorldDetails(worldId);
   if (!isCampaignImportRefreshCurrent(refreshSequence) || worldId !== elements.campaignImportWorld.value) return;
   const versions = [...(world.versions || [])].sort((a, b) => b.versionNumber - a.versionNumber);
   elements.campaignImportVersion.replaceChildren(

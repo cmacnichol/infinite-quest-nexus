@@ -672,6 +672,7 @@ describe("Nexus management UI contracts", () => {
         { id: "text-1", name: "Story text", providerRole: "text", providerType: "openai_compatible", defaultModel: "story-model", requestTimeoutMs: 300000, enabled: true, isDefault: false }
       ],
       providerTypeLabel: () => "OpenAI compatible",
+      renderProviderReadiness: vi.fn(),
       beginProviderEdit: vi.fn(),
       enabledProviders: (role: string) => role === "text" ? [{ id: "text-1" }] : [],
       api,
@@ -1718,5 +1719,214 @@ describe("Nexus management UI contracts", () => {
     elements.promptLibraryContent.value = "Changed instructions";
     functions.renderPromptLibrary(true);
     expect(elements.promptLibraryContent.value).toBe("Saved instructions");
+  });
+});
+
+function managementAsyncFunctionSource(name: string) {
+  const start = managementScript.indexOf(`function ${name}(`);
+  const definitionStart = managementScript.slice(start - 6, start) === "async " ? start - 6 : start;
+  const next = /\n(?:async )?function /.exec(managementScript.slice(start + 1));
+  const end = next ? start + 1 + next.index : -1;
+  if (start < 0 || end < 0) throw new Error(`Unable to locate management function ${name}.`);
+  return managementScript.slice(definitionStart, end);
+}
+
+function campaignMigrationHarness(initialCampaign: Record<string, unknown>, targetVersionId: string, detail: Promise<Record<string, unknown>>) {
+  const elements = { campaignWorldVersion: { value: targetVersionId }, migrateCampaign: { disabled: false } };
+  const detailEpochs = new Map<string, number>();
+  const getDashboardWorldDetails = vi.fn((worldId: string) => {
+    detailEpochs.set(worldId, (detailEpochs.get(worldId) || 0) + 1);
+    return detail;
+  });
+  const isDashboardWorldDetailRequestCurrent = (worldId: string, requestEpoch: number) => detailEpochs.get(worldId) === requestEpoch;
+  const api = vi.fn(async () => ({}));
+  const loadCampaigns = vi.fn(async () => undefined);
+  const campaignMessage = vi.fn();
+  const source = managementAsyncFunctionSource("migrateSelectedCampaign");
+  const implementation = Function(
+    "elements", "getDashboardWorldDetails", "dashboardWorldDetailRequestEpochs", "isDashboardWorldDetailRequestCurrent",
+    "window", "api", "loadCampaigns", "campaignMessage", "initialCampaign",
+    `let selectedCampaign = initialCampaign; let campaignSelectionRequest = 1; ${source}\nreturn { migrateSelectedCampaign, selectCampaign(campaign) { selectedCampaign = campaign; campaignSelectionRequest += 1; } };`
+  )(
+    elements,
+    getDashboardWorldDetails,
+    detailEpochs,
+    isDashboardWorldDetailRequestCurrent,
+    { confirm: vi.fn(() => true) },
+    api,
+    loadCampaigns,
+    campaignMessage,
+    initialCampaign
+  ) as {
+    migrateSelectedCampaign(): Promise<void>;
+    selectCampaign(campaign: Record<string, unknown>): void;
+  };
+  return { implementation, elements, detailEpochs, getDashboardWorldDetails, api, loadCampaigns, campaignMessage };
+}
+
+function transferVersionsHarness(details: (worldId: string) => Promise<Record<string, unknown>>) {
+  const elements = {
+    transferTargetWorld: { value: "" },
+    transferTargetVersion: {
+      disabled: false,
+      value: "",
+      options: [] as Array<{ label: string; value: string }>,
+      replaceChildren(...options: Array<{ label: string; value: string }>) { this.options = options; },
+      append(option: { label: string; value: string }) { this.options.push(option); }
+    },
+    transferPreviewSummary: { className: "status" }
+  };
+  const detailEpochs = new Map<string, number>();
+  const getDashboardWorldDetails = vi.fn((worldId: string) => {
+    detailEpochs.set(worldId, (detailEpochs.get(worldId) || 0) + 1);
+    return details(worldId);
+  });
+  const isDashboardWorldDetailRequestCurrent = (worldId: string, requestEpoch: number) => detailEpochs.get(worldId) === requestEpoch;
+  const resetTransferPreview = vi.fn((message?: string) => {
+    if (message) elements.transferPreviewSummary.className = "status error";
+    else elements.transferPreviewSummary.className = "status";
+  });
+  const source = managementAsyncFunctionSource("loadTransferTargetVersions");
+  const implementation = Function(
+    "elements", "getDashboardWorldDetails", "dashboardWorldDetailRequestEpochs", "isDashboardWorldDetailRequestCurrent", "resetTransferPreview", "Option",
+    `let transferTargetVersionsRequestEpoch = 0; ${source}\nreturn { loadTransferTargetVersions };`
+  )(
+    elements,
+    getDashboardWorldDetails,
+    detailEpochs,
+    isDashboardWorldDetailRequestCurrent,
+    resetTransferPreview,
+    class { constructor(public label: string, public value: string) {} }
+  ) as { loadTransferTargetVersions(): Promise<void> };
+  return { implementation, elements, detailEpochs, getDashboardWorldDetails, resetTransferPreview };
+}
+
+describe("campaign migration and transfer detail intent", () => {
+  const worldA = { id: "world-a", versions: [
+    { id: "version-one", versionNumber: 1 },
+    { id: "version-two", versionNumber: 2 },
+    { id: "version-three", versionNumber: 3 }
+  ] };
+  const campaignA = { id: "campaign-a", worldId: "world-a", worldVersionId: "version-one", worldVersionNumber: 1 };
+  const campaignB = { id: "campaign-b", worldId: "world-a", worldVersionId: "version-one", worldVersionNumber: 1 };
+
+  it("migrates the captured campaign and version when selection stays current", async () => {
+    const { implementation, api, loadCampaigns, campaignMessage } = campaignMigrationHarness(campaignA, "version-two", Promise.resolve(worldA));
+
+    await implementation.migrateSelectedCampaign();
+
+    expect(api).toHaveBeenCalledWith("/api/v1/campaigns/campaign-a/migrate-world", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ worldVersionId: "version-two", note: "Explicit migration from the World Library interface." })
+    }));
+    expect(loadCampaigns).toHaveBeenCalledWith("campaign-a", { selectionRequest: 1 });
+    expect(campaignMessage).toHaveBeenCalledWith(expect.stringContaining("Campaign migrated to world version 2."), "success");
+  });
+
+  it("does not migrate a newly selected campaign while the original world's details are pending", async () => {
+    let resolveDetail!: (world: Record<string, unknown>) => void;
+    const detail = new Promise<Record<string, unknown>>((resolve) => { resolveDetail = resolve; });
+    const { implementation, api, loadCampaigns } = campaignMigrationHarness(campaignA, "version-two", detail);
+
+    const migration = implementation.migrateSelectedCampaign();
+    implementation.selectCampaign(campaignB);
+    resolveDetail(worldA);
+    await migration;
+
+    expect(api).not.toHaveBeenCalled();
+    expect(loadCampaigns).not.toHaveBeenCalled();
+  });
+
+  it("does not submit a version chosen after migration started", async () => {
+    let resolveDetail!: (world: Record<string, unknown>) => void;
+    const detail = new Promise<Record<string, unknown>>((resolve) => { resolveDetail = resolve; });
+    const { implementation, elements, api } = campaignMigrationHarness(campaignA, "version-two", detail);
+
+    const migration = implementation.migrateSelectedCampaign();
+    elements.campaignWorldVersion.value = "version-three";
+    resolveDetail(worldA);
+    await migration;
+
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  it("keeps only the latest target world's versions when detail responses finish out of order", async () => {
+    let resolveA!: (world: Record<string, unknown>) => void;
+    let resolveB!: (world: Record<string, unknown>) => void;
+    const details = (worldId: string) => new Promise<Record<string, unknown>>((resolve) => {
+      if (worldId === "world-a") resolveA = resolve;
+      else resolveB = resolve;
+    });
+    const { implementation, elements } = transferVersionsHarness(details);
+
+    elements.transferTargetWorld.value = "world-a";
+    const first = implementation.loadTransferTargetVersions();
+    elements.transferTargetWorld.value = "world-b";
+    const second = implementation.loadTransferTargetVersions();
+    resolveB({ versions: [{ id: "version-b", versionNumber: 2 }] });
+    await second;
+    resolveA({ versions: [{ id: "version-a", versionNumber: 1 }] });
+    await first;
+
+    expect(elements.transferTargetVersion.options.map((option) => option.value)).toEqual(["", "version-b"]);
+    expect(elements.transferTargetVersion.disabled).toBe(false);
+  });
+
+  it("does not present a stale target-world detail failure", async () => {
+    let rejectA!: (error: Error) => void;
+    let resolveB!: (world: Record<string, unknown>) => void;
+    const details = (worldId: string) => worldId === "world-a"
+      ? new Promise<Record<string, unknown>>((_resolve, reject) => { rejectA = reject; })
+      : new Promise<Record<string, unknown>>((resolve) => { resolveB = resolve; });
+    const { implementation, elements, resetTransferPreview } = transferVersionsHarness(details);
+
+    elements.transferTargetWorld.value = "world-a";
+    const first = implementation.loadTransferTargetVersions();
+    elements.transferTargetWorld.value = "world-b";
+    const second = implementation.loadTransferTargetVersions();
+    resolveB({ versions: [{ id: "version-b", versionNumber: 2 }] });
+    await second;
+    const resetCount = resetTransferPreview.mock.calls.length;
+    rejectA(new Error("Stale world details failed"));
+    await first;
+
+    expect(resetTransferPreview).toHaveBeenCalledTimes(resetCount);
+    expect(elements.transferPreviewSummary.className).toBe("status");
+    expect(elements.transferTargetVersion.options.map((option) => option.value)).toEqual(["", "version-b"]);
+    expect(elements.transferTargetVersion.disabled).toBe(false);
+  });
+});
+
+describe("transfer target world detail epoch fences", () => {
+  it("does not install a target world's detail invalidated while versions are loading", async () => {
+    let resolveDetail!: (world: Record<string, unknown>) => void;
+    const detail = new Promise<Record<string, unknown>>((resolve) => { resolveDetail = resolve; });
+    const { implementation, elements, detailEpochs } = transferVersionsHarness(() => detail);
+    elements.transferTargetWorld.value = "world-a";
+
+    const loading = implementation.loadTransferTargetVersions();
+    detailEpochs.set("world-a", (detailEpochs.get("world-a") || 0) + 1);
+    resolveDetail({ versions: [{ id: "stale-version", versionNumber: 4 }] });
+    await loading;
+
+    expect(elements.transferTargetVersion.options.map((option) => option.value)).toEqual([""]);
+    expect(elements.transferTargetVersion.disabled).toBe(true);
+  });
+
+  it("does not present a failure from target detail invalidated while versions are loading", async () => {
+    let rejectDetail!: (error: Error) => void;
+    const detail = new Promise<Record<string, unknown>>((_resolve, reject) => { rejectDetail = reject; });
+    const { implementation, elements, detailEpochs, resetTransferPreview } = transferVersionsHarness(() => detail);
+    elements.transferTargetWorld.value = "world-a";
+
+    const loading = implementation.loadTransferTargetVersions();
+    detailEpochs.set("world-a", (detailEpochs.get("world-a") || 0) + 1);
+    const resetCount = resetTransferPreview.mock.calls.length;
+    rejectDetail(new Error("Stale invalidated detail failure"));
+    await loading;
+
+    expect(resetTransferPreview).toHaveBeenCalledTimes(resetCount);
+    expect(elements.transferTargetVersion.options.map((option) => option.value)).toEqual([""]);
+    expect(elements.transferTargetVersion.disabled).toBe(true);
+    expect(elements.transferPreviewSummary.className).toBe("status error");
   });
 });
