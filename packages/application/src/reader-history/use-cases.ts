@@ -1,4 +1,8 @@
-import { readerHistoryRequestSchema, readerTurnNumberSchema } from "@infinite-quest/contracts";
+import {
+  readerHistoryRequestSchema,
+  readerSceneWindowRequestSchema,
+  readerTurnNumberSchema
+} from "@infinite-quest/contracts";
 import type { ReaderHistoryApplication, ReaderHistoryApplicationDependencies, ReaderHistoryScope } from "./ports.js";
 
 function requireScope(scope: ReaderHistoryScope): void {
@@ -20,6 +24,11 @@ export function createReaderHistoryApplication(
       requireScope(scope);
       const parsedOptions = readerHistoryRequestSchema.parse(options);
       return dependencies.turns.searchHistory(scope, parsedOptions);
+    },
+    async getSceneWindow(scope, request) {
+      requireScope(scope);
+      const parsedRequest = readerSceneWindowRequestSchema.parse(request);
+      return dependencies.turns.getSceneWindow(scope, parsedRequest);
     }
   };
 }

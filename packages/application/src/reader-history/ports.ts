@@ -1,4 +1,9 @@
-import type { ReaderHistoryItem, TurnSummary } from "@infinite-quest/contracts";
+import type {
+  ReaderHistoryItem,
+  ReaderSceneWindowRequest,
+  ReaderSceneWindowResponse,
+  TurnSummary
+} from "@infinite-quest/contracts";
 
 export type ReaderHistoryScope = Readonly<{
   ownerUserId: string;
@@ -16,14 +21,18 @@ export type ReaderHistoryPage = Readonly<{
   nextCursor: string | null;
 }>;
 
+export type ReaderSceneWindow = Omit<ReaderSceneWindowResponse, "campaignId">;
+
 export interface ReaderHistoryRepositoryPort {
   getEffectiveTurn(scope: ReaderHistoryScope, turnNumber: number): Promise<TurnSummary | null>;
   searchHistory(scope: ReaderHistoryScope, options: ReaderHistorySearchOptions): Promise<ReaderHistoryPage>;
+  getSceneWindow(scope: ReaderHistoryScope, request: ReaderSceneWindowRequest): Promise<ReaderSceneWindow | null>;
 }
 
 export interface ReaderHistoryApplication {
   getEffectiveTurn(scope: ReaderHistoryScope, turnNumber: number): Promise<TurnSummary | null>;
   searchHistory(scope: ReaderHistoryScope, options: ReaderHistorySearchOptions): Promise<ReaderHistoryPage>;
+  getSceneWindow(scope: ReaderHistoryScope, request: ReaderSceneWindowRequest): Promise<ReaderSceneWindow | null>;
 }
 
 export type ReaderHistoryApplicationDependencies = Readonly<{

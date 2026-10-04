@@ -93,6 +93,44 @@ integration("PostgreSQL exact reader turn lookup", () => {
     return foreign;
   }
 
+  async function createReaderHistoryApp(): Promise<Awaited<ReturnType<typeof buildServer>>> {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = databaseUrl!;
+    let config: RuntimeConfig;
+    try {
+      config = { ...loadRuntimeConfig(), systemArchiveEnabled: false };
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+    const providers = {
+      ...inertProviders,
+      application: {
+        ...inertProviders.application,
+        getTurnCosts: ({ ownerUserId: scopedOwnerId, turnIds }: { ownerUserId: string; campaignId: string; turnIds: string[] }) =>
+          readTurnReportedCostsForTest(pool, scopedOwnerId, turnIds)
+      }
+    };
+    return buildServer(inertStorageServerOptions({ pool, config, providers }));
+  }
+
+  function sceneWindowPath(campaignId: string, options: Readonly<{
+    anchorTurnNumber: number;
+    anchorTurnId: string;
+    direction: "older" | "newer";
+    neighborLimit?: number;
+    historyToken?: string;
+  }>): string {
+    const query = new URLSearchParams({
+      anchorTurnNumber: String(options.anchorTurnNumber),
+      anchorTurnId: options.anchorTurnId,
+      direction: options.direction
+    });
+    if (options.neighborLimit !== undefined) query.set("neighborLimit", String(options.neighborLimit));
+    if (options.historyToken !== undefined) query.set("historyToken", options.historyToken);
+    return `/api/v1/campaigns/${campaignId}/reader/scene-window?${query.toString()}`;
+  }
+
   it("registers exact lookup through buildServer and hides foreign-owned campaigns", async () => {
     const imported = await createCampaignFixture();
     const accepted = (await pool.query<{ id: string; narration: string; turnNumber: number }>(
@@ -419,4 +457,459 @@ integration("PostgreSQL exact reader turn lookup", () => {
     expect(result?.id).toBe(firstTurn.rows[0]!.id);
     expect(result?.id).not.toBe(secondTurn.rows[0]!.id);
   });
+
+  it("returns actual sparse neighbors, validates tokens, and keeps scene data public", async () => {
+    const imported = await createCampaignFixture();
+    const numbers = [10, 42, 60, 100, 135, 222, 900];
+    const inserted = await pool.query<{ id: string; turnNumber: number; narration: string }>(
+      `INSERT INTO turns (
+         owner_user_id,campaign_id,turn_number,action,narration,mechanics_private,model_metadata
+       )
+       SELECT $1,$2,item.turn_number,'Action ' || item.turn_number,
+              'Narration ' || item.turn_number,
+              CASE WHEN item.turn_number=60 THEN '{"privateCanary":"PRIVATE_SCENE_CANARY"}'::jsonb ELSE NULL END,
+              CASE WHEN item.turn_number=60 THEN '{"raw":"PRIVATE_SCENE_CANARY"}'::jsonb ELSE '{}'::jsonb END
+         FROM unnest($3::integer[]) AS item(turn_number)
+       RETURNING id,turn_number AS "turnNumber",narration`,
+      [ownerUserId, imported.campaignId, numbers]
+    );
+    const turn = (turnNumber: number) => inserted.rows.find((row) => row.turnNumber === turnNumber)!;
+    await pool.query("UPDATE campaigns SET active_turn_number=900 WHERE id=$1 AND owner_user_id=$2", [imported.campaignId, ownerUserId]);
+    await pool.query(
+      `INSERT INTO provider_cost_events (
+         owner_user_id,campaign_id,turn_id,provider_type,category,operation,requested_model,resolved_model,amount,currency,usage_metadata
+       ) VALUES ($1,$2,$3,'openai_compatible','story','story_turn','fixture-model','fixture-model',0.125,'USD','{}')`,
+      [ownerUserId, imported.campaignId, turn(100).id]
+    );
+    const otherCampaign = await createCampaignFixture();
+    const otherTurn = (await pool.query<{ id: string; turnNumber: number }>(
+      "SELECT id,turn_number AS \"turnNumber\" FROM turns WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY turn_number LIMIT 1",
+      [ownerUserId, otherCampaign.campaignId]
+    )).rows[0]!;
+    const foreign = await createForeignCampaignFixture();
+    const app = await createReaderHistoryApp();
+    try {
+      const older = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 100,
+          anchorTurnId: turn(100).id,
+          direction: "older",
+          neighborLimit: 2
+        })
+      });
+      expect(older.statusCode).toBe(200);
+      expect(older.json().campaignId).toBe(imported.campaignId);
+      expect(older.json().anchor).toEqual({ turnNumber: 100, id: turn(100).id });
+      expect(older.json().direction).toBe("older");
+      expect(older.json().turns.map(({ turnNumber }: { turnNumber: number }) => turnNumber)).toEqual([42, 60, 100]);
+      expect(older.json().turns[2]).toMatchObject({
+        id: turn(100).id,
+        turnNumber: 100,
+        reportedCost: { amount: "0.125", currency: "USD" }
+      });
+      expect(older.json().hasMore).toBe(true);
+      expect(older.json().historyToken).toEqual(expect.any(String));
+      expect(JSON.stringify(older.json())).not.toContain("PRIVATE_SCENE_CANARY");
+
+      const newer = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 100,
+          anchorTurnId: turn(100).id,
+          direction: "newer",
+          neighborLimit: 9,
+          historyToken: older.json().historyToken
+        })
+      });
+      expect(newer.statusCode).toBe(200);
+      expect(newer.json().turns.map(({ turnNumber }: { turnNumber: number }) => turnNumber)).toEqual([100, 135, 222, 900]);
+      expect(newer.json().hasMore).toBe(false);
+
+      const edge = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 900,
+          anchorTurnId: turn(900).id,
+          direction: "newer",
+          neighborLimit: 1
+        })
+      });
+      expect(edge.statusCode).toBe(200);
+      expect(edge.json().turns.map(({ turnNumber }: { turnNumber: number }) => turnNumber)).toEqual([900]);
+      expect(edge.json().hasMore).toBe(false);
+
+      const malformed = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 100,
+          anchorTurnId: turn(100).id,
+          direction: "older",
+          neighborLimit: 10
+        })
+      });
+      expect(malformed.statusCode).toBe(400);
+
+      const mismatchedAnchor = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 100,
+          anchorTurnId: turn(135).id,
+          direction: "older"
+        })
+      });
+      expect(mismatchedAnchor.statusCode).toBe(409);
+      expect(mismatchedAnchor.json().code).toBe("reader_anchor_changed");
+
+      const missing = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 9999,
+          anchorTurnId: crypto.randomUUID(),
+          direction: "older"
+        })
+      });
+      const crossOwner = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(foreign.campaignId, {
+          anchorTurnNumber: 1,
+          anchorTurnId: crypto.randomUUID(),
+          direction: "older"
+        })
+      });
+      expect(missing.statusCode).toBe(404);
+      expect(crossOwner.statusCode).toBe(404);
+      expect(crossOwner.json()).toEqual(missing.json());
+      expect(JSON.stringify(crossOwner.json())).not.toContain(foreign.ownerUserId);
+
+      const crossCampaignToken = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(otherCampaign.campaignId, {
+          anchorTurnNumber: otherTurn.turnNumber,
+          anchorTurnId: otherTurn.id,
+          direction: "older",
+          historyToken: older.json().historyToken
+        })
+      });
+      expect(crossCampaignToken.statusCode).toBe(400);
+
+      const malformedToken = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 100,
+          anchorTurnId: turn(100).id,
+          direction: "older",
+          historyToken: "not-a-base64url-history-token!"
+        })
+      });
+      expect(malformedToken.statusCode).toBe(400);
+
+      await pool.query(
+        "INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration) VALUES ($1,$2,901,'Appended action','Appended narration')",
+        [ownerUserId, imported.campaignId]
+      );
+      await pool.query("UPDATE campaigns SET active_turn_number=901 WHERE id=$1 AND owner_user_id=$2", [imported.campaignId, ownerUserId]);
+      const staleAfterAppend = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 100,
+          anchorTurnId: turn(100).id,
+          direction: "older",
+          neighborLimit: 2,
+          historyToken: older.json().historyToken
+        })
+      });
+      expect(staleAfterAppend.statusCode).toBe(409);
+      expect(staleAfterAppend.json().code).toBe("reader_history_changed");
+      const afterAppendWindow = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 100,
+          anchorTurnId: turn(100).id,
+          direction: "older",
+          neighborLimit: 2
+        })
+      });
+      const appendedId = (await pool.query<{ id: string }>(
+        "SELECT id FROM turns WHERE owner_user_id=$1 AND campaign_id=$2 AND turn_number=901",
+        [ownerUserId, imported.campaignId]
+      )).rows[0]!.id;
+      await pool.query("DELETE FROM turns WHERE owner_user_id=$1 AND campaign_id=$2 AND id=$3", [ownerUserId, imported.campaignId, appendedId]);
+      await pool.query("UPDATE campaigns SET active_turn_number=900 WHERE id=$1 AND owner_user_id=$2", [imported.campaignId, ownerUserId]);
+      const staleAfterRewind = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 100,
+          anchorTurnId: turn(100).id,
+          direction: "older",
+          neighborLimit: 2,
+          historyToken: afterAppendWindow.json().historyToken
+        })
+      });
+      expect(staleAfterRewind.statusCode).toBe(409);
+      expect(staleAfterRewind.json().code).toBe("reader_history_changed");
+
+      await pool.query(
+        `INSERT INTO turn_narration_corrections (
+           owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,source,created_by_user_id
+         ) VALUES ($1,$2,$3,1,'Corrected scene 60',$4,'administrative',$1)`,
+        [ownerUserId, imported.campaignId, turn(60).id, sha256(turn(60).narration)]
+      );
+      const staleAfterCorrection = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 100,
+          anchorTurnId: turn(100).id,
+          direction: "older",
+          neighborLimit: 2,
+          historyToken: older.json().historyToken
+        })
+      });
+      expect(staleAfterCorrection.statusCode).toBe(409);
+      expect(staleAfterCorrection.json().code).toBe("reader_history_changed");
+
+      const fresh = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 100,
+          anchorTurnId: turn(100).id,
+          direction: "older",
+          neighborLimit: 2
+        })
+      });
+      const beforeReplacement = await pool.query<{ count: string; maximum: number; latestId: string }>(
+        `SELECT count(*)::text AS count, max(turn_number) AS maximum,
+                (SELECT id::text FROM turns WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY turn_number DESC LIMIT 1) AS "latestId"
+           FROM turns WHERE owner_user_id=$1 AND campaign_id=$2`,
+        [ownerUserId, imported.campaignId]
+      );
+      await pool.query("DELETE FROM turns WHERE owner_user_id=$1 AND campaign_id=$2 AND id=$3", [ownerUserId, imported.campaignId, turn(42).id]);
+      const replacementId = crypto.randomUUID();
+      await pool.query(
+        "INSERT INTO turns (id,owner_user_id,campaign_id,turn_number,action,narration) VALUES ($1,$2,$3,42,'Replacement action','Replacement narration')",
+        [replacementId, ownerUserId, imported.campaignId]
+      );
+      const afterReplacement = await pool.query<{ count: string; maximum: number; latestId: string }>(
+        `SELECT count(*)::text AS count, max(turn_number) AS maximum,
+                (SELECT id::text FROM turns WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY turn_number DESC LIMIT 1) AS "latestId"
+           FROM turns WHERE owner_user_id=$1 AND campaign_id=$2`,
+        [ownerUserId, imported.campaignId]
+      );
+      expect(afterReplacement.rows).toEqual(beforeReplacement.rows);
+      const staleAfterInteriorReplacement = await app.inject({
+        method: "GET",
+        url: sceneWindowPath(imported.campaignId, {
+          anchorTurnNumber: 100,
+          anchorTurnId: turn(100).id,
+          direction: "older",
+          neighborLimit: 2,
+          historyToken: fresh.json().historyToken
+        })
+      });
+      expect(staleAfterInteriorReplacement.statusCode).toBe(409);
+      expect(staleAfterInteriorReplacement.json().code).toBe("reader_history_changed");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps neighbor, correction, and reported-cost reads in one repeatable-read snapshot", async () => {
+    const imported = await createCampaignFixture();
+    const inserted = await pool.query<{ id: string; turnNumber: number; narration: string }>(
+      `INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration)
+       VALUES ($1,$2,20,'Older action','Older original narration'),
+              ($1,$2,50,'Anchor action','Anchor narration')
+       RETURNING id,turn_number AS "turnNumber",narration`,
+      [ownerUserId, imported.campaignId]
+    );
+    const older = inserted.rows.find(({ turnNumber }) => turnNumber === 20)!;
+    const anchor = inserted.rows.find(({ turnNumber }) => turnNumber === 50)!;
+    await pool.query(
+      `INSERT INTO provider_cost_events (
+         owner_user_id,campaign_id,turn_id,provider_type,category,operation,requested_model,resolved_model,amount,currency,usage_metadata
+       ) VALUES ($1,$2,$3,'openai_compatible','story','story_turn','fixture-model','fixture-model',0.1,'USD','{}')`,
+      [ownerUserId, imported.campaignId, older.id]
+    );
+
+    let resumeRead!: () => void;
+    let announceFingerprint!: () => void;
+    const continueRead = new Promise<void>((resolvePromise) => { resumeRead = resolvePromise; });
+    const fingerprintObserved = new Promise<void>((resolvePromise) => { announceFingerprint = resolvePromise; });
+    let paused = false;
+    const gatedPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        const rawQuery = client.query.bind(client) as (
+          query: unknown,
+          values?: unknown[]
+        ) => Promise<{ rows: unknown[] }>;
+        return {
+          query: async (query: unknown, values?: unknown[]) => {
+            const result = await rawQuery(query, values);
+            if (!paused && typeof query === "string" && query.includes("scene-window-fingerprint")) {
+              paused = true;
+              announceFingerprint();
+              await continueRead;
+            }
+            return result;
+          },
+          release: () => client.release()
+        };
+      }
+    } as unknown as DatabasePool;
+    const repository = createPostgresReaderHistoryRepository(gatedPool, { turnReportedCosts: async () => new Map() });
+    const pending = repository.getSceneWindow({ ownerUserId, campaignId: imported.campaignId }, {
+      anchorTurnNumber: 50,
+      anchorTurnId: anchor.id,
+      direction: "older",
+      neighborLimit: 1
+    });
+    try {
+      await fingerprintObserved;
+      await pool.query(
+        `INSERT INTO turn_narration_corrections (
+           owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,source,created_by_user_id
+         ) VALUES ($1,$2,$3,1,'New correction after snapshot',$4,'administrative',$1)`,
+        [ownerUserId, imported.campaignId, older.id, sha256(older.narration)]
+      );
+      await pool.query(
+        `INSERT INTO provider_cost_events (
+           owner_user_id,campaign_id,turn_id,provider_type,category,operation,requested_model,resolved_model,amount,currency,usage_metadata
+         ) VALUES ($1,$2,$3,'openai_compatible','image','image_generation','fixture-model','fixture-model',0.2,'USD','{}')`,
+        [ownerUserId, imported.campaignId, older.id]
+      );
+    } finally {
+      resumeRead();
+    }
+
+    const window = await pending;
+    expect(window?.turns).toMatchObject([{
+      id: older.id,
+      turnNumber: 20,
+      narration: "Older original narration",
+      reportedCost: { amount: "0.1", byCategory: { story: "0.1", image: "0", memory: "0" } }
+    }, { id: anchor.id, turnNumber: 50 }]);
+    await expect(repository.getSceneWindow({ ownerUserId, campaignId: imported.campaignId }, {
+      anchorTurnNumber: 50,
+      anchorTurnId: anchor.id,
+      direction: "older",
+      neighborLimit: 1,
+      historyToken: window!.historyToken
+    })).rejects.toMatchObject({ statusCode: 409, details: { code: "reader_history_changed" } });
+  }, 30_000);
+
+  it("captures query plans for sparse and 2,000-turn windows", async () => {
+    const imported = await createCampaignFixture();
+    await pool.query(
+      `INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration)
+       SELECT $1,$2,item.turn_number,'Sparse plan action ' || item.turn_number,'Sparse plan narration ' || item.turn_number
+         FROM unnest($3::integer[]) AS item(turn_number)`,
+      [ownerUserId, imported.campaignId, [100, 105, 200, 500]]
+    );
+    await pool.query("ANALYZE turns");
+    await pool.query("ANALYZE turn_narration_corrections");
+
+    const explainRecords: Array<Record<string, unknown>> = [];
+    const explainPlanDocuments: Array<Readonly<{ dataset: string; kind: string; queryPlan: unknown }>> = [];
+    let currentPlanSet = "sparse-six-turn-ledger";
+    const explainedPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        const rawQuery = client.query.bind(client) as (
+          query: unknown,
+          values?: unknown[]
+        ) => Promise<{ rows: unknown[] }>;
+        return {
+          query: async (query: unknown, values?: unknown[]) => {
+            if (typeof query === "string") {
+              const kind = query.includes("scene-window-fingerprint")
+                ? "fingerprint"
+                : query.includes("scene-window-neighbors")
+                  ? "neighbors"
+                  : query.includes("ledger_scope AS")
+                    ? "reported-costs"
+                    : null;
+              if (kind) {
+                const explained = await rawQuery(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${query}`, values);
+                const record = explained.rows[0] as Record<string, unknown> | undefined;
+                const queryPlan = record?.["QUERY PLAN"];
+                const document = (queryPlan as Array<Record<string, unknown>> | undefined)?.[0];
+                const root = document?.Plan as Record<string, unknown> | undefined;
+                explainPlanDocuments.push({ dataset: currentPlanSet, kind, queryPlan });
+                explainRecords.push({
+                  dataset: currentPlanSet,
+                  kind,
+                  planningTimeMs: document?.["Planning Time"],
+                  executionTimeMs: document?.["Execution Time"],
+                  nodeType: root?.["Node Type"],
+                  actualRows: root?.["Actual Rows"],
+                  sharedHitBlocks: root?.["Shared Hit Blocks"],
+                  sharedReadBlocks: root?.["Shared Read Blocks"]
+                });
+              }
+            }
+            return rawQuery(query, values);
+          },
+          release: () => client.release()
+        };
+      }
+    } as unknown as DatabasePool;
+    const repository = createPostgresReaderHistoryRepository(explainedPool, { turnReportedCosts: async () => new Map() });
+
+    const sparseAnchor = (await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE owner_user_id=$1 AND campaign_id=$2 AND turn_number=200",
+      [ownerUserId, imported.campaignId]
+    )).rows[0]!;
+    const sparseWindow = await repository.getSceneWindow({ ownerUserId, campaignId: imported.campaignId }, {
+      anchorTurnNumber: 200,
+      anchorTurnId: sparseAnchor.id,
+      direction: "older",
+      neighborLimit: 9
+    });
+    expect(sparseWindow?.turns.map(({ turnNumber }) => turnNumber)).toEqual([1, 2, 100, 105, 200]);
+    expect(sparseWindow?.hasMore).toBe(false);
+
+    const count = 2000;
+    const firstTurnNumber = 10000;
+    await pool.query(
+      `INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration)
+       SELECT $1,$2,$3 + ordinal * 3,'Plan action ' || ordinal,'Plan narration ' || ordinal
+         FROM generate_series(1,$4) AS series(ordinal)`,
+      [ownerUserId, imported.campaignId, firstTurnNumber, count]
+    );
+    const anchorTurnNumber = firstTurnNumber + 1500 * 3;
+    const anchor = (await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE owner_user_id=$1 AND campaign_id=$2 AND turn_number=$3",
+      [ownerUserId, imported.campaignId, anchorTurnNumber]
+    )).rows[0]!;
+    await pool.query("ANALYZE turns");
+    await pool.query("ANALYZE turn_narration_corrections");
+
+    currentPlanSet = "two-thousand-added-2006-total";
+
+    const window = await repository.getSceneWindow({ ownerUserId, campaignId: imported.campaignId }, {
+      anchorTurnNumber,
+      anchorTurnId: anchor.id,
+      direction: "older",
+      neighborLimit: 9
+    });
+
+    expect(window?.turns).toHaveLength(10);
+    expect(window?.hasMore).toBe(true);
+    expect(explainRecords
+      .filter(({ kind }) => kind === "fingerprint")
+      .map(({ actualRows }) => actualRows)).toEqual([6, 2006]);
+    expect(explainRecords.map(({ dataset, kind }) => `${dataset}:${kind}`)).toEqual([
+      "sparse-six-turn-ledger:fingerprint", "sparse-six-turn-ledger:neighbors", "sparse-six-turn-ledger:reported-costs",
+      "two-thousand-added-2006-total:fingerprint", "two-thousand-added-2006-total:neighbors", "two-thousand-added-2006-total:reported-costs"
+    ]);
+    for (const record of explainRecords) {
+      expect(record.executionTimeMs).toEqual(expect.any(Number));
+      expect(record.actualRows).toEqual(expect.any(Number));
+    }
+    const explainJsonPath = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T16-scene-window-explain-plans.json";
+    await writeFile(resolve(explainJsonPath), `${JSON.stringify(explainPlanDocuments, null, 2)}\n`, "utf8");
+    process.stdout.write(`T16_EXPLAIN_SPARSE_AND_2000 ${JSON.stringify(explainRecords)}\n`);
+    process.stdout.write(`T16_EXPLAIN_JSON_PATH ${explainJsonPath}\n`);
+  }, 30_000);
 });
