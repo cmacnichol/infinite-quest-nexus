@@ -127,6 +127,10 @@ let readerPositionWriteTimer = null;
 let readerPositionWriteQueue = Promise.resolve();
 let continuousReaderAbortController = null;
 const continuousSceneSignatures = new WeakMap();
+let activeImagePoll = null;
+const illustrationRenderSignatures = new WeakMap();
+const inlineIllustrationRenderSignatures = new WeakMap();
+const imageJobRenderSignatures = new WeakMap();
 
 const initialization = new Promise((resolve, reject) => {
   resolveInitialization = resolve;
@@ -1223,6 +1227,8 @@ async function loadCampaign(campaignId, options = {}) {
   readerIllustrationRequestSequence += 1;
   state.illustrationLoading = false;
   state.imagePollEpoch += 1;
+  if (activeImagePoll) activeImagePoll.stopped = true;
+  activeImagePoll = null;
   if (state.imagePollTimer) clearTimeout(state.imagePollTimer);
   state.imagePollTimer = null;
 
@@ -1772,7 +1778,7 @@ function segmentIllustrationMarkup(turn, turnIndex, segment, segmentCount) {
   </div>`;
 }
 
-function renderStoryIllustration() {
+function renderStoryIllustration({ skipIfUnchanged = false } = {}) {
   const layout = $("appLayout");
   const panel = $("storyIllustrationPanel");
   const content = $("storyIllustrationContent");
@@ -1790,25 +1796,48 @@ function renderStoryIllustration() {
     const segmentTurnIndex = state.turns.findIndex((item) => (item.id || item.turnId) === segment.turnId);
     const segmentTurn = state.turns[segmentTurnIndex];
     if (!segmentTurn) return;
+    const signature = JSON.stringify([
+      segmentTurn,
+      segment,
+      illustrationSegmentsForTurn(segment.turnId).length,
+      state.illustrationVariantIndexes.get(segment.id) || 0
+    ]);
+    if (skipIfUnchanged && inlineIllustrationRenderSignatures.get(segmentContent) === signature) return;
     segmentContent.innerHTML = segmentIllustrationMarkup(
       segmentTurn,
       segmentTurnIndex,
       segment,
       illustrationSegmentsForTurn(segment.turnId).length
     );
+    inlineIllustrationRenderSignatures.set(segmentContent, signature);
   });
 
   const inlineVisible = visible && inlineContents.length > 0 && !state.illustrationError;
   const panelVisible = visible && !inlineVisible;
+  const signature = JSON.stringify([
+    state.campaignId,
+    turn?.id || turn?.turnId || null,
+    turn?.turnNumber ?? null,
+    turn?.narration ?? null,
+    state.illustrationConfig,
+    state.illustrationSegments,
+    [...state.illustrationVariantIndexes],
+    state.illustrationLoading,
+    state.illustrationError,
+    state.generationDisplayActive
+  ]);
   layout.classList.toggle("has-illustration", panelVisible);
   layout.classList.toggle("has-segmented-illustrations", inlineVisible);
   panel.classList.toggle("hidden", !panelVisible);
+  if (skipIfUnchanged && illustrationRenderSignatures.get(content) === signature) return;
   if (!visible) {
     content.replaceChildren();
+    illustrationRenderSignatures.set(content, signature);
     return;
   }
   if (inlineVisible) {
     content.replaceChildren();
+    illustrationRenderSignatures.set(content, signature);
     return;
   }
 
@@ -1822,12 +1851,14 @@ function renderStoryIllustration() {
     content.innerHTML = `${statusMarkup}${narrationIsStale
       ? `<p class="mini dim">The narration was corrected; existing illustrations may no longer match.</p>`
       : ""}${segments.map((segment) => segmentIllustrationMarkup(turn, turnIndex, segment, segments.length)).join("")}`;
+    illustrationRenderSignatures.set(content, signature);
     return;
   }
   content.innerHTML = `${statusMarkup}<div class="image-wrap image-job-placeholder">
     <div class="image-placeholder">This accepted turn has no illustration segments yet.</div>
     <button class="small primary" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="generate-turn-segments">Generate illustrations for this turn</button>
   </div>`;
+  illustrationRenderSignatures.set(content, signature);
 }
 
 function renderContinuousSceneWindow(container, turns) {
@@ -3740,60 +3771,118 @@ async function refreshIllustrations() {
 }
 
 function pollImageJobs({ initialSegments = null } = {}) {
-  if (state.imagePollTimer) clearTimeout(state.imagePollTimer);
   if (!state.campaignId) return;
   const campaignId = state.campaignId;
-  const epoch = ++state.imagePollEpoch;
   const loadSequence = campaignLoadSequence;
-  let failures = 0;
-  const current = () => state.campaignId === campaignId && state.imagePollEpoch === epoch
-    && campaignLoadSequence === loadSequence;
-
-  const poll = async () => {
-    if (!current()) return;
-    try {
-      if (!state.illustrationConfig) {
-        const config = await illustrationApi.config(campaignId);
-        if (!current()) return;
-        state.illustrationConfig = config;
-      }
-      const data = await illustrationApi.imageJobs(campaignId);
-      const jobs = data.jobs || data || [];
-      const segmentData = initialSegments === null
-        ? await illustrationApi.segments(campaignId)
-        : { segments: initialSegments };
-      initialSegments = null;
-      if (!current()) return;
-      failures = 0;
-      state.illustrationError = null;
-      const segments = segmentData.segments || [];
-      let anyPending = false;
-      state.illustrationSegments = segments;
-      renderStoryIllustration();
-      for (const job of jobs) {
-        recordImageJobActivity(job, { suppress: !state.imageActivityInitialized });
-        renderSceneImageJob(job);
-        if (["queued", "generating", "provider_pending", "downloading"].includes(job.status)) anyPending = true;
-      }
-      for (const segment of segments) {
-        recordIllustrationSegmentActivity(segment, { suppress: !state.imageActivityInitialized });
-        if (["queued", "refining", "generating"].includes(segment.status)
-          || ["queued", "refining", "recoverable"].includes(segment.promptJobStatus)) anyPending = true;
-      }
-      state.imageActivityInitialized = true;
-      if (anyPending) {
-        state.imagePollTimer = setTimeout(poll, IMAGE_POLL_MS);
-      }
-    } catch (error) {
-      if (!current()) return;
-      state.illustrationError = illustrationLoadError(error);
-      renderStoryIllustration();
-      if (error?.name !== "ApiContractError" && ++failures < 3) {
-        state.imagePollTimer = setTimeout(poll, IMAGE_POLL_MS * failures);
-      }
+  let poll = activeImagePoll;
+  if (!poll || poll.stopped || poll.campaignId !== campaignId || poll.loadSequence !== loadSequence) {
+    if (poll?.timer) {
+      clearTimeout(poll.timer);
+      if (state.imagePollTimer === poll.timer) state.imagePollTimer = null;
     }
+    if (poll) poll.stopped = true;
+    poll = {
+      campaignId,
+      loadSequence,
+      epoch: ++state.imagePollEpoch,
+      failures: 0,
+      initialSegments,
+      seedRevision: initialSegments === null ? 0 : 1,
+      timer: null,
+      inFlight: null,
+      stopped: false
+    };
+    activeImagePoll = poll;
+  } else if (initialSegments !== null) {
+    poll.initialSegments = initialSegments;
+    poll.seedRevision += 1;
+  }
+
+  const current = () => activeImagePoll === poll && !poll.stopped
+    && state.campaignId === poll.campaignId && state.imagePollEpoch === poll.epoch
+    && campaignLoadSequence === poll.loadSequence;
+  const schedule = (delay) => {
+    if (!current() || poll.timer) return;
+    const timer = setTimeout(() => {
+      if (poll.timer === timer) poll.timer = null;
+      if (state.imagePollTimer === timer) state.imagePollTimer = null;
+      if (current()) void runPoll();
+    }, delay);
+    poll.timer = timer;
+    state.imagePollTimer = timer;
   };
-  return poll();
+  const runPoll = () => {
+    if (!current()) return Promise.resolve();
+    if (poll.inFlight) return poll.inFlight;
+    if (poll.timer) {
+      clearTimeout(poll.timer);
+      if (state.imagePollTimer === poll.timer) state.imagePollTimer = null;
+      poll.timer = null;
+    }
+    const seedRevisionAtStart = poll.seedRevision;
+    const work = (async () => {
+      try {
+        if (!state.illustrationConfig) {
+          const config = await illustrationApi.config(poll.campaignId);
+          if (!current()) return;
+          state.illustrationConfig = config;
+        }
+        const data = await illustrationApi.imageJobs(poll.campaignId);
+        if (!current()) return;
+        const jobs = data.jobs || data || [];
+        let segments;
+        if (poll.initialSegments !== null) {
+          segments = poll.initialSegments;
+          poll.initialSegments = null;
+        } else {
+          const segmentData = await illustrationApi.segments(poll.campaignId);
+          if (!current()) return;
+          if (poll.seedRevision !== seedRevisionAtStart && poll.initialSegments !== null) {
+            segments = poll.initialSegments;
+            poll.initialSegments = null;
+          } else {
+            segments = segmentData.segments || [];
+          }
+        }
+        if (!current()) return;
+        poll.failures = 0;
+        state.illustrationError = null;
+        let anyPending = false;
+        state.illustrationSegments = segments;
+        renderStoryIllustration({ skipIfUnchanged: true });
+        for (const job of jobs) {
+          recordImageJobActivity(job, { suppress: !state.imageActivityInitialized });
+          renderSceneImageJob(job);
+          if (["queued", "generating", "provider_pending", "downloading"].includes(job.status)) anyPending = true;
+        }
+        for (const segment of segments) {
+          recordIllustrationSegmentActivity(segment, { suppress: !state.imageActivityInitialized });
+          if (["queued", "refining", "generating"].includes(segment.status)
+            || ["queued", "refining", "recoverable"].includes(segment.promptJobStatus)) anyPending = true;
+        }
+        state.imageActivityInitialized = true;
+        if (anyPending) {
+          schedule(IMAGE_POLL_MS);
+        } else {
+          poll.stopped = true;
+        }
+      } catch (error) {
+        if (!current()) return;
+        state.illustrationError = illustrationLoadError(error);
+        renderStoryIllustration({ skipIfUnchanged: true });
+        if (error?.name !== "ApiContractError" && ++poll.failures < 3) {
+          schedule(IMAGE_POLL_MS * poll.failures);
+        } else {
+          poll.stopped = true;
+        }
+      } finally {
+        poll.inFlight = null;
+      }
+    })();
+    poll.inFlight = work;
+    return work;
+  };
+  return runPoll();
 }
 
 function recordIllustrationSegmentActivity(segment, options = {}) {
@@ -3928,15 +4017,43 @@ function renderSceneImageJob(job) {
     status.className = imageWrap.querySelector("img") ? "image-job-status image-job-overlay" : "image-job-status";
     imageWrap.appendChild(status);
   }
+  const labelText = terminalFailure
+    ? (job.errorMessage || "Illustration generation did not complete.")
+    : `Creating illustration · ${imageJobStatusText(job)}`;
+  const progressValue = Number(job.providerProgress);
+  const renderedProgress = Number.isFinite(progressValue) ? Math.max(0, Math.min(100, progressValue)) : null;
+  const signature = JSON.stringify({
+    jobId: job.id,
+    status: job.status,
+    providerStatus: job.providerStatus || null,
+    providerProgress: renderedProgress,
+    providerQueuePosition: Number.isInteger(job.providerQueuePosition) ? job.providerQueuePosition : null,
+    errorMessage: terminalFailure ? job.errorMessage || "Illustration generation did not complete." : null,
+    turnNumber: active ? turn?.turnNumber ?? null : null,
+    terminalFailure,
+    active
+  });
+  const existingLabel = status.querySelector("p");
+  const existingProgress = status.querySelector("progress");
+  const existingRetry = status.querySelector('[type="button"]');
+  if (imageJobRenderSignatures.get(status) === signature
+    && existingLabel
+    && (active ? Boolean(existingProgress) : terminalFailure ? Boolean(existingRetry) : !existingProgress && !existingRetry)) {
+    if (existingLabel.textContent !== labelText) existingLabel.textContent = labelText;
+    if (active && existingProgress) {
+      const nextProgressValue = renderedProgress ?? 0;
+      if (existingProgress.value !== nextProgressValue) existingProgress.value = nextProgressValue;
+    }
+    return;
+  }
   status.replaceChildren();
   const label = document.createElement("p");
-  label.textContent = terminalFailure ? (job.errorMessage || "Illustration generation did not complete.") : `Creating illustration · ${imageJobStatusText(job)}`;
+  label.textContent = labelText;
   status.append(label);
   if (active) {
     const progress = document.createElement("progress");
     progress.max = 100;
-    const value = Number(job.providerProgress);
-    if (Number.isFinite(value)) progress.value = Math.max(0, Math.min(100, value));
+    if (renderedProgress !== null) progress.value = renderedProgress;
     progress.setAttribute("aria-label", `Illustration generation progress for turn ${turn?.turnNumber ?? "unknown"}`);
     status.append(progress);
   } else if (terminalFailure) {
@@ -3958,6 +4075,7 @@ function renderSceneImageJob(job) {
     });
     status.append(retry);
   }
+  imageJobRenderSignatures.set(status, signature);
 }
 
 function updateSceneImage(turnId, assetUrl, replace = false) {
@@ -3965,8 +4083,9 @@ function updateSceneImage(turnId, assetUrl, replace = false) {
   // Find the turn index
   const turnIdx = state.turns.findIndex(t => (t.id || t.turnId) === turnId);
   if (turnIdx < 0) return;
+  const previousAssetUrl = state.turns[turnIdx].imageAssetUrl || state.turns[turnIdx].imageUrl;
   state.turns[turnIdx].imageAssetUrl = assetUrl;
-  if (turnIdx === viewedTurnIndex()) renderStoryIllustration();
+  if (turnIdx === viewedTurnIndex() && previousAssetUrl !== assetUrl) renderStoryIllustration();
 }
 
 function openImagePromptEditor(turnId) {

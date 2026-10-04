@@ -43,6 +43,7 @@ async function bootLegacyStory({
   correctTurnNarration = vi.fn().mockResolvedValue({ effectiveNarration: "", correctionRevision: 0 }),
   illustrationConfig = { enabled: false, sourcePolicy: "off" },
   illustrationSegments = [],
+  loadImageJobs,
   loadIllustrationSegments,
   loadIllustrationConfig,
   classifyTurnInput,
@@ -66,6 +67,7 @@ async function bootLegacyStory({
   correctTurnNarration?: ReturnType<typeof vi.fn>;
   illustrationConfig?: Record<string, unknown>;
   illustrationSegments?: Array<Record<string, unknown>>;
+  loadImageJobs?: () => Promise<{ jobs: Array<Record<string, unknown>> }>;
   loadIllustrationSegments?: () => Promise<unknown>;
   loadIllustrationConfig?: () => Promise<unknown>;
   classifyTurnInput?: ReturnType<typeof vi.fn>;
@@ -136,7 +138,7 @@ async function bootLegacyStory({
     illustrations: {
       config: loadIllustrationConfig ?? (async () => illustrationConfig),
       segments: loadIllustrationSegments ?? (async () => ({ segments: illustrationSegments })),
-      imageJobs: async () => ({ jobs: [] })
+      imageJobs: loadImageJobs ?? (async () => ({ jobs: [] }))
     },
     readerHistory: { getTurn: getReaderHistoryTurn, searchHistory: searchReaderHistory, getSceneWindow },
     workflow,
@@ -607,6 +609,70 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
+  it("starts one image-job poll after the initial illustration reads", async () => {
+    const imageJobs = vi.fn(async () => ({ jobs: [] as Array<Record<string, unknown>> }));
+    const segments = vi.fn(async () => ({ segments: [] as Array<Record<string, unknown>> }));
+    try {
+      await bootLegacyStory({
+        turns: makeTurns(1, 1),
+        illustrationConfig: { enabled: true, sourcePolicy: "generate_only" },
+        loadIllustrationSegments: segments,
+        loadImageJobs: imageJobs
+      });
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+      expect(segments).toHaveBeenCalledTimes(1);
+      expect(imageJobs).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("coalesces an explicit illustration refresh with the in-flight image-job poll", async () => {
+    const jobs = deferred<{ jobs: Array<Record<string, unknown>> }>();
+    const imageJobs = vi.fn(() => jobs.promise);
+    const segments = vi.fn(async () => ({ segments: [] as Array<Record<string, unknown>> }));
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 1),
+        illustrationConfig: { enabled: true, sourcePolicy: "generate_only" },
+        loadIllustrationSegments: segments,
+        loadImageJobs: imageJobs
+      });
+      await vi.waitFor(() => expect(imageJobs).toHaveBeenCalledTimes(1));
+
+      document.querySelector('[data-action="refresh-illustrations"]')
+        ?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(segments).toHaveBeenCalledTimes(2));
+      expect(imageJobs).toHaveBeenCalledTimes(1);
+
+      jobs.resolve({ jobs: [] });
+      await vi.waitFor(() => expect(imageJobs).toHaveBeenCalledTimes(1));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("stops polling after all illustration jobs and segments become terminal", async () => {
+    const imageJobs = vi.fn(async () => ({ jobs: [{ id: "job-1", status: "completed" }] }));
+    const segments = vi.fn(async () => ({ segments: [{ id: "segment-1", status: "completed" }] }));
+    try {
+      await bootLegacyStory({
+        turns: makeTurns(1, 1),
+        illustrationConfig: { enabled: true, sourcePolicy: "generate_only" },
+        loadIllustrationSegments: segments,
+        loadImageJobs: imageJobs
+      });
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+      vi.useFakeTimers();
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(imageJobs).toHaveBeenCalledTimes(1);
+      expect(segments).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("clears recovery controls and stale recovery actions when a clean campaign replaces a recovered one", async () => {
     const recoveredCampaign = {
       campaign: { id: "campaign-1", title: "Recovered campaign", activeTurnNumber: 1, storyLengthProfile: "standard" },
@@ -985,7 +1051,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('class="roll-card ${passed ? "success" : "failure"}"');
     expect(storyHtml).toContain('id="storyIllustrationPanel"');
     expect(storyHtml).toContain('id="storyIllustrationContent"');
-    expect(storyScript).toContain("function renderStoryIllustration()");
+    expect(storyScript).toContain("function renderStoryIllustration({ skipIfUnchanged = false } = {})");
     expect(storyScript).toContain('class="image-wrap${selected ? "" : " image-job-placeholder"}"');
     expect(storyCss).toContain(".layout.has-illustration {");
     expect(storyCss).toContain(".story-illustration-panel {");
@@ -1750,7 +1816,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('recordActivity("image", "Illustration generation progress"');
     expect(storyScript).toContain('["queued", "generating", "provider_pending", "downloading"]');
     expect(storyScript).toContain('aria-label", `Illustration generation progress');
-    expect(storyScript).toContain('illustrationApi.imageJobs(campaignId)');
+    expect(storyScript).toContain('illustrationApi.imageJobs(poll.campaignId)');
     expect(storyScript).toContain('illustrationApi.config(campaignId)');
     expect(storyScript).toContain('state.illustrationConfig?.sourcePolicy !== "off"');
     expect(storyScript).toContain('function openImagePromptEditor(turnId)');
