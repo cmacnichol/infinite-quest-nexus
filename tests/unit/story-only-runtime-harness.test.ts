@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { request as httpRequest } from "node:http";
 import {
   assertStoryOnlyRuntimeTarget,
@@ -13,6 +13,7 @@ import {
   resolveStoryOnlyRuntimeRenderer,
   resolveStoryOnlyRuntimePostgresContainer,
   storyOnlyRuntimeDockerBuildArgs,
+  removeOwnedStoryOnlyDockerContainer,
 } from "../helpers/story-only-runtime-fixture.js";
 import {
   createStoryOnlySyntheticProvider,
@@ -301,6 +302,67 @@ describe("story-only disposable runtime harness", () => {
     expect(assertOwnedStoryOnlyDatabase("infinitequest_storyonly_run1")).toBe("infinitequest_storyonly_run1");
     expect(() => assertOwnedStoryOnlyDatabase("infinitequest_storyonly_test")).toThrow("uniquely owned");
     expect(() => assertOwnedStoryOnlyDatabase("infinitequest_test")).toThrow("uniquely owned");
+  });
+
+  it("treats an exact missing attempted Docker container as already cleaned", async () => {
+    const execute = vi.fn(async () => ({ output: "Error: No such object: iq-runtime-owned", exitCode: 1 }));
+
+    await expect(removeOwnedStoryOnlyDockerContainer({
+      name: "iq-runtime-owned", resourceTag: "unique-tag", component: "runtime", image: "story-only:test",
+      command: ["node", "runtime.js"]
+    }, execute)).resolves.toBeUndefined();
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledWith(["inspect", "iq-runtime-owned"]);
+  });
+
+  it("refuses to remove an attempted Docker name whose label or command does not match", async () => {
+    const execute = vi.fn(async () => ({ output: JSON.stringify([{
+      Id: "c".repeat(64), Name: "/iq-runtime-owned",
+      Config: { Image: "story-only:test", Cmd: ["node", "runtime.js"], Labels: {
+        "io.infinitequest.story-only.resource-tag": "another-tag",
+        "io.infinitequest.story-only.component": "runtime"
+      } }
+    }]), exitCode: 0 }));
+
+    await expect(removeOwnedStoryOnlyDockerContainer({
+      name: "iq-runtime-owned", resourceTag: "unique-tag", component: "runtime", image: "story-only:test",
+      command: ["node", "runtime.js"]
+    }, execute)).rejects.toThrow("ownership could not be verified");
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledWith(["inspect", "iq-runtime-owned"]);
+  });
+
+  it("removes only the returned container ID and preserves removal failures for aggregation", async () => {
+    const expected = {
+      name: "iq-runtime-owned", resourceTag: "unique-tag", component: "runtime" as const,
+      image: "story-only:test", command: ["node", "runtime.js"]
+    };
+    const id = "d".repeat(64);
+    const inspection = JSON.stringify([{
+      Id: id, Name: "/iq-runtime-owned",
+      Config: { Image: expected.image, Cmd: expected.command, Labels: {
+        "io.infinitequest.story-only.resource-tag": expected.resourceTag,
+        "io.infinitequest.story-only.component": expected.component
+      } }
+    }]);
+    const execute = vi.fn(async (args: readonly string[]) => args[0] === "inspect"
+      ? { output: inspection, exitCode: 0 }
+      : { output: "daemon refused removal", exitCode: 1 });
+    const close = createStoryOnlyRuntimeCleanup([
+      () => removeOwnedStoryOnlyDockerContainer(expected, execute),
+      async () => { throw new Error("owned database cleanup failed"); }
+    ]);
+
+    await expect(close()).rejects.toMatchObject({
+      name: "AggregateError",
+      errors: expect.arrayContaining([
+        expect.objectContaining({ message: "Story-only Docker container cleanup failed." }),
+        expect.objectContaining({ message: "owned database cleanup failed" })
+      ])
+    });
+    expect(execute.mock.calls.map(([args]) => args)).toEqual([["inspect", expected.name], ["rm", "--force", id]]);
   });
 
   it("memoizes concurrent shutdown and disposes a startup result after cancellation", async () => {

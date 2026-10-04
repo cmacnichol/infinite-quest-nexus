@@ -19,6 +19,8 @@ const OWNED_DATABASE_PREFIX = "infinitequest_storyonly_";
 const RUNTIME_PORT = 18081;
 const CREDENTIAL_SECRET = "story-only-runtime-test-credential-secret";
 const STORY_ONLY_POSTGRES_CONTAINER = "infinitequest-story-only-test";
+const STORY_ONLY_RESOURCE_LABEL = "io.infinitequest.story-only.resource-tag";
+const STORY_ONLY_COMPONENT_LABEL = "io.infinitequest.story-only.component";
 
 export type StoryOnlyRuntimeRenderer = "native" | "web-awesome";
 
@@ -191,15 +193,78 @@ function stopChild(child: ChildProcess | undefined): Promise<void> {
   });
 }
 
-function runCommand(command: string, args: readonly string[]): Promise<string> {
+type CommandResult = Readonly<{ output: string; exitCode: number | null }>;
+
+function runCommandResult(command: string, args: readonly string[]): Promise<CommandResult> {
   return new Promise((resolveCommand, reject) => {
     const child = spawn(command, [...args], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let output = "";
     child.stdout?.on("data", (chunk: Buffer) => { output = `${output}${chunk.toString("utf8")}`; });
     child.stderr?.on("data", (chunk: Buffer) => { output = `${output}${chunk.toString("utf8")}`; });
     child.once("error", reject);
-    child.once("exit", (code) => code === 0 ? resolveCommand(output.trim()) : reject(new Error(`Story-only runtime command failed (${command}).`)));
+    child.once("exit", (code) => resolveCommand(Object.freeze({ output: output.trim(), exitCode: code })));
   });
+}
+
+function runCommand(command: string, args: readonly string[]): Promise<string> {
+  return runCommandResult(command, args).then((result) => {
+    if (result.exitCode !== 0) throw new Error(`Story-only runtime command failed (${command}).`);
+    return result.output;
+  });
+}
+
+type StoryOnlyDockerContainerIdentity = Readonly<{
+  name: string;
+  resourceTag: string;
+  component: "provider" | "runtime";
+  image: string;
+  command: readonly string[];
+}>;
+
+function isMissingDockerContainerOutput(output: string, name: string): boolean {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(?:no such object|no such container)\\s*:?\\s*\\/?${escapedName}(?:\\s|$)`, "iu").test(output);
+}
+
+export async function removeOwnedStoryOnlyDockerContainer(
+  expected: StoryOnlyDockerContainerIdentity,
+  execute: (args: readonly string[]) => Promise<CommandResult>
+): Promise<void> {
+  const inspected = await execute(["inspect", expected.name]);
+  if (inspected.exitCode !== 0) {
+    if (isMissingDockerContainerOutput(inspected.output, expected.name)) return;
+    throw new Error("Story-only Docker container ownership could not be verified.");
+  }
+
+  let containers: unknown;
+  try { containers = JSON.parse(inspected.output); } catch {
+    throw new Error("Story-only Docker container ownership could not be verified.");
+  }
+  if (!Array.isArray(containers) || containers.length !== 1 || typeof containers[0] !== "object" || containers[0] === null) {
+    throw new Error("Story-only Docker container ownership could not be verified.");
+  }
+  const container = containers[0] as {
+    Id?: unknown;
+    Name?: unknown;
+    Config?: { Image?: unknown; Cmd?: unknown; Labels?: unknown };
+  };
+  const labels = container.Config?.Labels;
+  const command = container.Config?.Cmd;
+  if (typeof container.Id !== "string" || !/^[a-f0-9]{12,64}$/iu.test(container.Id)
+      || container.Name !== `/${expected.name}` || container.Config?.Image !== expected.image
+      || !Array.isArray(command) || !command.every((part): part is string => typeof part === "string")
+      || JSON.stringify(command) !== JSON.stringify(expected.command)
+      || typeof labels !== "object" || labels === null
+      || (labels as Record<string, unknown>)[STORY_ONLY_RESOURCE_LABEL] !== expected.resourceTag
+      || (labels as Record<string, unknown>)[STORY_ONLY_COMPONENT_LABEL] !== expected.component) {
+    throw new Error("Story-only Docker container ownership could not be verified.");
+  }
+  const removed = await execute(["rm", "--force", container.Id]);
+  if (removed.exitCode !== 0) throw new Error("Story-only Docker container cleanup failed.");
+}
+
+function dockerOwnershipArgs(resourceTag: string, component: StoryOnlyDockerContainerIdentity["component"]): string[] {
+  return ["--label", `${STORY_ONLY_RESOURCE_LABEL}=${resourceTag}`, "--label", `${STORY_ONLY_COMPONENT_LABEL}=${component}`];
 }
 
 export function resolveStoryOnlyRuntimePostgresContainer(value: unknown): string {
@@ -287,8 +352,8 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
   let dockerImageBuilt = false;
   let dockerNetworkCreated = false;
   let postgresConnected = false;
-  let dockerProviderStarted = false;
-  let dockerRuntimeStarted = false;
+  let dockerProviderAttempted = false;
+  let dockerRuntimeAttempted = false;
   let databaseCreated = false;
   let assetRootCreated = false;
   let archiveRootCreated = false;
@@ -298,6 +363,14 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
   const dockerNetwork = `iq-storyonly-${resourceTag}`;
   const dockerProvider = `iq-provider-${resourceTag}`;
   const dockerRuntime = `iq-runtime-${resourceTag}`;
+  const dockerProviderCommand = ["node", "node_modules/tsx/dist/cli.mjs", "scripts/story-only-synthetic-provider.ts"];
+  const dockerRuntimeCommand = ["node", "node_modules/tsx/dist/cli.mjs", "services/runtime/src/main.ts"];
+  const dockerProviderIdentity: StoryOnlyDockerContainerIdentity = Object.freeze({
+    name: dockerProvider, resourceTag, component: "provider", image: dockerImage, command: dockerProviderCommand
+  });
+  const dockerRuntimeIdentity: StoryOnlyDockerContainerIdentity = Object.freeze({
+    name: dockerRuntime, resourceTag, component: "runtime", image: dockerImage, command: dockerRuntimeCommand
+  });
   try {
     await admin.query(`CREATE DATABASE "${databaseName}"`);
     databaseCreated = true;
@@ -313,7 +386,8 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
       await runCommand("docker", storyOnlyRuntimeDockerBuildArgs(renderer, dockerImage)); dockerImageBuilt = true;
       await runCommand("docker", ["network", "create", dockerNetwork]); dockerNetworkCreated = true;
       await runCommand("docker", ["network", "connect", dockerNetwork, postgresContainer]); postgresConnected = true;
-      await runCommand("docker", ["run", "--detach", "--name", dockerProvider, "--network", dockerNetwork, "--env", "STORY_ONLY_SYNTHETIC_PROVIDER_HOST=0.0.0.0", dockerImage, "node", "node_modules/tsx/dist/cli.mjs", "scripts/story-only-synthetic-provider.ts"]); dockerProviderStarted = true;
+      dockerProviderAttempted = true;
+      await runCommand("docker", ["run", "--detach", "--name", dockerProvider, "--network", dockerNetwork, ...dockerOwnershipArgs(resourceTag, "provider"), "--env", "STORY_ONLY_SYNTHETIC_PROVIDER_HOST=0.0.0.0", dockerImage, ...dockerProviderCommand]);
     } else {
       provider = await createStoryOnlySyntheticProvider();
     }
@@ -347,20 +421,20 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
     await pool.end();
     pool = undefined;
     const runtimeBaseUrl = `http://127.0.0.1:${port}`;
-    const runtimeEnvironment = {
-      ...process.env,
+    const runtimeConfig = Object.freeze({
       APP_ROLE: "all", APP_HOST: "0.0.0.0", APP_PORT: docker ? "8080" : String(port), DATABASE_URL: docker ? dockerDatabaseUrl(databaseUrl, postgresContainer) : databaseUrl,
       DATABASE_MAX_CONNECTIONS: "12", CREDENTIAL_ENCRYPTION_KEY: CREDENTIAL_SECRET,
       PROVIDER_NETWORK_ALLOWLIST: docker ? dockerProvider : "127.0.0.1", LEGACY_WEB_ROOT: docker ? "/app/apps/web/dist" : resolve(root, "apps/web/dist"), NEXT_WEB_ROOT: docker ? "/app/apps/web-next/dist" : resolve(root, "apps/web-next/dist"),
       ASSET_STORAGE_ROOT: docker ? "/tmp/story-only/assets" : assetRoot, ARCHIVE_STORAGE_ROOT: docker ? "/tmp/story-only/archives" : archiveRoot, LOG_LEVEL: "silent"
-    };
+    });
     if (docker) {
-      await runCommand("docker", ["run", "--detach", "--name", dockerRuntime, "--network", dockerNetwork, "--publish", `127.0.0.1:${port}:8080`, ...Object.entries(runtimeEnvironment).flatMap(([key, value]) => value === undefined ? [] : ["--env", `${key}=${value}`]), dockerImage, "node", "node_modules/tsx/dist/cli.mjs", "services/runtime/src/main.ts"]); dockerRuntimeStarted = true;
+      dockerRuntimeAttempted = true;
+      await runCommand("docker", ["run", "--detach", "--name", dockerRuntime, "--network", dockerNetwork, ...dockerOwnershipArgs(resourceTag, "runtime"), "--publish", `127.0.0.1:${port}:8080`, ...Object.entries(runtimeConfig).flatMap(([key, value]) => ["--env", `${key}=${value}`]), dockerImage, ...dockerRuntimeCommand]);
     } else runtime = spawn(process.execPath, ["node_modules/tsx/dist/cli.mjs", "services/runtime/src/main.ts"], {
       cwd: root,
       windowsHide: true,
       stdio: ["ignore", "ignore", "pipe"],
-      env: runtimeEnvironment
+      env: { ...process.env, ...runtimeConfig }
     });
     try {
       await waitForStoryOnlyRuntimeReady(runtimeBaseUrl, runtime);
@@ -379,8 +453,8 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
       async () => stopChild(runtime),
       async () => activeProvider.close(),
       ...(docker ? [
-        ...(dockerRuntimeStarted ? [async () => { await runCommand("docker", ["rm", "--force", dockerRuntime]); }] : []),
-        ...(dockerProviderStarted ? [async () => { await runCommand("docker", ["rm", "--force", dockerProvider]); }] : []),
+        ...(dockerRuntimeAttempted ? [async () => removeOwnedStoryOnlyDockerContainer(dockerRuntimeIdentity, (args) => runCommandResult("docker", args))] : []),
+        ...(dockerProviderAttempted ? [async () => removeOwnedStoryOnlyDockerContainer(dockerProviderIdentity, (args) => runCommandResult("docker", args))] : []),
         ...(postgresConnected ? [async () => { await runCommand("docker", ["network", "disconnect", dockerNetwork, postgresContainer]); }] : []),
         ...(dockerNetworkCreated ? [async () => { await runCommand("docker", ["network", "rm", dockerNetwork]); }] : []),
         ...(dockerImageBuilt ? [async () => { await runCommand("docker", ["image", "rm", "--force", dockerImage]); }] : [])
@@ -400,8 +474,8 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
       async () => { await pool?.end(); },
       async () => { await provider?.close(); },
       ...(docker ? [
-        ...(dockerRuntimeStarted ? [async () => { await runCommand("docker", ["rm", "--force", dockerRuntime]); }] : []),
-        ...(dockerProviderStarted ? [async () => { await runCommand("docker", ["rm", "--force", dockerProvider]); }] : []),
+        ...(dockerRuntimeAttempted ? [async () => removeOwnedStoryOnlyDockerContainer(dockerRuntimeIdentity, (args) => runCommandResult("docker", args))] : []),
+        ...(dockerProviderAttempted ? [async () => removeOwnedStoryOnlyDockerContainer(dockerProviderIdentity, (args) => runCommandResult("docker", args))] : []),
         ...(postgresConnected ? [async () => { await runCommand("docker", ["network", "disconnect", dockerNetwork, postgresContainer]); }] : []),
         ...(dockerNetworkCreated ? [async () => { await runCommand("docker", ["network", "rm", dockerNetwork]); }] : []),
         ...(dockerImageBuilt ? [async () => { await runCommand("docker", ["image", "rm", "--force", dockerImage]); }] : [])
