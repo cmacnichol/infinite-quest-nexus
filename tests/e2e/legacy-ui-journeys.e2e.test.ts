@@ -346,7 +346,8 @@ async function installJourneyApi(page: Page, options: { readonly imageFailure?: 
         const direction = url.searchParams.get("direction");
         if (direction !== "older" && direction !== "newer") return respond({ error: "invalid_request" }, 400);
         const anchorTurnNumber = Number(url.searchParams.get("anchorTurnNumber"));
-        const anchorTurnId = url.searchParams.get("anchorTurnId") ?? "";
+        const anchorTurnId = url.searchParams.get("anchorTurnId");
+        if (!anchorTurnId) return respond({ error: "invalid_request" }, 400);
         const neighborLimit = Number(url.searchParams.get("neighborLimit") ?? 9);
         const historyToken = url.searchParams.get("historyToken");
         const anchorIndex = campaign.turns.findIndex(turn => Number(turn.turnNumber) === anchorTurnNumber && turn.id === anchorTurnId);
@@ -763,7 +764,8 @@ test("explicit_reader_window_bounds: startup and older-scene paging stay bounded
       const direction = url.searchParams.get("direction");
       if (direction !== "older" && direction !== "newer") return route.fulfill({ status: 400, json: { error: "invalid_request" } });
       const anchorTurnNumber = Number(url.searchParams.get("anchorTurnNumber"));
-      const anchorTurnId = url.searchParams.get("anchorTurnId") ?? "";
+      const anchorTurnId = url.searchParams.get("anchorTurnId");
+      if (!anchorTurnId) return route.fulfill({ status: 400, json: { error: "invalid_request" } });
       const anchorIndex = fixture.turns.findIndex(turn => Number(turn.turnNumber) === anchorTurnNumber && turn.id === anchorTurnId);
       if (anchorIndex < 0) return route.fulfill({ status: 404, json: { error: "not_found" } });
       const requestedLimit = Number(url.searchParams.get("neighborLimit") ?? 9);

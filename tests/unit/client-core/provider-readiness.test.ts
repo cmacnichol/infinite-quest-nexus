@@ -11,6 +11,8 @@ const storyCapability = {
   advertisedAt: "2026-10-03T10:00:00.000Z",
   operations: [{ operation: "story" as const, streaming: false, status: "verified" as const, reason: null, schemaVersion: CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY.schemaVersion, schemaHash: CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY.schemaHash, verifiedAt: "2026-10-03T10:00:00.000Z", expiresAt: "2026-10-04T10:00:00.000Z" }]
 };
+const storyOperation = storyCapability.operations[0];
+if (!storyOperation) throw new Error("The typed Story capability fixture must include its operation.");
 
 function profile(overrides: Partial<SafeProviderProfileView> = {}): SafeProviderProfileView {
   return safeProviderProfileViewSchema.parse({
@@ -35,10 +37,10 @@ describe("provider readiness", () => {
   });
 
   it.each([
-    ["unknown", { advertisedAt: null, operations: [{ ...storyCapability.operations[0], status: "unknown" }] }, "unknown"],
-    ["expired", { operations: [{ ...storyCapability.operations[0], verifiedAt: "2026-10-01T10:00:00.000Z", expiresAt: "2026-10-02T10:00:00.000Z" }] }, "expired"],
-    ["malformed", { operations: [{ ...storyCapability.operations[0], expiresAt: "not-a-time" }] }, "malformed"],
-    ["wrong schema identity", { operations: [{ ...storyCapability.operations[0], schemaHash: "0".repeat(64) }] }, "identity-mismatch"],
+    ["unknown", { advertisedAt: null, operations: [{ ...storyOperation, status: "unknown" }] }, "unknown"],
+    ["expired", { operations: [{ ...storyOperation, verifiedAt: "2026-10-01T10:00:00.000Z", expiresAt: "2026-10-02T10:00:00.000Z" }] }, "expired"],
+    ["malformed", { operations: [{ ...storyOperation, expiresAt: "not-a-time" }] }, "malformed"],
+    ["wrong schema identity", { operations: [{ ...storyOperation, schemaHash: "0".repeat(64) }] }, "identity-mismatch"],
     ["wrong model identity", { model: "vendor/other-model" }, "identity-mismatch"]
   ] as const)("does not mark %s capability ready", (_name, patch, expectedCapability) => {
     const capability = { ...storyCapability, ...patch } as unknown as NonNullable<SafeProviderProfileView["responseFormatCapability"]>;
@@ -49,7 +51,7 @@ describe("provider readiness", () => {
     expect(assess(candidate).capability).toBe(expectedCapability);
   });
   it("rejects an impossible advertised operation status at the untrusted boundary", () => {
-    const malformed = { ...storyCapability, operations: [{ ...storyCapability.operations[0], status: "advertised" }] } as unknown as NonNullable<SafeProviderProfileView["responseFormatCapability"]>;
+    const malformed = { ...storyCapability, operations: [{ ...storyOperation, status: "advertised" }] } as unknown as NonNullable<SafeProviderProfileView["responseFormatCapability"]>;
     const candidate = { ...profile(), responseFormatCapability: malformed } as SafeProviderProfileView;
     expect(assess(candidate)).toMatchObject({ state: "unavailable", capability: "malformed" });
   });
@@ -63,11 +65,11 @@ describe("provider readiness", () => {
   it("requires the capability operation to match streaming and reject unsupported or invalid times", () => {
     const wrongStreaming = profile({ configuration: { streaming: true } });
     expect(assess(wrongStreaming)).toMatchObject({ state: "unavailable", capability: "identity-mismatch" });
-    const unsupported = { ...storyCapability, operations: [{ ...storyCapability.operations[0], status: "unsupported" as const }] };
+    const unsupported = { ...storyCapability, operations: [{ ...storyOperation, status: "unsupported" as const }] };
     expect(assess(profile({ responseFormatCapability: unsupported }))).toMatchObject({ state: "unavailable", capability: "unsupported" });
-    const futureVerified = { ...storyCapability, operations: [{ ...storyCapability.operations[0], verifiedAt: "2026-10-04T10:00:00.000Z" }] };
+    const futureVerified = { ...storyCapability, operations: [{ ...storyOperation, verifiedAt: "2026-10-04T10:00:00.000Z" }] };
     expect(assess(profile({ responseFormatCapability: futureVerified }))).toMatchObject({ state: "unavailable", capability: "malformed" });
-    const inverted = { ...storyCapability, operations: [{ ...storyCapability.operations[0], verifiedAt: "2026-10-03T11:00:00.000Z", expiresAt: "2026-10-03T10:00:00.000Z" }] };
+    const inverted = { ...storyCapability, operations: [{ ...storyOperation, verifiedAt: "2026-10-03T11:00:00.000Z", expiresAt: "2026-10-03T10:00:00.000Z" }] };
     expect(assess(profile({ responseFormatCapability: inverted }))).toMatchObject({ state: "unavailable", capability: "malformed" });
   });
 
@@ -90,7 +92,7 @@ describe("provider readiness", () => {
     expect(providerReadinessForRole("text", [disabledDefault], [inventory()], now)).toMatchObject({ state: "unavailable", profileId: disabledDefault.id });
   });
   it("classifies a contract-valid advertised-at but unverified story capability as not ready", () => {
-    const capability = { ...storyCapability, operations: [{ ...storyCapability.operations[0], status: "unknown" as const, verifiedAt: null, expiresAt: null }] };
+    const capability = { ...storyCapability, operations: [{ ...storyOperation, status: "unknown" as const, verifiedAt: null, expiresAt: null }] };
     expect(assess(profile({ responseFormatCapability: capability }))).toMatchObject({ state: "unavailable", capability: "advertised" });
   });
   it("does not let stale inventory identity or absent selected models establish readiness", () => {
