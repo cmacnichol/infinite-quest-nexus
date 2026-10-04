@@ -2026,7 +2026,7 @@ describe("campaign import version detail generations", () => {
 
     await harness.load(1).catch((error) => harness.handleError(error, 1));
     expect(harness.statuses).toHaveLength(1);
-    expect(harness.statuses[0].message).toContain("Current destination detail failed");
+    expect(harness.statuses[0]!.message).toContain("Current destination detail failed");
     expect(harness.elements.campaignImportVersion.textContent).toContain("Could not load versions. Select the destination again to retry.");
 
     await harness.load(1);
