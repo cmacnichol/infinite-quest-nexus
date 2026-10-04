@@ -151,3 +151,28 @@ export type {
   StoryHistorySearchOutcome,
   StoryHistorySearchState
 } from "./story-history-search.js";
+export {
+  STORY_CONTINUOUS_READER_WINDOW_LIMIT,
+  STORY_CONTINUOUS_READER_NEIGHBOR_LIMIT,
+  createStoryContinuousReaderState,
+  selectStoryReadIdentity,
+  beginStoryContinuousReaderGroup,
+  settleStoryContinuousReaderResponse,
+  settleStoryContinuousReaderFailure,
+  beginStoryContinuousReaderRetry,
+  settleStoryContinuousReaderAnchorRefresh,
+  settleStoryContinuousReaderAnchorRefreshFailure,
+  reconcileStoryAcceptedSceneReplacement
+} from "./story-continuous-reader.js";
+export type {
+  StoryReadIdentity,
+  StoryContinuousReaderScope,
+  StoryContinuousReaderFailureKind,
+  StoryContinuousReaderRequest,
+  StoryContinuousReaderAnchorRefreshRequest,
+  StoryContinuousReaderState,
+  StoryContinuousReaderBootstrap,
+  StoryContinuousReaderInitialization,
+  StoryContinuousReaderRetry,
+  StoryContinuousReaderAnchorRefreshResult
+} from "./story-continuous-reader.js";
