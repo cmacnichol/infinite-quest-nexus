@@ -299,8 +299,12 @@ test("a saved Turn 12 stays bounded until an explicit scene group and survives m
       Reflect.apply(originalScrollTo, window, args);
     }) as typeof window.scrollTo;
   });
-  await seedReaderPosition(page, fixture, fixture.turns[11]!);
   await prepareStoryPage(page, fixture.campaignId);
+  await page.goto(`${origin}/story/${fixture.campaignId}`);
+  await expect(page.locator("#storySyncStatus")).toContainText("Story synced");
+  await page.locator("#freeAction").fill("Keep this draft while the reader mode changes.");
+  await expect(page.locator("#autosaveStatus")).toHaveText("Draft saved");
+  await seedReaderPosition(page, fixture, fixture.turns[11]!);
 
   await page.goto(`${origin}/story/${fixture.campaignId}`);
   await expect(page.locator("#readerPositionNotice")).toContainText("Resumed reading at Turn 12");
@@ -325,7 +329,7 @@ test("a saved Turn 12 stays bounded until an explicit scene group and survives m
   expect(sceneWindowRequests(requests, fixture.campaignId)).toHaveLength(0);
   expect(cursorRequests(requests, fixture.campaignId)).toHaveLength(0);
 
-  await page.locator("#freeAction").fill("Keep this draft while the reader mode changes.");
+  await expect(page.locator("#freeAction")).toBeDisabled();
   await saveContinuousPreference(page, false);
   await expect(page.locator("#scene-12")).toBeVisible();
   expect(await renderedSceneTurns(page)).toEqual([12]);

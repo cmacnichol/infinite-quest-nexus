@@ -268,7 +268,7 @@ test("explicit turn navigation saves identity even when it leaves scroll geometr
   });
 });
 
-test("continuous reading renders an exact saved turn when the history page fails", async ({ page }) => {
+test("continuous reading resumes an exact saved turn without requesting unavailable history pages", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });
   const user = fixture.session.user as Record<string, unknown>;
   user.settings = { ...(user.settings as Record<string, unknown>), continuousReading: true };
@@ -287,14 +287,16 @@ test("continuous reading renders an exact saved turn when the history page fails
   const exactLookup = await installExactTurnRoute(page, fixture, () => fixture.turns[11]!);
 
   await page.goto(`${origin}/story/${fixture.campaignId}`);
-  await expect.poll(() => failedOlderPages).toBe(1);
+  expect(failedOlderPages).toBe(0);
   await expect.poll(() => page.locator("#storySyncStatus").textContent()).toContain("Story synced");
   await expect.poll(() => exactLookup()).toBe(1);
   await expect(page.locator("#readerPositionNotice")).toContainText("Resumed reading at Turn 12");
   await expect.poll(() => page.locator("#readerTurnCount").textContent()).toContain("Turn 12 of 317");
   await expect(page.locator("#scene-12")).toBeVisible();
   expect(exactLookup()).toBe(1);
-  expect(failedOlderPages).toBe(1);
+  expect(failedOlderPages).toBe(0);
+  await expect(page.locator(".scene[data-turn-number]")).toHaveCount(1);
+  expect(instrumentation.writes.filter(write => write.path.includes("/generations/"))).toEqual([]);
 });
 
 test("a same-number replacement accepted during font layout supersedes the saved identity", async ({ page }) => {
