@@ -5363,7 +5363,10 @@ async function saveSelectedCampaign(event = null, { snapshot = campaignSettingsS
   } catch (error) {
     if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       renderCampaignSaveFeedback("error");
-      campaignMessage(safeWorkflowFailure("Campaign settings could not be saved.", error), "error");
+      const message = error?.statusCode === 409 && error?.details?.code === "active_turn_changed"
+        ? "Campaign changed. Your edits are still here. Reload the campaign before saving again."
+        : "Campaign settings could not be saved.";
+      campaignMessage(safeWorkflowFailure(message, error), "error");
     }
     return false;
   } finally {

@@ -7,6 +7,12 @@ const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidenc
 const campaignA = { id: "campaign-a", title: "Campaign Alpha", status: "active", worldId: "world-a", worldVersionId: "version-a", worldTitle: "World Alpha", worldVersionNumber: 1, activeTurnNumber: 3, stateRevision: 5, turnControlStyle: "flexible_action", storyLengthProfile: "standard", storyContextBudgetTokens: 32000 };
 const campaignB = { ...campaignA, id: "campaign-b", title: "Campaign Beta" };
 type ApiLogEntry = { method: string; path: string; status: number; requestBody: string | null; response: unknown };
+type WorkspaceControls = {
+  patchGate?: Promise<void>;
+  patchStatus?: number;
+  patchStarted?: () => void;
+  patchResponseBody?: unknown;
+};
 let apiLog: ApiLogEntry[] = [];
 let campaignRecords = new Map<string, typeof campaignA>();
 
@@ -14,7 +20,7 @@ function response(body: unknown, status = 200) {
   return { status, contentType: "application/json", body: JSON.stringify(body) };
 }
 
-async function fixtureRoute(route: Route, controls: { patchGate?: Promise<void>; patchStatus?: number; patchStarted?: () => void }) {
+async function fixtureRoute(route: Route, controls: WorkspaceControls) {
   const request = route.request();
   const url = new URL(request.url());
   const path = url.pathname.replace(/^\/api\/v1/u, "");
@@ -41,7 +47,7 @@ async function fixtureRoute(route: Route, controls: { patchGate?: Promise<void>;
     if (controls.patchGate) await controls.patchGate;
     const input = JSON.parse(request.postData() || "{}");
     status = controls.patchStatus ?? 200;
-    if (status >= 400) body = { message: "Synthetic save failure" };
+    if (status >= 400) body = controls.patchResponseBody ?? { message: "Synthetic save failure" };
     else {
       const id = path.slice("/campaigns/".length);
       body = { ...campaignRecords.get(id), ...input, id, imageProviderProfileId: null, updatedAt: "2026-10-03T12:00:00Z" };
@@ -52,7 +58,7 @@ async function fixtureRoute(route: Route, controls: { patchGate?: Promise<void>;
   await route.fulfill(response(body, status));
 }
 
-async function openWorkspace(page: Page, controls: { patchGate?: Promise<void>; patchStatus?: number; patchStarted?: () => void } = {}) {
+async function openWorkspace(page: Page, controls: WorkspaceControls = {}) {
   await page.route("**/api/v1/**", (route) => fixtureRoute(route, controls));
   await page.goto(`${origin}/nexus/index.html#campaigns`);
   await page.locator('#campaignList [data-campaign-id="campaign-a"]').waitFor();
@@ -149,6 +155,55 @@ test("stays on the campaign and preserves fields after save failure", async ({ p
   await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "error");
   await expect(page.locator("#campaignStatusMessage")).toHaveText("Campaign settings could not be saved.");
   await expect(page.locator("#campaignStatusMessage")).not.toContainText("Synthetic save failure");
+});
+
+test("active-turn conflict explains how to recover without exposing server details or losing campaign edits", async ({ page }, testInfo) => {
+  const privateCanary = "PRIVATE_ACTIVE_TURN_CONFLICT_DETAIL";
+  await openWorkspace(page, {
+    patchStatus: 409,
+    patchResponseBody: {
+      message: privateCanary,
+      details: { code: "active_turn_changed", internal: privateCanary },
+      correlationId: "safe-active-turn-reference"
+    }
+  });
+  await page.locator("#campaignTitle").fill("Retained Alpha title");
+  await page.locator("#campaignTabStory").click();
+  await page.locator("#campaignStoryLengthProfile").selectOption("long");
+  await page.locator('#campaignList [data-campaign-id="campaign-b"]').click();
+  await page.locator("#saveCampaignEditsDecision").click();
+
+  await expect(page.locator("#campaignTitle")).toHaveValue("Retained Alpha title");
+  await expect(page.locator("#campaignStoryLengthProfile")).toHaveValue("long");
+  await expect(page.locator("#memoryTitle")).toHaveText("Campaign Alpha");
+  await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "error");
+  await expect(page.locator("#campaignStatusMessage")).toHaveText(
+    "Campaign changed. Your edits are still here. Reload the campaign before saving again. Reference: safe-active-turn-reference."
+  );
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText(privateCanary);
+
+  const writes = apiLog.filter((entry) => ["POST", "PUT", "PATCH", "DELETE"].includes(entry.method));
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toMatchObject({ method: "PATCH", path: "/campaigns/campaign-a", status: 409 });
+  expect(JSON.parse(writes[0]?.requestBody ?? "{}")).toMatchObject({ title: "Retained Alpha title", storyLengthProfile: "long" });
+  expect(campaignRecords.get("campaign-a")).toMatchObject({ title: "Campaign Alpha", storyLengthProfile: "standard" });
+  await page.screenshot({ path: testInfo.outputPath("campaign-active-turn-conflict.png"), fullPage: true });
+});
+
+test("unknown campaign conflicts retain the generic safe save failure", async ({ page }) => {
+  const privateCanary = "PRIVATE_UNKNOWN_CAMPAIGN_CONFLICT";
+  await openWorkspace(page, {
+    patchStatus: 409,
+    patchResponseBody: { message: privateCanary, details: { code: "another_conflict" } }
+  });
+  await page.locator("#campaignTitle").fill("Uncommitted Alpha title");
+  await page.locator("#saveCampaign").click();
+
+  await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "error");
+  await expect(page.locator("#campaignStatusMessage")).toHaveText("Campaign settings could not be saved.");
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText(privateCanary);
+  await expect(page.locator("#campaignTitle")).toHaveValue("Uncommitted Alpha title");
+  expect(apiLog.filter((entry) => entry.method === "PATCH")).toHaveLength(1);
 });
 
 test("late save completion cannot overwrite a campaign selected after Discard", async ({ page }) => {
