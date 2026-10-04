@@ -1052,7 +1052,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="storyIllustrationPanel"');
     expect(storyHtml).toContain('id="storyIllustrationContent"');
     expect(storyScript).toContain("function renderStoryIllustration({ skipIfUnchanged = false } = {})");
-    expect(storyScript).toContain('class="image-wrap${selected ? "" : " image-job-placeholder"}"');
+    expect(storyScript).toContain('class="image-wrap${selected ? "" : " image-job-placeholder"}${isCurrentTurn ? " image-wrap-has-controls" : ""}"');
     expect(storyCss).toContain(".layout.has-illustration {");
     expect(storyCss).toContain(".story-illustration-panel {");
     expect(storyCss).toContain("position: sticky;");
@@ -1934,7 +1934,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('aria-label="Preview or edit this image prompt"');
     expect(storyScript).toContain('aria-label="Regenerate only this image"');
     expect(storyScript).not.toContain('aria-label="More image controls"');
-    expect(storyCss).toContain(".segment-image-icon { width: 34px;");
+    expect(storyCss).toContain(".segment-image-icon { width: 44px;");
     expect(storyScript).toContain("function openSegmentImagePromptEditor(segmentId, variantIndex)");
     expect(storyScript).toContain("async function regenerateSegmentImage(segmentId, variantIndex, prompt)");
     expect(storyScript).toContain("function whySegmentImage(segmentId, variantIndex)");
@@ -1953,7 +1953,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('data-action="next-segment-image"');
     expect(storyCss).toContain(".narration-segment {");
     expect(storyCss).toContain(".segment-illustration-sticky { position: sticky; top: 76px; }");
-    expect(storyCss).toContain(".segment-illustration-content .image-wrap { position: relative;");
+    expect(storyCss).toContain(".segment-illustration-card > .image-wrap {");
+    expect(storyCss).toContain(".segment-illustration-card > .image-wrap.image-wrap-has-controls { padding-top: 64px; }");
+    expect(storyScript).toContain('statusContainer.insertBefore(status, metadata)');
     expect(storyCss).toContain(".layout.has-segmented-illustrations .story-shell");
     expect(storyCss).toContain("overflow: clip;");
     expect(storyCss).toContain(".illustration-carousel {");

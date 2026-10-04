@@ -437,7 +437,7 @@ code { color: var(--gold); }
 .carousel-search > span[aria-hidden] { position: absolute; left: 13px; z-index: 1; color: var(--muted); font-size: 1.15rem; }
 .carousel-search input { padding-left: 38px; border-radius: 999px; background: #0d111bd9; }
 .carousel-buttons { display: flex; gap: 7px; }
-.carousel-buttons button { width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 50%; background: #161a27; color: var(--text); cursor: pointer; }
+.carousel-buttons button { width: 44px; height: 44px; border: 1px solid var(--line); border-radius: 50%; background: #161a27; color: var(--text); cursor: pointer; }
 .carousel-buttons button:hover { border-color: var(--purple); background: #292445; }
 .card-carousel { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(280px, 31%); gap: 15px; overflow-x: auto; padding: 2px 2px 15px; scroll-behavior: smooth; scroll-snap-type: x mandatory; scrollbar-color: #49425f transparent; scrollbar-width: thin; }
 .dashboard-card { position: relative; display: grid; grid-template-rows: 145px 1fr; min-height: 310px; overflow: hidden; border: 1px solid var(--line); border-radius: 19px; background: #121620; color: var(--text); text-align: left; scroll-snap-align: start; box-shadow: 0 16px 40px #0005; transition: transform .2s ease, border-color .2s ease; }
@@ -713,7 +713,7 @@ legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 80
 .collection-empty { margin: 0; }
 .collection-empty-state { display: grid; width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; align-content: start; justify-items: start; gap: 10px; }
 .collection-empty-state .collection-empty { width: 100%; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-.collection-clear { width: max-content; max-width: 100%; }
+.collection-clear { width: max-content; max-width: 100%; min-height: 44px; padding: 10px 12px; }
 .management-world-sort { width: 180px; }
 @media (max-width: 820px) {
   .world-library-toolbar { grid-template-columns: minmax(0, 1fr) auto auto; }

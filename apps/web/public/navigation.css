@@ -50,7 +50,7 @@
 .nav-primary-links > a,
 .nav-menu-trigger,
 .nav-text-button {
-  min-height: 38px;
+  min-height: 44px;
   border: 0;
   border-radius: 9px;
   padding: 10px 13px;
@@ -130,9 +130,9 @@
 .nav-meta { display: flex; min-width: 70px; align-items: center; justify-content: flex-end; gap: 8px; text-align: right; }
 .nav-profile-button {
   display: inline-grid;
-  width: 38px;
-  height: 38px;
-  flex: 0 0 38px;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
   place-items: center;
   border: 1px solid var(--line);
   border-radius: 50%;
@@ -167,7 +167,7 @@
   .universal-nav-links { justify-content: space-around; padding-left: 2px; }
   .nav-primary-links > a,
   .nav-menu-trigger,
-  .nav-text-button { min-height: 32px; padding-inline: 5px; font-size: .69rem; }
+  .nav-text-button { min-height: 44px; padding-inline: 5px; font-size: .69rem; }
   .nav-section-divider { height: 22px; margin-inline: 2px; }
   .nav-menu-panel,
   .nav-menu-panel.compact-panel,
@@ -179,4 +179,17 @@
 @media (max-width: 340px) {
   .universal-nav { grid-template-columns: minmax(0, 1fr) auto; }
   .universal-nav .nexus-brand { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html,
+  body,
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

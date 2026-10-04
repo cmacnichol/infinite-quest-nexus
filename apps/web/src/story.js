@@ -1771,10 +1771,11 @@ function segmentIllustrationMarkup(turn, turnIndex, segment, segmentCount) {
   const status = segmentStatusLabel(segment);
   const isCurrentTurn = Number(turn.turnNumber) === Number(state.campaign?.activeTurnNumber);
   return `<div class="segment-illustration-card">
-    <div class="image-wrap${selected ? "" : " image-job-placeholder"}">
+    <div class="image-wrap${selected ? "" : " image-job-placeholder"}${isCurrentTurn ? " image-wrap-has-controls" : ""}">
     ${selected
       ? `<img src="${escapeHtml(selected.url)}" alt="Illustration ${selectedIndex + 1} for turn ${turn.turnNumber}, segment ${segment.ordinal + 1}" loading="lazy" />`
       : `<div class="image-placeholder">${escapeHtml(status || "No illustration is available for this segment yet.")}</div>`}
+    <div class="segment-image-footer">
     ${variants.length > 1 ? `<div class="illustration-carousel" aria-label="Illustration variants">
       <button class="small ghost" type="button" data-action="previous-segment-image" data-segment-id="${escapeHtml(segment.id)}" aria-label="Previous illustration">←</button>
       <span>${selectedIndex + 1} / ${variants.length}</span>
@@ -1785,6 +1786,7 @@ function segmentIllustrationMarkup(turn, turnIndex, segment, segmentCount) {
       <span>Segment ${segment.ordinal + 1} of ${segmentCount}</span>
       <span>${segment.endWord - segment.startWord} words</span>
       ${segment.promptSource === "ai_fallback" ? "<span>Direct fallback</span>" : ""}
+    </div>
     </div>
     </div>
     ${isCurrentTurn ? `<div class="segment-image-controls" aria-label="Controls for this current-turn illustration">
@@ -2026,7 +2028,10 @@ function scrollSceneIntoView(scene) {
     && scene?.style) {
     scene.style.scrollMarginTop = `${Math.ceil(Math.max(headerHeight, stickyTop) + toolbarHeight + 12)}px`;
   }
-  scene.scrollIntoView({ behavior: "smooth", block: "start" });
+  scene.scrollIntoView({
+    behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    block: "start"
+  });
 }
 
 // ── Player Input ──────────────────────────────────────────────
@@ -4293,11 +4298,19 @@ function renderSceneImageJob(job) {
     imageWrap.className = "image-wrap image-job-placeholder";
     content?.appendChild(imageWrap);
   }
-  let status = imageWrap.querySelector(".image-job-status");
+  let statusContainer = imageWrap.querySelector(".segment-image-footer");
+  if (!statusContainer && job.segmentId) {
+    statusContainer = document.createElement("div");
+    statusContainer.className = "segment-image-footer";
+    imageWrap.appendChild(statusContainer);
+  }
+  statusContainer ??= imageWrap;
+  let status = statusContainer.querySelector(".image-job-status");
   if (!status) {
     status = document.createElement("div");
     status.className = imageWrap.querySelector("img") ? "image-job-status image-job-overlay" : "image-job-status";
-    imageWrap.appendChild(status);
+    const metadata = statusContainer.querySelector(".segment-illustration-meta");
+    statusContainer.insertBefore(status, metadata);
   }
   const labelText = terminalFailure
     ? (job.errorMessage || "Illustration generation did not complete.")

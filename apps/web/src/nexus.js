@@ -2788,7 +2788,18 @@ async function openQuickCampaign() {
 }
 
 function scrollCarousel(element, direction) {
-  element.scrollBy({ left: direction * Math.max(280, element.clientWidth * .82), behavior: "smooth" });
+  element.scrollBy({
+    left: direction * Math.max(280, element.clientWidth * .82),
+    behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
+  });
+}
+
+function scrollPromptLibrary(direction) {
+  if (!elements.promptLibraryList) return;
+  elements.promptLibraryList.scrollBy({
+    left: direction * Math.max(260, elements.promptLibraryList.clientWidth * .8),
+    behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
+  });
 }
 
 function worldMessage(message, type = "") {
@@ -8928,8 +8939,8 @@ elements.promptLibraryDiscard?.addEventListener("click", () => {
   renderPromptLibraryDirtyState();
   schedulePromptLibraryPreview();
 });
-elements.promptLibraryPrevious?.addEventListener("click", () => elements.promptLibraryList.scrollBy({ left: -Math.max(260, elements.promptLibraryList.clientWidth * .8), behavior: "smooth" }));
-elements.promptLibraryNext?.addEventListener("click", () => elements.promptLibraryList.scrollBy({ left: Math.max(260, elements.promptLibraryList.clientWidth * .8), behavior: "smooth" }));
+elements.promptLibraryPrevious?.addEventListener("click", () => scrollPromptLibrary(-1));
+elements.promptLibraryNext?.addEventListener("click", () => scrollPromptLibrary(1));
 window.addEventListener("beforeunload", (event) => {
   if (!promptLibraryIsDirty()) return;
   event.preventDefault();
