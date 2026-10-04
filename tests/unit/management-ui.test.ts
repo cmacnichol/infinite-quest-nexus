@@ -605,6 +605,46 @@ describe("Nexus management UI contracts", () => {
     expect(sectionFeedback?.textContent).toBe("");
   });
 
+  it("keeps a failed current Story Memory reload private and disables stale controls until retry", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const savedSettings = { level: "standard", reviewMode: "off", availableLevels: ["off", "standard", "enhanced", "max"] };
+    const privateError = Object.assign(new Error("PRIVATE_STORY_MEMORY_BODY_CANARY"), { correlationId: "story-safe-789" });
+    const api = vi.fn().mockRejectedValueOnce(privateError).mockResolvedValueOnce(savedSettings);
+    const functions = managementFunctions<{
+      loadCampaignStoryMemory: (campaignId: string, selectionEpoch: number, signal?: AbortSignal) => Promise<unknown>;
+    }>([
+      "readCampaignStoryMemorySettings",
+      "campaignStoryMemoryDescription",
+      "renderCampaignStoryMemorySettings",
+      "safeWorkflowFailure",
+      "loadCampaignStoryMemory"
+    ], {
+      elements,
+      selectedCampaign: { id: "campaign-story-current" },
+      campaignSelectionRequest: 12,
+      campaignStoryMemorySettings: savedSettings,
+      STORY_MEMORY_LEVELS: ["off", "standard", "enhanced", "max"],
+      api
+    });
+    const status = elements.campaignStoryMemoryStatus as HTMLElement;
+    const level = elements.campaignStoryMemoryLevel as HTMLSelectElement;
+    const review = elements.campaignContinuityReviewEnabled as HTMLInputElement;
+    Object.defineProperty(level, "value", { value: "standard", writable: true, configurable: true });
+    Object.defineProperty(review, "checked", { value: false, writable: true, configurable: true });
+
+    await expect(functions.loadCampaignStoryMemory("campaign-story-current", 12)).rejects.toBe(privateError);
+    expect(status.textContent).toBe("Story Memory settings are unavailable. Reference: story-safe-789.");
+    expect(status.textContent).not.toContain("PRIVATE_STORY_MEMORY_BODY_CANARY");
+    expect(level.disabled).toBe(true);
+    expect(review.disabled).toBe(true);
+
+    await expect(functions.loadCampaignStoryMemory("campaign-story-current", 12)).resolves.toEqual(savedSettings);
+    expect(status.textContent).toContain("Saved level: standard");
+    expect(level.disabled).toBe(false);
+    expect(api).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps campaign feedback visible when a non-Overview panel is active", () => {
     const { document } = parseHTML(managementHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));

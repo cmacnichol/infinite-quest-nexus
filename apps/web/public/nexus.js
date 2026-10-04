@@ -473,7 +473,7 @@ async function loadCampaignStoryMemory(campaignId, selectionRequest, signal) {
     return settings;
   } catch (error) {
     if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
-    renderCampaignStoryMemorySettings(null, { message: `Story Memory settings are unavailable: ${error.message || String(error)}` });
+    renderCampaignStoryMemorySettings(null, { message: safeWorkflowFailure("Story Memory settings are unavailable.", error) });
     throw error;
   }
 }

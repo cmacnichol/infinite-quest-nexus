@@ -242,6 +242,64 @@ test("a_failed_section_read_can_be_retried_by_reopening_its_tab", async ({ page 
   await expect(page.locator("#campaignStatusMessage")).not.toContainText("Synthetic Story Memory read failure");
 });
 
+test("story_memory_reload_failure_after_save_keeps_private_details_hidden_and_retries", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
+  const api = await installLegacyUiFixture(page, fixture);
+  const path = pathFor(campaignId(fixture), "story-memory");
+  let storyReads = 0;
+  let storyWrites = 0;
+  let savedLevel = "off";
+  await page.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    if (new URL(request.url()).pathname === path && request.method() === "GET") {
+      storyReads += 1;
+      if (storyReads === 2) {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ message: "PRIVATE_STORY_MEMORY_BODY_CANARY", correlationId: "story-safe-789" })
+        });
+        return;
+      }
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(storyMemoryResponse(savedLevel)) });
+      return;
+    }
+    if (new URL(request.url()).pathname === path && request.method() === "PUT") {
+      storyWrites += 1;
+      const input = request.postDataJSON() as { level: string };
+      savedLevel = input.level;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(storyMemoryResponse(savedLevel)) });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await selectCampaign(page, fixture);
+  await page.locator("#campaignTabStory").click();
+  await expect(page.locator("#campaignStoryMemoryStatus")).toContainText("Saved level: off");
+  await page.locator("#campaignStoryMemoryLevel").selectOption("standard");
+  await expect(page.locator("#campaignStoryMemoryStatus")).toContainText("Saved level: standard");
+  expect(storyWrites).toBe(1);
+  expect(savedLevel).toBe("standard");
+
+  await page.locator("#campaignTabOverview").click();
+  await page.locator("#campaignTabStory").click();
+  const status = page.locator("#campaignStoryMemoryStatus");
+  await expect(status).toHaveText("Story Memory settings are unavailable. Reference: story-safe-789.");
+  await expect(page.locator("#campaignStoryMemoryLevel")).toBeDisabled();
+  const visibleText = await page.locator("body").evaluate((element) => (element as HTMLElement).innerText);
+  expect(visibleText).not.toContain("PRIVATE_STORY_MEMORY_BODY_CANARY");
+  expect(storyReads).toBe(2);
+  expect(reads(api, path)).toHaveLength(2);
+
+  await page.locator('#campaignPanelStory [data-action="retry-campaign-section"]').click();
+  await expect(status).toContainText("Saved level: standard");
+  await expect(page.locator("#campaignStoryMemoryLevel")).toBeEnabled();
+  expect(storyReads).toBe(3);
+  expect(reads(api, path)).toHaveLength(3);
+});
+
 test("overview_remains_usable_while_opened_chronicle_reads_and_preview_are_blocked", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
   const api = await installLegacyUiFixture(page, fixture);
