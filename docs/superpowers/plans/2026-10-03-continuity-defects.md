@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
-> This document is a plan, not authorization to implement, commit, or publish. Follow the execution method the user authorizes. Do not dispatch subagents merely to review this plan.
+> This plan records scope, task evidence, and completion. The current request authorizes rebase, commit, push, and pull-request creation; deployment remains outside scope. Do not dispatch subagents merely to review this plan.
 
 **Goal:** Fix loss of retrieved facts after protected-fact allocation and duplicate tracker state caused by name-only model updates.
 
@@ -10,7 +10,25 @@
 
 **Tech Stack:** TypeScript, PostgreSQL, Zod, Vitest, Playwright, Node.js, repository-pinned pnpm.
 
-**Spec:** [Story generation and continuity audit, Actions A1 and A2](../../review/2026-10-03-story-continuity-audit.md). Audited revision: `94853d2d859f57b8a75bb69edd532c016570dffa`. Implementation baseline: `1374688c` (`origin/main` on 2026-10-03). Between those revisions, upstream changed `generation-execution-repository.ts`, `generation-executor-adapter.ts`, `chronicle-context-repository.ts`, `generation.integration.test.ts`, and `generation-integrity-diagnostics.e2e.test.ts` (provider-failure and Activity lifecycle diagnostics). The audited planner and tracker-merge code is unchanged; both defects still reproduce at the new baseline.
+**Spec:** [Story generation and continuity audit, Actions A1 and A2](../../review/2026-10-03-story-continuity-audit.md). Audited revision: `94853d2d859f57b8a75bb69edd532c016570dffa`. Implementation baseline: `1374688c` (`origin/main` on 2026-10-03). Between those revisions, upstream changed `generation-execution-repository.ts`, `generation-executor-adapter.ts`, `chronicle-context-repository.ts`, `generation.integration.test.ts`, and `generation-integrity-diagnostics.e2e.test.ts` (provider-failure and Activity lifecycle diagnostics). The audited planner and tracker-merge code was unchanged; both defects still reproduced at the new baseline.
+
+## Current execution status (updated 2026-10-03 local)
+
+A1 and A2 were implemented and reviewed before rebase at `1ec9bb8f`, then cleanly rebased onto `origin/main` at `b0b57dd9`; the rebased implementation head is `7aa6a99e`. The first verification report/status commit was `ac242a75`, and the documentation follow-up began at `48290981`. Existing verification counts below are pre-rebase evidence. The [implementation verification report](../../review/2026-10-03-continuity-implementation-verification.md) preserves that evidence and records fresh post-rebase results separately.
+
+The pre-rebase Sol implementation review approved the code with 0 critical, 0 important, and 1 nonblocking P3 advisory for seeded private-canary assertions at the Activity boundary. All 128 PostgreSQL integration files were attempted before rebase: the initial aggregate had 3 unexplained failures; unchanged focused full-file reruns passed all three. There is no uninterrupted green full-suite claim. Post-rebase unit, check, build, and browser validation passed; PostgreSQL was not rerun because the dedicated test authentication had been restored. A3–A9 remain open. Pull-request publication is authorized; its description and post-rebase validation are prepared, while commit, push, and PR creation remain pending.
+
+The pre-rebase independent review on 2026-10-03 confirmed both repairs and found no defects. It re-ran the focused unit suites (281/281) and confirmed that the new planner tests fail on the baseline planner; details are in the verification report's independent-review section. PostgreSQL and browser results were not re-run.
+
+**Deferred follow-ups** (scheduled for later; none block A1/A2 correctness):
+- [ ] Seed canaries in the Activity privacy integration test (Task 4, P3).
+- [ ] Diagnose the three unexplained all-files integration failures and record one uninterrupted green full run.
+- [ ] Configure valid dedicated integration-test authentication before any future PostgreSQL run. The prior temporary test setup has been restored and privately cleaned up.
+
+**Authorized publication work**:
+- [x] Rebase `codex/continuity-defects` onto `origin/main` at `b0b57dd9`; rebased implementation head `7aa6a99e`.
+- [x] Finish fresh post-rebase unit, check, build, and browser validation and record the results; PostgreSQL was not rerun because its dedicated test authentication had been restored.
+- [ ] Commit and push the reviewed branch, then create and attach the pull request.
 
 ## Global constraints
 
@@ -22,7 +40,7 @@
 - Preserve complete authority records separately from bounded prompt context.
 - Preserve exact provider responses, candidate hashes, producing-request identities, review receipts, and raw tracker-update evidence.
 - Keep current provider tracker objects open. Do not introduce a closed tracker schema or require new provider fields.
-- No prompt wording, prompt-protocol version, database schema, deployment, dependency, or secret changes are planned. The one permitted contract change is adding `tracker_update_identity_invalid: "repair_authority"` to `diagnosticActionByCode` in `packages/contracts/src/story-prompt.ts` (Task 4). It adds a recovery-diagnostic code, not a provider-output or prompt-protocol field.
+- No prompt wording or protocol version, database schema, deployment, dependency, or secret changes were made. The only contract change was adding `tracker_update_identity_invalid: "repair_authority"` to `diagnosticActionByCode` in `packages/contracts/src/story-prompt.ts` (Task 4). It adds a recovery-diagnostic code, not a provider-output or prompt-protocol field.
 - Do not automatically merge or delete pre-existing duplicate trackers. Historical cleanup requires a separately reviewed operation. Campaigns that already contain legacy duplicates must keep generating (see the legacy tie-break in Task 3).
 - Follow two-space indentation and existing TypeScript conventions.
 - Read [domain guidance](../../agents/domain.md), [scene-context/mechanics note](../../architecture/scene-context-mechanics-review.md), and [testing matrix](../../workflows/testing.md) before implementation.
@@ -46,7 +64,7 @@
 The documents were prepared in the managed worktree:
 `C:/Users/chris/.codex/worktrees/story-continuity-audit/InfiniteQuest`.
 
-It was created at the audited revision with a detached HEAD and then moved, still detached, onto `origin/main` at `1374688c`. If implementation is authorized, create or select an appropriate `codex/` branch in this worktree before committing. Do not reset the main checkout. If `origin/main` moves again before implementation starts, rebase first and re-check the target files listed below.
+The worktree started at the audited revision and was moved onto `origin/main` at `1374688c` for implementation on `codex/continuity-defects`. Tasks 1–5 completed through implementation HEAD `1ec9bb8f`; the first verification-document update was committed as `ac242a75`. Initial checkout preparation is complete. Do not reset the main checkout.
 
 - [x] Confirm revision, worktree status, applicable instructions, and whether another task has changed any target files.
 - [x] Restore only the pinned locked dependencies if needed; use `--frozen-lockfile`.
@@ -229,7 +247,8 @@ The repository owns the authoritative decision. An optional earlier pure check i
 - [x] Add an append integration case that starts with an explicit tracker ID and accepts a name-only update. Assert one row in both current state and the accepted snapshot, with original rules preserved.
 - [x] Add replacement coverage proving the update is applied to the saved pre-turn base and failure preserves the previously accepted turn.
 - [x] Add an ambiguous-name case. Assert no new accepted turn, no changed campaign state/facts/memory, no image dispatch caused by acceptance, and a recoverable job with a safe message.
-- [ ] In the Activity integration suite, exercise the same recoverable tracker failure through the production mutation path. Assert event kind `generation.recoverable`, status `recoverable`, and the exact generic diagnostic code/message above. Assert the job retains its specific recovery diagnostic, while the Activity payload contains no tracker names, values, nested private fields, or raw error text. **Deferred P3:** the existing assertion does not seed tracker-value canaries; final Sol review approved the implementation and left this test-strengthening advisory nonblocking.
+- [x] In the Activity integration suite, exercise the same recoverable tracker failure through the production mutation path. Assert event kind `generation.recoverable`, status `recoverable`, and the exact generic diagnostic code/message above. Assert the job retains its specific recovery diagnostic.
+- [ ] Strengthen the Activity privacy test with seeded tracker names, values, nested private fields, and raw-error canaries, then assert those values are absent from the Activity payload. **Deferred nonblocking P3:** the existing negative assertion has no seeded canaries. Task 5 prompt-projection canaries do not establish this separate Activity boundary.
 - [x] Add explicit-ID success despite duplicate display names and conflicting unknown-ID rejection.
 - [x] Add a legacy-duplicate append case: seed campaign state with the `location`/`Location` pair and accept a name-only update. Assert the turn is accepted, the `Location`-ID tracker changes, and the tracker count stays at two.
 - [x] Assert the public generation job projection and SSE/polling schemas accept the new safe error and expose no private names, values, or nested fields. Only extend a finite diagnostic enum if the existing projection requires it; retain generic privacy guarantees.
@@ -286,7 +305,7 @@ Expected: both surfaces render the fixed safe message and recovery behavior with
 - [x] Verify no prompt/schema/protocol/dependency/migration change slipped into the repair. The only permitted contracts diff is the single `diagnosticActionByCode` entry.
 - [x] Review privacy, scope isolation, stale-authority checks, candidate preservation, and request-budget behavior together.
 - [x] Record exact passed/failed/skipped counts and reasons. A blocked PostgreSQL or browser gate remains blocked; it is not satisfied by unit tests.
-- [ ] If publishing is subsequently authorized, describe the concrete before/after behaviors, independent commits, validation, and rollout limitations.
+- [x] Prepare the authorized pull-request description with concrete before/after behavior, separate implementation commits, post-rebase validation, screenshots, and rollout limitations.
 
 **Final commands**
 ```sh

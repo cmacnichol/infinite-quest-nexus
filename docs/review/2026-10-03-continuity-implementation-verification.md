@@ -2,7 +2,10 @@
 
 Branch: `codex/continuity-defects`
 
-Verified implementation head: `1ec9bb8f`
+Pre-rebase implementation head with completed validation: `1ec9bb8f`
+
+Rebased implementation head: `7aa6a99e` on `origin/main` at `b0b57dd9`
+Post-rebase validation: unit, check, build, and browser diagnostics passed. Pre-rebase evidence is retained below.
 Scope: the A1 and A2 repairs from the [story continuity audit](2026-10-03-story-continuity-audit.md).
 
 This report records implementation and validation evidence separately from the historical audit. It does not claim that all integration files passed in one uninterrupted run.
@@ -41,7 +44,7 @@ Sol reviewed each implementation task. Tasks 1 through 5 received spec and quali
 | Repository check | **Passed** | `pnpm check` passed repository boundary and data-safety checks, TypeScript, and client syntax checks. |
 | Build | **Passed** | `pnpm build` passed package, runtime, legacy client, and replacement client builds. Vite emitted its nonfatal large-chunk warning for the replacement client. |
 | Browser diagnostics | **Passed** | `generation-integrity-diagnostics.e2e.test.ts`: 54/54 passed with process-scoped `NODE_OPTIONS=--import=tsx`. Both Story surfaces rendered the safe recovery message at desktop and mobile sizes; the recovery action offers discard and no retry. This verifies presentation and interaction behavior, not live-model quality. |
-| Final typecheck and `git diff --check` | **Passed** | Root TypeScript check and final whitespace check passed on `1ec9bb8f`. |
+| Final pre-rebase typecheck and `git diff --check` | **Passed** | Root TypeScript check and final whitespace check passed on `1ec9bb8f`. |
 | Live provider, deployment, CI | **Not run** | No live-provider narrative-quality, deployment, or CI claim is made. |
 
 The full integration failures were followed by focused reruns with no source or test edits. Those reruns are useful passing evidence, but they do not explain or erase the failures in the combined run. The 199 PostgreSQL skips were 192 Linux platform/archive gates, 6 opt-in known-failure baselines, and 1 opt-in historical-fact benchmark. The 44 unit skips were Windows/platform-specific. The runs spanned 2026-10-03 local time and 2026-10-04 UTC.
@@ -53,10 +56,64 @@ The screenshots show the safe tracker-identity recovery presentation on both Sto
 - Legacy Story: [1440 px](assets/generation-integrity-diagnostics/legacy-tracker_identity-1440.png), [390 px](assets/generation-integrity-diagnostics/legacy-tracker_identity-390.png)
 - Web Next Story: [1440 px](assets/generation-integrity-diagnostics/web-next-tracker_identity-1440.png), [390 px](assets/generation-integrity-diagnostics/web-next-tracker_identity-390.png)
 
-## Remaining items
+## Pre-rebase independent review (2026-10-03, Claude Code)
 
-- The final whole-branch Sol review approved `1ec9bb8f` with 0 critical, 0 important, and 1 nonblocking P3 Activity privacy-test advisory.
+A second review of `origin/main...ac242a75` (base `1374688c`) found no defects in A1 or A2. Both repairs do what the audit required. This review re-ran the focused unit suites only. The PostgreSQL and browser results above come from the implementation record and were not re-run, because the dedicated test-database authentication had already been restored.
+
+### A1 — retrieved fact recall
+
+| Check | Finding |
+| --- | --- |
+| Fix location | In history coverage, canonical-fact candidates survive the early filter. They are dropped later only when the same fact ID *and* exact content appear in the selected `protected-fact:` / `current-fact:` blocks. Fact-specific latest-turn and recent-turn exclusions are limited to history coverage; non-history behavior is unchanged. |
+| Production retrieval path | The database loader's `generationExclusions.protectedFactIds` comes from the reservation plan's *selected* protected facts (`generation-executor-adapter.ts`, reservation construction), not from all captured facts. A fact left out of protected allocation therefore reaches the planner. |
+| Current-continuity facts | These are serialized only when their `current-fact:` block is selected, so dropping duplicates based on selected blocks matches the wire payload. |
+| Tests catch the defect | With the baseline planner temporarily swapped in, 5 new tests fail. They are the protected-allocation recall case, its control, the ID-only duplicate case, and the latest/selected-predecessor turn cases. All pass with the fix. |
+
+### A2 — tracker identity
+
+| Check | Finding |
+| --- | --- |
+| Single merge point | `mergedTrackers` is removed. `applyCampaignTrackerUpdates` is called only inside `commitAcceptedTurn`'s transaction, so a thrown identity error rolls back before any write. |
+| Error handling | Both commit call sites (normal acceptance and saved-Keep resume) are inside the executor `try` whose typed `CampaignTrackerUpdateError` branch runs before the generic failure branch. That branch mirrors the existing recoverable-integrity branch and uses the lease-fenced `markRecoverable`. |
+| Resolution policy | A direct probe of the helper matched the plan in every case: the audit Location example; the legacy `location`/`Location` tie-break; an ID-addressed `currentValue` alias; trimmed names; an ID equal to another tracker's name not being targeted; create-then-update in one batch; `-2` suffixes on ID collisions; `conflicting_identity` for an unknown ID with an existing name; explicit clearing; numeric coercion; unmodified inputs; the unchanged 200-tracker cap. |
+| Contract scope | The only contracts change is the `tracker_update_identity_invalid: "repair_authority"` entry. |
+
+### Evidence from this review
+
+| Area | Result |
+| --- | --- |
+| Focused unit suites (planner, history facts/reservation, evidence spans, trackers, state editors, state contract, safe diagnostics, executor adapter, client-core workflow) | **Passed** 281/281, 11 files |
+| Baseline red check (planner) | **Confirmed** 5 new tests fail on the `1374688c` planner |
+| PostgreSQL integration, browser diagnostics, check, build | **Not re-run**; see the implementation evidence above |
+| Upstream overlap | `origin/main` is 19 commits ahead of `ac242a75`; none touch the changed source files |
+
+## Remaining items recorded at pre-rebase review
+
+Deferred follow-ups. None of these block A1/A2 correctness; they are scheduled for later.
+
+- **Activity privacy test (P3):** seed tracker names, values, nested private fields, and raw-error canaries in `activity-generation.integration.test.ts`, then assert those values are absent from the Activity payload. The current negative assertion has nothing seeded to find.
+- **Unexplained integration failures:** diagnose the three all-files failures (Activity illustration, authoring jobs, secure-storage repository) and get one uninterrupted green full run. They lie outside the A1/A2 change set.
+- **Test-database authentication:** configure valid dedicated integration-test authentication before the next PostgreSQL run.
+- **Branch hygiene:** the branch has since been rebased onto `origin/main` at `b0b57dd9` (implementation head `7aa6a99e`). Post-rebase validation is complete; commit/push/PR remain pending.
+
+Recorded for context:
+
+- The pre-rebase whole-branch Sol review approved `1ec9bb8f` with 0 critical, 0 important, and 1 nonblocking P3 Activity privacy-test advisory.
 - The dedicated integration-test authentication was restored after all clients finished, privately verified, and its backup and task-created environment file were removed. No credential or backup contents are reproduced here. Future database test runs need valid dedicated test authentication configured again.
 - The three failures in the all-files PostgreSQL pass remain recorded even though unchanged isolated reruns passed; their causes remain unconfirmed, and there is no uninterrupted green full-suite claim.
 - Existing duplicate tracker pairs remain untouched and can retain conflicting values in future prompt context until explicitly consolidated through the state editor.
-- Publishing, CI, deployment, and live-provider verification were not requested or performed.
+- Pull-request publication is authorized and pending. CI, deployment, and live-provider verification have not been performed.
+
+## Rebased publication validation (2026-10-03 local)
+
+Fresh validation ran on tested checkout HEAD `48290981` (implementation commit `7aa6a99e`) over `origin/main` at `b0b57dd9`. These results are separate from the pre-rebase counts above.
+
+| Area | Result | Evidence and limits |
+| --- | --- | --- |
+| Full unit suite | **Passed** | 376 files, 4,938 tests passed, 44 platform skips; exit 0. The count differs from the pre-rebase run after dependency updates. |
+| Repository check | **Passed** | 2,098 repository boundary/data-safety candidates plus TypeScript and client syntax checks. |
+| Build | **Passed** | Package, runtime, and client builds passed. Vite reported the main chunk at 843.44 kB with its nonfatal 500 kB threshold warning. |
+| Browser diagnostics | **Passed** | Post-rebase `generation-integrity-diagnostics.e2e.test.ts`: 54/54 passed, 0 skipped. Sol verified the 173-entry screenshot manifest with 0 mismatches after restoring 43 generated screenshot rewrites; the four approved tracker-identity screenshots were retained unchanged. |
+| PostgreSQL integration | **Not rerun** | The dedicated test authentication has been restored. The prior all-file aggregate and three unchanged focused reruns above remain pre-rebase evidence. |
+
+The pull-request description is prepared. Commit, push, and pull-request creation are authorized and remain pending. No deployment or live-provider verification is claimed.

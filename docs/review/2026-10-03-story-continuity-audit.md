@@ -18,9 +18,27 @@ Evidence labels:
 - **Source-confirmed:** established by tracing current code; the affected database or provider scenario was not executed in this audit.
 - **Recommendation:** a proposed improvement, not an assertion that the missing feature is a defect.
 
-The first two defects have a [detailed implementation plan](../superpowers/plans/2026-10-03-continuity-defects.md). Implementation is not part of this documentation task.
+The first two defects had a [detailed implementation plan](../superpowers/plans/2026-10-03-continuity-defects.md), and A1/A2 are now complete. The audit findings and evidence below remain as recorded at the audited revision; current implementation evidence is linked in the status section.
 
-## Current status
+## Implementation follow-up status (updated 2026-10-03 local; validation continued into 2026-10-04 UTC)
+
+The original audit and its reproduction results below are unchanged. A1 and A2 were implemented and reviewed before rebase at `1ec9bb8f`, then cleanly rebased onto `origin/main` at `b0b57dd9`; the rebased implementation head is `7aa6a99e`. The first implementation report/status commit was `ac242a75`; the documentation baseline before this publication follow-up was `48290981`. The current request authorizes commit, push, and pull-request creation.
+
+- [x] **A1 — retrieved fact recall:** optional Chronicle facts are suppressed only when the same verified fact is in selected authority. The regression follows recall through the final request, sent-ID manifest, supersession, and replay.
+- [x] **A2 — tracker identity:** name-only updates resolve to stable identity, aliases apply correctly, and unresolved identity failures roll back safely. Existing `location`/`Location` duplicate pairs remain unmerged and may retain conflicting values.
+- [ ] **A3 — effective memory capabilities:** open; no implementation recorded.
+- [ ] **A4 — accepted history across replacement and rewind:** open; no implementation recorded.
+- [ ] **A5 — validated story authority before image dispatch:** open; no implementation recorded.
+- [ ] **A6 — end-to-end continuity measurement:** open; no implementation recorded.
+- [ ] **A7 — intended RPG depth:** open; no implementation recorded.
+- [ ] **A8 — long-campaign memory organization:** open; no implementation recorded.
+- [ ] **A9 — change risk and release checks:** open; a temporary local test-database repair does not satisfy the CI/browser/release-check action.
+
+The [implementation verification report](2026-10-03-continuity-implementation-verification.md) separates pre-rebase and post-rebase evidence. All 128 PostgreSQL integration files were attempted before rebase; the initial pass had 3 unexplained failures, and unchanged isolated full-file reruns passed those three cases. There is no uninterrupted green full-suite claim. The pre-rebase Sol review approved the implementation with 0 critical, 0 important, and 1 nonblocking P3 advisory to seed canaries in the Activity privacy test. Task 5 prompt canaries cover the prompt boundary, not the separate Activity boundary. After rebase, unit, check, build, and browser diagnostics passed; the 54-case browser suite had 54 passes, 0 skips, and Sol verified the screenshot manifest with no mismatches. PostgreSQL will not be rerun because its dedicated test authentication was restored. Live-provider, CI, and deployment checks were not performed.
+
+## Capability status as audited on 2026-10-03
+
+The following table describes the system at audited revision `94853d2d`; it is historical context and does not incorporate the A1/A2 implementation.
 
 | Capability | Assessment |
 | --- | --- |
@@ -47,14 +65,16 @@ The first two defects have a [detailed implementation plan](../superpowers/plans
 
 Source anchors: [commit and supersession safeguards](../../packages/database/src/generation-execution-repository.ts), [generation authority](../../packages/database/src/chronicle-generation-context.ts), [browser recovery](../../packages/client-web/src/generation/fallback-source.ts).
 
-## Action A1 Restore retrieved facts omitted by protected allocation
+## Action A1 Restore retrieved facts omitted by protected allocation — COMPLETED
 
 **Priority:** first implementation workstream.
 **Evidence:** reproduced with the actual `planGenerationPromptContext` function.
 
+**Implementation status:** Completed through selection-aware deduplication and final-request/replay coverage. See the [implementation verification report](2026-10-03-continuity-implementation-verification.md). History-coverage v5 keeps its existing early excerpt selection; the separate reachable excerpt retry is verified on the layered non-history path.
+
 ### Problem and impact
 
-The planner constructs a duplicate-fact set from all captured protected facts before determining which protected facts fit. A fact dropped from that allocation can also be removed from Chronicle candidates as a duplicate. Retrieval can find the right fact while the final request still omits it.
+At the audited revision, the planner constructed a duplicate-fact set from all captured protected facts before determining which protected facts fit. A fact dropped from that allocation could also be removed from Chronicle candidates as a duplicate. Retrieval could find the right fact while the final request still omitted it.
 
 ### Reproduction
 
@@ -71,22 +91,24 @@ A synthetic campaign contained 41 facts, including an older fact that the northe
 
 This was a planner-level execution, not a PostgreSQL or live-model test.
 
-### Required action
+### Original required action (completed)
 
 Deduplicate against facts actually transmitted in protected/current authority. Preserve source validation, supersession authority, evidence manifests, final request budgets, and historical protocol behavior. Test reservation, retrieval, final serialization, and next-turn replay together.
 
-**Acceptance:** a verified relevant fact excluded from protected allocation remains eligible for optional retrieval; a fact actually sent elsewhere appears once; omission diagnostics describe the real reason.
+**Acceptance criteria:** a verified relevant fact excluded from protected allocation remains eligible for optional retrieval; a fact actually sent elsewhere appears once; omission diagnostics describe the real reason. See the [implementation verification report](2026-10-03-continuity-implementation-verification.md) for focused and PostgreSQL evidence.
 
 Source: [context planner](../../services/runtime/src/generation-context-planner.ts), especially protected-fact duplicate filtering and final historical-block assembly.
 
-## Action A2 Make tracker updates resolve stable identities
+## Action A2 Make tracker updates resolve stable identities — COMPLETED
 
 **Priority:** second implementation workstream.
 **Evidence:** reproduced by executing the current private merge function extracted unchanged from source, using the production tracker normalizer.
 
+**Implementation status:** Completed through identity-aware projection at the guarded acceptance boundary, recovery coverage, and next-request replay. See the [implementation verification report](2026-10-03-continuity-implementation-verification.md). Pre-existing `location`/`Location` duplicates are preserved for compatibility; they are not automatically consolidated and may continue to expose conflicting values.
+
 ### Problem and impact
 
-Existing trackers are indexed by ID, but a model update may identify a tracker by name. The documented model-output example uses name/value. When ID and name differ, the merge can create a second tracker with a conflicting value and missing update rules.
+At the audited revision, existing trackers were indexed by ID, but a model update could identify a tracker by name. The documented model-output example used name/value. When ID and name differed, the merge could create a second tracker with a conflicting value and missing update rules.
 
 Input:
 ```json
@@ -106,13 +128,13 @@ Actual result:
 
 This confirms the merge defect, not a full accepted-turn database workflow.
 
-### Required action
+### Original required action (completed)
 
 Resolve explicit IDs first, then unambiguous names for existing compatible output. Preserve stable identity and existing fields absent from the update. Reject ambiguous identity without mutating accepted state. Preserve original provider payloads and review hashes; normalize only the materialized state projection.
 
 The initial fix need not make IDs mandatory in the provider schema. Mandatory IDs and any prompt-protocol migration are a separate enhancement.
 
-**Acceptance:** the example yields exactly one tracker with ID `location`, new value, and original rules. Append, replacement, Keep, retry/reclaim, and next-turn context behave consistently.
+**Acceptance criteria:** the example yields exactly one tracker with ID `location`, new value, and original rules. Append, replacement, Keep, retry/reclaim, and next-turn context behave consistently. The [implementation verification report](2026-10-03-continuity-implementation-verification.md) documents unit, PostgreSQL, and browser evidence plus the preserved-duplicate limitation.
 
 Sources: [current merge](../../packages/database/src/generation-execution-repository.ts), [tracker normalization](../../packages/domain/src/campaign-trackers.ts), [story output contract](../../packages/contracts/src/story-prompt.ts).
 
@@ -221,7 +243,9 @@ Sources: [executor](../../services/runtime/src/generation-executor-adapter.ts), 
 
 The existing locked dependencies were restored from local cache to allow fresh unit verification. No dependency versions or tracked code were changed.
 
-## Recommended delivery order
+## Recommended delivery order as recorded at audit time
+
+This order predates A1/A2 implementation; those two actions are now complete, while A3–A9 remain open.
 
 1. Implement and verify A1 and A2 independently using the linked plan.
 2. Resolve A3 effective-capability configuration and player visibility.
@@ -229,5 +253,5 @@ The existing locked dependencies were restored from local cache to allow fresh u
 4. Establish A6 long-campaign quality measurements.
 5. Use those measurements and product priorities to sequence A7 through A9.
 
-This ordering is a recommendation. Only the documentation and implementation plan have been requested in the current task.
+This ordering remains a recommendation. The implementation status above reflects the later A1/A2 work without changing the original audit evidence.
 
