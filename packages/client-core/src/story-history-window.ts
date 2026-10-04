@@ -17,9 +17,11 @@ type StoryHistoryPageBookmark = {
   readonly source: "server" | "resident";
   readonly firstTurnNumber: number;
   readonly lastTurnNumber: number;
+  readonly identities: readonly StoryHistoryTurn[];
 };
 
 type StoryHistoryDisplayWindow = {
+  readonly turnNumbers: readonly number[];
   readonly firstTurnNumber: number;
   readonly lastTurnNumber: number;
   readonly sourceKeys: readonly number[];
@@ -28,8 +30,7 @@ type StoryHistoryDisplayWindow = {
 type StoryHistoryPendingNavigation = {
   readonly direction: "older" | "newer";
   readonly targetWindowIndex: number;
-  readonly firstTurnNumber: number;
-  readonly lastTurnNumber: number;
+  readonly turnNumbers: readonly number[];
   readonly sourceKeys: readonly number[];
   readonly attemptedSourceKeys: readonly number[];
   readonly fallbackCursor: string | null;
@@ -49,6 +50,10 @@ export type StoryHistoryPageRequest = {
   readonly anchorTurnNumber: number;
   readonly targetStartTurnNumber: number;
   readonly targetEndTurnNumber: number;
+  /** Exact accepted ordinals required to complete the display window. */
+  readonly targetWindowTurnNumbers: readonly number[];
+  /** Exact accepted ordinals requested from this source page. */
+  readonly targetTurnNumbers: readonly number[];
   readonly targetWindowFirstTurnNumber: number;
   readonly targetWindowLastTurnNumber: number;
   readonly targetWindowIndex: number;
@@ -58,18 +63,21 @@ export type StoryHistoryPageRequest = {
 };
 
 export type StoryHistoryWindowState<TTurn extends StoryHistoryTurn = StoryHistoryTurn> = {
-  /** Retained row fragments contributing to the committed window and pending target. */
+  /** Retained raw rows contributing to the committed window and pending target. */
   readonly cachedPages: readonly StoryHistoryCachedPage<TTurn>[];
-  /** Opaque cursors and numeric page bounds retained for replay after row eviction. */
+  /** Opaque cursors and accepted identities retained for bounded replay after row eviction. */
   readonly pageStack: readonly StoryHistoryPageBookmark[];
-  /** Metadata-only display history; raw source pages can contribute to several windows. */
+  /** Metadata-only accepted-entry windows; ordinal gaps do not imply missing turns. */
   readonly windows: readonly StoryHistoryDisplayWindow[];
   readonly windowIndex: number;
   readonly pending: StoryHistoryPendingNavigation | null;
   readonly nextSourceKey: number;
   readonly selectedPreview: TTurn | null;
   readonly residentRange: { readonly firstTurnNumber: number; readonly lastTurnNumber: number } | null;
+  /** Accepted ordinals from the already-loaded resident ledger, used only as row keys. */
+  readonly residentTurnNumbers: readonly number[];
   readonly position: StoryHistoryWindowPosition;
+  readonly historyToken: string | null;
 };
 
 export type StoryHistoryVisibleWindow<TTurn extends StoryHistoryTurn = StoryHistoryTurn> = {
@@ -107,17 +115,14 @@ function bookmarkFor<TTurn extends StoryHistoryTurn>(page: StoryHistoryPage<TTur
     nextCursor: page.nextCursor,
     source: page.source ?? "server",
     firstTurnNumber: turns[0]?.turnNumber ?? 0,
-    lastTurnNumber: turns.at(-1)?.turnNumber ?? 0
+    lastTurnNumber: turns.at(-1)?.turnNumber ?? 0,
+    identities: turns.map(({ id, turnNumber }) => ({ id, turnNumber }))
   };
 }
 
-function pageContains(bookmark: StoryHistoryPageBookmark, first: number, last: number): boolean {
-  return bookmark.firstTurnNumber <= last && bookmark.lastTurnNumber >= first;
-}
-
 function allCachedTurns<TTurn extends StoryHistoryTurn>(state: StoryHistoryWindowState<TTurn>): TTurn[] {
-  const byId = new Map<string, TTurn>();
   const byNumber = new Map<number, TTurn>();
+  const byId = new Map<string, TTurn>();
   for (const page of state.cachedPages) {
     for (const turn of page.turns) {
       const existingNumber = byNumber.get(turn.turnNumber);
@@ -132,43 +137,128 @@ function allCachedTurns<TTurn extends StoryHistoryTurn>(state: StoryHistoryWindo
   return orderedTurns([...byNumber.values()]);
 }
 
-function selectedIsInRange<TTurn extends StoryHistoryTurn>(
-  state: StoryHistoryWindowState<TTurn>,
-  turns: readonly TTurn[],
-  first: number,
-  last: number
-): boolean {
-  const selected = state.selectedPreview;
-  return Boolean(selected
-    && selected.turnNumber >= first
-    && selected.turnNumber <= last
-    && turns.some((turn) => turn.id === selected.id && turn.turnNumber === selected.turnNumber));
-}
-
 function sourceByKey<TTurn extends StoryHistoryTurn>(state: StoryHistoryWindowState<TTurn>, sourceKey: number): StoryHistoryPageBookmark | null {
   return state.pageStack.find((page) => page.sourceKey === sourceKey) ?? null;
 }
 
+function allKnownTurnNumbers<TTurn extends StoryHistoryTurn>(state: StoryHistoryWindowState<TTurn>): number[] {
+  return [...new Set([
+    ...state.residentTurnNumbers,
+    ...state.pageStack.flatMap((page) => page.identities.map((turn) => turn.turnNumber))
+  ])].sort((left, right) => left - right);
+}
+
+function hasOlderSource<TTurn extends StoryHistoryTurn>(state: StoryHistoryWindowState<TTurn>): boolean {
+  const oldest = state.pageStack.filter((page) => page.source === "server")
+    .sort((left, right) => left.firstTurnNumber - right.firstTurnNumber)[0];
+  return Boolean(oldest?.nextCursor);
+}
+
+function sourceKeysForNumbers<TTurn extends StoryHistoryTurn>(state: StoryHistoryWindowState<TTurn>, numbers: readonly number[]): number[] {
+  const wanted = new Set(numbers);
+  return state.pageStack.filter((page) => page.identities.some((identity) => wanted.has(identity.turnNumber)))
+    .map((page) => page.sourceKey);
+}
+
+function makeWindow<TTurn extends StoryHistoryTurn>(state: StoryHistoryWindowState<TTurn>, turnNumbers: readonly number[]): StoryHistoryDisplayWindow {
+  const ordered = [...turnNumbers].sort((left, right) => left - right);
+  return {
+    turnNumbers: ordered,
+    firstTurnNumber: ordered[0] ?? 0,
+    lastTurnNumber: ordered.at(-1) ?? 0,
+    sourceKeys: sourceKeysForNumbers(state, ordered)
+  };
+}
+
+function buildWindows<TTurn extends StoryHistoryTurn>(
+  state: StoryHistoryWindowState<TTurn>,
+  capacity: number,
+  includePartialOldest: boolean
+): StoryHistoryDisplayWindow[] {
+  const numbers = allKnownTurnNumbers(state);
+  const reversed: number[][] = [];
+  let end = numbers.length;
+  while (end > 0) {
+    const selectedIndex = state.selectedPreview
+      ? numbers.findIndex((turnNumber) => turnNumber === state.selectedPreview?.turnNumber)
+      : -1;
+    const expandedStart = Math.max(0, end - STORY_HISTORY_PAGE_LIMIT);
+    const otherCapacity = state.selectedPreview ? STORY_HISTORY_PAGE_LIMIT - 1 : capacity;
+    const start = selectedIndex >= expandedStart && selectedIndex < end
+      ? expandedStart
+      : Math.max(0, end - otherCapacity);
+    reversed.push(numbers.slice(start, end));
+    end = start;
+  }
+  let windows = reversed.reverse().map((turnNumbers) => makeWindow(state, turnNumbers));
+  const firstWindow = windows[0];
+  if (!includePartialOldest && windows.length > 1 && firstWindow && firstWindow.turnNumbers.length < capacity) {
+    windows = windows.slice(1);
+  }
+  return windows;
+}
+
+function rowsOnSide(numbers: readonly number[], current: StoryHistoryDisplayWindow, side: "older" | "newer"): number[] {
+  return numbers.filter((turnNumber) => side === "older"
+    ? turnNumber < current.firstTurnNumber
+    : turnNumber > current.lastTurnNumber);
+}
+
+function windowsOnSide<TTurn extends StoryHistoryTurn>(state: StoryHistoryWindowState<TTurn>, numbers: readonly number[], capacity: number, side: "older" | "newer"): StoryHistoryDisplayWindow[] {
+  const result: StoryHistoryDisplayWindow[] = [];
+  if (side === "older") {
+    let end = numbers.length;
+    while (end > 0) {
+      const start = Math.max(0, end - capacity);
+      result.unshift(makeWindow(state, numbers.slice(start, end)));
+      end = start;
+    }
+  } else {
+    for (let start = 0; start < numbers.length; start += capacity) {
+      result.push(makeWindow(state, numbers.slice(start, start + capacity)));
+    }
+  }
+  return result;
+}
+
 function trimHistoryCache<TTurn extends StoryHistoryTurn>(state: StoryHistoryWindowState<TTurn>): StoryHistoryWindowState<TTurn> {
   const current = state.windows[state.windowIndex];
+  const preferredAdjacentIndex = state.position.direction === "newer" ? state.windowIndex + 1 : state.windowIndex - 1;
+  const oppositeAdjacentIndex = state.position.direction === "newer" ? state.windowIndex - 1 : state.windowIndex + 1;
+  const adjacent = state.windows[preferredAdjacentIndex] ?? state.windows[oppositeAdjacentIndex];
   const keepNumbers = new Set<number>();
-  const ranges: { first: number; last: number }[] = [];
-  if (current) ranges.push({ first: current.firstTurnNumber, last: current.lastTurnNumber });
-  if (current && !state.pending && current.firstTurnNumber > 1) {
-    const targetFirst = Math.max(1, current.firstTurnNumber - STORY_HISTORY_PAGE_LIMIT);
-    const targetLast = current.firstTurnNumber - 1;
-    const carrySource = current.sourceKeys.map((key) => sourceByKey(state, key))
-      .filter((source): source is StoryHistoryPageBookmark => Boolean(source && pageContains(source, targetFirst, targetLast)))
-      .sort((left, right) => {
-        const overlapLeft = Math.max(0, Math.min(targetLast, left.lastTurnNumber) - Math.max(targetFirst, left.firstTurnNumber) + 1);
-        const overlapRight = Math.max(0, Math.min(targetLast, right.lastTurnNumber) - Math.max(targetFirst, right.firstTurnNumber) + 1);
-        return overlapRight - overlapLeft;
-      })[0];
-    if (carrySource) ranges.push({ first: carrySource.firstTurnNumber, last: carrySource.lastTurnNumber });
+  const addUntilBounded = (numbers: readonly number[]): void => {
+    for (const number of numbers) {
+      if (keepNumbers.size >= STORY_HISTORY_RAW_CACHE_LIMIT) break;
+      keepNumbers.add(number);
+    }
+  };
+  addUntilBounded(current?.turnNumbers ?? []);
+  addUntilBounded(state.pending?.turnNumbers ?? []);
+  const cachedPageByKey = new Map<number, StoryHistoryCachedPage<TTurn>[]>();
+  for (const page of state.cachedPages) {
+    const pages = cachedPageByKey.get(page.sourceKey) ?? [];
+    pages.push(page);
+    cachedPageByKey.set(page.sourceKey, pages);
   }
-  if (state.pending) ranges.push({ first: state.pending.firstTurnNumber, last: state.pending.lastTurnNumber });
-  for (const range of ranges) {
-    for (let turnNumber = range.first; turnNumber <= range.last; turnNumber += 1) keepNumbers.add(turnNumber);
+  const addSourceRows = (sourceKeys: readonly number[]): void => {
+    for (const sourceKey of sourceKeys) {
+      const rows = new Map<number, TTurn>();
+      for (const page of cachedPageByKey.get(sourceKey) ?? []) {
+        for (const turn of page.turns) rows.set(turn.turnNumber, turn);
+      }
+      const additions = [...rows.keys()].filter((turnNumber) => !keepNumbers.has(turnNumber));
+      if (keepNumbers.size + additions.length <= STORY_HISTORY_RAW_CACHE_LIMIT) {
+        addUntilBounded([...rows.keys()]);
+      }
+    }
+  };
+  addSourceRows(current?.sourceKeys ?? []);
+  addSourceRows(state.pending?.sourceKeys ?? []);
+  if (adjacent) {
+    const currentSources = new Set([...(current?.sourceKeys ?? []), ...(state.pending?.sourceKeys ?? [])]);
+    const adjacentSource = adjacent.sourceKeys.find((sourceKey) => !currentSources.has(sourceKey));
+    if (adjacentSource !== undefined) addSourceRows([adjacentSource]);
   }
   const seen = new Set<number>();
   const cachedPages = state.cachedPages.map((page) => ({
@@ -185,133 +275,176 @@ function trimHistoryCache<TTurn extends StoryHistoryTurn>(state: StoryHistoryWin
   return { ...state, cachedPages };
 }
 
-function completeWindow<TTurn extends StoryHistoryTurn>(
-  state: StoryHistoryWindowState<TTurn>,
-  first: number,
-  last: number
-): TTurn[] | null {
-  const turns = allCachedTurns(state).filter((turn) => turn.turnNumber >= first && turn.turnNumber <= last);
-  if (turns.length !== last - first + 1) return null;
-  for (let offset = 0; offset < turns.length; offset += 1) {
-    if (turns[offset]?.turnNumber !== first + offset) return null;
-  }
-  return turns;
+function windowTurns<TTurn extends StoryHistoryTurn>(state: StoryHistoryWindowState<TTurn>, numbers: readonly number[]): TTurn[] | null {
+  const byNumber = new Map(allCachedTurns(state).map((turn) => [turn.turnNumber, turn]));
+  const turns = numbers.map((turnNumber) => byNumber.get(turnNumber));
+  return turns.every((turn): turn is TTurn => Boolean(turn)) ? turns : null;
 }
 
-function sourcesForWindow<TTurn extends StoryHistoryTurn>(
+function turnNumbersIn(state: StoryHistoryWindowState, candidates: readonly number[]): number[] {
+  const present = new Set(allKnownTurnNumbers(state));
+  return candidates.filter((number) => present.has(number));
+}
+
+function newPageRequest(
+  direction: "older" | "newer",
+  source: "server" | "resident",
+  requestCursor: string | null,
+  anchorTurnNumber: number,
+  targetTurnNumbers: readonly number[],
+  targetWindowIndex: number,
+  requiresFetch: boolean,
+  options: {
+    sourceBookmarkKey?: number;
+    targetSourceKeys?: readonly number[];
+    targetWindowTurnNumbers?: readonly number[];
+  } = {}
+): StoryHistoryPageRequest {
+  const sorted = [...targetTurnNumbers].sort((left, right) => left - right);
+  const windowNumbers = [...(options.targetWindowTurnNumbers ?? sorted)].sort((left, right) => left - right);
+  return {
+    direction,
+    source,
+    requestCursor,
+    anchorTurnNumber,
+    targetStartTurnNumber: windowNumbers[0] ?? anchorTurnNumber,
+    targetEndTurnNumber: windowNumbers.at(-1) ?? anchorTurnNumber,
+    targetWindowTurnNumbers: windowNumbers,
+    targetTurnNumbers: sorted,
+    targetWindowFirstTurnNumber: windowNumbers[0] ?? anchorTurnNumber,
+    targetWindowLastTurnNumber: windowNumbers.at(-1) ?? anchorTurnNumber,
+    targetWindowIndex,
+    ...(options.sourceBookmarkKey !== undefined ? { sourceBookmarkKey: options.sourceBookmarkKey } : {}),
+    ...(options.targetSourceKeys ? { targetSourceKeys: options.targetSourceKeys } : {}),
+    requiresFetch
+  };
+}
+
+function requestForPending<TTurn extends StoryHistoryTurn>(
   state: StoryHistoryWindowState<TTurn>,
-  first: number,
-  last: number
-): number[] {
-  return state.pageStack.filter((page) => pageContains(page, first, last)).map((page) => page.sourceKey);
+  pending: StoryHistoryPendingNavigation
+): StoryHistoryPageRequest | null {
+  if (pending.turnNumbers.length === 0) {
+    if (!pending.fallbackCursor) return null;
+    const current = state.windows[state.windowIndex];
+    const anchor = current?.firstTurnNumber ?? 1;
+    return newPageRequest(pending.direction, "server", pending.fallbackCursor, anchor, [], pending.targetWindowIndex, true);
+  }
+  const retained = new Set(allCachedTurns(state).map((turn) => turn.turnNumber));
+  const missing = pending.turnNumbers.filter((turnNumber) => !retained.has(turnNumber));
+  if (missing.length === 0) return null;
+  const residentNumbers = new Set(state.residentTurnNumbers);
+  const residentMissing = missing.filter((turnNumber) => residentNumbers.has(turnNumber));
+  if (residentMissing.length === missing.length && residentMissing.length > 0) {
+    return newPageRequest(pending.direction, "resident", null, pending.turnNumbers[0] ?? 1, residentMissing,
+      pending.targetWindowIndex, true, { targetSourceKeys: pending.sourceKeys, targetWindowTurnNumbers: pending.turnNumbers });
+  }
+  const tried = new Set(pending.attemptedSourceKeys);
+  const candidate = pending.sourceKeys.map((key) => sourceByKey(state, key))
+    .filter((source): source is StoryHistoryPageBookmark => Boolean(source && !tried.has(source.sourceKey)
+      && source.identities.some((identity) => missing.includes(identity.turnNumber))))
+    .concat(state.pageStack.filter((source) => !tried.has(source.sourceKey)
+      && source.identities.some((identity) => missing.includes(identity.turnNumber))))
+    .sort((left, right) => left.firstTurnNumber - right.firstTurnNumber)[0];
+  if (candidate) {
+    const targetTurnNumbers = missing.filter((turnNumber) => candidate.identities.some((identity) => identity.turnNumber === turnNumber));
+    return newPageRequest(pending.direction, candidate.source, candidate.requestCursor,
+      pending.turnNumbers[0] ?? 1, targetTurnNumbers, pending.targetWindowIndex, true,
+      { sourceBookmarkKey: candidate.sourceKey, targetSourceKeys: pending.sourceKeys, targetWindowTurnNumbers: pending.turnNumbers });
+  }
+  return null;
+}
+
+function requestForWindow<TTurn extends StoryHistoryTurn>(
+  state: StoryHistoryWindowState<TTurn>,
+  direction: "older" | "newer", target: StoryHistoryDisplayWindow, targetIndex: number
+): StoryHistoryPageRequest {
+  const cachedNumbers = new Set(allCachedTurns(state).map((turn) => turn.turnNumber));
+  const missing = target.turnNumbers.filter((turnNumber) => !cachedNumbers.has(turnNumber));
+  if (missing.length === 0) {
+    return newPageRequest(direction, "resident", null, target.firstTurnNumber, [], targetIndex, false,
+      { targetSourceKeys: target.sourceKeys, targetWindowTurnNumbers: target.turnNumbers });
+  }
+  const allResident = missing.every((turnNumber) => state.residentTurnNumbers.includes(turnNumber));
+  if (allResident) {
+    return newPageRequest(direction, "resident", null, target.firstTurnNumber, target.turnNumbers, targetIndex, true,
+      { targetSourceKeys: target.sourceKeys, targetWindowTurnNumbers: target.turnNumbers });
+  }
+  const bookmark = target.sourceKeys.map((key) => sourceByKey(state, key))
+    .find((page): page is StoryHistoryPageBookmark => Boolean(page && page.identities.some((identity) => missing.includes(identity.turnNumber))));
+  if (!bookmark) {
+    const known = state.pageStack.find((page) => page.identities.some((identity) => missing.includes(identity.turnNumber)));
+    if (!known) throw new Error("Story history target has no captured source page.");
+    return newPageRequest(direction, known.source, known.requestCursor, target.firstTurnNumber, missing, targetIndex, true,
+      { sourceBookmarkKey: known.sourceKey, targetSourceKeys: target.sourceKeys, targetWindowTurnNumbers: target.turnNumbers });
+  }
+  const sourceNumbers = missing.filter((turnNumber) => bookmark.identities.some((identity) => identity.turnNumber === turnNumber));
+  return newPageRequest(direction, bookmark.source, bookmark.requestCursor, target.firstTurnNumber, sourceNumbers, targetIndex, true,
+    { sourceBookmarkKey: bookmark.sourceKey, targetSourceKeys: target.sourceKeys, targetWindowTurnNumbers: target.turnNumbers });
 }
 
 export function createStoryHistoryWindow<TTurn extends StoryHistoryTurn>(options: {
   readonly page: StoryHistoryPage<TTurn>;
   readonly selectedPreview?: TTurn | null;
   readonly residentRange?: { readonly firstTurnNumber: number; readonly lastTurnNumber: number } | null;
+  readonly residentTurnNumbers?: readonly number[];
 }): StoryHistoryWindowState<TTurn> {
   const turns = orderedTurns(options.page.turns);
   if (turns.length > STORY_HISTORY_PAGE_LIMIT) {
     throw new Error("Story history page exceeds " + STORY_HISTORY_PAGE_LIMIT + " turns.");
   }
+  assertUniqueTurnIdentities(turns);
   const page = { ...options.page, turns };
   const selectedPreview = options.selectedPreview ?? null;
-  const selectedInPage = Boolean(selectedPreview && turns.some((turn) => turn.id === selectedPreview.id
-    && turn.turnNumber === selectedPreview.turnNumber));
-  const visibleCapacity = selectedPreview && !selectedInPage ? STORY_HISTORY_PAGE_LIMIT - 1 : STORY_HISTORY_PAGE_LIMIT;
-  const initialLast = turns.at(-1)?.turnNumber ?? 0;
-  const initialFirst = Math.max(turns[0]?.turnNumber ?? 0, initialLast - visibleCapacity + 1);
   const bookmark = bookmarkFor(page, 1);
-  const initialWindow = {
-    firstTurnNumber: initialFirst,
-    lastTurnNumber: initialLast,
-    sourceKeys: [bookmark.sourceKey]
-  };
-  return {
+  const residentTurnNumbers = [...new Set(options.residentTurnNumbers ?? [])].sort((left, right) => left - right);
+  const provisional: StoryHistoryWindowState<TTurn> = {
     cachedPages: [Object.assign({}, page, bookmark)],
     pageStack: [bookmark],
-    windows: [initialWindow],
+    windows: [],
     windowIndex: 0,
     pending: null,
     nextSourceKey: 2,
     selectedPreview,
     residentRange: options.residentRange ?? null,
-    position: { direction: "initial", anchorTurnNumber: turns.at(-1)?.turnNumber ?? null }
+    residentTurnNumbers,
+    position: { direction: "initial", anchorTurnNumber: turns.at(-1)?.turnNumber ?? null },
+    historyToken: null
   };
+  const initialNumbers = allKnownTurnNumbers(provisional);
+  const selectedIsInInitialPage = Boolean(selectedPreview && turns.some((turn) => turn.id === selectedPreview.id
+    && turn.turnNumber === selectedPreview.turnNumber));
+  const capacity = selectedPreview && !selectedIsInInitialPage
+    ? STORY_HISTORY_PAGE_LIMIT - 1
+    : STORY_HISTORY_PAGE_LIMIT;
+  const windows = buildWindows(provisional, capacity, !hasOlderSource(provisional));
+  const state = { ...provisional, windows, windowIndex: windows.length - 1 };
+  // An externally pinned preview reserves one card while preserving the newest accepted row order.
+  if (initialNumbers.length === 0) return state;
+  return trimHistoryCache(state);
 }
 
 export function selectStoryHistoryPreview<TTurn extends StoryHistoryTurn>(
-  state: StoryHistoryWindowState<TTurn>,
-  selectedPreview: TTurn | null
+  state: StoryHistoryWindowState<TTurn>, selectedPreview: TTurn | null
 ): StoryHistoryWindowState<TTurn> {
   const current = state.windows[state.windowIndex];
-  const firstWindow = state.windows[0];
-  const lastWindow = state.windows.at(-1);
-  if (!current || !firstWindow || !lastWindow) {
-    return trimHistoryCache({ ...state, selectedPreview, pending: null });
+  const updated = { ...state, selectedPreview, pending: null };
+  if (!current) return trimHistoryCache(updated);
+  let currentNumbers = [...current.turnNumbers];
+  if (selectedPreview && !currentNumbers.includes(selectedPreview.turnNumber)
+    && currentNumbers.length > STORY_HISTORY_PAGE_LIMIT - 1) {
+    currentNumbers = currentNumbers.slice(1);
   }
-
-  const currentRows = allCachedTurns(state).filter((turn) => turn.turnNumber >= current.firstTurnNumber
-    && turn.turnNumber <= current.lastTurnNumber);
-  if (currentRows.length === 0) return trimHistoryCache({ ...state, selectedPreview, pending: null });
-
-  const selectedInCurrent = Boolean(selectedPreview && currentRows.some((turn) => turn.id === selectedPreview.id
-    && turn.turnNumber === selectedPreview.turnNumber));
-  const currentCapacity = selectedPreview && !selectedInCurrent
-    ? STORY_HISTORY_PAGE_LIMIT - 1
-    : STORY_HISTORY_PAGE_LIMIT;
-  let visibleRows = currentRows;
-  if (currentRows.length > currentCapacity) {
-    visibleRows = state.windowIndex > 0
-      ? currentRows.slice(currentRows.length - currentCapacity)
-      : currentRows.slice(0, currentCapacity);
-  }
-  let currentFirst = visibleRows[0]!.turnNumber;
-  let currentLast = visibleRows.at(-1)!.turnNumber;
-  const selectedNumber = selectedPreview?.turnNumber;
-
-  const rangeFirst = Math.min(firstWindow.firstTurnNumber, currentFirst);
-  const rangeLast = Math.max(lastWindow.lastTurnNumber, currentLast);
-  const makeWindow = (windowFirst: number, windowLast: number): StoryHistoryDisplayWindow => ({
-    firstTurnNumber: windowFirst,
-    lastTurnNumber: windowLast,
-    sourceKeys: state.pageStack.filter((page) => pageContains(page, windowFirst, windowLast)).map((page) => page.sourceKey)
-  });
-  const preceding: StoryHistoryDisplayWindow[] = [];
-  for (let windowLast = currentFirst - 1; windowLast >= rangeFirst;) {
-    const selectedFits = Boolean(selectedPreview
-      && selectedNumber! <= windowLast
-      && selectedNumber! >= windowLast - STORY_HISTORY_PAGE_LIMIT + 1);
-    const capacity = selectedPreview
-      ? (selectedFits ? STORY_HISTORY_PAGE_LIMIT : STORY_HISTORY_PAGE_LIMIT - 1)
-      : STORY_HISTORY_PAGE_LIMIT;
-    const windowFirst = Math.max(rangeFirst, windowLast - capacity + 1);
-    preceding.unshift(makeWindow(windowFirst, windowLast));
-    windowLast = windowFirst - 1;
-  }
-
-  const following: StoryHistoryDisplayWindow[] = [];
-  for (let windowFirst = currentLast + 1; windowFirst <= rangeLast;) {
-    const selectedFits = Boolean(selectedPreview
-      && selectedNumber! >= windowFirst
-      && selectedNumber! <= windowFirst + STORY_HISTORY_PAGE_LIMIT - 1);
-    const capacity = selectedPreview
-      ? (selectedFits ? STORY_HISTORY_PAGE_LIMIT : STORY_HISTORY_PAGE_LIMIT - 1)
-      : STORY_HISTORY_PAGE_LIMIT;
-    const windowLast = Math.min(rangeLast, windowFirst + capacity - 1);
-    following.push(makeWindow(windowFirst, windowLast));
-    windowFirst = windowLast + 1;
-  }
-
-  const windows = [...preceding, makeWindow(currentFirst, currentLast), ...following];
-  return trimHistoryCache({
-    ...state,
-    selectedPreview,
-    pending: null,
-    windows,
-    windowIndex: preceding.length
-  });
+  const committed = makeWindow(updated, currentNumbers);
+  const known = allKnownTurnNumbers(updated);
+  const sideCapacity = selectedPreview ? STORY_HISTORY_PAGE_LIMIT - 1 : STORY_HISTORY_PAGE_LIMIT;
+  let older = windowsOnSide(updated, rowsOnSide(known, committed, "older"), sideCapacity, "older");
+  const oldestWindow = older[0];
+  if (hasOlderSource(updated) && oldestWindow && oldestWindow.turnNumbers.length < sideCapacity) older = older.slice(1);
+  const newer = windowsOnSide(updated, rowsOnSide(known, committed, "newer"), sideCapacity, "newer");
+  const windows = [...older, committed, ...newer];
+  const windowIndex = older.length;
+  return trimHistoryCache({ ...updated, windows, windowIndex });
 }
 
 export function storyHistoryVisibleTurns<TTurn extends StoryHistoryTurn>(
@@ -319,230 +452,69 @@ export function storyHistoryVisibleTurns<TTurn extends StoryHistoryTurn>(
 ): StoryHistoryVisibleWindow<TTurn> {
   const descriptor = state.windows[state.windowIndex];
   if (!descriptor) return { pageTurns: [], selectedPreview: state.selectedPreview, firstTurnNumber: null, lastTurnNumber: null };
-  const cachedTurns = allCachedTurns(state);
+  const cached = new Map(allCachedTurns(state).map((turn) => [turn.turnNumber, turn]));
   const selected = state.selectedPreview;
-  const cachedPageRows = cachedTurns.filter((turn) => turn.turnNumber >= descriptor.firstTurnNumber
-    && turn.turnNumber <= descriptor.lastTurnNumber);
-  const selectedInCandidate = selectedIsInRange(state, cachedPageRows, descriptor.firstTurnNumber, descriptor.lastTurnNumber);
-  const pinnedOffPage = Boolean(selected) && !selectedInCandidate;
-  const capacity = pinnedOffPage ? STORY_HISTORY_PAGE_LIMIT - 1 : STORY_HISTORY_PAGE_LIMIT;
-  let pageTurns = cachedPageRows;
-  if (pageTurns.length > capacity) {
-    pageTurns = state.windowIndex > 0 ? pageTurns.slice(pageTurns.length - capacity) : pageTurns.slice(0, capacity);
-  }
-  const firstTurnNumber = pageTurns[0]?.turnNumber ?? null;
-  const lastTurnNumber = pageTurns.at(-1)?.turnNumber ?? null;
-  const selectedPreview = state.selectedPreview
-    && !pageTurns.some((turn) => turn.id === state.selectedPreview?.id && turn.turnNumber === state.selectedPreview?.turnNumber)
-      ? state.selectedPreview
-    : null;
-  return { pageTurns, selectedPreview, firstTurnNumber, lastTurnNumber };
-}
-
-function missingNumbers<TTurn extends StoryHistoryTurn>(state: StoryHistoryWindowState<TTurn>, first: number, last: number): number[] {
-  const retained = new Set(allCachedTurns(state).map((turn) => turn.turnNumber));
-  const missing: number[] = [];
-  for (let turnNumber = first; turnNumber <= last; turnNumber += 1) {
-    if (!retained.has(turnNumber)) missing.push(turnNumber);
-  }
-  return missing;
-}
-
-function requestForPending<TTurn extends StoryHistoryTurn>(
-  state: StoryHistoryWindowState<TTurn>,
-  pending: StoryHistoryPendingNavigation
-): StoryHistoryPageRequest | null {
-  const missing = missingNumbers(state, pending.firstTurnNumber, pending.lastTurnNumber);
-  const firstMissing = missing[0];
-  if (firstMissing === undefined) return null;
-  const residentFirst = state.residentRange?.firstTurnNumber ?? Number.POSITIVE_INFINITY;
-  const residentLast = state.residentRange?.lastTurnNumber ?? Number.NEGATIVE_INFINITY;
-  if (firstMissing >= residentFirst && firstMissing <= residentLast) {
-    let targetEnd = firstMissing;
-    while (targetEnd + 1 <= residentLast && targetEnd + 1 <= pending.lastTurnNumber && missing.includes(targetEnd + 1)) targetEnd += 1;
-    return {
-      direction: pending.direction,
-      source: "resident",
-      requestCursor: null,
-      anchorTurnNumber: pending.lastTurnNumber,
-      targetStartTurnNumber: firstMissing,
-      targetEndTurnNumber: targetEnd,
-      targetWindowFirstTurnNumber: pending.firstTurnNumber,
-      targetWindowLastTurnNumber: pending.lastTurnNumber,
-      targetWindowIndex: pending.targetWindowIndex,
-      requiresFetch: true
-    };
-  }
-  const tried = new Set(pending.attemptedSourceKeys);
-  const candidate = pending.sourceKeys.map((key) => sourceByKey(state, key))
-    .filter((source): source is StoryHistoryPageBookmark => Boolean(source && !tried.has(source.sourceKey)
-      && source.firstTurnNumber <= firstMissing && source.lastTurnNumber >= firstMissing))
-    .concat(state.pageStack.filter((source) => !tried.has(source.sourceKey)
-      && source.firstTurnNumber <= firstMissing && source.lastTurnNumber >= firstMissing))
-    .sort((left, right) => left.firstTurnNumber - right.firstTurnNumber)[0];
-  if (candidate) {
-    let targetEnd = Math.min(pending.lastTurnNumber, candidate.lastTurnNumber);
-    while (targetEnd > firstMissing && !missing.includes(targetEnd)) targetEnd -= 1;
-    return {
-      direction: pending.direction,
-      source: candidate.source,
-      requestCursor: candidate.requestCursor,
-      anchorTurnNumber: pending.firstTurnNumber,
-      targetStartTurnNumber: firstMissing,
-      targetEndTurnNumber: targetEnd,
-      targetWindowFirstTurnNumber: pending.firstTurnNumber,
-      targetWindowLastTurnNumber: pending.lastTurnNumber,
-      targetWindowIndex: pending.targetWindowIndex,
-      sourceBookmarkKey: candidate.sourceKey,
-      requiresFetch: true
-    };
-  }
-  if (pending.fallbackCursor) {
-    return {
-      direction: pending.direction,
-      source: "server",
-      requestCursor: pending.fallbackCursor,
-      anchorTurnNumber: pending.firstTurnNumber,
-      targetStartTurnNumber: firstMissing,
-      targetEndTurnNumber: pending.lastTurnNumber,
-      targetWindowFirstTurnNumber: pending.firstTurnNumber,
-      targetWindowLastTurnNumber: pending.lastTurnNumber,
-      targetWindowIndex: pending.targetWindowIndex,
-      requiresFetch: true
-    };
-  }
-  return null;
-}
-
-function requestForWindow<TTurn extends StoryHistoryTurn>(
-  state: StoryHistoryWindowState<TTurn>,
-  direction: "older" | "newer",
-  target: StoryHistoryDisplayWindow,
-  targetIndex: number
-): StoryHistoryPageRequest {
-  const resident = state.residentRange;
-  const residentCovers = Boolean(resident && resident.firstTurnNumber <= target.firstTurnNumber
-    && resident.lastTurnNumber >= target.lastTurnNumber);
-  const source = residentCovers ? "resident" : (sourceByKey(state, target.sourceKeys[0] ?? -1)?.source ?? "server");
-  const sourceBookmark = target.sourceKeys.map((key) => sourceByKey(state, key))
-    .find((candidate): candidate is StoryHistoryPageBookmark => Boolean(candidate));
-  const missing = missingNumbers(state, target.firstTurnNumber, target.lastTurnNumber);
-  const requestStart = missing[0] ?? target.firstTurnNumber;
-  const requestEnd = missing.at(-1) ?? target.lastTurnNumber;
+  const pageTurns = descriptor.turnNumbers.map((turnNumber) => cached.get(turnNumber)).filter((turn): turn is TTurn => Boolean(turn));
+  const selectedIsVisible = Boolean(selected && pageTurns.some((turn) => turn.id === selected.id && turn.turnNumber === selected.turnNumber));
+  const selectedPreview = selected && !selectedIsVisible ? selected : null;
+  const capacity = selectedPreview ? STORY_HISTORY_PAGE_LIMIT - 1 : STORY_HISTORY_PAGE_LIMIT;
+  const visibleTurns = pageTurns.length > capacity ? pageTurns.slice(pageTurns.length - capacity) : pageTurns;
   return {
-    direction,
-    source: residentCovers ? "resident" : source,
-    requestCursor: residentCovers ? null : (sourceBookmark?.requestCursor ?? null),
-    anchorTurnNumber: target.firstTurnNumber,
-    targetStartTurnNumber: requestStart,
-    targetEndTurnNumber: requestEnd,
-    targetWindowFirstTurnNumber: target.firstTurnNumber,
-    targetWindowLastTurnNumber: target.lastTurnNumber,
-    targetWindowIndex: targetIndex,
-    ...(sourceBookmark ? { sourceBookmarkKey: sourceBookmark.sourceKey } : {}),
-    targetSourceKeys: target.sourceKeys,
-    requiresFetch: missing.length > 0
+    pageTurns: visibleTurns,
+    selectedPreview,
+    firstTurnNumber: visibleTurns[0]?.turnNumber ?? null,
+    lastTurnNumber: visibleTurns.at(-1)?.turnNumber ?? null
   };
 }
 
 export function storyHistoryPageRequest<TTurn extends StoryHistoryTurn>(
-  state: StoryHistoryWindowState<TTurn>,
-  direction: "older" | "newer"
+  state: StoryHistoryWindowState<TTurn>, direction: "older" | "newer"
 ): StoryHistoryPageRequest | null {
   if (state.pending) return requestForPending(state, state.pending);
   const adjacentIndex = direction === "older" ? state.windowIndex - 1 : state.windowIndex + 1;
   const adjacent = state.windows[adjacentIndex];
   if (adjacent) return requestForWindow(state, direction, adjacent, adjacentIndex);
   if (direction !== "older") return null;
-
-  const visible = storyHistoryVisibleTurns(state);
-  if (visible.pageTurns.length === 0 || visible.firstTurnNumber === null) return null;
-  const last = visible.firstTurnNumber - 1;
-  if (last < 1) return null;
-  const rawFirst = Math.max(1, last - (STORY_HISTORY_PAGE_LIMIT - 1));
-  const resident = state.residentRange;
-  const residentFirst = Math.max(rawFirst, resident?.firstTurnNumber ?? Number.POSITIVE_INFINITY);
-  const residentLast = Math.min(last, resident?.lastTurnNumber ?? Number.NEGATIVE_INFINITY);
-  const residentCoversTarget = residentFirst <= rawFirst && residentLast >= last;
-  const residentTouchesAnchor = residentFirst <= residentLast && residentLast === last;
-  const selectedInside = selectedIsInRange(state, allCachedTurns(state), rawFirst, last);
-  const capacity = state.selectedPreview && !selectedInside ? STORY_HISTORY_PAGE_LIMIT - 1 : STORY_HISTORY_PAGE_LIMIT;
-  const windowFirst = residentTouchesAnchor && !residentCoversTarget
-    ? residentFirst
-    : Math.max(rawFirst, last - capacity + 1);
-  const windowLast = residentTouchesAnchor && !residentCoversTarget ? residentLast : last;
-  const targetIndex = state.windowIndex - 1;
-  if (completeWindow(state, windowFirst, windowLast)) {
-    return {
-      direction,
-      source: "resident",
-      requestCursor: null,
-      anchorTurnNumber: last,
-      targetStartTurnNumber: windowFirst,
-      targetEndTurnNumber: windowLast,
-      targetWindowFirstTurnNumber: windowFirst,
-      targetWindowLastTurnNumber: windowLast,
-      targetWindowIndex: targetIndex,
-      targetSourceKeys: sourcesForWindow(state, windowFirst, windowLast),
-      requiresFetch: false
-    };
-  }
-  if (residentFirst <= residentLast) {
-    const sourceRequest: StoryHistoryPageRequest = {
-      direction,
-      source: "resident",
-      requestCursor: null,
-      anchorTurnNumber: last,
-      targetStartTurnNumber: residentCoversTarget ? rawFirst : residentFirst,
-      targetEndTurnNumber: residentCoversTarget ? last : residentLast,
-      targetWindowFirstTurnNumber: windowFirst,
-      targetWindowLastTurnNumber: windowLast,
-      targetWindowIndex: targetIndex,
-      requiresFetch: true
-    };
-    return sourceRequest;
-  }
+  const current = state.windows[state.windowIndex];
+  if (!current) return null;
+  const knownOlder = rowsOnSide(allKnownTurnNumbers(state), current, "older");
   const oldest = state.pageStack.filter((page) => page.source === "server")
     .sort((left, right) => left.firstTurnNumber - right.firstTurnNumber)[0];
+  const capacity = state.selectedPreview ? STORY_HISTORY_PAGE_LIMIT - 1 : STORY_HISTORY_PAGE_LIMIT;
+  if (knownOlder.length > 0 && (knownOlder.length >= capacity || !oldest?.nextCursor)) {
+    const target = makeWindow(state, knownOlder.slice(-capacity));
+    return requestForWindow(state, direction, target, -1);
+  }
   if (!oldest?.nextCursor) return null;
-  return {
-    direction,
-    source: "server",
-    requestCursor: oldest.nextCursor,
-    anchorTurnNumber: last,
-    targetStartTurnNumber: rawFirst,
-    targetEndTurnNumber: last,
-    targetWindowFirstTurnNumber: windowFirst,
-    targetWindowLastTurnNumber: windowLast,
-    targetWindowIndex: targetIndex,
-    requiresFetch: true
-  };
+  return newPageRequest("older", "server", oldest.nextCursor, current.firstTurnNumber, [], state.windowIndex - 1, true);
+}
+
+function sameIdentities(left: readonly StoryHistoryTurn[], right: readonly StoryHistoryTurn[]): boolean {
+  return left.length === right.length && left.every((turn, index) => turn.id === right[index]?.id
+    && turn.turnNumber === right[index]?.turnNumber);
+}
+
+function findWindowIndex(windows: readonly StoryHistoryDisplayWindow[], numbers: readonly number[]): number {
+  return windows.findIndex((acceptedWindow) => acceptedWindow.turnNumbers.length === numbers.length
+    && acceptedWindow.turnNumbers.every((turnNumber, index) => turnNumber === numbers[index]));
 }
 
 export function installStoryHistoryWindowPage<TTurn extends StoryHistoryTurn>(
-  state: StoryHistoryWindowState<TTurn>,
-  request: StoryHistoryPageRequest,
-  page: StoryHistoryPage<TTurn> | null
+  state: StoryHistoryWindowState<TTurn>, request: StoryHistoryPageRequest, page: StoryHistoryPage<TTurn> | null
 ): StoryHistoryWindowState<TTurn> {
   if (!request.requiresFetch) {
     if (page) throw new Error("A cached Story history navigation cannot install a fetched page.");
-    const descriptor: StoryHistoryDisplayWindow = {
-      firstTurnNumber: request.targetWindowFirstTurnNumber,
-      lastTurnNumber: request.targetWindowLastTurnNumber,
-      sourceKeys: request.targetSourceKeys ?? sourcesForWindow(state, request.targetWindowFirstTurnNumber, request.targetWindowLastTurnNumber)
-    };
-    let windows = [...state.windows];
-    let windowIndex = request.targetWindowIndex;
-    if (request.direction === "older" && windowIndex < 0) {
-      windows = [descriptor, ...windows];
-      windowIndex = 0;
-    } else if (windowIndex >= 0 && windowIndex < windows.length) {
-      windows[windowIndex] = descriptor;
-    }
+    const numbers = request.targetWindowTurnNumbers;
+    const descriptor = makeWindow(state, numbers);
+    const windows = [...state.windows];
+    const windowIndex = request.targetWindowIndex;
+    if (request.direction === "older" && windowIndex < 0) windows.unshift(descriptor);
+    else if (windowIndex >= 0 && windowIndex < windows.length) windows[windowIndex] = descriptor;
+    const resolvedIndex = request.direction === "older" && windowIndex < 0 ? 0 : windowIndex;
     return trimHistoryCache({
       ...state,
       windows,
-      windowIndex,
+      windowIndex: resolvedIndex,
       pending: null,
       position: { direction: request.direction, anchorTurnNumber: request.anchorTurnNumber }
     });
@@ -550,23 +522,19 @@ export function installStoryHistoryWindowPage<TTurn extends StoryHistoryTurn>(
 
   let pending = state.pending;
   if (!pending) {
-    const fallbackCursor = request.direction === "older" && request.targetWindowIndex < 0 && request.source === "server"
-      ? request.requestCursor
-      : null;
     pending = {
       direction: request.direction,
       targetWindowIndex: request.targetWindowIndex,
-      firstTurnNumber: request.targetWindowFirstTurnNumber,
-      lastTurnNumber: request.targetWindowLastTurnNumber,
-      sourceKeys: [...(request.targetSourceKeys ?? (request.sourceBookmarkKey ? [request.sourceBookmarkKey] : []))],
+      turnNumbers: request.targetWindowTurnNumbers,
+      sourceKeys: [...(request.targetSourceKeys ?? (request.sourceBookmarkKey !== undefined ? [request.sourceBookmarkKey] : []))],
       attemptedSourceKeys: [],
-      fallbackCursor
+      fallbackCursor: request.targetWindowTurnNumbers.length === 0 && request.direction === "older" && request.source === "server"
+        ? request.requestCursor
+        : null
     };
   }
   const preparedState = trimHistoryCache({ ...state, pending });
-  let candidateState: StoryHistoryWindowState<TTurn> = preparedState;
   if (!page) return preparedState;
-
   const pageSource = page.source ?? "server";
   if (page.requestCursor !== request.requestCursor || pageSource !== request.source) {
     throw new Error("Story history page source does not match the request.");
@@ -576,7 +544,7 @@ export function installStoryHistoryWindowPage<TTurn extends StoryHistoryTurn>(
   if (turns.length === 0 || turns.length > STORY_HISTORY_PAGE_LIMIT) {
     throw new Error("Story history page must contain between 1 and " + STORY_HISTORY_PAGE_LIMIT + " turns.");
   }
-  if (pageSource === "server" && pending?.direction === "older" && page.nextCursor === page.requestCursor) {
+  if (pageSource === "server" && pending.direction === "older" && page.nextCursor === page.requestCursor) {
     throw new Error("Older Story history cursor repeated instead of advancing.");
   }
   const pageBounds = bookmarkFor({ ...page, turns }, preparedState.nextSourceKey);
@@ -584,91 +552,123 @@ export function installStoryHistoryWindowPage<TTurn extends StoryHistoryTurn>(
     || pageBounds.lastTurnNumber > (state.residentRange?.lastTurnNumber ?? 0))) {
     throw new Error("Resident Story history page is outside the captured loaded range.");
   }
-  let pageStack = [...preparedState.pageStack];
-  let source = pageStack.find((candidate) => candidate.source === pageSource
-    && candidate.requestCursor === page.requestCursor
-    && (pageSource === "server" || (candidate.firstTurnNumber === pageBounds.firstTurnNumber
-      && candidate.lastTurnNumber === pageBounds.lastTurnNumber)));
-  if (source && (source.firstTurnNumber !== pageBounds.firstTurnNumber || source.lastTurnNumber !== pageBounds.lastTurnNumber)) {
+  const previous = allCachedTurns(preparedState);
+  const rowsByNumber = new Map(previous.map((turn) => [turn.turnNumber, turn]));
+  const idsByNumber = new Map<string, number>();
+  for (const turn of previous) idsByNumber.set(turn.id, turn.turnNumber);
+  for (const turn of turns) {
+    const existing = rowsByNumber.get(turn.turnNumber);
+    const existingNumber = idsByNumber.get(turn.id);
+    const knownIdentity = preparedState.pageStack.flatMap((sourcePage) => sourcePage.identities)
+      .find((identity) => identity.turnNumber === turn.turnNumber || identity.id === turn.id);
+    if ((existing && existing.id !== turn.id) || (existingNumber !== undefined && existingNumber !== turn.turnNumber)
+      || (knownIdentity && (knownIdentity.id !== turn.id || knownIdentity.turnNumber !== turn.turnNumber))) {
+      throw new Error("Story history turn identity changed during paging.");
+    }
+  }
+  const pageStack = [...preparedState.pageStack];
+  let source = pageStack.find((candidate) => candidate.source === pageSource && candidate.requestCursor === page.requestCursor
+    && (pageSource === "server" || candidate.sourceKey === request.sourceBookmarkKey));
+  if (source && !sameIdentities(source.identities, pageBounds.identities)) {
     throw new Error("Replayed Story history page no longer matches its captured source bounds.");
   }
   if (!source) {
     if (pageSource === "server" && pending.direction === "older") {
       const oldest = pageStack.filter((candidate) => candidate.source === "server")
         .sort((left, right) => left.firstTurnNumber - right.firstTurnNumber)[0];
-      if (!oldest || oldest.nextCursor !== page.requestCursor || pageBounds.lastTurnNumber >= oldest.firstTurnNumber) {
+      if (oldest && (oldest.nextCursor !== page.requestCursor || pageBounds.lastTurnNumber >= oldest.firstTurnNumber)) {
         throw new Error("Older Story history page does not continue the captured cursor stack.");
       }
     }
-    source = { ...pageBounds, sourceKey: state.nextSourceKey };
+    source = pageBounds;
     pageStack.push(source);
+  } else if (source.nextCursor !== page.nextCursor) {
+    throw new Error("Replayed Story history page changed its captured continuation cursor.");
   }
-  const before = allCachedTurns(preparedState);
-  const rowsByNumber = new Map(before.map((turn) => [turn.turnNumber, turn]));
-  for (const turn of turns) {
-    const existing = rowsByNumber.get(turn.turnNumber);
-    if (existing && existing.id !== turn.id) throw new Error("Story history turn identity changed during paging.");
-    const sameId = before.find((candidate) => candidate.id === turn.id);
-    if (sameId && sameId.turnNumber !== turn.turnNumber) throw new Error("Story history turn identity changed during paging.");
-  }
-  const relevant = turns.filter((turn) => turn.turnNumber >= pending!.firstTurnNumber && turn.turnNumber <= pending!.lastTurnNumber);
+
+  const targetSet = new Set(pending.turnNumbers);
+  const relevant = pending.turnNumbers.length === 0
+    ? turns
+    : turns.filter((turn) => targetSet.has(turn.turnNumber));
   const newRows = relevant.filter((turn) => !rowsByNumber.has(turn.turnNumber));
   if (newRows.length === 0) throw new Error("Captured Story history source made no progress toward the target window.");
-  const cachedPages = [...preparedState.cachedPages];
-  cachedPages.push(Object.assign({}, page, source, { source: pageSource, turns: newRows }));
-  const attemptedSourceKeys = source.sourceKey === preparedState.nextSourceKey
+
+  const cachedPages = [...preparedState.cachedPages, Object.assign({}, page, source, { source: pageSource, turns })];
+  const attemptedSourceKeys = source.sourceKey === preparedState.nextSourceKey || !pending.attemptedSourceKeys.includes(source.sourceKey)
     ? [...pending.attemptedSourceKeys, source.sourceKey]
-    : pending.attemptedSourceKeys.includes(source.sourceKey)
-      ? [...pending.attemptedSourceKeys]
-      : [...pending.attemptedSourceKeys, source.sourceKey];
-  pending = {
+    : [...pending.attemptedSourceKeys];
+  let nextPending: StoryHistoryPendingNavigation = {
     ...pending,
     sourceKeys: [...new Set([...pending.sourceKeys, source.sourceKey])],
     attemptedSourceKeys,
     fallbackCursor: pending.direction === "older" && pageSource === "server" ? page.nextCursor : pending.fallbackCursor
   };
-  candidateState = { ...preparedState, cachedPages, pageStack, pending, nextSourceKey: source.sourceKey === preparedState.nextSourceKey ? preparedState.nextSourceKey + 1 : preparedState.nextSourceKey };
-  const nextPosition: StoryHistoryWindowPosition = {
-    direction: pending.direction,
-    anchorTurnNumber: request.anchorTurnNumber
+  let candidateState: StoryHistoryWindowState<TTurn> = {
+    ...preparedState,
+    cachedPages,
+    pageStack,
+    pending: nextPending,
+    nextSourceKey: source.sourceKey === preparedState.nextSourceKey ? preparedState.nextSourceKey + 1 : preparedState.nextSourceKey
   };
-  candidateState = { ...candidateState, position: nextPosition };
-  candidateState = trimHistoryCache(candidateState);
-  if (!completeWindow(candidateState, pending.firstTurnNumber, pending.lastTurnNumber)) return candidateState;
 
-  const sourceKeys = sourcesForWindow(candidateState, pending.firstTurnNumber, pending.lastTurnNumber);
-  const descriptor: StoryHistoryDisplayWindow = {
-    firstTurnNumber: pending.firstTurnNumber,
-    lastTurnNumber: pending.lastTurnNumber,
-    sourceKeys: [...new Set([...sourceKeys, ...pending.sourceKeys])]
-  };
+  if (nextPending.turnNumbers.length === 0) {
+    const oldCurrent = state.windows[state.windowIndex];
+    if (nextPending.direction !== "older" || !oldCurrent) {
+      throw new Error("Captured Story history source made no progress toward an accepted-entry window.");
+    }
+    const eligible = allKnownTurnNumbers(candidateState)
+      .filter((turnNumber) => turnNumber < oldCurrent.firstTurnNumber);
+    const width = state.selectedPreview ? STORY_HISTORY_PAGE_LIMIT - 1 : STORY_HISTORY_PAGE_LIMIT;
+    const targetNumbers = eligible.slice(-width);
+    if (targetNumbers.length < width && page.nextCursor) {
+      nextPending = { ...nextPending, turnNumbers: [], fallbackCursor: page.nextCursor };
+      return trimHistoryCache({ ...candidateState, pending: nextPending });
+    }
+    if (targetNumbers.length > 0) {
+      const descriptor = makeWindow(candidateState, targetNumbers);
+      const windows = [...candidateState.windows];
+      const targetIndex = state.windowIndex;
+      windows.splice(targetIndex, 0, descriptor);
+      nextPending = {
+        ...nextPending,
+        targetWindowIndex: targetIndex,
+        turnNumbers: descriptor.turnNumbers,
+        sourceKeys: descriptor.sourceKeys
+      };
+      candidateState = {
+        ...candidateState,
+        windows,
+        windowIndex: state.windowIndex + 1,
+        pending: nextPending
+      };
+    } else if (nextPending.fallbackCursor) {
+      return trimHistoryCache(candidateState);
+    } else {
+      throw new Error("Captured Story history source made no progress toward an accepted-entry window.");
+    }
+  }
+
+  const cachedNumbers = new Set(allCachedTurns(candidateState).map((turn) => turn.turnNumber));
+  if (!nextPending.turnNumbers.every((turnNumber) => cachedNumbers.has(turnNumber))) {
+    return trimHistoryCache(candidateState);
+  }
+  const descriptor = makeWindow(candidateState, nextPending.turnNumbers);
   let windows = [...candidateState.windows];
-  let windowIndex = pending.targetWindowIndex;
-  if (pending.direction === "older" && windowIndex < 0) {
-    windows = [descriptor, ...windows];
+  const matchingIndex = findWindowIndex(windows, nextPending.turnNumbers);
+  let windowIndex = matchingIndex >= 0 ? matchingIndex : nextPending.targetWindowIndex;
+  if (matchingIndex < 0 && nextPending.direction === "older" && windowIndex < 0) {
+    windows.unshift(descriptor);
     windowIndex = 0;
-  } else if (windowIndex >= 0 && windowIndex < windows.length) {
+  } else if (matchingIndex < 0 && windowIndex >= 0 && windowIndex < windows.length) {
     windows[windowIndex] = descriptor;
-  } else {
+  } else if (matchingIndex < 0) {
     return { ...candidateState, pending: null };
   }
-  const completed = {
+  return trimHistoryCache({
     ...candidateState,
     windows,
     windowIndex,
     pending: null,
-    position: nextPosition
-  };
-  const olderCarryFirst = Math.max(1, descriptor.firstTurnNumber - STORY_HISTORY_PAGE_LIMIT);
-  const olderCarryLast = descriptor.firstTurnNumber - 1;
-  if (olderCarryFirst <= olderCarryLast) {
-    const retainedNumbers = new Set(allCachedTurns(completed).map((turn) => turn.turnNumber));
-    const carryRows = turns.filter((turn) => turn.turnNumber >= olderCarryFirst && turn.turnNumber <= olderCarryLast
-      && !retainedNumbers.has(turn.turnNumber));
-    if (carryRows.length > 0) {
-      const carryPage = Object.assign({}, page, source, { source: pageSource, turns: carryRows });
-      return trimHistoryCache({ ...completed, cachedPages: [...completed.cachedPages, carryPage] });
-    }
-  }
-  return trimHistoryCache(completed);
+    position: { direction: nextPending.direction, anchorTurnNumber: request.anchorTurnNumber }
+  });
 }

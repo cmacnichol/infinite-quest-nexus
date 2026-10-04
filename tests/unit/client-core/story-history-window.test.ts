@@ -22,9 +22,13 @@ function turns(first: number, last: number): Turn[] {
 
 function syntheticServer(total: number) {
   const cursorRows = new Map<string, number>();
+  const cursorByTurn = new Map<number, string>();
   const cursorBefore = (turnNumber: number): string => {
-    const cursor = `opaque-cursor-${turnNumber}-${cursorRows.size + 1}`;
+    const existing = cursorByTurn.get(turnNumber);
+    if (existing) return existing;
+    const cursor = `opaque-cursor-${turnNumber}-${cursorByTurn.size + 1}`;
     cursorRows.set(cursor, turnNumber);
+    cursorByTurn.set(turnNumber, cursor);
     return cursor;
   };
   const firstRecent = Math.max(1, total - 49);
@@ -75,7 +79,7 @@ function navigateHistory(state: StoryHistoryWindowState<Turn>, direction: "older
       captured.add(key);
     }
     const page = next.source === "resident"
-      ? { source: "resident" as const, requestCursor: null, nextCursor: null, turns: (rows.length ? rows : turns(next.targetStartTurnNumber, next.targetEndTurnNumber)).filter((turn) => turn.turnNumber >= next.targetStartTurnNumber && turn.turnNumber <= next.targetEndTurnNumber) }
+      ? { source: "resident" as const, requestCursor: null, nextCursor: null, turns: (rows.length ? rows : turns(next.targetStartTurnNumber, next.targetEndTurnNumber)).filter((turn) => next.targetTurnNumbers.includes(turn.turnNumber)) }
       : server.fetchPage(next.requestCursor);
     state = installStoryHistoryWindowPage(state, next, page);
   }
@@ -180,7 +184,8 @@ describe("bounded Story history window policy", () => {
     let state = createStoryHistoryWindow<Turn>({
       page: { source: "server", requestCursor: null, nextCursor: null, turns: recent },
       selectedPreview: rows[11] ?? null,
-      residentRange: { firstTurnNumber: 1, lastTurnNumber: total }
+      residentRange: { firstTurnNumber: 1, lastTurnNumber: total },
+      residentTurnNumbers: rows.map((turn) => turn.turnNumber)
     });
     const olderPages: number[][] = [];
 
@@ -247,7 +252,8 @@ describe("bounded Story history window policy", () => {
     let state = createStoryHistoryWindow<Turn>({
       page: server.initial,
       selectedPreview: turns(12, 12)[0] ?? null,
-      residentRange: { firstTurnNumber: 268, lastTurnNumber: 317 }
+      residentRange: { firstTurnNumber: 268, lastTurnNumber: 317 },
+      residentTurnNumbers: residentRows.map((turn) => turn.turnNumber)
     });
     const olderPages: number[][] = [];
     for (let attempt = 0; attempt < Math.ceil(318 / 49) + 10; attempt += 1) {
@@ -264,7 +270,8 @@ describe("bounded Story history window policy", () => {
     );
     expect(traversed.filter((turnNumber) => turnNumber === 268)).toHaveLength(1);
     expect(server.requests).toContain("opaque-cursor-269-1");
-    expect(olderPages.some((page) => page.includes(220) && page.includes(267))).toBe(true);
+    expect(olderPages[1]).toEqual(turns(221, 269).map((turn) => turn.turnNumber));
+    expect(olderPages.flat().filter((turnNumber) => turnNumber === 269)).toHaveLength(1);
 
     const newerPages: number[][] = [];
     for (let attempt = 0; attempt < Math.ceil(318 / 49) + 10; attempt += 1) {
@@ -281,7 +288,8 @@ describe("bounded Story history window policy", () => {
     const rows = turns(1, total);
     let state = createStoryHistoryWindow<Turn>({
       page: { source: "resident", requestCursor: null, nextCursor: null, turns: rows.slice(-50) },
-      residentRange: { firstTurnNumber: 1, lastTurnNumber: total }
+      residentRange: { firstTurnNumber: 1, lastTurnNumber: total },
+      residentTurnNumbers: rows.map((turn) => turn.turnNumber)
     });
 
     for (let attempt = 0; attempt < Math.ceil(total / 50) + 4; attempt += 1) {
@@ -316,7 +324,8 @@ describe("bounded Story history window policy", () => {
     let state = createStoryHistoryWindow<Turn>({
       page: { source: "resident", requestCursor: null, nextCursor: null, turns: rows.slice(-50) },
       selectedPreview: rows[267] ?? null,
-      residentRange: { firstTurnNumber: 1, lastTurnNumber: total }
+      residentRange: { firstTurnNumber: 1, lastTurnNumber: total },
+      residentTurnNumbers: rows.map((turn) => turn.turnNumber)
     });
     const olderPages: number[][] = [];
     for (let attempt = 0; attempt < Math.ceil(total / 49) + 8; attempt += 1) {
@@ -349,7 +358,8 @@ describe("bounded Story history window policy", () => {
     let state = createStoryHistoryWindow<Turn>({
       page: { source: "resident", requestCursor: null, nextCursor: null, turns: rows.slice(-50) },
       selectedPreview: turns(12, 12)[0] ?? null,
-      residentRange: { firstTurnNumber: 1, lastTurnNumber: total }
+      residentRange: { firstTurnNumber: 1, lastTurnNumber: total },
+      residentTurnNumbers: rows.map((turn) => turn.turnNumber)
     });
     state = navigateHistory(state, "older", server, rows);
     const before = storyHistoryVisibleTurns(state);
@@ -448,7 +458,7 @@ describe("bounded Story history window policy", () => {
     assertBoundedHistoryState(partial);
   });
 
-  it("rejects a captured source response that makes no progress toward its target", () => {
+  it("rejects a repeated accepted source page that makes no progress toward its target", () => {
     const initial = createStoryHistoryWindow<Turn>({
       page: { requestCursor: null, nextCursor: "opaque-before-268", turns: turns(268, 317) },
       selectedPreview: turns(12, 12)[0] ?? null
@@ -457,11 +467,14 @@ describe("bounded Story history window policy", () => {
     const prepared = installStoryHistoryWindowPage(initial, older!, null);
     const sourceRequest = storyHistoryPageRequest(prepared, "older");
 
-    expect(() => installStoryHistoryWindowPage(prepared, sourceRequest!, {
+    const response = {
       requestCursor: sourceRequest!.requestCursor,
-      nextCursor: "opaque-before-168",
-      turns: turns(168, 217)
-    })).toThrow(/no progress/i);
+      nextCursor: "opaque-before-218",
+      turns: turns(218, 267)
+    };
+    const completed = installStoryHistoryWindowPage(prepared, sourceRequest!, response);
+    expect(completed.pending).toBeNull();
+    expect(() => installStoryHistoryWindowPage(completed, sourceRequest!, response)).toThrow(/no progress/i);
     expect(prepared.pending).not.toBeNull();
     assertBoundedHistoryState(prepared);
   });
@@ -506,39 +519,33 @@ describe("bounded Story history window policy", () => {
     const firstSource = storyHistoryPageRequest(state, "newer");
     expect(firstSource?.source).toBe("server");
     expect(firstSource?.requestCursor).toBeTruthy();
-    const firstPage = server.fetchPage(firstSource!.requestCursor);
-    state = installStoryHistoryWindowPage(state, firstSource!, firstPage);
-    assertBoundedHistoryState(state);
-    expect(state.pending).not.toBeNull();
     expect(storyHistoryVisibleTurns(state).pageTurns.map((turn) => turn.id)).toEqual(committedBefore);
     const stagedNumbers = new Set(state.cachedPages.flatMap((page) => page.turns.map((turn) => turn.turnNumber)));
     expect(Array.from({ length: 44 }, (_, index) => index + 24).every((turnNumber) => stagedNumbers.has(turnNumber))).toBe(true);
+    expect(Array.from({ length: 5 }, (_, index) => index + 68).some((turnNumber) => stagedNumbers.has(turnNumber))).toBe(false);
 
-    const secondSource = storyHistoryPageRequest(state, "newer");
-    expect(secondSource?.source).toBe("server");
-    expect(secondSource?.requestCursor).toBeTruthy();
-    expect(secondSource?.requestCursor).not.toBe(firstSource?.requestCursor);
-    let secondSourceAttempts = 0;
+    let sourceAttempts = 0;
     try {
-      secondSourceAttempts += 1;
+      sourceAttempts += 1;
       throw new Error("private backend diagnostic must not replace the committed window");
     } catch {
-      // A failed second transport leaves the immutable policy state pending for retry.
+      // A failed transport leaves the immutable policy state pending for retry.
     }
     expect(storyHistoryVisibleTurns(state).pageTurns.map((turn) => turn.id)).toEqual(committedBefore);
     assertBoundedHistoryState(state);
     const retry = storyHistoryPageRequest(state, "newer");
-    expect(secondSourceAttempts).toBe(1);
-    expect(retry?.requestCursor).toBe(secondSource?.requestCursor);
-    const failedResponseCursor = retry?.requestCursor;
+    expect(sourceAttempts).toBe(1);
+    expect(retry?.requestCursor).toBe(firstSource?.requestCursor);
+    expect(retry?.requestCursor).toBeTruthy();
+    const retryCursor = retry?.requestCursor ?? null;
 
-    const secondPage = server.fetchPage(failedResponseCursor ?? null);
-    state = installStoryHistoryWindowPage(state, retry!, secondPage);
+    const retryPage = server.fetchPage(retryCursor);
+    expect(retryPage.turns.map((turn) => turn.turnNumber)).toEqual(turns(68, 117).map((turn) => turn.turnNumber));
+    state = installStoryHistoryWindowPage(state, retry!, retryPage);
     expect(state.pending).toBeNull();
     expect(storyHistoryVisibleTurns(state).pageTurns.map((turn) => turn.turnNumber)).toEqual(turns(24, 72).map((turn) => turn.turnNumber));
     expect(storyHistoryVisibleTurns(state).selectedPreview?.turnNumber).toBe(12);
-    expect(server.requests).toContain(firstSource?.requestCursor);
-    expect(server.requests).toContain(failedResponseCursor);
+    expect(server.requests).toContain(retryCursor);
     assertBoundedHistoryState(state);
   });
 });

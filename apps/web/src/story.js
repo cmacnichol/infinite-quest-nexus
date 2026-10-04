@@ -5232,7 +5232,8 @@ function initializeStoryHistoryWindow(options = {}) {
     selectedPreview,
     residentRange: residentRows.length
       ? { firstTurnNumber: Number(residentRows[0]?.turnNumber), lastTurnNumber: Number(residentRows.at(-1)?.turnNumber) }
-      : null
+      : null,
+    residentTurnNumbers: residentRows.map(turn => Number(turn.turnNumber)).filter(Number.isInteger)
   });
   state.historyWindowCampaignId = state.campaignId;
   state.historyWindowEpoch = storyTurnWindowEpoch;
@@ -5496,7 +5497,7 @@ async function changeStoryHistoryPage(direction) {
         const sourceRequest = storyHistoryPageRequest(workingWindow, direction);
         if (!sourceRequest?.requiresFetch) throw new Error("History reconstruction stopped before the requested window was complete.");
         const sourceKey = sourceRequest.source === "resident"
-          ? `resident:${sourceRequest.targetStartTurnNumber}:${sourceRequest.targetEndTurnNumber}`
+          ? `resident:${sourceRequest.targetTurnNumbers.join(",")}`
           : `server:${sourceRequest.requestCursor}`;
         if (attemptedSources.has(sourceKey)) throw new Error("History reconstruction repeated a source without progress.");
         attemptedSources.add(sourceKey);
@@ -5507,9 +5508,9 @@ async function changeStoryHistoryPage(direction) {
         ];
         let page;
         if (sourceRequest.source === "resident") {
-          const turns = (state.historyResidentRows || []).filter((turn) => Number(turn.turnNumber) >= sourceRequest.targetStartTurnNumber
-            && Number(turn.turnNumber) <= sourceRequest.targetEndTurnNumber);
-          const expected = sourceRequest.targetEndTurnNumber - sourceRequest.targetStartTurnNumber + 1;
+          const targetTurnNumbers = new Set(sourceRequest.targetTurnNumbers);
+          const turns = (state.historyResidentRows || []).filter((turn) => targetTurnNumbers.has(Number(turn.turnNumber)));
+          const expected = sourceRequest.targetTurnNumbers.length;
           if (turns.length !== expected) throw new Error("Loaded history has a missing turn at the page boundary.");
           mergeStoryTurnPages(knownTurns, turns);
           page = { source: "resident", requestCursor: null, nextCursor: null, turns };
@@ -5567,31 +5568,60 @@ async function changeStoryHistoryPage(direction) {
 async function moveSelectedHistoryPreview(offset) {
   const preview = state.historyWindow && storyHistoryVisibleTurns(state.historyWindow).selectedPreview;
   if (!preview || historyPageLoad) return;
-  const turnNumber = Number(preview.turnNumber) + offset;
-  const latest = Number(state.campaign?.activeTurnNumber || latestTurnNumber(state.turns));
-  if (!Number.isInteger(turnNumber) || turnNumber < 1 || turnNumber > latest) return;
+  if (offset !== -1 && offset !== 1) return;
+  const direction = offset < 0 ? "older" : "newer";
   const campaignId = state.campaignId;
   const epoch = storyTurnWindowEpoch;
   const capturedWindow = state.historyWindow;
   const requestId = ++state.historyPageRequestId;
-  setTurnHistoryLoadStatus(`Loading Turn ${turnNumber}…`, "loading");
+  setTurnHistoryLoadStatus(`Loading adjacent accepted turn…`, "loading");
   const operation = (async () => {
     try {
-      const response = await readerHistoryApi.getTurn(campaignId, turnNumber);
+      const response = await readerHistoryApi.getSceneWindow(campaignId, {
+        anchorTurnNumber: Number(preview.turnNumber),
+        anchorTurnId: String(preview.id),
+        direction,
+        neighborLimit: 1,
+        ...(capturedWindow.historyToken ? { historyToken: capturedWindow.historyToken } : {})
+      });
       if (requestId !== state.historyPageRequestId || state.campaignId !== campaignId
         || storyTurnWindowEpoch !== epoch || state.historyWindow !== capturedWindow) return;
-      const turn = response?.turn;
-      if (response?.campaignId !== campaignId || Number(turn?.turnNumber) !== turnNumber || !turn?.id) {
-        throw new Error(`Turn ${turnNumber} is no longer available in this campaign.`);
+      if (response?.campaignId !== campaignId || response.direction !== direction
+        || response.anchor?.id !== preview.id || Number(response.anchor?.turnNumber) !== Number(preview.turnNumber)) {
+        throw new Error("The accepted-history snapshot changed while loading the adjacent turn.");
+      }
+      if (!Array.isArray(response.turns) || typeof response.historyToken !== "string" || !response.historyToken) {
+        throw new Error("The accepted-history response is incomplete.");
+      }
+      const turns = response.turns;
+      const anchorIndex = turns.findIndex(turn => String(turn.id) === String(preview.id)
+        && Number(turn.turnNumber) === Number(preview.turnNumber));
+      if (anchorIndex < 0) throw new Error("The accepted-history response omitted its requested anchor.");
+      const turn = direction === "older" ? turns[anchorIndex - 1] : turns[anchorIndex + 1];
+      if (!turn && turns.length === 1 && response.hasMore === false) {
+        state.historyWindow = { ...capturedWindow, historyToken: response.historyToken };
+        setTurnHistoryLoadStatus(direction === "older"
+          ? "No earlier accepted turn."
+          : "No later accepted turn.");
+        return;
+      }
+      if (!turn?.id || !Number.isInteger(Number(turn.turnNumber))) {
+        throw new Error("The accepted-history response omitted the requested neighboring turn.");
       }
       const known = [
         ...(state.historyResidentRows || []),
-        ...(capturedWindow.cachedPages || []).flatMap((cached) => cached.turns)
-      ].find((candidate) => Number(candidate.turnNumber) === turnNumber);
-      if (known && (known.id || known.turnId) !== turn.id) throw new Error(`Turn ${turnNumber} has changed since this history window was opened.`);
-      state.historyWindow = selectStoryHistoryPreview(capturedWindow, turn);
-      state.historySelectedTurnNumber = turnNumber;
-      setTurnHistoryLoadStatus(`Selected Turn ${turnNumber}.`);
+        ...(capturedWindow.cachedPages || []).flatMap((cached) => cached.turns),
+        capturedWindow.selectedPreview
+      ].find(candidate => Number(candidate?.turnNumber) === Number(turn.turnNumber));
+      if (known && String(known.id || known.turnId) !== String(turn.id)) {
+        throw new Error(`Turn ${turn.turnNumber} has changed since this history window was opened.`);
+      }
+      state.historyWindow = {
+        ...selectStoryHistoryPreview(capturedWindow, turn),
+        historyToken: response.historyToken
+      };
+      state.historySelectedTurnNumber = Number(turn.turnNumber);
+      setTurnHistoryLoadStatus(`Selected Turn ${turn.turnNumber}.`);
       renderStoryHistoryWindow();
       revealSelectedHistoryCard();
     } catch (error) {

@@ -2,7 +2,11 @@ import { chromium, expect, test, type Page } from "@playwright/test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
-import { generationJobSnapshotSchema, generationResultSchema } from "../../packages/contracts/src/index.js";
+import {
+  generationJobSnapshotSchema,
+  generationResultSchema,
+  readerSceneWindowResponseSchema
+} from "../../packages/contracts/src/index.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 const alternateTurnId = "99999999-9999-4999-8999-999999999999";
@@ -476,20 +480,45 @@ test("restores an accepted turn outside the recent window once and explains a re
   expect(desktopLookupCount()).toBe(2);
 });
 
-test("a pinned resumed turn supports exact adjacent History lookups", async ({ page }) => {
+test("a pinned resumed turn supports accepted-neighbor History lookups", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });
   await installLegacyUiFixture(page, fixture);
   await seedReaderPosition(page, fixtureUserId(fixture), fixture.campaignId, fixture.turns[11]!);
   await prepareStoryPage(page, fixture.campaignId);
   const lookupCount = await installExactTurnRoute(page, fixture, () => fixture.turns[11]!);
-  const adjacentLookups = new Map<number, number>();
-  await page.route(`**/api/v1/campaigns/${fixture.campaignId}/reader/turns/13`, async route => {
-    adjacentLookups.set(13, (adjacentLookups.get(13) ?? 0) + 1);
-    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ campaignId: fixture.campaignId, turn: fixture.turns[12] }) });
+  const historyToken = "opaque-resumed-neighbor-snapshot";
+  const neighborRequests: Array<{ anchorTurnNumber: number; anchorTurnId: string; direction: string; historyToken: string | null }> = [];
+  const exactTurnPaths: string[] = [];
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname.includes("/reader/turns/")) exactTurnPaths.push(url.pathname);
   });
-  await page.route(`**/api/v1/campaigns/${fixture.campaignId}/reader/turns/11`, async route => {
-    adjacentLookups.set(11, (adjacentLookups.get(11) ?? 0) + 1);
-    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ campaignId: fixture.campaignId, turn: fixture.turns[10] }) });
+  await page.route(`**/api/v1/campaigns/${fixture.campaignId}/reader/scene-window**`, async route => {
+    const url = new URL(route.request().url());
+    const anchorTurnNumber = Number(url.searchParams.get("anchorTurnNumber"));
+    const anchorTurnId = url.searchParams.get("anchorTurnId") ?? "";
+    const direction = url.searchParams.get("direction");
+    const suppliedToken = url.searchParams.get("historyToken");
+    const anchorIndex = fixture.turns.findIndex(turn =>
+      Number(turn.turnNumber) === anchorTurnNumber && String(turn.id) === anchorTurnId);
+    if ((direction !== "older" && direction !== "newer") || anchorIndex < 0
+      || (neighborRequests.length === 0 ? suppliedToken !== null : suppliedToken !== historyToken)) {
+      await route.fulfill({ status: 400, contentType: "application/json", json: { error: "invalid_scene_window_request" } });
+      return;
+    }
+    neighborRequests.push({ anchorTurnNumber, anchorTurnId, direction, historyToken: suppliedToken });
+    const turns = direction === "older"
+      ? fixture.turns.slice(anchorIndex - 1, anchorIndex + 1)
+      : fixture.turns.slice(anchorIndex, anchorIndex + 2);
+    const response = readerSceneWindowResponseSchema.parse({
+      campaignId: fixture.campaignId,
+      anchor: { turnNumber: anchorTurnNumber, id: anchorTurnId },
+      direction,
+      turns,
+      hasMore: direction === "older" ? anchorIndex > 0 : anchorIndex + 2 < fixture.turns.length,
+      historyToken
+    });
+    await route.fulfill({ contentType: "application/json", json: response });
   });
 
   await page.goto(`${origin}/story/${fixture.campaignId}`);
@@ -502,13 +531,21 @@ test("a pinned resumed turn supports exact adjacent History lookups", async ({ p
 
   await page.locator("#btnTurnHistoryNextTurn").click();
   await expect(page.locator("#turnHistoryPreviewCard .history-card")).toContainText("Turn 13");
-  expect(adjacentLookups.get(13)).toBe(1);
+  await expect.poll(() => neighborRequests.length).toBe(1);
   await page.locator("#btnTurnHistoryPreviousTurn").click();
   await expect(page.locator("#turnHistoryPreviewCard .history-card")).toContainText("Turn 12");
-  expect(lookupCount()).toBe(2);
+  await expect.poll(() => neighborRequests.length).toBe(2);
   await page.locator("#btnTurnHistoryPreviousTurn").click();
   await expect(page.locator("#turnHistoryPreviewCard .history-card")).toContainText("Turn 11");
-  expect(adjacentLookups.get(11)).toBe(1);
+  await expect.poll(() => neighborRequests.length).toBe(3);
+  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 12 of 317");
+  await expect(page.locator("#scene-12")).toBeVisible();
+  expect(neighborRequests.map(request => [request.anchorTurnNumber, request.direction, request.historyToken])).toEqual([
+    [12, "newer", null],
+    [13, "older", historyToken],
+    [12, "older", historyToken]
+  ]);
+  expect(exactTurnPaths).toEqual([`/api/v1/campaigns/${fixture.campaignId}/reader/turns/12`]);
   expect(await page.locator("#turnHistoryModalList .history-card, #turnHistoryPreviewCard .history-card").count()).toBeLessThanOrEqual(50);
 
   await page.locator("#btnTurnHistoryDone").click();
@@ -518,7 +555,7 @@ test("a pinned resumed turn supports exact adjacent History lookups", async ({ p
   await page.locator("#btnNext").click();
   await expect(page.locator("#readerTurnCount")).toHaveText("Turn 317 of 317");
   await expect(page.locator("#scene-317")).toBeVisible();
-  expect(lookupCount()).toBe(2);
+  expect(lookupCount()).toBe(1);
 });
 test("a manual scroll cancels a pending exact-turn restore", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });

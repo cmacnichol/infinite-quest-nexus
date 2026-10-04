@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
+import { readerSceneWindowResponseSchema } from "../../packages/contracts/src/index.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 const evidenceDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T13-pagination";
@@ -207,25 +208,50 @@ test("history pages all 2000 accepted turns exactly once and Newer replays the c
   await traverseHistory(page, testInfo, 2000);
 });
 
-test("a resumed Turn 12 remains pinned through a private adjacent-lookup error and retry", async ({ page }) => {
+test("a resumed Turn 12 remains pinned through a private accepted-neighbor error and retry", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });
   const instrumentation = await installLegacyUiFixture(page, fixture);
   const userId = String((fixture.session.user as Record<string, unknown>).id);
   await seedReaderPosition(page, userId, fixture.campaignId, fixture.turns[11]!);
   await prepareStoryPage(page, fixture.campaignId);
 
-  let initialLookupCount = 0;
+  const exactTurnPaths: string[] = [];
+  const sceneWindowRequests: Array<{ anchorTurnNumber: number; anchorTurnId: string; direction: string; neighborLimit: number; historyToken: string | null }> = [];
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname.includes("/reader/turns/")) exactTurnPaths.push(url.pathname);
+    if (url.pathname.endsWith("/reader/scene-window")) {
+      sceneWindowRequests.push({
+        anchorTurnNumber: Number(url.searchParams.get("anchorTurnNumber")),
+        anchorTurnId: url.searchParams.get("anchorTurnId") ?? "",
+        direction: url.searchParams.get("direction") ?? "",
+        neighborLimit: Number(url.searchParams.get("neighborLimit")),
+        historyToken: url.searchParams.get("historyToken")
+      });
+    }
+  });
   await page.route(`**/api/v1/campaigns/${fixture.campaignId}/reader/turns/12`, async route => {
-    initialLookupCount += 1;
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({ campaignId: fixture.campaignId, turn: fixture.turns[11] })
     });
   });
-  let adjacentLookupCount = 0;
-  await page.route(`**/api/v1/campaigns/${fixture.campaignId}/reader/turns/11`, async route => {
-    adjacentLookupCount += 1;
-    if (adjacentLookupCount === 1) {
+  const historyToken = "opaque-private-neighbor-snapshot";
+  let failedNeighborOnce = false;
+  await page.route(`**/api/v1/campaigns/${fixture.campaignId}/reader/scene-window**`, async route => {
+    const url = new URL(route.request().url());
+    const anchorTurnNumber = Number(url.searchParams.get("anchorTurnNumber"));
+    const anchorTurnId = url.searchParams.get("anchorTurnId") ?? "";
+    const direction = url.searchParams.get("direction");
+    const neighborLimit = Number(url.searchParams.get("neighborLimit"));
+    const suppliedToken = url.searchParams.get("historyToken");
+    if (anchorTurnNumber !== 12 || anchorTurnId !== String(fixture.turns[11]!.id)
+      || direction !== "older" || neighborLimit !== 1 || suppliedToken !== null) {
+      await route.fulfill({ status: 400, contentType: "application/json", json: { error: "invalid_scene_window_request" } });
+      return;
+    }
+    if (!failedNeighborOnce) {
+      failedNeighborOnce = true;
       await route.fulfill({
         status: 503,
         contentType: "application/json",
@@ -233,15 +259,22 @@ test("a resumed Turn 12 remains pinned through a private adjacent-lookup error a
       });
       return;
     }
+    const response = readerSceneWindowResponseSchema.parse({
+      campaignId: fixture.campaignId,
+      anchor: { turnNumber: 12, id: fixture.turns[11]!.id },
+      direction: "older",
+      turns: fixture.turns.slice(10, 12),
+      hasMore: true,
+      historyToken
+    });
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify({ campaignId: fixture.campaignId, turn: fixture.turns[10] })
+      json: response
     });
   });
 
   await page.goto(`${origin}/story/${fixture.campaignId}`);
   await expect(page.locator("#readerTurnCount")).toHaveText("Turn 12 of 317");
-  await expect.poll(() => initialLookupCount).toBe(1);
   await openHistory(page);
   const previousPages = await pageTurns(page);
   const initialPageCount = previousPages.length;
@@ -251,22 +284,31 @@ test("a resumed Turn 12 remains pinned through a private adjacent-lookup error a
   const previousTurn = page.locator("#btnTurnHistoryPreviousTurn");
   await expect(previousTurn).toBeEnabled();
   await previousTurn.click();
-  await expect.poll(() => adjacentLookupCount).toBe(1);
+  await expect.poll(() => sceneWindowRequests.length).toBe(1);
   await expect(page.locator("#turnHistoryLoadStatus")).toContainText("Could not load adjacent turn.");
   await expect(page.locator("#turnHistoryLoadStatus")).not.toContainText("PRIVATE_ADJACENT_LOOKUP_CANARY");
   await expect(page.locator("#turnHistoryDialog")).not.toContainText("storage path");
   await expect(page.locator("#turnHistoryPreviewCard .history-card")).toContainText("Turn 12");
+  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 12 of 317");
+  await expect(page.locator("#scene-12")).toBeVisible();
   await expect(previousTurn).toBeEnabled();
   expect(await pageTurns(page)).toEqual(previousPages);
   expect(await page.locator("#turnHistoryModalList .history-card").count()).toBe(initialPageCount);
   expect(await page.locator("#turnHistoryModalList .history-card, #turnHistoryPreviewCard .history-card").count()).toBeLessThanOrEqual(50);
 
   await previousTurn.click();
-  await expect.poll(() => adjacentLookupCount).toBe(2);
+  await expect.poll(() => sceneWindowRequests.length).toBe(2);
   await expect(page.locator("#turnHistoryPreviewCard .history-card")).toContainText("Turn 11");
+  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 12 of 317");
+  await expect(page.locator("#scene-12")).toBeVisible();
   expect(await pageTurns(page)).toEqual(previousPages);
   expect(await page.locator("#turnHistoryModalList .history-card, #turnHistoryPreviewCard .history-card").count()).toBeLessThanOrEqual(50);
   expect(instrumentation.requests.filter(request => request.path.endsWith("/state/inspection"))).toHaveLength(0);
+  expect(sceneWindowRequests).toEqual([
+    { anchorTurnNumber: 12, anchorTurnId: String(fixture.turns[11]!.id), direction: "older", neighborLimit: 1, historyToken: null },
+    { anchorTurnNumber: 12, anchorTurnId: String(fixture.turns[11]!.id), direction: "older", neighborLimit: 1, historyToken: null }
+  ]);
+  expect(exactTurnPaths).toEqual([`/api/v1/campaigns/${fixture.campaignId}/reader/turns/12`]);
 });
 
 test("history disclosure keyboard activation is separate from turn selection and Inspect", async ({ page }) => {
