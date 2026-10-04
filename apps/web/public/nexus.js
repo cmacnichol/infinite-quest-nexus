@@ -2604,7 +2604,8 @@ async function retryCampaignWorkflowRead() {
   const route = acceptedManagementRoute;
   const intent = managementNavigationIntent;
   const preserveWorkflowFeedbackForCampaignId = selectedCampaign?.id || route?.selection?.kind === "campaign" && route.selection.id || "";
-  await loadCampaigns(selectedCampaign?.id || "", { focusNoSelection: true, preserveWorkflowFeedbackForCampaignId });
+  const selectionRequest = campaignSelectionRequest;
+  await loadCampaigns(selectedCampaign?.id || "", { focusNoSelection: true, preserveWorkflowFeedbackForCampaignId, selectionRequest, navigationIntent: intent });
   if (route === acceptedManagementRoute && intent === managementNavigationIntent) {
     await applyExplicitManagementSelection(route, intent, { preserveWorkflowFeedbackForCampaignId });
   }
@@ -4714,7 +4715,7 @@ function openCommittedCampaignStory() {
   }
 }
 
-async function loadCampaigns(preselectId = "", { focusNoSelection = false, explicitPreselect = false, preserveWorkflowFeedbackForCampaignId = "" } = {}) {
+async function loadCampaigns(preselectId = "", { focusNoSelection = false, explicitPreselect = false, preserveWorkflowFeedbackForCampaignId = "", selectionRequest = null, navigationIntent = null } = {}) {
   try {
     ({ campaigns } = await api("/api/v1/campaigns"));
   } catch (error) {
@@ -4736,6 +4737,8 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false, expli
   renderDashboardCampaigns();
   updateStoryViewLink();
   void loadDashboardStats();
+  if ((selectionRequest !== null && selectionRequest !== campaignSelectionRequest)
+    || (navigationIntent !== null && navigationIntent !== managementNavigationIntent)) return;
   elements.campaignList.replaceChildren();
   if (!campaigns.length) {
     if (!(await canLeaveCampaignEditor(null))) return;

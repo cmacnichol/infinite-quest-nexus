@@ -350,6 +350,52 @@ test("campaign_manual_selection_keeps_pending_list_retry_visible", async ({ page
   expect(campaignReads).toBe(3);
 });
 
+test("campaign_selection_during_pending_retry_keeps_latest_route_and_editor", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 2 });
+  const campaign = fixture.campaigns[0];
+  const otherCampaign = fixture.campaigns[1];
+  if (!campaign || !otherCampaign) throw new Error("Two synthetic campaigns are required.");
+  let campaignReads = 0;
+  let releaseRetry = () => {};
+  const retryGate = new Promise<void>(resolve => { releaseRetry = resolve; });
+  const stateIds: string[] = [];
+  const writes: string[] = [];
+  page.on("request", request => {
+    const stateMatch = /\/api\/v1\/campaigns\/([^/]+)\/state$/.exec(new URL(request.url()).pathname);
+    if (stateMatch?.[1]) stateIds.push(stateMatch[1]);
+    if (request.url().includes("/api/v1/") && !["GET", "HEAD"].includes(request.method())) writes.push(request.method());
+  });
+  await installLegacyUiFixture(page, fixture);
+  await page.route("**/api/v1/campaigns", async route => {
+    if (route.request().method() !== "GET") return route.fallback();
+    campaignReads += 1;
+    if (campaignReads === 2) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private campaign list diagnostics" }) });
+      return;
+    }
+    if (campaignReads === 3) await retryGate;
+    await route.fallback();
+  });
+  await page.goto(`${origin}/nexus/index.html#campaigns?campaignId=${campaign.id}`);
+  await expect(page.locator("#campaignTitle")).toHaveValue(String(campaign.title));
+  await page.locator("#refreshCampaigns").click();
+  await expect(page.locator("#workflowRetryCampaigns")).toBeVisible();
+  await page.locator("#workflowRetryCampaigns").click();
+  await expect.poll(() => campaignReads).toBe(3);
+  await page.locator(`#campaignList [data-campaign-id="${otherCampaign.id}"]`).click();
+  await expect(page.locator("#campaignTitle")).toHaveValue(String(otherCampaign.title));
+  await expect(page).toHaveURL(`${origin}/nexus/index.html#campaigns?campaignId=${otherCampaign.id}`);
+  releaseRetry();
+  // Wait for the released list and its optional detail consumers to settle before asserting ownership.
+  await page.waitForLoadState("networkidle");
+  await expect(page.locator("#workflowRetryCampaigns")).toHaveCount(0);
+  await expect(page.locator("#campaignTitle")).toHaveValue(String(otherCampaign.title));
+  await expect(page.locator("#memoryTitle")).toHaveText(String(otherCampaign.title));
+  await expect(page).toHaveURL(`${origin}/nexus/index.html#campaigns?campaignId=${otherCampaign.id}`);
+  expect(stateIds).toEqual([campaign.id, otherCampaign.id]);
+  expect(writes).toEqual([]);
+  await page.screenshot({ path: `${evidenceDir}/fix4-campaign-selection-during-retry-desktop.png`, fullPage: false });
+});
 test("provider_list_retry_keeps_current_save_error_after_profile_selection_refresh", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
   let providerReads = 0;
