@@ -188,10 +188,11 @@ async function fixtureRoute(route: Route) {
 async function openWorldManagement(page: Page, target = "world-library") {
   await page.route("**/api/v1/**", fixtureRoute);
   await page.goto(`${origin}/nexus/index.html#${target}`);
-  const carousel = target === "dashboard" ? '#dashboardWorlds [data-world-id="22222222-2222-4222-8222-222222222222"]' : '#worldManagementCarousel [data-world-id="11111111-1111-4111-8111-111111111111"]';
-  await page.locator(carousel).waitFor();
+  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  const worldCards = page.locator(target === "dashboard" ? "#dashboardWorlds [data-world-id]" : "#worldManagementCarousel [data-world-id]");
+  await expect(worldCards).toHaveCount(2);
   const fixtureWorldPattern = new RegExp(`^/worlds/(?:${worldA.id}|${worldB.id})$`, "u");
-  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && fixtureWorldPattern.test(event.path)).length).toBeGreaterThanOrEqual(2);
+  expect(apiEvents.filter((event) => event.method === "GET" && fixtureWorldPattern.test(event.path))).toEqual([]);
 }
 
 function recordEvidence(name: string) {
@@ -401,7 +402,7 @@ test("successful_draft_refreshes_only_the_changed_world_detail_cache", async ({ 
   await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha Revised");
   const aAfter = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/11111111-1111-4111-8111-111111111111").length;
   const bAfter = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/22222222-2222-4222-8222-222222222222").length;
-  expect(aAfter - aBefore).toBe(2);
+  expect(aAfter - aBefore).toBe(1);
   expect(bAfter - bBefore).toBe(0);
 });
 
@@ -424,31 +425,39 @@ test("saved_world_draft_reopens_with_the_new_revision_for_the_next_save", async 
   await page.screenshot({ path: resolve(evidenceDirectory, "world-draft-second-save-uses-refreshed-revision.png") });
 });
 
-test("a_detail_hydration_started_before_a_cover_write_cannot_repopulate_the_stale_cache", async ({ page }) => {
-  let releaseOldHydration!: () => void;
-  const oldHydrationGate = new Promise<void>((resolve) => { releaseOldHydration = resolve; });
-  detailGates.set("11111111-1111-4111-8111-111111111111", oldHydrationGate);
-  await page.route("**/api/v1/**", fixtureRoute);
-  const oldHydrationRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/v1/worlds/11111111-1111-4111-8111-111111111111");
-  await page.goto(`${origin}/nexus/index.html#world-library`);
-  await page.locator('#worldManagementCarousel [data-world-id="11111111-1111-4111-8111-111111111111"]').waitFor();
-  await oldHydrationRequest;
-  await page.locator('#worldManagementCarousel [data-world-id="11111111-1111-4111-8111-111111111111"]').click();
+test("user_demanded_world_hydration_and_cover_removal_reopen_without_stale_cover", async ({ page }) => {
+  await openWorldManagement(page);
+  const worldAlphaCard = page.locator('#worldManagementCarousel [data-world-id="11111111-1111-4111-8111-111111111111"]');
+  const detailReadsBeforeSelection = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/11111111-1111-4111-8111-111111111111").length;
+  await worldAlphaCard.click();
   await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
+  const selectedWorldDetails = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/11111111-1111-4111-8111-111111111111");
+  expect(selectedWorldDetails).toHaveLength(detailReadsBeforeSelection + 1);
+  expect((selectedWorldDetails.at(-1)?.response as { imageUrl?: string | null } | undefined)?.imageUrl)
+    .toBe("https://images.test/world-a-cover.png");
+
   await page.locator("#editWorldDraft").click();
   await page.locator("#worldCoverOptions summary").click();
   await page.locator('input[name="worldCoverMode"][value="remove"]').check();
   await page.locator("#saveWorldDraft").click();
   await expect.poll(() => apiEvents.some((event) => event.method === "PUT" && event.path === "/worlds/11111111-1111-4111-8111-111111111111/cover-asset")).toBe(true);
   await expect(page.locator("#worldAuthorDialog")).not.toBeVisible();
-  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/11111111-1111-4111-8111-111111111111").length).toBeGreaterThanOrEqual(3);
-  releaseOldHydration();
-  await expect.poll(() => apiEvents.some((event) => event.method === "GET" && event.path === "/worlds/11111111-1111-4111-8111-111111111111" && (event.response as { imageUrl?: string | null }).imageUrl === "https://images.test/world-a-cover.png")).toBe(true);
-  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  const coverRemovalIndex = apiEvents.findIndex((event) => event.method === "PUT" && event.path === "/worlds/11111111-1111-4111-8111-111111111111/cover-asset");
+  expect(coverRemovalIndex).toBeGreaterThanOrEqual(0);
+  await expect.poll(() => apiEvents.slice(coverRemovalIndex + 1).some((event) =>
+    event.method === "GET"
+      && event.path === "/worlds/11111111-1111-4111-8111-111111111111"
+      && (event.response as { imageUrl?: string | null }).imageUrl === null)).toBe(true);
   await page.evaluate(() => { window.location.hash = "#dashboard"; });
+  await page.locator('#dashboardWorlds [data-world-id="11111111-1111-4111-8111-111111111111"]').waitFor({ state: "visible" });
   await page.locator('#dashboardWorlds [data-world-id="11111111-1111-4111-8111-111111111111"]').click();
+  await expect(page.locator("#worldDetailsDialog")).toBeVisible();
+  const detailsAfterRemoval = apiEvents.slice(coverRemovalIndex + 1)
+    .filter((event) => event.method === "GET" && event.path === "/worlds/11111111-1111-4111-8111-111111111111");
+  expect(detailsAfterRemoval.length).toBeGreaterThan(0);
+  expect((detailsAfterRemoval.at(-1)?.response as { imageUrl?: string | null } | undefined)?.imageUrl).toBeNull();
   await expect(page.locator("#worldDetailsMedia")).not.toHaveCSS("background-image", /world-a-cover/u);
-  await page.screenshot({ path: resolve(evidenceDirectory, "stale-detail-hydration-after-cover-removal.png") });
+  await page.screenshot({ path: resolve(evidenceDirectory, "user-demand-world-after-cover-removal.png") });
 });
 
 test("a_late_completed_cover_job_invalidates_its_world_cache_without_touching_the_current_world", async ({ page }) => {
@@ -574,6 +583,10 @@ test("a_stayed_import_result_does_not_become_the_world_selected_by_a_later_refre
   await openWorldManagement(page);
   await page.locator('#worldManagementCarousel [data-world-id="11111111-1111-4111-8111-111111111111"]').click();
   await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
+  await expect.poll(() => apiEvents.filter((event) =>
+    event.method === "GET" && event.path === `/worlds/${worldA.id}/cover-job` && event.status === 200).length).toBeGreaterThan(0);
+  const completedCoverJobChecksBeforeRefresh = apiEvents.filter((event) =>
+    event.method === "GET" && event.path === `/worlds/${worldA.id}/cover-job` && event.status === 200).length;
   await page.evaluate(() => { window.location.hash = "#imports"; });
   await expect(page.locator("#imports")).toBeVisible();
   await page.locator("#storyFile").setInputFiles({
@@ -610,11 +623,28 @@ test("a_stayed_import_result_does_not_become_the_world_selected_by_a_later_refre
   await page.locator('#discardChangesDialog button[value="discard"]').click();
   await expect(page.locator("#worldAuthorDialog")).toBeHidden();
   const worldListsBeforeRefresh = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length;
-  const worldADetailPattern = new RegExp(`^/worlds/(?:${worldA.id}|${worldCId})$`, "u");
-  const worldDetailReadsBeforeRefresh = apiEvents.filter((event) => event.method === "GET" && worldADetailPattern.test(event.path)).length;
+  const worldDetailReadsBeforeRefresh = apiEvents.filter((event) => event.method === "GET" && event.path === `/worlds/${worldA.id}`).length;
+  const worldListRefreshResponse = page.waitForResponse((response) =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === "/api/v1/worlds");
+  const refreshedCoverJobResponse = page.waitForResponse((response) =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === `/api/v1/worlds/${worldA.id}/cover-job`);
   await page.locator("#refreshWorlds").click();
-  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length).toBeGreaterThan(worldListsBeforeRefresh);
-  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && worldADetailPattern.test(event.path)).length).toBeGreaterThan(worldDetailReadsBeforeRefresh);
+  const refreshResponse = await worldListRefreshResponse;
+  expect(refreshResponse.ok()).toBe(true);
+  const coverJobResponse = await refreshedCoverJobResponse;
+  expect(coverJobResponse.ok()).toBe(true);
+  expect(await coverJobResponse.json()).toBeNull();
+  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length)
+    .toBe(worldListsBeforeRefresh + 1);
+  await expect.poll(() => apiEvents.filter((event) =>
+    event.method === "GET" && event.path === `/worlds/${worldA.id}/cover-job` && event.status === 200).length)
+    .toBe(completedCoverJobChecksBeforeRefresh + 1);
+  await expect(page.locator("#refreshWorlds")).toBeEnabled();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
+  await expect(page.locator("#editWorldDraft")).toBeEnabled();
+  await expect(page.locator('#worldManagementCarousel [data-world-id="11111111-1111-4111-8111-111111111111"]')).toHaveAttribute("aria-pressed", "true");
+  expect(apiEvents.filter((event) => event.method === "GET" && event.path === `/worlds/${worldA.id}`).length)
+    .toBe(worldDetailReadsBeforeRefresh);
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
   await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
   await expect(page.locator('#worldManagementCarousel [data-world-id="11111111-1111-4111-8111-111111111111"]')).toHaveAttribute("aria-pressed", "true");

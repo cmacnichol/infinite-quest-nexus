@@ -255,8 +255,25 @@ test("campaign_list_retry_keeps_current_archive_export_error_after_selection_ref
   if (!campaign) throw new Error("The one-campaign fixture was not created.");
   if (!otherCampaign) throw new Error("The second campaign fixture was not created.");
   let campaignReads = 0;
-  let embeddingConfigReads = 0;
+  let campaignStateReads = 0;
+  let releaseRetryState!: () => void;
+  let retryStateStarted!: () => void;
+  const retryStateGate = new Promise<void>((resolve) => { releaseRetryState = resolve; });
+  const retryStateRequest = new Promise<void>((resolve) => { retryStateStarted = resolve; });
+  const apiRequestPaths: string[] = [];
   await installLegacyUiFixture(page, fixture);
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith("/api/v1/")) apiRequestPaths.push(url.pathname);
+  });
+  await page.route(`**/api/v1/campaigns/${campaign.id}/state`, async route => {
+    campaignStateReads += 1;
+    if (campaignStateReads === 2) {
+      retryStateStarted();
+      await retryStateGate;
+    }
+    await route.fallback();
+  });
   await page.route("**/api/v1/campaigns", async route => {
     if (route.request().method() !== "GET") return route.fallback();
     campaignReads += 1;
@@ -269,30 +286,11 @@ test("campaign_list_retry_keeps_current_archive_export_error_after_selection_ref
   await page.route(`**/api/v1/campaigns/${campaign.id}/export`, async route => {
     await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Campaign Archive export is unavailable." }) });
   });
-  await page.route(`**/api/v1/campaigns/${campaign.id}/memory/embedding-config`, async route => {
-    if (route.request().method() !== "GET") return route.fallback();
-    embeddingConfigReads += 1;
-    if (embeddingConfigReads > 1) {
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
-        enabled: true,
-        retrievalImplementation: "pgvector",
-        retrievalShadowEnabled: false,
-        providerProfileId: null,
-        model: "retry-complete-marker",
-        documentPrefix: "",
-        queryPrefix: "",
-        batchSize: 32,
-        effectiveDocumentPrefix: "",
-        effectiveQueryPrefix: ""
-      }) });
-      return;
-    }
-    await route.fallback();
-  });
 
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto(`${origin}/nexus/index.html#campaigns?campaignId=${campaign.id}`);
   await expect(page.locator("#campaignTitle")).toHaveValue(String(campaign.title));
+  expect(campaignStateReads).toBe(1);
   await page.locator("#refreshCampaigns").click();
   await expect(page.locator("#campaignStatusMessage")).toContainText("Campaigns could not be refreshed");
   await page.locator("#exportCampaign").click();
@@ -300,7 +298,15 @@ test("campaign_list_retry_keeps_current_archive_export_error_after_selection_ref
   await expect(page.locator("#workflowRetryCampaigns")).toBeVisible();
 
   await page.locator("#workflowRetryCampaigns").click();
-  await expect(page.locator("#embeddingStatus")).toContainText("retry-complete-marker");
+  await retryStateRequest;
+  expect(campaignStateReads).toBe(2);
+  const campaignSettingsTab = page.locator("#campaignSettingsRail [role=tab]").first();
+  try {
+    await expect(campaignSettingsTab).toBeDisabled();
+  } finally {
+    releaseRetryState();
+  }
+  await expect(campaignSettingsTab).toBeEnabled();
   await expect(page.locator("#campaignStatusMessage")).toBeVisible();
   await expect(page.locator("#campaignStatusMessage")).toContainText("Campaign Archive export is unavailable.");
   await expect(page.locator("#campaignStatusMessage")).not.toContainText("Campaigns could not be refreshed");
@@ -308,7 +314,8 @@ test("campaign_list_retry_keeps_current_archive_export_error_after_selection_ref
   await expect(page.locator("#workflowRetryCampaigns")).toHaveCount(0);
   await page.screenshot({ path: `${evidenceDir}/fix3-campaigns-error-after-retry-desktop.png`, fullPage: false });
   expect(campaignReads).toBe(3);
-  expect(embeddingConfigReads).toBe(2);
+  expect(apiRequestPaths.filter(path => path === `/api/v1/campaigns/${campaign.id}/memory/metrics`
+    || path === `/api/v1/campaigns/${campaign.id}/memory/embedding-config`)).toEqual([]);
 
   await page.locator(`#campaignList [data-campaign-id="${otherCampaign.id}"]`).click();
   await expect(page.locator("#campaignTitle")).toHaveValue(String(otherCampaign.title));

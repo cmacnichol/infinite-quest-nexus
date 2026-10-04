@@ -93,7 +93,8 @@ test("provider Escape, Cancel, and backdrop share guarded dismissal and failed s
   await expect(page.locator("#discardChangesDialog")).toBeHidden();
   await expect(page.locator("#providerDialog")).toBeVisible();
   release();
-  await expect(page.locator("#providerStatus")).toContainText("Synthetic provider save failure");
+  await expect(page.locator("#providerStatus")).toContainText("Provider profile could not be saved.");
+  await expect(page.locator("#providerStatus")).not.toContainText("Synthetic provider save failure");
   await expect(page.locator("#providerName")).toBeEnabled();
   await expect(page.locator("#providerName")).toHaveValue("Synthetic failed save profile");
   await page.locator("#cancelProviderEdit").click();
