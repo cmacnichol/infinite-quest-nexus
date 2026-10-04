@@ -75,6 +75,159 @@ test("campaign_and_provider_startup_errors_have_independent_dashboard_retries", 
   expect(providerAttempts).toBe(2);
 });
 
+test("worlds_startup_failure_reaches_workspace_before_dashboard_retry", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
+  let worldAttempts = 0;
+  await installLegacyUiFixture(page, fixture);
+  await page.route("**/api/v1/worlds", async route => {
+    worldAttempts += 1;
+    if (worldAttempts === 1) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private world read diagnostics" }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ worlds: fixture.worlds }) });
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`${origin}/nexus/index.html`);
+  await expect(page.locator("#workflowDashboardRetryWorlds")).toBeVisible();
+  await page.locator("#navSetup").click();
+  await page.locator("#navWorlds").click();
+  await expect(page).toHaveURL(/#world-library$/u);
+  await expect(page.locator("#worldStatus")).toContainText("Worlds could not be loaded");
+  await expect(page.locator("#worldStatus")).not.toContainText("Private world read diagnostics");
+  await expect(page.locator("#workflowRetryWorlds")).toBeVisible();
+  await page.screenshot({ path: `${evidenceDir}/fix2-worlds-read-error-desktop.png`, fullPage: false });
+
+  await page.locator("#workflowRetryWorlds").click();
+  await expect(page.locator("#worldManagementCarousel [data-world-id]")).toHaveCount(1);
+  await expect(page.locator("#workflowRetryWorlds")).toHaveCount(0);
+  await expect(page.locator("#worldStatus")).not.toContainText("Worlds could not be loaded");
+  await expect(page.locator("#dashboardWorkflowStatus")).toBeHidden();
+  await page.screenshot({ path: `${evidenceDir}/fix2-worlds-read-recovered-desktop.png`, fullPage: false });
+  expect(worldAttempts).toBe(2);
+});
+
+test("campaign_startup_failure_reaches_workspace_before_dashboard_retry", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
+  let campaignAttempts = 0;
+  await installLegacyUiFixture(page, fixture);
+  await page.route("**/api/v1/campaigns", async route => {
+    campaignAttempts += 1;
+    if (campaignAttempts === 1) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private campaign read diagnostics" }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ campaigns: fixture.campaigns }) });
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`${origin}/nexus/index.html`);
+  await expect(page.locator("#workflowDashboardRetryCampaigns")).toBeVisible();
+
+  await page.locator("#navSetup").click();
+  await page.locator("#navCampaigns").click();
+  await expect(page).toHaveURL(/#campaigns$/u);
+  await expect(page.locator("#campaignStatusMessage")).toContainText("Campaigns could not be loaded");
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText("Private campaign read diagnostics");
+  await expect(page.locator("#workflowRetryCampaigns")).toBeVisible();
+  await page.screenshot({ path: `${evidenceDir}/fix2-campaigns-read-error-desktop.png`, fullPage: false });
+  await page.locator("#workflowRetryCampaigns").click();
+  await expect(page.locator("#campaignList [data-campaign-id]")).toHaveCount(1);
+  await expect(page.locator("#workflowRetryCampaigns")).toHaveCount(0);
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText("Campaigns could not be loaded");
+  await expect(page.locator("#dashboardWorkflowStatus")).toBeHidden();
+  await page.screenshot({ path: `${evidenceDir}/fix2-campaigns-read-recovered-desktop.png`, fullPage: false });
+  expect(campaignAttempts).toBe(2);
+});
+
+test("provider_startup_failure_reaches_workspace_before_dashboard_retry", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
+  let providerAttempts = 0;
+  await installLegacyUiFixture(page, fixture);
+  await page.route("**/api/v1/providers", async route => {
+    providerAttempts += 1;
+    if (providerAttempts === 1) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private provider read diagnostics" }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ providers: [] }) });
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`${origin}/nexus/index.html`);
+  await expect(page.locator("#workflowDashboardRetryProviders")).toBeVisible();
+
+  await page.locator("#navSetup").click();
+  await page.locator("#navProviders").click();
+  await expect(page).toHaveURL(/#providers$/u);
+  await expect(page.locator("#providerStatus")).toContainText("Provider profiles could not be loaded");
+  await expect(page.locator("#providerStatus")).not.toContainText("Private provider read diagnostics");
+  await expect(page.locator("#workflowRetryProviders")).toBeVisible();
+  await page.screenshot({ path: `${evidenceDir}/fix2-providers-read-error-desktop.png`, fullPage: false });
+  await page.locator("#workflowRetryProviders").click();
+  await expect(page.locator("#providerStatus")).not.toContainText("Provider profiles could not be loaded");
+  await expect(page.locator("#workflowRetryProviders")).toHaveCount(0);
+  await expect(page.locator("#dashboardWorkflowStatus")).toBeHidden();
+  await page.screenshot({ path: `${evidenceDir}/fix2-providers-read-recovered-desktop.png`, fullPage: false });
+  expect(providerAttempts).toBe(2);
+});
+
+test("workspace_read_retry_coexists_with_newer_world_action_error", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 0 });
+  const world = fixture.worlds[0];
+  if (!world) throw new Error("The world fixture was not created.");
+  let worldReads = 0;
+  let archiveWrites = 0;
+  await installLegacyUiFixture(page, fixture);
+  await page.route("**/api/v1/worlds", async route => {
+    worldReads += 1;
+    if (worldReads === 2) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private world list diagnostics" }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ worlds: fixture.worlds }) });
+  });
+  await page.route(`**/api/v1/worlds/${fixture.worldId}`, async route => {
+    if (route.request().method() === "PATCH") {
+      archiveWrites += 1;
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private archive diagnostics" }) });
+      return;
+    }
+    await route.fallback();
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`${origin}/nexus/index.html#world-library`);
+  await page.locator(`#worldManagementCarousel [data-world-id="${fixture.worldId}"]`).click();
+  await page.locator("#refreshWorlds").click();
+  await expect(page.locator("#worldStatus")).toContainText("Worlds could not be refreshed");
+  await expect(page.locator("#workflowRetryWorlds")).toBeVisible();
+
+  await page.locator("#worldSelectionPanel details.dropdown-menu summary").click();
+  await page.locator("#archiveWorld").click();
+  await expect(page.locator("#worldStatus")).toContainText("World archive status could not be changed.");
+  await expect(page.locator("#worldStatus")).not.toContainText("Private archive diagnostics");
+  await expect(page.locator("#worldStatus")).toContainText("Worlds could not be refreshed");
+  await expect(page.locator("#worldStatus")).not.toContainText("Private world list diagnostics");
+  await expect(page.locator("#workflowRetryWorlds")).toBeVisible();
+  await expect.poll(() => archiveWrites).toBe(1);
+
+  await page.locator("#navDashboard").click();
+  await page.locator("#navSetup").click();
+  await page.locator("#navWorlds").click();
+  await expect(page.locator("#worldStatus")).toContainText("World archive status could not be changed.");
+  await expect(page.locator("#worldStatus")).toContainText("Worlds could not be refreshed");
+  await expect(page.locator("#worldStatus")).not.toContainText("Private archive diagnostics");
+  await expect(page.locator("#workflowRetryWorlds")).toBeVisible();
+  await page.screenshot({ path: `${evidenceDir}/fix2-worlds-coexisting-errors-desktop.png`, fullPage: false });
+
+  await page.locator("#workflowRetryWorlds").click();
+  await expect(page.locator("#worldStatus")).toContainText("World archive status could not be changed.");
+  await expect(page.locator("#worldStatus")).not.toContainText("Worlds could not be refreshed");
+  await expect(page.locator("#workflowRetryWorlds")).toHaveCount(0);
+  await expect(page.locator("#dashboardWorkflowStatus")).toBeHidden();
+  await page.screenshot({ path: `${evidenceDir}/fix2-worlds-action-error-after-retry-desktop.png`, fullPage: false });
+  expect(worldReads).toBe(3);
+  expect(archiveWrites).toBe(1);
+});
+
 test("operation_errors_do_not_offer_unrelated_list_retries", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
   await installLegacyUiFixture(page, fixture);

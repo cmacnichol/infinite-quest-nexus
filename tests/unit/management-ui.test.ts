@@ -187,6 +187,7 @@ describe("Nexus management UI contracts", () => {
       document,
       window: { matchMedia: () => ({ matches: false }) },
       managementSelectionErrorIsCurrent,
+      dashboardWorkflowErrors: new Map(),
       CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"]
     });
 

@@ -736,12 +736,16 @@ function managementSelectionError(route, message) {
   if (route.view === "worlds") {
     elements.worldStatus.textContent = visibleMessage;
     elements.worldStatus.className = "status error";
-    addWorkflowRetry(elements.worldStatus, "workflowRetryWorlds", "Retry world list", () => retryWorldWorkflowRead());
+    const pendingReadFailure = dashboardWorkflowErrors.get("worlds");
+    if (pendingReadFailure) showManagementSelectionReadFailure("worlds", pendingReadFailure.message);
+    else addWorkflowRetry(elements.worldStatus, "workflowRetryWorlds", "Retry world list", () => retryWorldWorkflowRead());
   } else if (route.view === "campaigns") {
     elements.campaignStatusMessage.textContent = visibleMessage;
     elements.campaignStatusMessage.className = "status error";
     elements.campaignStatusMessage.classList.remove("hidden");
-    addWorkflowRetry(elements.campaignStatusMessage, "workflowRetryCampaigns", "Retry campaign list", () => retryCampaignWorkflowRead());
+    const pendingReadFailure = dashboardWorkflowErrors.get("campaigns");
+    if (pendingReadFailure) showManagementSelectionReadFailure("campaigns", pendingReadFailure.message);
+    else addWorkflowRetry(elements.campaignStatusMessage, "workflowRetryCampaigns", "Retry campaign list", () => retryCampaignWorkflowRead());
   }
 }
 
@@ -752,21 +756,24 @@ function managementSelectionErrorIsCurrent(view) {
 
 function clearResolvedManagementSelectionError(view) {
   if (!managementSelectionErrorIsCurrent(view)) return;
+  const host = view === "worlds" ? elements.worldStatus : elements.campaignStatusMessage;
   const message = managementSelectionActionErrorMessage;
   managementSelectionErrorIntent = null;
   managementSelectionErrorMessage = "";
   managementSelectionActionErrorMessage = "";
-  if (view === "worlds") {
-    elements.worldStatus.querySelector("#workflowRetryWorlds")?.remove();
-    elements.worldStatus.querySelector(".workflow-retry-feedback")?.remove();
-    elements.worldStatus.textContent = message || "World content is stored in PostgreSQL, never embedded in this client.";
-    elements.worldStatus.className = message ? "status error" : "status";
-  } else {
-    elements.campaignStatusMessage.querySelector("#workflowRetryCampaigns")?.remove();
-    elements.campaignStatusMessage.querySelector(".workflow-retry-feedback")?.remove();
-    elements.campaignStatusMessage.textContent = message;
-    elements.campaignStatusMessage.className = message ? "status error" : "status hidden";
+  const readFailure = host.querySelector(".workflow-read-failure");
+  for (const retry of host.querySelectorAll("#workflowRetryWorlds, #workflowRetryCampaigns")) {
+    if (!readFailure?.contains(retry)) retry.remove();
   }
+  for (const feedback of host.querySelectorAll(".workflow-retry-feedback")) {
+    if (!readFailure?.contains(feedback)) feedback.remove();
+  }
+  host.replaceChildren();
+  if (message) host.append(document.createTextNode(message));
+  else if (view === "worlds" && !readFailure) host.append(document.createTextNode("World content is stored in PostgreSQL, never embedded in this client."));
+  if (readFailure) host.append(readFailure);
+  host.className = message ? "status error" : "status";
+  if (view === "campaigns" && !message && !readFailure) host.classList.add("hidden");
 }
 
 function showManagementSelectionReadFailure(view, message) {
@@ -775,10 +782,7 @@ function showManagementSelectionReadFailure(view, message) {
   const retryId = isWorld ? "workflowRetryWorlds" : "workflowRetryCampaigns";
   const label = isWorld ? "Retry world list" : "Retry campaign list";
   const retry = isWorld ? () => retryWorldWorkflowRead() : () => retryCampaignWorkflowRead();
-  host.textContent = [message, managementSelectionActionErrorMessage, managementSelectionErrorMessage].filter(Boolean).join(" ");
-  host.className = "status error";
-  host.classList.remove("hidden");
-  addWorkflowRetry(host, retryId, label, retry);
+  setWorkflowReadFailure(host, view, message, retryId, label, retry);
 }
 
 async function applyExplicitManagementSelection(route, intent) {
@@ -858,6 +862,7 @@ function applyManagementView(hash, { focus = false } = {}) {
   if (dataTransferView) elements.navDataTransfer?.classList.add("active");
   elements.navSetup?.classList.toggle("active", !dashboardView);
   updateStoryViewLink();
+  projectDashboardWorkflowErrorToRoute(route);
   if (focus && ![...document.querySelectorAll("dialog[open]")].length) managementHeading(route)?.focus({ preventScroll: true });
   return route;
 }
@@ -2446,14 +2451,18 @@ function worldMessage(message, type = "") {
       managementSelectionActionErrorMessage = message;
       elements.worldStatus.textContent = `${message} ${managementSelectionErrorMessage}`;
       elements.worldStatus.className = "status error";
-      addWorkflowRetry(elements.worldStatus, "workflowRetryWorlds", "Retry world list", () => retryWorldWorkflowRead());
+      const pendingReadFailure = dashboardWorkflowErrors.get("worlds");
+      if (pendingReadFailure) showManagementSelectionReadFailure("worlds", pendingReadFailure.message);
+      else addWorkflowRetry(elements.worldStatus, "workflowRetryWorlds", "Retry world list", () => retryWorldWorkflowRead());
     }
     return;
   }
+  const pendingReadFailure = dashboardWorkflowErrors.get("worlds");
   delete elements.worldStatus.dataset.workflowReadFailure;
   elements.worldStatus.querySelector("#workflowRetryWorlds")?.remove();
   elements.worldStatus.textContent = message;
   elements.worldStatus.className = `status ${type}`.trim();
+  if (pendingReadFailure) setWorkflowReadFailure(elements.worldStatus, "worlds", pendingReadFailure.message, "workflowRetryWorlds", "Retry world list", () => retryWorldWorkflowRead());
 }
 
 function campaignMessage(message, type = "") {
@@ -2463,32 +2472,59 @@ function campaignMessage(message, type = "") {
       elements.campaignStatusMessage.textContent = `${message} ${managementSelectionErrorMessage}`;
       elements.campaignStatusMessage.className = "status error";
       elements.campaignStatusMessage.classList.remove("hidden");
-      addWorkflowRetry(elements.campaignStatusMessage, "workflowRetryCampaigns", "Retry campaign list", () => retryCampaignWorkflowRead());
+      const pendingReadFailure = dashboardWorkflowErrors.get("campaigns");
+      if (pendingReadFailure) showManagementSelectionReadFailure("campaigns", pendingReadFailure.message);
+      else addWorkflowRetry(elements.campaignStatusMessage, "workflowRetryCampaigns", "Retry campaign list", () => retryCampaignWorkflowRead());
     }
     return;
   }
+  const pendingReadFailure = dashboardWorkflowErrors.get("campaigns");
   delete elements.campaignStatusMessage.dataset.workflowReadFailure;
   elements.campaignStatusMessage.querySelector("#workflowRetryCampaigns")?.remove();
   elements.campaignStatusMessage.textContent = message;
   elements.campaignStatusMessage.className = `status ${type}`.trim();
   elements.campaignStatusMessage.classList.remove("hidden");
+  if (pendingReadFailure) setWorkflowReadFailure(elements.campaignStatusMessage, "campaigns", pendingReadFailure.message, "workflowRetryCampaigns", "Retry campaign list", () => retryCampaignWorkflowRead());
 }
 
 function setWorkflowReadFailure(host, key, message, retryId, label, retry) {
   host.dataset.workflowReadFailure = key;
-  host.textContent = message;
-  host.className = "status error";
   host.classList.remove("hidden");
-  addWorkflowRetry(host, retryId, label, retry);
+  let feedback = host.querySelector(".workflow-read-failure");
+  if (!feedback) {
+    feedback = document.createElement("div");
+    feedback.className = "workflow-read-failure status error";
+    host.append(feedback);
+  }
+  feedback.replaceChildren();
+  const readMessage = document.createElement("span");
+  readMessage.className = "workflow-read-message";
+  readMessage.textContent = message;
+  feedback.append(readMessage);
+  const previousRetry = host.querySelector(`#${retryId}`);
+  if (previousRetry && !feedback.contains(previousRetry)) previousRetry.remove();
+  addWorkflowRetry(feedback, retryId, label, retry);
 }
 
 function clearWorkflowReadFailure(host, key, retryId, message = "") {
   if (host.dataset.workflowReadFailure !== key) return;
   delete host.dataset.workflowReadFailure;
-  host.querySelector(`#${retryId}`)?.remove();
-  host.querySelector(".workflow-retry-feedback")?.remove();
-  host.textContent = message;
-  host.className = message ? "status" : "status hidden";
+  const feedback = host.querySelector(".workflow-read-failure");
+  feedback?.remove();
+  if (!host.textContent.trim()) host.classList.add("hidden");
+}
+
+function projectDashboardWorkflowErrorToRoute(route) {
+  const target = route.view === "worlds"
+    ? { key: "worlds", host: elements.worldStatus, retryId: "workflowRetryWorlds", label: "Retry world list", retry: () => retryWorldWorkflowRead() }
+    : route.view === "campaigns"
+      ? { key: "campaigns", host: elements.campaignStatusMessage, retryId: "workflowRetryCampaigns", label: "Retry campaign list", retry: () => retryCampaignWorkflowRead() }
+      : route.view === "providers"
+        ? { key: "providers", host: elements.providerStatus, retryId: "workflowRetryProviders", label: "Retry provider profiles", retry: () => loadProviders() }
+        : null;
+  if (!target) return;
+  const failure = dashboardWorkflowErrors.get(target.key);
+  if (failure) setWorkflowReadFailure(target.host, target.key, failure.message, target.retryId, target.label, target.retry);
 }
 
 function reportWorldListReadFailure(message) {
@@ -5356,10 +5392,12 @@ function syncIllustrationProviderAvailability(restoreSavedState = false) {
 }
 
 function providerMessage(message, type = "") {
+  const pendingReadFailure = dashboardWorkflowErrors.get("providers");
   delete elements.providerStatus.dataset.workflowReadFailure;
   elements.providerStatus.querySelector("#workflowRetryProviders")?.remove();
   elements.providerStatus.textContent = message;
   elements.providerStatus.className = `status ${type}`.trim();
+  if (pendingReadFailure) setWorkflowReadFailure(elements.providerStatus, "providers", pendingReadFailure.message, "workflowRetryProviders", "Retry provider profiles", () => loadProviders());
 }
 
 function providerTypeLabel(providerType) {
