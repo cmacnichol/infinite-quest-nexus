@@ -509,6 +509,7 @@ test("keeps_advanced_values_hidden_across_empty_selection_before_loading_campaig
     await expect(chronicleBody).toBeHidden();
 
     await page.locator("#refreshCampaigns").click();
+    await selectCampaign(page, fixture, 1);
     await expect(page.locator("#memoryTitle")).toHaveText(String(campaign(fixture, 1).title));
     await expect(chronicleBody).toBeHidden();
     await page.locator("#campaignTabChronicle").click();
