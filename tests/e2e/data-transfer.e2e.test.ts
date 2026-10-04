@@ -83,6 +83,11 @@ function json(route: Route, value: unknown, status = 200): Promise<void> {
   return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
 }
 
+async function waitForLegacyManagementReady(page: Page, surfaceName: string): Promise<void> {
+  if (surfaceName !== "legacy Nexus") return;
+  await expect(page.locator('#managementInteractiveRoot:not([inert])[aria-busy="false"]')).toBeVisible();
+}
+
 async function installDataTransferApi(
   page: Page,
   enabled = true,
@@ -609,6 +614,7 @@ for (const surface of surfaces) {
   test(`${surface.name} recovers a mocked ambiguous import commit after reload`, async ({ page }) => {
     const evidence = await installDataTransferApi(page, true, { disconnectFirstImportCommit: true });
     await page.goto(surface.url);
+    await waitForLegacyManagementReady(page, surface.name);
     await page.locator(surface.file).setInputFiles({
       name: "ambiguous-owner-system.zip",
       mimeType: "application/zip",
@@ -623,6 +629,7 @@ for (const surface of surfaces) {
     expect(operationKeys).toHaveLength(1);
 
     await page.reload();
+    await waitForLegacyManagementReady(page, surface.name);
     await expect(page.locator(surface.report)).toBeVisible();
     expect(evidence.importCommits).toHaveLength(2);
     expect(evidence.importCommits[1]?.idempotencyKey).toBe(evidence.importCommits[0]?.idempotencyKey);
@@ -669,6 +676,7 @@ for (const surface of surfaces) {
       holdFirstUploadChunk: true
     });
     await page.goto(surface.url);
+    await waitForLegacyManagementReady(page, surface.name);
     await page.locator(surface.file).setInputFiles({
       name: "accessible-progress.zip",
       mimeType: "application/zip",
@@ -688,6 +696,7 @@ for (const surface of surfaces) {
   test(`${surface.name} clears a cancelled durable upload so it cannot be cancelled twice`, async ({ page }) => {
     const evidence = await installDataTransferApi(page, true, { holdFirstUploadChunk: true });
     await page.goto(surface.url);
+    await waitForLegacyManagementReady(page, surface.name);
     await page.locator(surface.file).setInputFiles({
       name: "cancel-durable-upload.zip",
       mimeType: "application/zip",
@@ -715,10 +724,12 @@ for (const surface of surfaces) {
       buffer: Buffer.from("system")
     };
     await page.goto(surface.url);
+    await waitForLegacyManagementReady(page, surface.name);
     await page.locator(surface.file).setInputFiles(selectedArchive);
     await expect(page.locator(surface.error)).toBeVisible();
 
     await page.reload();
+    await waitForLegacyManagementReady(page, surface.name);
     await page.locator(surface.file).setInputFiles(selectedArchive);
     await expect(page.locator(surface.preview)).toBeVisible();
     expect(evidence.uploadsCreated).toBe(1);
