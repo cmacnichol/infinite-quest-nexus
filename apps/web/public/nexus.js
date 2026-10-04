@@ -12,7 +12,8 @@ import {
   resolveResumeCampaign,
   nativePresetSupport,
   reduceSelectionEditor,
-  serializeSelectionEditorPatch
+  serializeSelectionEditorPatch,
+  providerReadinessForRole
 } from "/nexus/legacy-management.js";
 
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
@@ -160,6 +161,9 @@ const characterRowOriginals = new WeakMap();
 const legacyStorageKey = "infiniteQuestNexusClientState.v1";
 let detectedBrowserStory = null;
 let providers = [];
+let providerInventoryObservations = [];
+let providerInventoryRequestSequence = 0;
+const providerInventoryRequestEpochs = new Map();
 let selectedProvider = null;
 let embeddingConfig = null;
 let illustrationConfig = null;
@@ -5644,7 +5648,82 @@ function populateEmbeddingProviderSelect() {
   }
 }
 
+function providerReadinessCapabilityLabel(status) {
+  const labels = {
+    "not-applicable": "Not applicable",
+    unknown: "Unknown",
+    advertised: "Advertised, not verified",
+    expired: "Expired",
+    malformed: "Malformed evidence",
+    "identity-mismatch": "Does not match current model/schema",
+    unsupported: "Not supported",
+    verified: "Verified for current schema"
+  };
+  return labels[status] || "Unknown";
+}
+
+function renderProviderReadiness() {
+  for (const role of ["text", "image", "embedding"]) {
+    const card = elements.providers.querySelector(`[data-provider-readiness="${role}"]`);
+    if (!card) continue;
+    const readiness = providerReadinessForRole(role, providers, providerInventoryObservations, Date.now());
+    card.dataset.readinessState = readiness.state;
+    card.querySelector("[data-readiness-health]").textContent = readiness.health.replaceAll("-", " ");
+    card.querySelector("[data-readiness-inventory]").textContent = readiness.inventory.replaceAll("-", " ");
+    card.querySelector("[data-readiness-capability]").textContent = providerReadinessCapabilityLabel(readiness.capability);
+    card.querySelector("[data-readiness-state]").textContent = readiness.state === "ready"
+      ? "Ready · current observed evidence"
+      : readiness.state === "checking"
+        ? "Checking model inventory…"
+        : readiness.state === "not-configured"
+          ? "Not configured"
+          : "Not ready · see evidence above";
+    const check = card.querySelector("[data-readiness-check]");
+    check.hidden = !readiness.profileId;
+    check.classList.toggle("hidden", !readiness.profileId);
+    check.disabled = readiness.inventory === "checking";
+    check.textContent = check.disabled ? "Checking inventory…" : "Check model inventory";
+  }
+}
+
+async function refreshProviderReadinessInventory(role) {
+  const card = elements.providers.querySelector(`[data-provider-readiness="${role}"]`);
+  const readiness = providerReadinessForRole(role, providers, providerInventoryObservations, Date.now());
+  const profile = providers.find((item) => item.id === readiness.profileId);
+  if (!card || !profile) return;
+  const identity = {
+    profileId: profile.id,
+    role,
+    providerType: profile.providerType,
+    baseUrl: profile.baseUrl,
+    modelId: profile.defaultModel
+  };
+  const requestEpoch = ++providerInventoryRequestSequence;
+  providerInventoryRequestEpochs.set(profile.id, requestEpoch);
+  providerInventoryObservations = providerInventoryObservations.filter((item) => item.profileId !== profile.id);
+  providerInventoryObservations.push({ ...identity, status: "checking", modelIds: [], checkedAt: null });
+  renderProviderReadiness();
+  try {
+    const result = await api(`/api/v1/providers/${profile.id}/models?refresh=true`);
+    if (providerInventoryRequestEpochs.get(profile.id) !== requestEpoch) return;
+    const currentProfile = providers.find((item) => item.id === profile.id);
+    if (!currentProfile || currentProfile.providerRole !== identity.role || currentProfile.providerType !== identity.providerType || currentProfile.baseUrl !== identity.baseUrl || currentProfile.defaultModel !== identity.modelId) return;
+    const modelIds = Array.isArray(result.models) ? result.models.map(profileModelValue).filter((modelId) => typeof modelId === "string" && modelId.length > 0) : [];
+    providerInventoryObservations = providerInventoryObservations.filter((item) => item.profileId !== profile.id);
+    providerInventoryObservations.push({ ...identity, status: modelIds.length ? "available" : "unavailable", modelIds, checkedAt: new Date().toISOString() });
+  } catch {
+    if (providerInventoryRequestEpochs.get(profile.id) !== requestEpoch) return;
+    providerInventoryObservations = providerInventoryObservations.filter((item) => item.profileId !== profile.id);
+    providerInventoryObservations.push({ ...identity, status: "unavailable", modelIds: [], checkedAt: new Date().toISOString() });
+  } finally {
+    if (providerInventoryRequestEpochs.get(profile.id) === requestEpoch) {
+      providerInventoryRequestEpochs.delete(profile.id);
+      renderProviderReadiness();
+    }
+  }
+}
 function renderProviderProfiles() {
+  renderProviderReadiness();
   elements.providerProfileList.replaceChildren();
   if (!providers.length) {
     elements.providerProfileList.innerHTML = '<p class="muted">No provider profiles have been added.</p>';
@@ -5863,8 +5942,8 @@ function renderProviderSelectionEditor() {
   const presetMode = providerSelectionEditor.mode === "preset";
   elements.providerSelectionModel.checked = !presetMode;
   elements.providerSelectionPreset.checked = presetMode;
-  elements.providerModelSelectionField.classList.toggle("hidden", illustration || presetMode);
-  elements.providerModelSelectionField.hidden = illustration || presetMode;
+  elements.providerModelSelectionField.classList.toggle("hidden", presetMode);
+  elements.providerModelSelectionField.hidden = presetMode;
   elements.providerPresetSelectionPanel.classList.toggle("hidden", !eligible || !presetMode);
   elements.providerPresetSelectionPanel.hidden = !eligible || !presetMode;
   elements.providerResponseFormatPolicyField.classList.toggle("hidden", illustration || presetMode);
@@ -6172,8 +6251,15 @@ function providerConfigurationFromForm(existingConfig = {}) {
   const configuration = { ...existingConfig, streaming: elements.providerStreaming.checked };
   if (nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter" && providerSelectionEditor) {
     const patch = serializeSelectionEditorPatch(providerSelectionEditor);
-    configuration.textResponseFormatPolicy = patch.configuration.textResponseFormatPolicy;
-    if (Object.prototype.hasOwnProperty.call(patch.configuration, "textExecutionOverrides")) {
+    const presetMode = providerSelectionEditor.mode === "preset";
+    const hasSavedFormatPolicy = Object.prototype.hasOwnProperty.call(existingConfig, "textResponseFormatPolicy");
+    configuration.textResponseFormatPolicy = presetMode && hasSavedFormatPolicy
+      ? existingConfig.textResponseFormatPolicy
+      : patch.configuration.textResponseFormatPolicy;
+    const hasSavedOverrides = Object.prototype.hasOwnProperty.call(existingConfig, "textExecutionOverrides");
+    if (presetMode && hasSavedOverrides) {
+      configuration.textExecutionOverrides = existingConfig.textExecutionOverrides;
+    } else if (Object.prototype.hasOwnProperty.call(patch.configuration, "textExecutionOverrides")) {
       configuration.textExecutionOverrides = patch.configuration.textExecutionOverrides;
     }
     return configuration;
@@ -6249,6 +6335,7 @@ function beginProviderEdit(provider) {
   responseFormatCapabilityProfile = provider.responseFormatCapability || null;
   elements.providerModelPickerList.replaceChildren();
   initializeProviderSelectionEditor(provider);
+  elements.providerAdvancedSettings.open = false;
   openEditDialog(elements.providerDialog, returnFocusTo);
   elements.providerName.focus();
   providerMessage(`Editing ${provider.name}. Leave the API key blank to keep the stored credential.`);
@@ -6298,13 +6385,15 @@ async function saveProvider(event) {
   const disabledBeforeSave = providerControls.map((control) => control.disabled);
   providerControls.forEach((control) => { control.disabled = true; });
   providerMessage("Saving provider profile…");
+  let provider;
+  const wasEditing = Boolean(editingProviderId);
   try {
     const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
     const preservedSelection = providerSelectionEditor ? serializeSelectionEditorPatch(providerSelectionEditor) : null;
     const nativeSelection = nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter" && providerSelectionEditor
       ? serializeSelectionEditorPatch(providerSelectionEditor)
       : null;
-    const provider = await api(editingProviderId ? `/api/v1/providers/${editingProviderId}` : "/api/v1/providers", {
+    provider = await api(editingProviderId ? `/api/v1/providers/${editingProviderId}` : "/api/v1/providers", {
       method: editingProviderId ? "PATCH" : "POST",
       body: JSON.stringify({
         name: elements.providerName.value,
@@ -6324,8 +6413,17 @@ async function saveProvider(event) {
         configuration: providerConfigurationFromForm(existingConfig)
       })
     });
-    const wasEditing = Boolean(editingProviderId);
-    resetProviderForm();
+  } catch (error) {
+    providerMessage(safeWorkflowFailure("Provider profile could not be saved.", error), "error");
+    providerControls.forEach((control, index) => { control.disabled = disabledBeforeSave[index] ?? false; });
+    providerSaveBusy = false;
+    return;
+  }
+
+  providerInventoryRequestEpochs.set(provider.id, ++providerInventoryRequestSequence);
+  providerInventoryObservations = providerInventoryObservations.filter((item) => item.profileId !== provider.id);
+  resetProviderForm();
+  try {
     await loadProviders(provider.providerRole === "text" ? provider.id : "");
     if (provider.providerRole === "embedding") {
       elements.embeddingProvider.value = provider.id;
@@ -6339,16 +6437,20 @@ async function saveProvider(event) {
       elements.illustrationModel.value = provider.defaultModel || "";
       elements.discoverIllustrationModels.disabled = false;
     }
-    providerMessage(`${provider.name} ${wasEditing ? "updated" : "saved"}. Credentials, if supplied, were encrypted before database storage.`, "success");
-    if (elements.providerDialog) elements.providerDialog.close();
   } catch (error) {
-    providerMessage(safeWorkflowFailure("Provider profile could not be saved.", error), "error");
-  } finally {
+    providerMessage(`${provider.name} was ${wasEditing ? "updated" : "saved"}.`, "success");
+    reportProviderListReadFailure("The provider list could not be refreshed. Retry provider profiles to confirm the saved profile.");
+    if (elements.providerDialog) elements.providerDialog.close();
     providerControls.forEach((control, index) => { control.disabled = disabledBeforeSave[index] ?? false; });
     providerSaveBusy = false;
+    return;
   }
-}
 
+  providerMessage(`${provider.name} ${wasEditing ? "updated" : "saved"}. Credentials, if supplied, were encrypted before database storage.`, "success");
+  if (elements.providerDialog) elements.providerDialog.close();
+  providerControls.forEach((control, index) => { control.disabled = disabledBeforeSave[index] ?? false; });
+  providerSaveBusy = false;
+}
 async function refreshProviderModelsFromForm() {
   const sequence = ++responseFormatCapabilitySequence;
   const identity = responseFormatCapabilityIdentity();
@@ -8292,6 +8394,7 @@ if (elements.newProviderButton) {
   });
 }
 elements.providerForm.addEventListener("submit", saveProvider);
+for (const check of elements.providers.querySelectorAll("[data-readiness-check]")) check.addEventListener("click", () => { void refreshProviderReadinessInventory(check.dataset.readinessCheck); });
 elements.cancelProviderEdit.addEventListener("click", () => {
   if (elements.providerDialog) dismissEditDialog(elements.providerDialog);
 });

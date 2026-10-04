@@ -4,6 +4,8 @@ export {
   serializeSelectionEditorPatch
 } from "@infinite-quest/client-core";
 export { isExactStoryResponseFormatCapability } from "@infinite-quest/client-core";
+export { providerReadinessForRole } from "@infinite-quest/client-core";
+export type { ProviderInventoryObservation, ProviderInventoryStatus, ProviderReadinessCapabilityState, ProviderReadinessResult, ProviderReadinessRole, ProviderReadinessState } from "@infinite-quest/client-core";
 export type {
   OverrideIntent,
   ResponseFormatPolicy,
