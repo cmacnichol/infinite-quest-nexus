@@ -40,3 +40,8 @@ export type {
   CampaignCreationUserSettings,
   CampaignCreationWorld
 } from "@infinite-quest/client-core";
+
+if (typeof document !== "undefined" && document.querySelector("#dashboard")) {
+  const controllerUrl = "/nexus/nexus.js";
+  void import(/* @vite-ignore */ controllerUrl);
+}

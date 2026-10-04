@@ -3,7 +3,7 @@ import { parseHTML } from "linkedom";
 import { describe, expect, it } from "vitest";
 
 const nexusHtml = readFileSync("apps/web/public/index.html", "utf8");
-const nexusScript = readFileSync("apps/web/public/nexus.js", "utf8");
+const nexusScript = readFileSync("apps/web/src/nexus.js", "utf8");
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/src/story.js", "utf8");
 

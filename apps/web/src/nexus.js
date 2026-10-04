@@ -1,34 +1,26 @@
-import { createImageLibraryBrowser } from "/nexus/image-library-browser.js";
 import {
-  createProviderPresetsApi,
-  createEditSession,
-  createLegacySectionLoader,
   buildCampaignCreateRequest,
   createCampaignCreationDraft,
-  requestEditDismissal,
-  bindEditDialogDismissal,
+  createEditSession,
   createSelectionEditorState,
   filterSortCampaigns,
   filterSortWorlds,
-  resolveResumeCampaign,
-  nativePresetSupport,
+  providerReadinessForRole,
   reduceSelectionEditor,
-  serializeSelectionEditorPatch,
-  providerReadinessForRole
-} from "/nexus/legacy-management.js";
+  resolveResumeCampaign,
+  serializeSelectionEditorPatch
+} from "@infinite-quest/client-core";
+import { createProviderPresetsApi, nativePresetSupport } from "@infinite-quest/client-web";
+import { bindEditDialogDismissal, requestEditDismissal } from "./legacy-edit-session.js";
+import { createLegacySectionLoader } from "./legacy-section-loader.js";
 
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
 const campaignSectionLoader = createLegacySectionLoader({
   loadSection: (request) => loadCampaignSettingsSectionData(request)
 });
-const assetLibraryBrowser = createImageLibraryBrowser({
-  dialog: elements.assetLibraryDialog,
-  grid: elements.assetLibraryGrid,
-  status: elements.assetLibraryStatus,
-  filterContainer: elements.assetLibraryFilters,
-  loadMore: elements.assetLibraryLoadMore,
-  closeButton: elements.closeAssetLibrary
-});
+let assetLibraryBrowserPromise = null;
+let assetLibraryImportRetryNonce = 0;
+const MAX_ASSET_LIBRARY_RETRY_NONCE = 0x7fffffff;
 let selectedFile = null;
 let selectedImportSource = null;
 let selectedImport = null;
@@ -4055,8 +4047,42 @@ function updateWorldCoverChoice() {
   else elements.worldCoverStatus.textContent = worldAuthorMode === "edit" && artworkUrl(selectedWorld) ? "The current cover will be kept." : "No cover will be applied.";
 }
 
+function loadAssetLibraryBrowser() {
+  if (!assetLibraryBrowserPromise) {
+    const imageLibraryModuleUrl = "/nexus/image-library-browser.js";
+    const retryQuery = assetLibraryImportRetryNonce > 0
+      ? `?retry=${assetLibraryImportRetryNonce}`
+      : "";
+    assetLibraryBrowserPromise = import(/* @vite-ignore */ `${imageLibraryModuleUrl}${retryQuery}`)
+      .then(({ createImageLibraryBrowser }) => createImageLibraryBrowser({
+        dialog: elements.assetLibraryDialog,
+        grid: elements.assetLibraryGrid,
+        status: elements.assetLibraryStatus,
+        filterContainer: elements.assetLibraryFilters,
+        loadMore: elements.assetLibraryLoadMore,
+        closeButton: elements.closeAssetLibrary
+      }))
+      .catch((error) => {
+        assetLibraryBrowserPromise = null;
+        assetLibraryImportRetryNonce = assetLibraryImportRetryNonce >= MAX_ASSET_LIBRARY_RETRY_NONCE
+          ? 1
+          : assetLibraryImportRetryNonce + 1;
+        throw error;
+      });
+  }
+  return assetLibraryBrowserPromise;
+}
+
 async function openAssetLibrary(onSelect, context = {}) {
-  await assetLibraryBrowser.open({ mode: onSelect ? "picker" : "browse", onSelect, context });
+  let browser;
+  try {
+    browser = await loadAssetLibraryBrowser();
+  } catch (error) {
+    elements.worldCoverStatus.className = "status error";
+    elements.worldCoverStatus.textContent = safeWorkflowFailure("The image library could not be loaded. Try again.", error);
+    return;
+  }
+  await browser.open({ mode: onSelect ? "picker" : "browse", onSelect, context });
 }
 
 async function chooseWorldCoverFromLibrary() {

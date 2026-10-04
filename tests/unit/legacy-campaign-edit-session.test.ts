@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { createEditSession } from "../../packages/client-core/src/edit-session.js";
 
-const script = readFileSync("apps/web/public/nexus.js", "utf8");
+const script = readFileSync("apps/web/src/nexus.js", "utf8");
 
 type TestSnapshot = Record<string, unknown>;
 type CampaignEditGuard = {

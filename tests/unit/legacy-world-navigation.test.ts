@@ -3,7 +3,7 @@ import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
 
 const managementHtml = readFileSync("apps/web/public/index.html", "utf8");
-const managementScript = readFileSync("apps/web/public/nexus.js", "utf8");
+const managementScript = readFileSync("apps/web/src/nexus.js", "utf8");
 
 function functionSources(names: string[]) {
   return names.map((name) => {

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const nexusSource = readFileSync("apps/web/public/nexus.js", "utf8");
+const nexusSource = readFileSync("apps/web/src/nexus.js", "utf8");
 const markup = readFileSync("apps/web/public/index.html", "utf8");
 
 describe("legacy provider and authoring dismissal", () => {

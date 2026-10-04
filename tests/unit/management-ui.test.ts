@@ -6,7 +6,7 @@ import { createLegacySectionLoader } from "../../apps/web/src/legacy-section-loa
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/src/story.js", "utf8");
 const managementHtml = readFileSync("apps/web/public/index.html", "utf8");
-const managementScript = readFileSync("apps/web/public/nexus.js", "utf8");
+const managementScript = readFileSync("apps/web/src/nexus.js", "utf8");
 const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
 const { document: managementDocument } = parseHTML(managementHtml);
 const imageLibraryScript = readFileSync("apps/web/public/image-library-browser.js", "utf8");

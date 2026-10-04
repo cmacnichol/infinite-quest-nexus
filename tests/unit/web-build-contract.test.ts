@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -7,7 +7,7 @@ import { beforeAll, describe, expect, test } from "vitest";
 const rootDirectory = process.cwd();
 const activeUiImplementationFiles = [
   "apps/web/public/index.html",
-  "apps/web/public/nexus.js",
+  "apps/web/src/nexus.js",
   "apps/web/public/nexus.css",
   "apps/web/src/story.js",
   "apps/web-next/src/campaign-editor-page.ts",
@@ -21,12 +21,22 @@ function localAssetPaths(html: string, prefix: string): string[] {
     .map((value) => value.slice(prefix.length));
 }
 
+const legacyVite = createRequire(path.join(rootDirectory, "apps/web/package.json"))("vite") as {
+  build(options: Record<string, unknown>): Promise<unknown>;
+};
+const replacementVite = createRequire(path.join(rootDirectory, "apps/web-next/package.json"))("vite") as {
+  build(options: Record<string, unknown>): Promise<unknown>;
+};
+
 describe("web build contract", () => {
-  beforeAll(() => {
-    execSync("pnpm build:web:legacy && pnpm build:web:next", {
-      cwd: rootDirectory,
-      encoding: "utf8",
-      stdio: "pipe"
+  beforeAll(async () => {
+    await legacyVite.build({
+      configFile: path.join(rootDirectory, "apps/web/vite.config.ts"),
+      root: path.join(rootDirectory, "apps/web")
+    });
+    await replacementVite.build({
+      configFile: path.join(rootDirectory, "apps/web-next/vite.config.ts"),
+      root: path.join(rootDirectory, "apps/web-next")
     });
   }, 60_000);
 
@@ -41,9 +51,13 @@ describe("web build contract", () => {
     }
     expect(existsSync(path.join(distDirectory, "legacy-client.js"))).toBe(true);
     expect(existsSync(path.join(distDirectory, "legacy-management.js"))).toBe(true);
+    expect(existsSync(path.join(distDirectory, "nexus.js"))).toBe(true);
+    const startupScript = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"[^>]*>\s*<\/script>/giu)]
+      .map((match) => match[1]);
+    expect(startupScript).toEqual(["/nexus/legacy-management.js"]);
     expect(storyHtml).toContain('src="/nexus/legacy-client.js"');
     expect(existsSync(path.join(distDirectory, "story.js"))).toBe(false);
-    const emitted = [html, storyHtml, ...Array.from(new Set([...localAssetPaths(html, "/nexus/"), ...localAssetPaths(storyHtml, "/nexus/")]))
+    const emitted = [html, storyHtml, readFileSync(path.join(distDirectory, "nexus.js"), "utf8"), ...Array.from(new Set([...localAssetPaths(html, "/nexus/"), ...localAssetPaths(storyHtml, "/nexus/")]))
       .filter((assetPath) => assetPath.endsWith(".js"))
       .map((assetPath) => readFileSync(path.join(distDirectory, assetPath), "utf8"))].join("\n");
     expect(emitted).toContain("Semantic Retrieval");
@@ -61,6 +75,8 @@ describe("web build contract", () => {
     expect(typeof bundle.reduceSelectionEditor).toBe("function");
     expect(typeof bundle.serializeSelectionEditorPatch).toBe("function");
     expect(typeof bundle.createProviderPresetsApi).toBe("function");
+    const bridgeSource = readFileSync(path.join(rootDirectory, "apps/web/dist/legacy-management.js"), "utf8");
+    expect([...bridgeSource.matchAll(/\/nexus\/nexus\.js/gu)]).toHaveLength(1);
   });
 
   test("replacement build emits HTML whose hashed assets exist", () => {

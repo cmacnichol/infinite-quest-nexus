@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 const dashboardHtml = readFileSync("apps/web/public/index.html", "utf8");
-const dashboardScript = readFileSync("apps/web/public/nexus.js", "utf8");
+const dashboardScript = readFileSync("apps/web/src/nexus.js", "utf8");
 const dashboardCss = readFileSync("apps/web/public/nexus.css", "utf8");
 const navigationCss = readFileSync("apps/web/public/navigation.css", "utf8");
 

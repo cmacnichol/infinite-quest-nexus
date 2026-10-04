@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { buildCampaignCreateRequest } from "../../packages/client-core/src/campaign-creation-draft.js";
 
 const html = readFileSync("apps/web/public/index.html", "utf8");
-const script = readFileSync("apps/web/public/nexus.js", "utf8");
+const script = readFileSync("apps/web/src/nexus.js", "utf8");
 const campaignId = "00000000-0000-4000-8000-000000000001";
 const worldId = "00000000-0000-4000-8000-000000000002";
 const worldVersionId = "00000000-0000-4000-8000-000000000003";
