@@ -33,6 +33,7 @@ import {
 } from "./story-generation-monitor.js";
 import { handleStoryEscape } from "./story-keyboard.js";
 import { createLegacyCastPanel } from "./campaign-cast-panel.js";
+import { createStoryStreamRenderer } from "./story-stream-renderer.js";
 import {
   createChoiceDraftSelection,
   resetChoiceDraftSelection,
@@ -514,6 +515,11 @@ const state = {
     }
   }
 };
+
+let storyStreamRenderer = null;
+let storyStreamEpoch = 0;
+let storyStreamRunIdentity = null;
+let storyStreamIdentityToken = 0;
 
 const modalBaselines = new WeakMap();
 let discardModalTarget = null;
@@ -1223,6 +1229,7 @@ async function loadReaderIllustrations(campaignId, loadEpoch) {
 async function loadCampaign(campaignId, options = {}) {
   const loadSequence = ++campaignLoadSequence;
   const loadEpoch = ++storyTurnWindowEpoch;
+  invalidateStoryStreamRenderer();
   const positionInteractionEpoch = readerPositionInteractionEpoch;
   readerIllustrationRequestSequence += 1;
   state.illustrationLoading = false;
@@ -2872,7 +2879,81 @@ async function runGeneration(action, options = {}) {
   }
 }
 
-function renderStreamingPreview(narrationText, action) {
+function createStoryStreamRenderIdentity() {
+  storyStreamEpoch += 1;
+  storyStreamIdentityToken += 1;
+  storyStreamRunIdentity = {
+    epoch: storyStreamEpoch,
+    token: storyStreamIdentityToken,
+    campaignId: state.campaignId,
+    loadSequence: campaignLoadSequence,
+    run: state.generationRun,
+    jobId: state.generationJobId
+  };
+  getStoryStreamRenderer().reset(storyStreamEpoch);
+  return storyStreamRunIdentity;
+}
+
+function isCurrentStoryStreamIdentity(identity) {
+  return Boolean(identity)
+    && storyStreamRunIdentity === identity
+    && identity.epoch === storyStreamEpoch
+    && identity.campaignId === state.campaignId
+    && identity.loadSequence === campaignLoadSequence
+    && identity.run === state.generationRun
+    && identity.jobId === state.generationJobId
+    && state.generationDisplayActive;
+}
+
+function bindStoryStreamRun(run) {
+  const identity = storyStreamRunIdentity;
+  if (!identity || identity.campaignId !== state.campaignId || identity.loadSequence !== campaignLoadSequence) return identity;
+  identity.run = run;
+  identity.jobId = run.jobId;
+  return identity;
+}
+
+function invalidateStoryStreamRenderer(expectedIdentity = null) {
+  if (expectedIdentity && storyStreamRunIdentity !== expectedIdentity) return;
+  storyStreamEpoch += 1;
+  storyStreamRunIdentity = null;
+  storyStreamRenderer?.reset(storyStreamEpoch);
+}
+
+function flushStoryStreamNarration(expectedIdentity = storyStreamRunIdentity) {
+  if (expectedIdentity && storyStreamRunIdentity === expectedIdentity) storyStreamRenderer?.flush();
+}
+
+function renderSafeStreamingNarration(text) {
+  const identity = storyStreamRunIdentity;
+  if (!isCurrentStoryStreamIdentity(identity)) return;
+  const narration = $("streamingPreviewCard")?.querySelector(".streaming-narration");
+  if (!narration) return;
+  narration.innerHTML = `${sanitizeNarration(text)}<span class="streaming-cursor" title="Receiving live tokens..."></span>`;
+}
+
+function getStoryStreamRenderer() {
+  if (!storyStreamRenderer) {
+    storyStreamRenderer = createStoryStreamRenderer({
+      scheduleFrame: (callback) => typeof window.requestAnimationFrame === "function"
+        ? window.requestAnimationFrame(() => callback())
+        : setTimeout(callback, 0),
+      cancelFrame: (frameId) => {
+        if (typeof window.cancelAnimationFrame === "function") window.cancelAnimationFrame(frameId);
+        else clearTimeout(frameId);
+      },
+      renderSafe: renderSafeStreamingNarration,
+      onFollow: () => {
+        const identity = storyStreamRunIdentity;
+        if (state.streamingAutoFollow && isCurrentStoryStreamIdentity(identity)) followStreamingPreview();
+      }
+    });
+  }
+  return storyStreamRenderer;
+}
+
+function renderStreamingPreview(narrationText, action, expectedIdentity = storyStreamRunIdentity) {
+  if (!isCurrentStoryStreamIdentity(expectedIdentity)) return;
   const container = $("storyArea");
   if (!container) return;
 
@@ -2905,18 +2986,12 @@ function renderStreamingPreview(narrationText, action) {
   const header = card.querySelector(".turn-streaming-header");
   if (header) syncCancelGenerationButton(header, state);
 
-  const narration = card.querySelector(".streaming-narration");
-  if (narration) {
-    narration.innerHTML = `${sanitizeNarration(narrationText)}<span class="streaming-cursor" title="Receiving live tokens..."></span>`;
-  }
-
   if (isNewPreview) {
     state.streamingAutoFollow = true;
     card.scrollIntoView({ behavior: "auto", block: "start" });
     state.streamingExpectedScrollY = window.scrollY;
-  } else if (state.streamingAutoFollow) {
-    followStreamingPreview();
   }
+  getStoryStreamRenderer().push(narrationText, expectedIdentity.epoch);
 }
 
 function followStreamingPreview() {
@@ -2943,6 +3018,7 @@ function pauseStreamingAutoFollow() {
 }
 
 function clearStreamingPreview() {
+  invalidateStoryStreamRenderer();
   const card = $("streamingPreviewCard");
   if (card) card.remove();
   state.streamingAutoFollow = true;
@@ -2954,6 +3030,7 @@ function beginGenerationDisplay(action, { preserveAcceptedScene = false } = {}) 
   state.cancellationConfirmed = false;
   state.generationDisplayActive = true;
   state.generationDisplayAction = action || "";
+  createStoryStreamRenderIdentity();
   renderTurnInput();
   const container = $("storyArea");
   if (container && !preserveAcceptedScene) container.replaceChildren();
@@ -2962,6 +3039,7 @@ function beginGenerationDisplay(action, { preserveAcceptedScene = false } = {}) 
 }
 
 function restoreGenerationDisplay() {
+  flushStoryStreamNarration();
   state.generationDisplayActive = false;
   state.generationDisplayAction = "";
   state.generationJobId = null;
@@ -2971,9 +3049,11 @@ function restoreGenerationDisplay() {
 }
 
 function commitGenerationDisplay(removeStreamingPreview = true) {
+  flushStoryStreamNarration();
   state.generationDisplayActive = false;
   state.generationDisplayAction = "";
   state.generationJobId = null;
+  invalidateStoryStreamRenderer();
   if (removeStreamingPreview) $("streamingPreviewCard")?.remove();
 }
 
@@ -3403,7 +3483,8 @@ async function reconcileCompletedGeneration(result) {
 async function observeGenerationRun(run, action, retryFirst = false) {
   state.generationJobId = run.jobId;
   if (!state.generationDisplayActive) beginGenerationDisplay(action);
-  else renderStreamingPreview("", action || state.generationDisplayAction);
+  const streamIdentity = bindStoryStreamRun(run);
+  if (state.generationDisplayActive) renderStreamingPreview("", action || state.generationDisplayAction, streamIdentity);
   pollImageJobs();
   let terminalError = null;
   let resultUnavailable = false;
@@ -3429,10 +3510,12 @@ async function observeGenerationRun(run, action, retryFirst = false) {
         });
       }
     },
-    onNarration: (text) => renderStreamingPreview(text, action || state.generationDisplayAction),
+    onNarration: (text) => renderStreamingPreview(text, action || state.generationDisplayAction, streamIdentity),
     onDegraded: (reason, failures) => recordActivity("system", "Generation monitoring degraded", `${reason} (${failures})`),
     onDetached: () => recordActivity("system", "Generation monitoring detached", `jobId=${run.jobId}`),
     onResultUnavailable: (jobId, error) => {
+      flushStoryStreamNarration(streamIdentity);
+      invalidateStoryStreamRenderer(streamIdentity);
       showGenerationRecovery(
         jobId,
         "The turn completed, but its result is temporarily unavailable. Retry loading it.",
@@ -3442,8 +3525,12 @@ async function observeGenerationRun(run, action, retryFirst = false) {
       recordActivity("system", "Completed turn result unavailable", error.message);
       resultUnavailable = true;
     },
-    onCompleted: finalizeCompletedGeneration,
+    onCompleted: (result) => {
+      flushStoryStreamNarration(streamIdentity);
+      return finalizeCompletedGeneration(result);
+    },
     onCancelled: async () => {
+      flushStoryStreamNarration(streamIdentity);
       terminalError = await reconcileRemoteGenerationCancellation({
         state,
         clearPendingSubmission,
@@ -3453,6 +3540,7 @@ async function observeGenerationRun(run, action, retryFirst = false) {
       });
     },
     onTerminalFailure: (error, outcome) => {
+      flushStoryStreamNarration(streamIdentity);
       clearPendingSubmission();
       state.pendingGeneration = null;
       if (lastSnapshot) state.generationRecovery = lastSnapshot;

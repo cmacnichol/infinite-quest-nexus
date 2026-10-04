@@ -1619,7 +1619,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('window.addEventListener("scroll", () => {');
     expect(storyScript).toContain("streamingExpectedScrollY");
     expect(storyScript).toContain('function pauseStreamingAutoFollow()');
-    expect(storyScript).toContain('if (state.streamingAutoFollow) {\n    followStreamingPreview();');
+    expect(storyScript).toContain('onFollow: () => {');
+    expect(storyScript).toContain('if (state.streamingAutoFollow && isCurrentStoryStreamIdentity(identity)) followStreamingPreview();');
     expect(storyScript).toContain('data-action="follow-stream"');
     expect(storyScript).not.toContain("  scrollToView();\n}\n\nfunction clearStreamingPreview");
     expect(storyCss).toContain(".streaming-follow-button {");
@@ -1636,7 +1637,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain("function restoreViewportAfterRender(viewport)");
     expect(storyScript).toContain("window.requestAnimationFrame(() => {");
     expect(storyScript).toContain('window.scrollTo({ ...viewport, behavior: "auto" });');
-    expect(storyScript).toContain('onCompleted: finalizeCompletedGeneration');
+    expect(storyScript).toContain('onCompleted: (result) => {');
+    expect(storyScript).toContain('flushStoryStreamNarration(streamIdentity);');
+    expect(storyScript).toContain('return finalizeCompletedGeneration(result);');
     expect(storyScript).toContain('await finalizeCompletedGeneration(result);');
   });
 
@@ -1734,6 +1737,107 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       expect(scrollTop).toBe(480);
       expect(syncStatus).toHaveBeenCalledTimes(2);
     } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("renders the latest cumulative snapshot per frame and flushes the pending snapshot before terminal cleanup", async () => {
+    let allowFinalSnapshot!: () => void;
+    const finalSnapshotGate = new Promise<void>(resolve => { allowFinalSnapshot = resolve; });
+    let allowTerminal!: () => void;
+    const terminalGate = new Promise<void>(resolve => { allowTerminal = resolve; });
+    let secondSnapshotProcessed!: () => void;
+    const secondSnapshot = new Promise<void>(resolve => { secondSnapshotProcessed = resolve; });
+    let finalSnapshotProcessed!: () => void;
+    const finalSnapshot = new Promise<void>(resolve => { finalSnapshotProcessed = resolve; });
+    let watchFinished!: () => void;
+    const watchCompletion = new Promise<void>(resolve => { watchFinished = resolve; });
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn().mockResolvedValue({
+        jobId: "batched-stream-job",
+        async *watch() {
+          try {
+            yield { type: "narration" as const, text: "First cumulative snapshot." };
+            yield { type: "narration" as const, text: "Latest cumulative snapshot." };
+            secondSnapshotProcessed();
+            await finalSnapshotGate;
+            yield { type: "narration" as const, text: "Terminal pending snapshot." };
+            finalSnapshotProcessed();
+            await terminalGate;
+            yield { type: "settled" as const, outcome: "failed" as const, error: new Error("provider stopped") };
+          } finally {
+            watchFinished();
+          }
+        }
+      })
+    };
+
+    let testDocument: Document | null = null;
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
+      testDocument = document;
+      let nextFrameId = 0;
+      const callbacks = new Map<number, FrameRequestCallback>();
+      const requestFrame = vi.fn((callback: FrameRequestCallback) => {
+        nextFrameId += 1;
+        callbacks.set(nextFrameId, callback);
+        return nextFrameId;
+      });
+      const cancelFrame = vi.fn();
+      const scrollIntoView = vi.fn();
+      Object.defineProperties(window, {
+        requestAnimationFrame: { configurable: true, value: requestFrame },
+        cancelAnimationFrame: { configurable: true, value: cancelFrame }
+      });
+      Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+
+      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+      action.value = "Wait for the station bell.";
+      action.dispatchEvent(new window.Event("input", { bubbles: true }));
+      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await secondSnapshot;
+
+      expect(requestFrame).toHaveBeenCalledTimes(1);
+      const narration = document.querySelector("#streamingPreviewCard .streaming-narration");
+      expect(narration?.textContent).not.toContain("Latest cumulative snapshot.");
+      callbacks.get(1)?.(0);
+      expect(narration?.textContent).toContain("Latest cumulative snapshot.");
+      expect(narration?.textContent).not.toContain("First cumulative snapshot.");
+      expect(scrollIntoView).toHaveBeenCalledTimes(2);
+
+      scrollIntoView.mockClear();
+      window.dispatchEvent(new window.Event("wheel"));
+      allowFinalSnapshot();
+      await finalSnapshot;
+      expect(requestFrame).toHaveBeenCalledTimes(2);
+      expect(narration?.textContent).not.toContain("Terminal pending snapshot.");
+      const preview = document.getElementById("streamingPreviewCard") as HTMLElement | null;
+      if (!preview) throw new Error("Streaming preview is required until the terminal event settles.");
+      let narrationAtRemoval = "";
+      const remove = preview.remove.bind(preview);
+      preview.remove = () => {
+        narrationAtRemoval = preview.querySelector(".streaming-narration")?.textContent || "";
+        remove();
+      };
+
+      allowTerminal();
+      await watchCompletion;
+      await vi.waitFor(() => expect(document.getElementById("generationProgress")?.classList.contains("hidden")).toBe(true), { timeout: 5_000 });
+
+      expect(narrationAtRemoval).toContain("Terminal pending snapshot.");
+      expect(cancelFrame).toHaveBeenCalledWith(2);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      callbacks.get(2)?.(0);
+      expect(document.getElementById("streamingPreviewCard")).toBeNull();
+      expect(workflow.submit).toHaveBeenCalledOnce();
+    } finally {
+      allowFinalSnapshot();
+      allowTerminal();
+      await watchCompletion;
+      if (testDocument) {
+        await vi.waitFor(() => expect(testDocument?.getElementById("generationProgress")?.classList.contains("hidden")).toBe(true), { timeout: 5_000 });
+      }
       vi.unstubAllGlobals();
     }
   });
