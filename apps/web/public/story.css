@@ -290,6 +290,19 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 
 .scene { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; scroll-margin-top: 135px; }
 
+.continuous-reader-controls {
+  display: flex;
+  flex: 1 0 100%;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+.continuous-reader-controls[hidden],
+.continuous-reader-controls [hidden] { display: none !important; }
+.continuous-reader-status { flex-basis: 100%; text-align: center; color: var(--muted); font-size: .85rem; }
+
 .narration {
   width: min(100%, calc(var(--reader-width-ch, 72) * 1ch));
   margin-inline: auto;

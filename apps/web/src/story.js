@@ -58,6 +58,16 @@ import {
   createStoryHistorySearchState,
   settleStoryHistorySearch,
   validateStoryHistoryJumpTarget,
+  STORY_CONTINUOUS_READER_WINDOW_LIMIT,
+  createStoryContinuousReaderState,
+  selectStoryReadIdentity,
+  beginStoryContinuousReaderGroup,
+  settleStoryContinuousReaderResponse,
+  settleStoryContinuousReaderFailure,
+  beginStoryContinuousReaderRetry,
+  settleStoryContinuousReaderAnchorRefresh,
+  settleStoryContinuousReaderAnchorRefreshFailure,
+  reconcileStoryAcceptedSceneReplacement,
   DEFAULT_READER_PREFERENCES,
   normalizeReaderPreferences
 } from "@infinite-quest/client-core";
@@ -116,6 +126,8 @@ let readerPositionChoicePending = false;
 let readerPositionRestoreEpoch = 0;
 let readerPositionWriteTimer = null;
 let readerPositionWriteQueue = Promise.resolve();
+let continuousReaderAbortController = null;
+const continuousSceneSignatures = new WeakMap();
 
 const initialization = new Promise((resolve, reject) => {
   resolveInitialization = resolve;
@@ -148,10 +160,217 @@ const sanitizeNarration = (text) => {
     .join("");
 };
 
+function ensureContinuousReaderControls() {
+  const toolbar = document.querySelector("[data-story-reader-toolbar]");
+  if (!toolbar) return null;
+  let controls = $("continuousReaderControls");
+  if (!controls) {
+    controls = document.createElement("div");
+    controls.id = "continuousReaderControls";
+    controls.className = "continuous-reader-controls";
+    controls.hidden = true;
+    const older = document.createElement("button");
+    older.type = "button";
+    older.className = "small ghost";
+    older.dataset.continuousReaderDirection = "older";
+    older.textContent = "Load older scenes";
+    const newer = document.createElement("button");
+    newer.type = "button";
+    newer.className = "small ghost";
+    newer.dataset.continuousReaderDirection = "newer";
+    newer.textContent = "Load newer scenes";
+    const status = document.createElement("span");
+    status.id = "continuousReaderStatus";
+    status.className = "continuous-reader-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    status.hidden = true;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "small ghost";
+    retry.dataset.continuousReaderRetry = "true";
+    retry.textContent = "Retry scene group";
+    retry.hidden = true;
+    controls.append(older, newer, status, retry);
+    toolbar.appendChild(controls);
+  }
+  return controls;
+}
+
+function initializeContinuousReader(options = {}) {
+  if (!state.campaignId) {
+    state.continuousReader = null;
+    return null;
+  }
+  const bootstrap = {
+    scope: { campaignId: state.campaignId, loadEpoch: campaignLoadSequence },
+    residentTurns: state.turns,
+    ...(options.selectedReadIdentity !== undefined
+      ? { selectedReadIdentity: options.selectedReadIdentity }
+      : {}),
+    ...(options.selectedTurn ? {
+      selectedTurn: { campaignId: state.campaignId, turn: options.selectedTurn }
+    } : {})
+  };
+  const initialized = createStoryContinuousReaderState(bootstrap);
+  state.continuousReader = initialized.status === "ready" ? initialized.state : null;
+  return state.continuousReader;
+}
+
+function continuousReaderStatusText(readerState = state.continuousReader) {
+  if (!readerState) return "";
+  if (readerState.status === "loading") return "Loading scene group…";
+  if (readerState.status === "error") {
+    return CONTINUOUS_READER_FAILURE_COPY[readerState.failureKind] || CONTINUOUS_READER_FAILURE_COPY.request;
+  }
+  return "";
+}
+
+function syncContinuousReaderControls() {
+  const controls = ensureContinuousReaderControls();
+  if (!controls) return;
+  const readerState = state.continuousReader;
+  const isVisible = Boolean(state.user?.settings?.continuousReading && state.campaignLoaded && state.turns.length);
+  controls.hidden = !isVisible;
+  controls.classList.toggle("hidden", !isVisible);
+  const pending = readerState?.status === "loading";
+  for (const button of controls.querySelectorAll("[data-continuous-reader-direction]")) {
+    const direction = button.dataset.continuousReaderDirection;
+    button.disabled = !isVisible || pending || readerState?.status === "error"
+      || readerState?.edgeAvailability?.[direction] === false;
+  }
+  const status = $("continuousReaderStatus");
+  const statusText = continuousReaderStatusText(readerState);
+  if (status) {
+    status.textContent = statusText;
+    status.hidden = !statusText;
+  }
+  const retry = controls.querySelector("[data-continuous-reader-retry]");
+  if (retry) retry.hidden = !isVisible || readerState?.status !== "error";
+}
+
+function continuousReaderFailureKind(error) {
+  const statusCode = Number(error?.statusCode ?? error?.status);
+  const domainCode = error?.domainCode ?? error?.code;
+  if (statusCode === 409 && domainCode === "reader_history_changed") return "history-changed";
+  if (statusCode === 409 && domainCode === "reader_anchor_changed") return "anchor-changed";
+  if (error?.name === "ApiContractError" || error?.name === "ZodError") return "protocol";
+  return "request";
+}
+
+function captureContinuousReaderAnchor(request) {
+  const turnNumber = request.apiRequest.anchorTurnNumber;
+  const turnId = request.apiRequest.anchorTurnId;
+  const scene = $(`scene-${turnNumber}`);
+  if (!scene || scene.dataset.turnId !== turnId) return null;
+  return { turnNumber, turnId, top: scene.getBoundingClientRect().top };
+}
+
+function restoreContinuousReaderAnchor(anchor) {
+  if (!anchor) return;
+  window.requestAnimationFrame(() => {
+    const scene = $(`scene-${anchor.turnNumber}`);
+    if (!scene || scene.dataset.turnId !== anchor.turnId) return;
+    const difference = scene.getBoundingClientRect().top - anchor.top;
+    if (Math.abs(difference) > 0.5) {
+      window.scrollTo({ top: window.scrollY + difference, behavior: "auto" });
+    }
+  });
+}
+
+function continuousReaderRequestIsCurrent(request) {
+  return state.continuousReader?.pendingRequest === request
+    && state.continuousReader.scope.campaignId === request.campaignId
+    && state.continuousReader.scope.loadEpoch === request.loadEpoch
+    && state.campaignId === request.campaignId
+    && campaignLoadSequence === request.loadEpoch;
+}
+
+async function executeContinuousReaderRequest(request, anchor) {
+  const controller = new AbortController();
+  continuousReaderAbortController?.abort();
+  continuousReaderAbortController = controller;
+  try {
+    const response = await readerHistoryApi.getSceneWindow(request.campaignId, request.apiRequest, controller.signal);
+    if (!continuousReaderRequestIsCurrent(request)) return false;
+    state.continuousReader = settleStoryContinuousReaderResponse(state.continuousReader, request, response);
+    if (state.continuousReader.status === "idle") {
+      renderAllScenes({ autoScroll: false });
+      restoreContinuousReaderAnchor(anchor);
+      updateStatusBar();
+      return true;
+    }
+    syncContinuousReaderControls();
+    return false;
+  } catch (error) {
+    if (!continuousReaderRequestIsCurrent(request)) return false;
+    state.continuousReader = settleStoryContinuousReaderFailure(
+      state.continuousReader,
+      request,
+      continuousReaderFailureKind(error)
+    );
+    syncContinuousReaderControls();
+    return false;
+  } finally {
+    if (continuousReaderAbortController === controller) continuousReaderAbortController = null;
+  }
+}
+
+async function loadContinuousReaderGroup(direction) {
+  const readerState = state.continuousReader;
+  if (!state.user?.settings?.continuousReading || !readerState) return false;
+  const started = beginStoryContinuousReaderGroup(readerState, direction);
+  if (!started.request) return false;
+  const anchor = captureContinuousReaderAnchor(started.request);
+  state.continuousReader = started.state;
+  syncContinuousReaderControls();
+  return executeContinuousReaderRequest(started.request, anchor);
+}
+
+async function retryContinuousReaderGroup() {
+  const readerState = state.continuousReader;
+  if (!readerState) return false;
+  const started = beginStoryContinuousReaderRetry(readerState);
+  if (!started.request && !started.anchorRefreshRequest) return false;
+  const failedRequest = started.request || started.anchorRefreshRequest.failedRequest;
+  const anchor = captureContinuousReaderAnchor(failedRequest);
+  state.continuousReader = started.state;
+  syncContinuousReaderControls();
+  if (started.request) return executeContinuousReaderRequest(started.request, anchor);
+
+  const refresh = started.anchorRefreshRequest;
+  const controller = new AbortController();
+  continuousReaderAbortController?.abort();
+  continuousReaderAbortController = controller;
+  try {
+    const response = await readerHistoryApi.getTurn(refresh.campaignId, refresh.turnNumber, controller.signal);
+    if (state.continuousReader?.pendingRequest !== refresh || state.campaignId !== refresh.campaignId
+      || campaignLoadSequence !== refresh.loadEpoch) return false;
+    const refreshed = settleStoryContinuousReaderAnchorRefresh(state.continuousReader, refresh, response);
+    state.continuousReader = refreshed.state;
+    if (refreshed.request) return executeContinuousReaderRequest(refreshed.request, anchor);
+    syncContinuousReaderControls();
+    return false;
+  } catch {
+    if (state.continuousReader?.pendingRequest !== refresh) return false;
+    state.continuousReader = settleStoryContinuousReaderAnchorRefreshFailure(state.continuousReader, refresh);
+    syncContinuousReaderControls();
+    return false;
+  } finally {
+    if (continuousReaderAbortController === controller) continuousReaderAbortController = null;
+  }
+}
+
 // ── Constants ──────────────────────────────────────────────────
 const IMAGE_POLL_MS = 5000;
 const TOAST_DURATION = 3500;
 const STORY_HISTORY_SEARCH_DEBOUNCE_MS = 250;
+const CONTINUOUS_READER_FAILURE_COPY = Object.freeze({
+  request: "Couldn't load this scene group. Try again.",
+  "history-changed": "Story history changed. Retry this scene group.",
+  "anchor-changed": "This scene was replaced. Refresh the scene group to continue.",
+  protocol: "Couldn't use this scene group. Try again."
+});
 
 // ── State ──────────────────────────────────────────────────────
 const state = {
@@ -187,6 +406,7 @@ const state = {
   illustrationSegments: [],
   illustrationError: null,
   readerPinnedTurn: null,
+  continuousReader: null,
   readerResumePosition: null,
   imagePollEpoch: 0,
   illustrationVariantIndexes: new Map(),
@@ -384,6 +604,7 @@ function fallBackFromReaderPosition(message) {
   state.readerResumePosition = null;
   state.viewTurnNumber = null;
   readerPositionChoicePending = false;
+  if (state.user?.settings?.continuousReading) initializeContinuousReader();
   hideReaderResumePrompt();
   showReaderPositionNotice(message);
   renderAllScenes();
@@ -468,6 +689,12 @@ async function restoreSavedReaderPosition(position, scope, loadSequence, positio
     }
     state.readerPinnedTurn = currentTurn ? null : turn;
     state.viewTurnNumber = position.turnNumber === latestTurnNumber(state.turns) ? null : position.turnNumber;
+    if (state.user?.settings?.continuousReading) {
+      initializeContinuousReader({
+        selectedReadIdentity: { turnNumber: position.turnNumber, id: position.turnId },
+        selectedTurn: currentTurn || turn
+      });
+    }
     hideReaderResumePrompt();
     renderAllScenes({ autoScroll: false });
     updateStatusBar();
@@ -510,7 +737,8 @@ function captureReaderPosition() {
   const turnNumber = Number(scene.dataset.turnNumber);
   const turn = state.readerPinnedTurn && Number(state.readerPinnedTurn.turnNumber) === turnNumber
     ? state.readerPinnedTurn
-    : state.turns.find((item) => Number(item.turnNumber) === turnNumber);
+    : state.turns.find((item) => Number(item.turnNumber) === turnNumber)
+      || state.continuousReader?.turns.find((item) => Number(item.turnNumber) === turnNumber);
   const turnId = turn?.id || turn?.turnId;
   if (!turnId || !Number.isInteger(turnNumber) || turnNumber < 1) return null;
   const inset = readerStickyInset();
@@ -889,6 +1117,10 @@ async function loadCampaign(campaignId, options = {}) {
   const loadEpoch = ++storyTurnWindowEpoch;
   const positionInteractionEpoch = readerPositionInteractionEpoch;
 
+  continuousReaderAbortController?.abort();
+  continuousReaderAbortController = null;
+  state.continuousReader = null;
+
   readerPositionLoadEpoch += 1;
   readerPositionChoicePending = true;
   state.readerPinnedTurn = null;
@@ -955,15 +1187,7 @@ async function loadCampaign(campaignId, options = {}) {
     document.title = `${name} — Infinite Quest`;
 
     state.viewTurnNumber = null;
-    if (state.user?.settings?.continuousReading && state.historyNextCursor) {
-      try {
-        await ensureCompleteTurnHistory();
-      } catch (error) {
-        if (!isCompleteHistorySuperseded(error)) {
-          toast(`Continuous reading is showing the loaded window: ${error.message}`);
-        }
-      }
-    }
+    if (state.user?.settings?.continuousReading) initializeContinuousReader();
     renderAllScenes({ autoScroll: options.autoScroll });
     updateStatusBar();
 
@@ -972,6 +1196,7 @@ async function loadCampaign(campaignId, options = {}) {
     recordActivity("system", "Campaign loaded", `${state.turns.length} turns loaded for "${name}".`);
     state.campaignLoaded = true;
     setStorySyncStatus("Story synced");
+    syncContinuousReaderControls();
     void offerSavedReaderPosition(campaignId, loadSequence, positionInteractionEpoch);
     if (!state.pendingGeneration && (state.generationRecovery?.status === "recoverable" || state.generationRecovery?.status === "failed")) {
       const guidance = generationRecoveryGuidance(state.generationRecovery.diagnostic);
@@ -1008,6 +1233,7 @@ async function loadCampaign(campaignId, options = {}) {
     state.runtimeState = null;
     state.campaignLoaded = false;
     state.turns = [];
+    state.continuousReader = null;
     state.pendingGeneration = null;
     state.generationRecovery = null;
     state.generationReview = null;
@@ -1101,6 +1327,7 @@ function renderScene(turn, index) {
   sceneDiv.className = "scene";
   sceneDiv.id = `scene-${turn.turnNumber}`;
   sceneDiv.dataset.turnNumber = turn.turnNumber;
+  sceneDiv.dataset.turnId = turn.id || turn.turnId || "";
 
   // Narration column
   let narrationHtml = "";
@@ -1189,6 +1416,7 @@ function renderScene(turn, index) {
   }
 
   sceneDiv.innerHTML = `<div class="scene-narration">${narrationHtml}</div>`;
+  continuousSceneSignatures.set(sceneDiv, JSON.stringify(turn));
   return sceneDiv;
 }
 
@@ -1489,19 +1717,64 @@ function renderStoryIllustration() {
   </div>`;
 }
 
+function renderContinuousSceneWindow(container, turns) {
+  for (const child of [...container.children]) {
+    if (!child.classList.contains("scene")) child.remove();
+  }
+  const existing = new Map([...container.querySelectorAll(":scope > .scene")].map((scene) => [
+    `${scene.dataset.turnNumber}:${scene.dataset.turnId}`,
+    scene
+  ]));
+  const focusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const focusedScene = focusedElement?.closest(".scene") || null;
+  let focusMustMove = false;
+  const retained = new Set();
+  for (let index = 0; index < turns.length; index += 1) {
+    const turn = turns[index];
+    const turnId = turn.id || turn.turnId || "";
+    const key = `${turn.turnNumber}:${turnId}`;
+    let scene = existing.get(key);
+    const nextScene = renderScene(turn, index);
+    if (scene) {
+      retained.add(scene);
+      if (continuousSceneSignatures.get(scene) !== continuousSceneSignatures.get(nextScene)) {
+        if (focusedScene === scene) focusMustMove = true;
+        for (const attribute of [...scene.attributes]) scene.removeAttribute(attribute.name);
+        for (const attribute of [...nextScene.attributes]) scene.setAttribute(attribute.name, attribute.value);
+        scene.replaceChildren(...nextScene.childNodes);
+        continuousSceneSignatures.set(scene, JSON.stringify(turn));
+      }
+    } else {
+      scene = nextScene;
+      retained.add(scene);
+    }
+    container.appendChild(scene);
+  }
+  for (const scene of existing.values()) {
+    if (!retained.has(scene)) {
+      if (focusedScene === scene) focusMustMove = true;
+      scene.remove();
+    }
+  }
+  if (focusMustMove) {
+    const older = document.querySelector('[data-continuous-reader-direction="older"]');
+    if (older instanceof HTMLButtonElement) older.focus({ preventScroll: true });
+  }
+}
+
 function renderAllScenes(options = {}) {
   const container = $("storyArea");
   if (!container) return;
 
-  container.innerHTML = "";
-
   if (state.generationDisplayActive) {
+    container.replaceChildren();
     renderStreamingPreview("", state.pendingGeneration?.action || state.generationDisplayAction);
     renderStoryIllustration();
     return;
   }
 
   if (state.turns.length === 0) {
+    container.replaceChildren();
     const worldName = state.world?.title || state.campaign?.title || "";
     const character = state.world?.character || state.campaign?.character || "";
     const premise = state.world?.premise || state.campaign?.premise || "";
@@ -1520,15 +1793,15 @@ function renderAllScenes(options = {}) {
 
   const isContinuous = Boolean(state.user?.settings?.continuousReading);
   if (isContinuous) {
-    const pinnedIsInWindow = state.readerPinnedTurn
-      && state.turns.some((turn) => (turn.id || turn.turnId) === (state.readerPinnedTurn?.id || state.readerPinnedTurn?.turnId));
-    const visibleTurns = state.readerPinnedTurn && !pinnedIsInWindow
-      ? [...state.turns, state.readerPinnedTurn].sort((left, right) => Number(left.turnNumber) - Number(right.turnNumber))
-      : state.turns;
-    for (let i = 0; i < visibleTurns.length; i++) {
-      container.appendChild(renderScene(visibleTurns[i], i));
-    }
+    if (!state.continuousReader) initializeContinuousReader();
+    const visibleTurns = state.continuousReader?.turns?.length
+      ? state.continuousReader.turns
+      : state.readerPinnedTurn
+        ? [state.readerPinnedTurn]
+        : state.turns.slice(-STORY_CONTINUOUS_READER_WINDOW_LIMIT);
+    renderContinuousSceneWindow(container, visibleTurns);
   } else {
+    container.replaceChildren();
     const targetIndex = viewedTurnIndex();
     if (state.turns[targetIndex]) {
       container.appendChild(renderScene(state.turns[targetIndex], targetIndex));
@@ -1539,6 +1812,7 @@ function renderAllScenes(options = {}) {
   }
 
   renderStoryIllustration();
+  syncContinuousReaderControls();
   if (options.autoScroll !== false) scrollToView();
 }
 
@@ -2902,6 +3176,7 @@ function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {
   if (!preview || !result.resultTurnId) return false;
 
   const completedTurn = { ...result, id: result.resultTurnId };
+  const wasContinuous = Boolean(state.user?.settings?.continuousReading);
   const acceptedTurns = state.turns
     .filter((turn) => turn.id !== result.resultTurnId && Number(turn.turnNumber) !== Number(result.turnNumber))
     .concat(completedTurn)
@@ -2910,8 +3185,22 @@ function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {
   const completedTurnIndex = state.turns.findIndex((turn) => turn.id === result.resultTurnId);
   if (completedTurnIndex < 0) return false;
 
-  state.viewTurnNumber = null;
-  preview.replaceWith(renderScene(completedTurn, completedTurnIndex));
+  if (!preserveViewport) state.viewTurnNumber = null;
+  if (wasContinuous) {
+    if (state.continuousReader) {
+      state.continuousReader = reconcileStoryAcceptedSceneReplacement(state.continuousReader, completedTurn);
+    }
+    if (!preserveViewport) {
+      initializeContinuousReader({
+        selectedReadIdentity: { turnNumber: Number(completedTurn.turnNumber), id: completedTurn.id },
+        selectedTurn: completedTurn
+      });
+    }
+    preview.remove();
+    renderAllScenes({ autoScroll: false });
+  } else {
+    preview.replaceWith(renderScene(completedTurn, completedTurnIndex));
+  }
   state.streamingAutoFollow = true;
   state.streamingExpectedScrollY = null;
   renderStoryIllustration();
@@ -3144,6 +3433,7 @@ function updateStatusBar() {
     const total = Math.max(Number(state.campaign?.activeTurnNumber || 0), latestTurnNumber(state.turns));
     readerTurnCount.textContent = total > 0 ? `Turn ${currentViewTurnNumber()} of ${total}` : "No turns yet";
   }
+  syncContinuousReaderControls();
   syncInputState();
   syncReaderResumePrompt();
 }
@@ -3164,7 +3454,20 @@ function navigateToTurn(turnNumber) {
   if (!isContinuous) {
     renderAllScenes();
   } else {
-    renderStoryIllustration();
+    const targetTurn = state.turns.find((turn) => Number(turn.turnNumber) === target) || null;
+    const turnId = targetTurn?.id || targetTurn?.turnId;
+    const resident = turnId && state.continuousReader?.turns?.some((turn) => turn.turnNumber === target && turn.id === turnId);
+    if (target === latest || !resident) {
+      initializeContinuousReader(targetTurn ? {
+        selectedReadIdentity: { turnNumber: Number(targetTurn.turnNumber), id: turnId },
+        selectedTurn: targetTurn
+      } : {});
+      renderAllScenes({ autoScroll: false });
+    } else if (state.continuousReader) {
+      state.continuousReader = selectStoryReadIdentity(state.continuousReader, { turnNumber: target, id: turnId });
+      renderStoryIllustration();
+      syncContinuousReaderControls();
+    }
   }
   updateStatusBar();
   scrollToView();
@@ -4034,7 +4337,7 @@ async function saveUserProfile() {
     : defaultTurnStyle?.value === "flexible_scene" ? "flexible_scene" : "flexible_action";
   const readerPreferences = readerPreferencesFromControls();
   const wasContinuousReading = Boolean(state.user?.settings?.continuousReading);
-  let completeHistoryError = null;
+  const readerPositionBeforeSave = wasContinuousReading !== continuousReading ? captureReaderPosition() : null;
 
   if (!displayName) {
     toast("Display name is required.", 2600);
@@ -4067,21 +4370,39 @@ async function saveUserProfile() {
       }
     }
     applyReaderPreferences(state.user?.settings?.readerPreferences ?? readerPreferences);
-    if (!wasContinuousReading && continuousReading && state.historyNextCursor) {
-      try {
-        await ensureCompleteTurnHistory();
-      } catch (error) {
-        if (!isCompleteHistorySuperseded(error)) {
-          completeHistoryError = error;
-          toast(`Continuous reading is showing the loaded window: ${error.message}`);
-        }
+    if (wasContinuousReading !== continuousReading) {
+      const position = readerPositionBeforeSave?.position;
+      const selectedTurnNumber = position?.turnNumber ?? currentViewTurnNumber();
+      const selectedTurnId = position?.turnId;
+      const selectedTurn = state.readerPinnedTurn
+        && Number(state.readerPinnedTurn.turnNumber) === selectedTurnNumber
+        && (!selectedTurnId || (state.readerPinnedTurn.id || state.readerPinnedTurn.turnId) === selectedTurnId)
+        ? state.readerPinnedTurn
+        : state.turns.find((turn) => Number(turn.turnNumber) === selectedTurnNumber
+          && (!selectedTurnId || (turn.id || turn.turnId) === selectedTurnId))
+          || state.continuousReader?.turns.find((turn) => Number(turn.turnNumber) === selectedTurnNumber
+            && (!selectedTurnId || (turn.id || turn.turnId) === selectedTurnId))
+          || null;
+      state.viewTurnNumber = selectedTurnNumber === latestTurnNumber(state.turns) ? null : selectedTurnNumber;
+      state.readerPinnedTurn = selectedTurn && !state.turns.some((turn) => (turn.id || turn.turnId) === (selectedTurn.id || selectedTurn.turnId))
+        ? selectedTurn
+        : null;
+      if (continuousReading) {
+        initializeContinuousReader(selectedTurn ? {
+          selectedReadIdentity: { turnNumber: selectedTurnNumber, id: selectedTurn.id || selectedTurn.turnId },
+          selectedTurn
+        } : {});
       }
     }
-    renderAllScenes();
+    renderAllScenes({ autoScroll: wasContinuousReading !== continuousReading ? false : undefined });
+    if (wasContinuousReading !== continuousReading && readerPositionBeforeSave?.position) {
+      restoreReaderSceneOffset(readerPositionBeforeSave.position.turnNumber, readerPositionBeforeSave.position.offsetRatio);
+      scheduleReaderPositionSave();
+    }
     updateStatusBar();
     const dlg = $("userProfileDialog");
     if (dlg && dlg.close) dlg.close();
-    if (!completeHistoryError) toast("Profile saved.", 2600);
+    toast("Profile saved.", 2600);
   } catch (err) {
     if (profileStatus) profileStatus.textContent = `Profile could not be saved: ${err.message || String(err)}`;
     toast("Failed to save profile: " + err.message, 3500);
@@ -4589,6 +4910,12 @@ function jumpToSelectedHistoryTurn() {
     hideReaderResumePrompt();
     clearResponseEditSession();
     state.viewTurnNumber = turnNumber;
+    if (state.user?.settings?.continuousReading) {
+      initializeContinuousReader({
+        selectedReadIdentity: { turnNumber, id: selectedTurn.id || selectedTurn.turnId },
+        selectedTurn
+      });
+    }
     renderAllScenes({ autoScroll: false });
     updateStatusBar();
     scrollToView();
@@ -5279,6 +5606,15 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnReaderHistory) btnReaderHistory.addEventListener("click", openTurnHistoryModal);
   const btnReaderJumpLatest = $("btnReaderJumpLatest");
   if (btnReaderJumpLatest) btnReaderJumpLatest.addEventListener("click", () => navigateToTurn(null));
+  const continuousReaderControls = ensureContinuousReaderControls();
+  continuousReaderControls?.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("button") : null;
+    if (!button) return;
+    const direction = button.dataset.continuousReaderDirection;
+    if (direction === "older" || direction === "newer") void loadContinuousReaderGroup(direction);
+    else if (button.hasAttribute("data-continuous-reader-retry")) void retryContinuousReaderGroup();
+  });
+  syncContinuousReaderControls();
   const btnResumeReading = $("btnResumeReading");
   if (btnResumeReading) btnResumeReading.addEventListener("click", () => { void resumeSavedReaderPosition(); });
   const btnUndo = $("btnUndo");

@@ -185,6 +185,20 @@ const makeTurns = (first: number, last: number) => Array.from(
   })
 );
 
+const makeAcceptedTurns = (first: number, last: number) => makeTurns(first, last).map((turn) => ({
+  ...turn,
+  id: `00000000-0000-4000-8000-${String(turn.turnNumber).padStart(12, "0")}`,
+  inputMode: "action",
+  inputModeSource: "explicit",
+  choices: [],
+  customActionSuggestion: "",
+  imagePrompt: "",
+  imageUrl: null,
+  acceptedAt: "2026-10-03T12:00:00.000Z",
+  chronicleRetrieval: null,
+  reportedCost: null
+}));
+
 function selectOption(select: HTMLSelectElement, value: string) {
   select.querySelectorAll("option").forEach((option) => { option.selected = false; });
   const option = select.querySelector(`option[value="${value}"]`) as HTMLOptionElement | null;
@@ -2551,7 +2565,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     }
   });
 
-  it("loads all pages before rendering continuous reading", async () => {
+  it("renders only the latest ten resident scenes without draining cursor pages", async () => {
     const fetchTurns = vi.fn().mockResolvedValue({
       campaignId: "campaign-1",
       turns: makeTurns(1, 50),
@@ -2559,17 +2573,17 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     });
     try {
       const { document } = await bootLegacyStory({
-        turns: makeTurns(51, 100),
+        turns: makeAcceptedTurns(51, 100),
         nextCursor: "before-51",
         continuousReading: true,
         fetchTurns
       });
       await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(fetchTurns).toHaveBeenCalledTimes(1);
+      expect(fetchTurns).not.toHaveBeenCalled();
       const scenes = document.querySelectorAll<HTMLElement>("#storyContainer .scene");
-      expect(scenes).toHaveLength(100);
-      expect(scenes[0]?.id).toBe("scene-1");
-      expect(scenes[99]?.id).toBe("scene-100");
+      expect(scenes).toHaveLength(10);
+      expect(scenes[0]?.id).toBe("scene-91");
+      expect(scenes[9]?.id).toBe("scene-100");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2844,22 +2858,22 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     }
   });
 
-  it("retries complete history only after continuous reading is explicitly re-enabled", async () => {
+  it("does not retry or drain older history when continuous reading is toggled", async () => {
     const fetchTurns = vi.fn()
       .mockRejectedValueOnce(new Error("first page failed"))
       .mockResolvedValueOnce({ campaignId: "campaign-1", turns: makeTurns(1, 50), nextCursor: null });
     try {
       const { document, window } = await bootLegacyStory({
-        turns: makeTurns(51, 100),
+        turns: makeAcceptedTurns(51, 100),
         nextCursor: "before-51",
         continuousReading: true,
         fetchTurns
       });
 
-      await vi.waitFor(() => expect(fetchTurns).toHaveBeenCalledTimes(1), { timeout: 5_000 });
       await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fetchTurns).not.toHaveBeenCalled();
+      expect(document.querySelectorAll("#storyArea .scene")).toHaveLength(10);
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      expect(fetchTurns).toHaveBeenCalledTimes(1);
       expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(50);
 
       document.getElementById("btnOpenUserProfile")?.dispatchEvent(new window.Event("click", { bubbles: true }));
@@ -2871,56 +2885,47 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       const reenabledContinuousReading = document.getElementById("userProfileContinuousReading") as HTMLInputElement;
       reenabledContinuousReading.checked = true;
       document.getElementById("btnSaveUserProfile")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      await vi.waitFor(() => expect(fetchTurns).toHaveBeenCalledTimes(2), { timeout: 5_000 });
-      await vi.waitFor(() => expect(document.querySelectorAll("#storyContainer .scene")).toHaveLength(100), { timeout: 5_000 });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fetchTurns).not.toHaveBeenCalled();
       const scenes = document.querySelectorAll<HTMLElement>("#storyContainer .scene");
-      expect(scenes[0]?.id).toBe("scene-1");
-      expect(scenes[99]?.id).toBe("scene-100");
-      expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("All 100 turns loaded");
+      expect(scenes).toHaveLength(10);
+      expect(scenes[0]?.id).toBe("scene-91");
+      expect(scenes[9]?.id).toBe("scene-100");
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("keeps History bounded after continuous-reading's initial complete-load failure", async () => {
+  it("keeps History bounded and does not drain its cursor when continuous mode opens History", async () => {
     const fetchTurns = vi.fn()
       .mockRejectedValueOnce(new Error("initial continuous history failed"))
       .mockResolvedValueOnce({ campaignId: "campaign-1", turns: makeTurns(1, 50), nextCursor: null });
     try {
       const { document, window } = await bootLegacyStory({
-        turns: makeTurns(51, 100),
+        turns: makeAcceptedTurns(51, 100),
         nextCursor: "before-51",
         continuousReading: true,
         fetchTurns
       });
 
-      let scenes = document.querySelectorAll<HTMLElement>("#storyContainer .scene");
-      expect(scenes).toHaveLength(50);
-      expect(scenes[0]?.id).toBe("scene-51");
-      expect(scenes[49]?.id).toBe("scene-100");
-
-      await vi.waitFor(() => expect(fetchTurns).toHaveBeenCalledTimes(1), { timeout: 5_000 });
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      scenes = document.querySelectorAll<HTMLElement>("#storyContainer .scene");
-      expect(fetchTurns).toHaveBeenCalledTimes(1);
-      expect(scenes).toHaveLength(50);
-      expect(scenes[0]?.id).toBe("scene-51");
-      expect(scenes[49]?.id).toBe("scene-100");
+      const scenes = document.querySelectorAll<HTMLElement>("#storyContainer .scene");
+      expect(fetchTurns).not.toHaveBeenCalled();
+      expect(scenes).toHaveLength(10);
+      expect(scenes[0]?.id).toBe("scene-91");
+      expect(scenes[9]?.id).toBe("scene-100");
       expect(document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card")).toHaveLength(50);
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("loads complete history before rendering newly enabled continuous reading", async () => {
-    let resolvePage!: (page: Record<string, unknown>) => void;
-    const fetchTurns = vi.fn(() => new Promise((resolve) => { resolvePage = resolve; }));
+  it("enables continuous reading from its resident window without requesting older pages", async () => {
+    const fetchTurns = vi.fn();
     try {
       const { document, window } = await bootLegacyStory({
-        turns: makeTurns(51, 100),
+        turns: makeAcceptedTurns(51, 100),
         nextCursor: "before-51",
         fetchTurns
       });
@@ -2930,25 +2935,21 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       document.getElementById("btnSaveUserProfile")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      expect(document.querySelectorAll("#storyContainer .scene")).toHaveLength(1);
-      resolvePage({ campaignId: "campaign-1", turns: makeTurns(1, 50), nextCursor: null });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
       const scenes = document.querySelectorAll<HTMLElement>("#storyContainer .scene");
-      expect(scenes).toHaveLength(100);
-      expect(scenes[0]?.id).toBe("scene-1");
-      expect(scenes[99]?.id).toBe("scene-100");
+      expect(fetchTurns).not.toHaveBeenCalled();
+      expect(scenes).toHaveLength(10);
+      expect(scenes[0]?.id).toBe("scene-91");
+      expect(scenes[9]?.id).toBe("scene-100");
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("keeps newly enabled continuous reading on a coherent bounded window when history fails", async () => {
+  it("does not surface errors from unused cursor paging while enabling continuous reading", async () => {
     const fetchTurns = vi.fn().mockRejectedValue(new Error("profile history failed"));
     try {
       const { document, window } = await bootLegacyStory({
-        turns: makeTurns(51, 100),
+        turns: makeAcceptedTurns(51, 100),
         nextCursor: "before-51",
         fetchTurns
       });
@@ -2961,10 +2962,11 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
 
       const scenes = document.querySelectorAll<HTMLElement>("#storyContainer .scene");
       expect(continuousReading.checked).toBe(true);
-      expect(scenes).toHaveLength(50);
-      expect(scenes[0]?.id).toBe("scene-51");
-      expect(scenes[49]?.id).toBe("scene-100");
-      expect(document.getElementById("toast")?.textContent).toContain("profile history failed");
+      expect(fetchTurns).not.toHaveBeenCalled();
+      expect(scenes).toHaveLength(10);
+      expect(scenes[0]?.id).toBe("scene-91");
+      expect(scenes[9]?.id).toBe("scene-100");
+      expect(document.getElementById("toast")?.textContent).not.toContain("profile history failed");
     } finally {
       vi.unstubAllGlobals();
     }
