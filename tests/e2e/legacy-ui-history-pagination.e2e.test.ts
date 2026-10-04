@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
@@ -50,6 +50,31 @@ function pageTurns(page: Page): Promise<number[]> {
 async function openHistory(page: Page): Promise<void> {
   await page.locator("[data-story-reader-toolbar]").getByRole("button", { name: "History" }).click();
   await expect(page.locator("#turnHistoryDialog")).toHaveAttribute("open", "");
+}
+
+async function selectedHistoryCardGeometry(page: Page, turnNumber: number): Promise<{
+  readonly turnNumber: number;
+  readonly fullyVisible: boolean;
+  readonly scrollTop: number;
+  readonly clientHeight: number;
+  readonly scrollHeight: number;
+}> {
+  return page.evaluate((selectedTurnNumber) => {
+    const scroller = document.querySelector<HTMLElement>("#turnHistoryDialog .dialog-scroll");
+    const card = document.querySelector<HTMLElement>(`#turnHistoryDialog .history-card[aria-pressed="true"][data-turn-number="${selectedTurnNumber}"]`);
+    if (!scroller || !card) throw new Error(`Missing History scroller or selected Turn ${selectedTurnNumber}.`);
+    const scrollerRect = scroller.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    const viewportTop = scrollerRect.top + scroller.clientTop;
+    const viewportBottom = viewportTop + scroller.clientHeight;
+    return {
+      turnNumber: Number(card.dataset.turnNumber),
+      fullyVisible: cardRect.top >= viewportTop && cardRect.bottom <= viewportBottom,
+      scrollTop: scroller.scrollTop,
+      clientHeight: scroller.clientHeight,
+      scrollHeight: scroller.scrollHeight
+    };
+  }, turnNumber);
 }
 
 async function traverseHistory(page: Page, testInfo: import("@playwright/test").TestInfo, turnCount: number): Promise<void> {
@@ -204,5 +229,74 @@ test("history disclosure keyboard activation is separate from turn selection and
   await page.keyboard.press("Enter");
   await expect(card).toHaveAttribute("aria-pressed", "true");
   expect(instrumentation.requests.filter(request => request.path.endsWith("/state/inspection"))).toHaveLength(0);
+  expect(await page.locator("#turnHistoryModalList .history-card, #turnHistoryPreviewCard .history-card").count()).toBeLessThanOrEqual(50);
+});
+
+test("History reveals the selected card on open, reopen, and explicit selection", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });
+  await installLegacyUiFixture(page, fixture);
+  await prepareStoryPage(page, fixture.campaignId);
+  await page.goto(`${origin}/story/${fixture.campaignId}`);
+  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 317 of 317");
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openHistory(page);
+
+  const selected = page.locator('#turnHistoryModalList .history-card[data-turn-number="317"][aria-pressed="true"]');
+  const desktopGeometry = await selectedHistoryCardGeometry(page, 317);
+  await mkdir(evidenceDirectory, { recursive: true });
+  await page.screenshot({ path: `${evidenceDirectory}/history-selected-desktop.png`, fullPage: false });
+  await writeFile(`${evidenceDirectory}/history-selected-desktop-geometry.json`, JSON.stringify(desktopGeometry, null, 2));
+  await expect(selected).toBeVisible();
+  expect(desktopGeometry.scrollHeight).toBeGreaterThan(desktopGeometry.clientHeight);
+  expect(desktopGeometry.fullyVisible).toBe(true);
+  expect(desktopGeometry.scrollTop).toBeGreaterThan(0);
+
+  await page.locator("#btnTurnHistoryDone").click();
+  await expect(page.locator("#turnHistoryDialog")).not.toHaveAttribute("open", "");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openHistory(page);
+  const mobileGeometry = await selectedHistoryCardGeometry(page, 317);
+  await page.screenshot({ path: `${evidenceDirectory}/history-selected-mobile.png`, fullPage: false });
+  await writeFile(`${evidenceDirectory}/history-selected-mobile-geometry.json`, JSON.stringify(mobileGeometry, null, 2));
+  expect(mobileGeometry.fullyVisible).toBe(true);
+
+  const offscreenCard = page.locator('#turnHistoryModalList .history-card[data-turn-number="268"]');
+  await offscreenCard.evaluate(element => element.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  await expect(offscreenCard).toHaveAttribute("aria-pressed", "true");
+  const explicitlySelectedGeometry = await selectedHistoryCardGeometry(page, 268);
+  await writeFile(`${evidenceDirectory}/history-explicit-selection-geometry.json`, JSON.stringify(explicitlySelectedGeometry, null, 2));
+  expect(explicitlySelectedGeometry.fullyVisible).toBe(true);
+});
+
+test("History keeps native scrolling and pages only on explicit Older/Newer without changing the scene", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });
+  const instrumentation = await installLegacyUiFixture(page, fixture);
+  await prepareStoryPage(page, fixture.campaignId);
+  await page.goto(`${origin}/story/${fixture.campaignId}`);
+  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 317 of 317");
+  await openHistory(page);
+
+  const scroller = page.locator("#turnHistoryDialog .dialog-scroll");
+  const initialScrollTop = await scroller.evaluate(element => element.scrollTop);
+  const scrollBox = await scroller.boundingBox();
+  if (!scrollBox) throw new Error("History scroll container has no rendered box.");
+  await page.mouse.move(scrollBox.x + scrollBox.width / 2, scrollBox.y + scrollBox.height / 2);
+  await page.mouse.wheel(0, 180);
+  await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBeGreaterThan(initialScrollTop);
+
+  const pageBeforeOlder = await pageTurns(page);
+  const turnBeforePaging = await page.locator("#readerTurnCount").textContent();
+  const turnsPath = `/api/v1/campaigns/${fixture.campaignId}/turns`;
+  await page.locator("#btnTurnHistoryOlder").click();
+  await expect.poll(async () => JSON.stringify(await pageTurns(page))).not.toBe(JSON.stringify(pageBeforeOlder));
+  expect(await page.locator("#readerTurnCount")).toHaveText(turnBeforePaging ?? "");
+  expect(instrumentation.requests.filter(request => request.path === turnsPath)).toHaveLength(1);
+  const olderPage = await pageTurns(page);
+
+  await page.locator("#btnTurnHistoryNewer").click();
+  await expect.poll(async () => JSON.stringify(await pageTurns(page))).toBe(JSON.stringify(pageBeforeOlder));
+  expect(await page.locator("#readerTurnCount")).toHaveText(turnBeforePaging ?? "");
+  expect(await pageTurns(page)).not.toEqual(olderPage);
+  expect(instrumentation.requests.filter(request => request.path === turnsPath)).toHaveLength(1);
   expect(await page.locator("#turnHistoryModalList .history-card, #turnHistoryPreviewCard .history-card").count()).toBeLessThanOrEqual(50);
 });

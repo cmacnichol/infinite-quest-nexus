@@ -2012,6 +2012,38 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyCss).toContain('.turn-input-mode-pill.scene {');
   });
 
+  it("renders the canonical accepted date semantically on loaded History cards", async () => {
+    try {
+      const acceptedAt = "2026-10-03T12:34:56.000Z";
+      const turns = makeTurns(1, 2).map(turn => ({ ...turn, acceptedAt }));
+      const { document, window } = await bootLegacyStory({ turns });
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+
+      const card = document.querySelector<HTMLElement>('#turnHistoryModalList .history-card[data-turn-number="2"]');
+      const time = card?.querySelector("time");
+      expect(time?.getAttribute("datetime")).toBe(acceptedAt);
+      expect(time?.textContent?.trim()).toContain("2026");
+      expect(time?.textContent).not.toContain("Invalid Date");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("omits a malformed accepted date rather than showing invalid or raw date text", async () => {
+    try {
+      const turns = makeTurns(1, 2).map(turn => ({ ...turn, acceptedAt: "not-a-public-timestamp" }));
+      const { document, window } = await bootLegacyStory({ turns });
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+
+      const card = document.querySelector<HTMLElement>('#turnHistoryModalList .history-card[data-turn-number="2"]');
+      expect(card?.querySelector("time")).toBeNull();
+      expect(card?.textContent).not.toContain("Invalid Date");
+      expect(card?.textContent).not.toContain("not-a-public-timestamp");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("renders recorded and Unknown Chronicle retrieval details as escaped, labelled turn-history metadata", () => {
     const markup = (storyModule as Record<string, unknown>).chronicleRetrievalHistoryMarkup;
     expect(typeof markup).toBe("function");
@@ -2126,14 +2158,15 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   });
 
   it("opens on the loaded recent page and fetches one older page only when requested", async () => {
+    const acceptedAt = "2026-10-03T12:34:56.000Z";
     const fetchTurns = vi.fn().mockResolvedValue({
       campaignId: "campaign-1",
-      turns: makeTurns(1, 50),
+      turns: makeTurns(1, 50).map(turn => ({ ...turn, acceptedAt })),
       nextCursor: null
     });
     try {
       const { document, window } = await bootLegacyStory({
-        turns: makeTurns(51, 100),
+        turns: makeTurns(51, 100).map(turn => ({ ...turn, acceptedAt })),
         nextCursor: "before-51",
         fetchTurns
       });
@@ -2157,6 +2190,10 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       expect(pageCards).toHaveLength(49);
       expect(pageCards[0]?.textContent).toContain("Turn 2");
       expect(previewCard?.textContent).toContain("Turn 1");
+      expect({
+        loadedDateTime: cards[0]?.querySelector("time")?.getAttribute("datetime"),
+        pinnedDateTime: previewCard?.querySelector("time")?.getAttribute("datetime")
+      }).toEqual({ loadedDateTime: acceptedAt, pinnedDateTime: acceptedAt });
       expect(olderCards[49]?.textContent).toContain("Turn 50");
       expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("Showing turns 2–50");
     } finally {

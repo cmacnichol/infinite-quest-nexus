@@ -190,7 +190,10 @@ test("legacy dashboard and Story baseline records requests, zero writes, history
     nativeLongTaskSupported: await page.evaluate(() => (window as typeof window & { __legacyUiNativeLongTaskSupported?: boolean }).__legacyUiNativeLongTaskSupported ?? false),
     apiResponseBytes: instrumentation.requests.reduce((sum, request) => sum + request.responseBytes, 0)
   };
-  await testInfo.attach("legacy-ui-baseline.json", { body: JSON.stringify(baseline, null, 2), contentType: "application/json" });
+  const baselinePath = testInfo.outputPath("legacy-ui-baseline.json");
+  const baselineJson = JSON.stringify(baseline, null, 2);
+  await writeFile(baselinePath, baselineJson);
+  await testInfo.attach("legacy-ui-baseline.json", { path: baselinePath, contentType: "application/json" });
   expect(dashboardDomNodes).toBeGreaterThan(0);
   expect(storyDomNodes).toBeGreaterThan(0);
   expect(historyDomNodes).toBeGreaterThan(0);

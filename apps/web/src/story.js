@@ -4081,6 +4081,7 @@ async function openTurnHistoryModal() {
     initializeStoryHistoryWindow();
   }
   renderStoryHistoryWindow();
+  revealSelectedHistoryCard();
 }
 
 function initializeStoryHistoryWindow(options = {}) {
@@ -4142,13 +4143,26 @@ function historyCard(turn, { selected = false, preview = false } = {}) {
   title.className = "history-card-title";
   title.textContent = `${Number(turn.turnNumber) === currentViewTurnNumber() ? "◆ " : ""}Turn ${turn.turnNumber}`;
   heading.appendChild(title);
+  const metadata = document.createElement("span");
+  metadata.className = "history-card-meta";
   const inputMode = turn.inputMode === "scene" ? "scene" : "action";
   const inputModeLabel = inputMode === "scene" ? "Scene direction" : "Action";
   const pill = document.createElement("span");
   pill.className = `turn-input-mode-pill ${inputMode}`;
   pill.textContent = inputModeLabel;
   pill.setAttribute("aria-label", `Prompt interpretation: ${inputModeLabel}`);
-  heading.appendChild(pill);
+  metadata.appendChild(pill);
+  const acceptedAt = typeof turn.acceptedAt === "string" ? turn.acceptedAt : "";
+  const acceptedAtTimestamp = acceptedAt ? Date.parse(acceptedAt) : Number.NaN;
+  if (Number.isFinite(acceptedAtTimestamp)) {
+    const date = document.createElement("time");
+    date.className = "history-card-date";
+    date.dateTime = acceptedAt;
+    date.textContent = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" })
+      .format(new Date(acceptedAtTimestamp));
+    metadata.appendChild(date);
+  }
+  heading.appendChild(metadata);
   const excerpt = document.createElement("span");
   const excerptSource = String(turn.action || turn.narration || turn.effectiveNarration || "");
   excerpt.className = turn.action ? "turn-history-prompt" : "";
@@ -4222,6 +4236,18 @@ function renderStoryHistoryWindow() {
   updateHistorySelectionActions();
 }
 
+function revealSelectedHistoryCard() {
+  const scroller = $("turnHistoryDialog")?.querySelector(".dialog-scroll");
+  const selected = scroller?.querySelector('.history-card[aria-pressed="true"]');
+  if (!scroller || !selected) return;
+  const viewport = scroller.getBoundingClientRect();
+  const card = selected.getBoundingClientRect();
+  const viewportTop = viewport.top + scroller.clientTop;
+  const viewportBottom = viewportTop + scroller.clientHeight;
+  if (card.top < viewportTop) scroller.scrollTop += card.top - viewportTop;
+  else if (card.bottom > viewportBottom) scroller.scrollTop += card.bottom - viewportBottom;
+}
+
 function selectHistoryTurn(turnNumber) {
   if (!Number.isInteger(turnNumber) || !historyWindowContainsTurn(turnNumber)) return;
   state.historySelectedTurnNumber = turnNumber;
@@ -4237,6 +4263,7 @@ function selectHistoryTurn(turnNumber) {
   if (panel) { panel.classList.add("hidden"); panel.replaceChildren(); }
   state.historyInspectionRequestId += 1;
   renderStoryHistoryWindow();
+  revealSelectedHistoryCard();
   updateHistorySelectionActions();
 }
 
@@ -4435,6 +4462,7 @@ async function moveSelectedHistoryPreview(offset) {
       state.historySelectedTurnNumber = turnNumber;
       setTurnHistoryLoadStatus(`Selected Turn ${turnNumber}.`);
       renderStoryHistoryWindow();
+      revealSelectedHistoryCard();
     } catch (error) {
       if (requestId !== state.historyPageRequestId || state.campaignId !== campaignId
         || storyTurnWindowEpoch !== epoch || state.historyWindow !== capturedWindow) return;
