@@ -363,6 +363,9 @@ describe("Nexus management UI contracts", () => {
   it("clears campaign controls and restores focus when a refresh leaves no selection", async () => {
     const { document } = parseHTML(managementHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const managementSelectionErrorIsCurrent = managementFunctionWithBindings<(view: string) => boolean>("managementSelectionErrorIsCurrent", {
+      managementSelectionErrorIntent: null, managementNavigationIntent: 0, acceptedManagementRoute: null
+    });
     const functions = managementFunctions<{
       setCampaignSettingsPanel: (panelId: string) => void;
       setCampaignSettingsAvailability: (available: boolean) => void;
@@ -393,6 +396,8 @@ describe("Nexus management UI contracts", () => {
       updateStoryViewLink: () => undefined,
       renderIllustrationSettingsVisibility: () => undefined,
       clearDashboardWorkflowError: () => undefined,
+      clearWorkflowReadFailure: () => undefined,
+      managementSelectionErrorIsCurrent,
       campaignStoryMemorySettings: null,
       renderCampaignStoryMemorySettings: () => undefined
     });
@@ -417,9 +422,6 @@ describe("Nexus management UI contracts", () => {
     const campaignPanelOverview = requiredElement<HTMLElement>("campaignPanelOverview");
     const campaignPanelChronicle = requiredElement<HTMLElement>("campaignPanelChronicle");
     const campaignStatusMessage = requiredElement<HTMLElement>("campaignStatusMessage");
-    const managementSelectionErrorIsCurrent = managementFunctionWithBindings<(view: string) => boolean>("managementSelectionErrorIsCurrent", {
-      managementSelectionErrorIntent: null, managementNavigationIntent: 0, acceptedManagementRoute: null
-    });
     const refreshCampaigns = requiredElement<HTMLButtonElement>("refreshCampaigns");
     let focusedControlId = "";
     refreshCampaigns.focus = () => { focusedControlId = refreshCampaigns.id; };
@@ -492,6 +494,7 @@ describe("Nexus management UI contracts", () => {
       managementSelectionErrorIsCurrent,
       addWorkflowRetry: () => undefined,
       clearDashboardWorkflowError: () => undefined,
+      clearWorkflowReadFailure: () => undefined,
       renderCampaignStoryMemorySettings: () => undefined,
       api: async (path: string, options?: { method?: string }) => {
         if (options?.method === "DELETE") return {};

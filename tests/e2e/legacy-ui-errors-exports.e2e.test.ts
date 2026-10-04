@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
+const evidenceDir = process.env.LEGACY_UI_T24_EVIDENCE_DIR ?? ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T24";
 
 test("startup_error_visible_on_dashboard while successful siblings stay available", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
@@ -22,14 +23,17 @@ test("startup_error_visible_on_dashboard while successful siblings stay availabl
   await expect(page.locator("#dashboardWorkflowStatus")).toContainText("Worlds could not be loaded");
   await expect(page.locator("#workflowDashboardRetryWorlds")).toBeVisible();
   await expect(page.locator("#dashboardCampaigns [data-campaign-id]")).toHaveCount(1);
-  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T24/dashboard-startup-error-desktop.png", fullPage: false });
+  await page.screenshot({ path: `${evidenceDir}/fix1-dashboard-startup-error-desktop.png`, fullPage: false });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.locator("#dashboardWorkflowStatus")).toBeVisible();
-  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T24/dashboard-startup-error-mobile.png", fullPage: false });
+  await page.screenshot({ path: `${evidenceDir}/fix1-dashboard-startup-error-mobile.png`, fullPage: false });
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.locator("#workflowDashboardRetryWorlds").click();
   await expect(page.locator("#dashboardWorlds [data-world-id]")).toHaveCount(1);
   await expect(page.locator("#dashboardWorkflowStatus")).toBeHidden();
+  await page.goto(`${origin}/nexus/index.html#world-library`);
+  await expect(page.locator("#worldStatus")).not.toContainText("Worlds could not be loaded");
+  await expect(page.locator("#workflowRetryWorlds")).toHaveCount(0);
   expect(worldAttempts).toBe(2);
 });
 
@@ -64,8 +68,69 @@ test("campaign_and_provider_startup_errors_have_independent_dashboard_retries", 
   await expect(page.locator("#dashboardCampaigns [data-campaign-id]")).toHaveCount(1);
   await page.locator("#workflowDashboardRetryProviders").click();
   await expect(page.locator("#dashboardWorkflowStatus")).toBeHidden();
+  await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#providerStatus")).not.toContainText("Provider profiles could not be loaded");
+  await expect(page.locator("#workflowRetryProviders")).toHaveCount(0);
   expect(campaignAttempts).toBe(2);
   expect(providerAttempts).toBe(2);
+});
+
+test("operation_errors_do_not_offer_unrelated_list_retries", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
+  await installLegacyUiFixture(page, fixture);
+  await page.route(`**/api/v1/campaigns/${fixture.campaignId}`, async route => {
+    if (route.request().method() === "PATCH") {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private save diagnostics" }) });
+      return;
+    }
+    await route.fallback();
+  });
+  await page.route("**/api/v1/providers", async route => {
+    if (route.request().method() === "POST") {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private provider diagnostics" }) });
+      return;
+    }
+    await route.fallback();
+  });
+  await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await page.locator(`#campaignList [data-campaign-id="${fixture.campaignId}"]`).click();
+  await page.locator("#campaignTitle").fill("Unsaved campaign title");
+  await page.locator("#saveCampaign").click();
+  await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "error");
+  await expect(page.locator("#campaignStatusMessage")).toContainText("could not be saved");
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText("Private save diagnostics");
+  await expect(page.locator("#workflowRetryCampaigns")).toHaveCount(0);
+  await expect(page.locator("#campaignTitle")).toHaveValue("Unsaved campaign title");
+
+  await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#discardChangesDialog")).toBeVisible();
+  await page.locator('#discardChangesDialog button[value="discard"]').click();
+  await expect(page.locator("#providers")).toBeVisible();
+  await page.locator("#newProviderButton").click();
+  await page.locator("#providerForm button[type=submit]").click();
+  await expect(page.locator("#providerStatus")).toContainText("could not be saved");
+  await expect(page.locator("#providerStatus")).not.toContainText("Private provider diagnostics");
+  await expect(page.locator("#workflowRetryProviders")).toHaveCount(0);
+  await page.locator("#cancelProviderEdit").click();
+  if (await page.locator("#discardChangesDialog").isVisible()) {
+    await page.locator('#discardChangesDialog button[value="discard"]').click();
+  }
+  await expect(page.locator("#providerDialog")).toBeHidden();
+
+  await page.route(`**/api/v1/worlds/${fixture.worldId}`, async route => {
+    if (route.request().method() === "PATCH") {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private world action diagnostics" }) });
+      return;
+    }
+    await route.fallback();
+  });
+  await page.goto(`${origin}/nexus/index.html#world-library`);
+  await page.locator(`#worldManagementCarousel [data-world-id="${fixture.worldId}"]`).click();
+  await page.locator("#worldSelectionPanel details.dropdown-menu summary").click();
+  await page.locator("#archiveWorld").click();
+  await expect(page.locator("#worldStatus")).toContainText("World archive status could not be changed.");
+  await expect(page.locator("#worldStatus")).not.toContainText("Private world action diagnostics");
+  await expect(page.locator("#workflowRetryWorlds")).toHaveCount(0);
 });
 
 test("retry_does_not_duplicate_writes after a separately retried list read", async ({ page }) => {
@@ -141,6 +206,77 @@ test("campaign_list_retry_keeps_the_latest_missing_route_and_selected_campaign",
   expect(campaignReads).toBe(4);
 });
 
+test("campaign_startup_retry_resolves_the_exact_missing_id_before_clearing_absence", async ({ page }) => {
+  const fixtureBase = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 2 });
+  const requestedCampaign = fixtureBase.campaigns[1];
+  if (!requestedCampaign) throw new Error("The two-campaign fixture was not created.");
+  const requestedCampaignId = String(requestedCampaign.id);
+  const requestedWorldId = String(requestedCampaign.worldId);
+  const fixture = { ...fixtureBase, campaignId: requestedCampaignId };
+  let campaignReads = 0;
+  let notifyCampaignStateRequest: () => void = () => {};
+  let releaseCampaignState: () => void = () => {};
+  let notifyWorldDetailRequest: () => void = () => {};
+  let releaseWorldDetail: () => void = () => {};
+  const campaignStateRequest = new Promise<void>(resolve => { notifyCampaignStateRequest = resolve; });
+  const campaignStateGate = new Promise<void>(resolve => { releaseCampaignState = resolve; });
+  const worldDetailRequest = new Promise<void>(resolve => { notifyWorldDetailRequest = resolve; });
+  const worldDetailGate = new Promise<void>(resolve => { releaseWorldDetail = resolve; });
+  await installLegacyUiFixture(page, fixture);
+  await page.route("**/api/v1/campaigns", async route => {
+    campaignReads += 1;
+    if (campaignReads === 1) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private database diagnostics" }) });
+      return;
+    }
+    const visibleCampaigns = campaignReads === 2
+      ? [fixture.campaigns[0]]
+      : fixture.campaigns;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ campaigns: visibleCampaigns }) });
+  });
+  await page.route(`**/api/v1/campaigns/${requestedCampaignId}/state`, async route => {
+    notifyCampaignStateRequest();
+    await campaignStateGate;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ activeTurnNumber: 1, revision: 1 }) });
+  });
+  await page.route(`**/api/v1/worlds/${requestedWorldId}`, async route => {
+    notifyWorldDetailRequest();
+    await worldDetailGate;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fixture.worldDetails.get(requestedWorldId)) });
+  });
+  await page.route(`**/api/v1/campaigns/${requestedCampaignId}`, route => route.fulfill({
+    status: 503,
+    contentType: "application/json",
+    body: JSON.stringify({ message: "Private save diagnostics" })
+  }), { times: 1 });
+  await page.goto(`${origin}/nexus/index.html#campaigns?campaignId=${requestedCampaignId}`);
+
+  await expect(page.locator("#campaignStatusMessage")).toContainText("could not be loaded to resolve this link");
+  await page.locator("#workflowRetryCampaigns").click();
+  await expect(page.locator("#campaignStatusMessage")).toContainText("not available in this library");
+  await expect(page).toHaveURL(new RegExp(`#campaigns\\?campaignId=${requestedCampaignId}$`, "u"));
+  await page.locator("#workflowRetryCampaigns").click();
+  await campaignStateRequest;
+  await expect(page.locator("#campaignStatusMessage")).toContainText("not available in this library");
+  await expect(page.locator("#workflowRetryCampaigns")).toBeVisible();
+  releaseCampaignState();
+  await worldDetailRequest;
+
+  await expect(page.locator("#campaignTitle")).toHaveValue(String(requestedCampaign.title));
+  await page.locator("#campaignTitle").fill("Unsaved retry-time campaign title");
+  await page.locator("#saveCampaign").click();
+  await expect(page.locator("#campaignStatusMessage")).toContainText("Campaign settings could not be saved.");
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText("Private save diagnostics");
+  releaseWorldDetail();
+  await expect(page.locator("#campaignTitle")).toHaveValue("Unsaved retry-time campaign title");
+  await expect(page.locator("#campaignStatusMessage")).toContainText("Campaign settings could not be saved.");
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText("not available in this library");
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText("Private save diagnostics");
+  await expect(page.locator("#workflowRetryCampaigns")).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`#campaigns\\?campaignId=${requestedCampaignId}$`, "u"));
+  expect(campaignReads).toBe(3);
+});
+
 test("html_error_rendered_as_text with only safe correlation detail", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 0 });
   await installLegacyUiFixture(page, fixture);
@@ -175,7 +311,11 @@ test("export_reading_goes_story without starting a download", async ({ page }) =
   await expect(page.locator("#readingStoryExportLink")).toHaveAttribute("href", `/story/${fixture.campaignId}`);
   await page.locator("#readingStoryExportLink").click();
   await expect(page).toHaveURL(new RegExp(`/story/${fixture.campaignId}$`, "u"));
-  await page.locator('[aria-controls="storyExportMenu"]').click();
+  await expect(page.locator("#storySyncStatus")).toHaveText("Story synced");
+  await expect(page.locator("#storyArea .scene")).toHaveCount(1);
+  const exportMenuTrigger = page.locator('[aria-controls="storyExportMenu"]');
+  await exportMenuTrigger.click();
+  await expect(exportMenuTrigger).toHaveAttribute("aria-expanded", "true");
   await expect(page.locator("#storyExportMenu")).toBeVisible();
   await expect(page.locator("#storyExportMenu").getByRole("button", { name: /Markdown|HTML|PDF/u })).toHaveCount(3);
   expect(downloaded).toBe(false);
@@ -206,7 +346,7 @@ test("missing_campaign_not_empty_adventure keeps the Story recovery view authori
   });
   await page.goto(`${origin}/story/${missingCampaignId}`);
   await expect(page.locator("#storyLoadRecovery")).toContainText("Campaign not found");
-  await expect(page.locator("#storyArea .turn")).toHaveCount(0);
+  await expect(page.locator("#storyArea .scene")).toHaveCount(0);
   await expect(page.getByText("No adventure yet", { exact: false })).toHaveCount(0);
   await expect(page.locator("#storyLoadRecovery a")).toHaveAttribute("href", "/nexus/#campaigns");
 });

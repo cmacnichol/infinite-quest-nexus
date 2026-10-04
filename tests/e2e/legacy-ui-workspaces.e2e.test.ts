@@ -138,7 +138,7 @@ test("missing_world_link_keeps_the_archive_failure_and_both_world_scopes_visible
   await expect.poll(() => api.writes.filter(write => write.method === "PATCH").length).toBe(1);
   await expect(page.locator("#worldEditorTitle")).toHaveText(String(world.title));
   await expect(page.locator(`#worldManagementCarousel [data-world-id="${world.id}"]`)).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator("#worldStatus")).toContainText("configured synthetic route failure");
+  await expect(page.locator("#worldStatus")).toContainText("World archive status could not be changed.");
   await expect(page.locator("#worldStatus")).toContainText("not available in this library");
   await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/fix2-world-archive-error.png", fullPage: false });
   expect(api.writes.filter(write => write.method === "PATCH")).toHaveLength(1);
@@ -161,7 +161,7 @@ test("missing_campaign_link_keeps_the_save_failure_and_both_campaign_scopes_visi
   await expect(page.locator("#campaignTitle")).toHaveValue("Changed campaign A title");
   await expect(page.locator(`#campaignList [data-campaign-id="${campaign.id}"]`)).toHaveClass(/active/u);
   await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "error");
-  await expect(page.locator("#campaignStatusMessage")).toContainText("configured synthetic route failure");
+  await expect(page.locator("#campaignStatusMessage")).toContainText("Campaign settings could not be saved.");
   await expect(page.locator("#campaignStatusMessage")).toContainText("not available in this library");
   await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/fix2-campaign-save-error.png", fullPage: false });
   expect(api.writes.filter(write => write.method === "PATCH")).toHaveLength(1);
@@ -242,7 +242,7 @@ test("dirty_menu_navigation_save_failure_keeps_workspace_open_and_discard_accept
   await expect(page.locator("#discardChangesDialog")).toBeVisible();
   await page.locator("#saveCampaignEditsDecision").click();
   await expect(page.locator("#campaignTitle")).toHaveValue("Unsaved synthetic title");
-  await expect(page.locator("#campaignStatusMessage")).toContainText("A configured synthetic route failure.");
+  await expect(page.locator("#campaignStatusMessage")).toContainText("Campaign settings could not be saved.");
   await expect(page.locator("body")).toHaveAttribute("data-management-view", "campaigns");
   expect(api.writes.filter(write => write.method === "PATCH" && write.path.endsWith(`/${campaign.id}`))).toHaveLength(1);
 
