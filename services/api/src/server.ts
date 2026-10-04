@@ -207,10 +207,12 @@ let lastWorldGenerationProgressCleanupAt = 0;
 
 type StaticConditionalName = "if-match" | "if-unmodified-since" | "if-none-match" | "if-modified-since";
 type StaticRequestHeaders = Partial<Record<StaticConditionalName, string>>;
-type StaticFileValidator = Readonly<{ etag: string; modifiedAtMs: number }>;
+type StaticFileValidator = Readonly<{ etag: string; modifiedAtMs: number; byteLength: number }>;
 type StaticRequestState = {
   readonly validators: Map<string, StaticFileValidator>;
   readonly conditionalHeaders: StaticRequestHeaders;
+  readonly identityRepresentation?: Readonly<{ path: string; validator: StaticFileValidator }>;
+  rangeRequested: boolean;
   selectedValidator?: StaticFileValidator;
 };
 
@@ -290,7 +292,11 @@ async function readStaticValidator(rootPath: string, filePath: string): Promise<
     const cached = staticValidatorCache.get(key);
     if (cached?.signature === signature) return cached.validator;
     const digest = createHash("sha256").update(await readFile(realFilePath)).digest("hex");
-    const validator = { etag: `"sha256-${digest}"`, modifiedAtMs: Math.floor(fileStat.mtimeMs / 1_000) * 1_000 };
+    const validator = {
+      etag: `"sha256-${digest}"`,
+      modifiedAtMs: Math.floor(fileStat.mtimeMs / 1_000) * 1_000,
+      byteLength: fileStat.size
+    };
     staticValidatorCache.set(key, { signature, validator });
     return validator;
   } catch (error) {
@@ -380,7 +386,12 @@ async function prepareStaticRequest(request: FastifyRequest, config: RuntimeConf
     const value = requestHeaderValue(request.headers[name]);
     return value === undefined ? [] : [[name, value]];
   })) as StaticRequestHeaders;
-  const state: StaticRequestState = { validators, conditionalHeaders };
+  const state: StaticRequestState = {
+    validators,
+    conditionalHeaders,
+    ...(identityValidator === undefined ? {} : { identityRepresentation: { path: identityPath, validator: identityValidator } }),
+    rangeRequested: false
+  };
   staticRequestStateByRequest.set(request, state);
   for (const name of staticConditionalNames) setRequestHeader(request, name, undefined);
 
@@ -392,6 +403,7 @@ async function prepareStaticRequest(request: FastifyRequest, config: RuntimeConf
     const identity = validators.get(staticPathKey(identityPath));
     // Preconditions precede Range, including when the requested bytes do not exist.
     if (identity) {
+      state.rangeRequested = true;
       state.selectedValidator = identity;
       if (staticConditionalStatus(request, state) !== undefined) {
         setRequestHeader(request, "range", undefined);
@@ -405,15 +417,26 @@ async function prepareStaticRequest(request: FastifyRequest, config: RuntimeConf
   }
 }
 
-function setStaticCacheHeader(reply: FastifyReply, filePath: string): void {
+function staticCacheControl(filePath: string): string {
   const logicalFilePath = filePath.replace(/\.(?:br|gz|deflate)$/iu, "");
   const isHtml = logicalFilePath.toLowerCase().endsWith(".html");
-  reply.header(
-    "Cache-Control",
-    !isHtml && VITE_HASHED_STATIC_ASSET_PATTERN.test(logicalFilePath)
-      ? "public, max-age=31536000, immutable"
-      : "no-cache"
-  );
+  return !isHtml && VITE_HASHED_STATIC_ASSET_PATTERN.test(logicalFilePath)
+    ? "public, max-age=31536000, immutable"
+    : "no-cache";
+}
+
+function appendVaryHeader(reply: FastifyReply, name: string): void {
+  const current = reply.getHeader("Vary");
+  const values = (Array.isArray(current) ? current : current === undefined ? [] : [String(current)])
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!values.some((value) => value.toLowerCase() === name.toLowerCase())) values.push(name);
+  reply.header("Vary", values.join(", "));
+}
+
+function setStaticCacheHeader(reply: FastifyReply, filePath: string): void {
+  reply.header("Cache-Control", staticCacheControl(filePath));
   const state = staticRequestStateByRequest.get(reply.request);
   const validator = state?.validators.get(staticPathKey(filePath));
   if (state && validator) {
@@ -733,6 +756,22 @@ export async function buildServer({
   app.setErrorHandler((error, request, reply) => {
     const code = statusCode(error);
     const details = errorDetails(error);
+    const staticState = staticRequestStateByRequest.get(request);
+    const identityRepresentation = staticState?.identityRepresentation;
+    const guardedStaticRangeError = code === 416
+      && details.name === "RangeNotSatisfiableError"
+      && staticState?.rangeRequested
+      && identityRepresentation
+      && staticState.selectedValidator?.etag === identityRepresentation.validator.etag;
+    if (guardedStaticRangeError && identityRepresentation) {
+      reply
+        .header("ETag", identityRepresentation.validator.etag)
+        .header("Cache-Control", staticCacheControl(identityRepresentation.path))
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Range", `bytes */${identityRepresentation.validator.byteLength}`)
+        .header("Content-Type", "application/json; charset=utf-8");
+      appendVaryHeader(reply, "Accept-Encoding");
+    }
     const exposed = exposeError(error, code);
     const transport = providerTransportErrorDetails(error);
     const authoringFailure = typeof error === "object" && error !== null && "authoringFailure" in error
@@ -785,7 +824,7 @@ export async function buildServer({
         : exposed && (code < 500 || safeFiveXX) ? safeErrorDetails(details.details) : {},
       ...(!safeAuthoringFailure && code < 500 && details.issues !== undefined ? { issues: details.issues } : {})
     });
-    void reply.code(code).send(payload);
+    void reply.code(code).send(guardedStaticRangeError && request.method === "HEAD" ? "" : payload);
   });
 
   installRequestSecurity(app, config);

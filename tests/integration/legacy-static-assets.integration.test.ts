@@ -433,6 +433,20 @@ it("preserves System Archive byte ranges and transport headers with Accept-Encod
     expect(response.headers.get("etag")).toBe(`"${sha256}"`);
     expect(response.headers.get("content-encoding")).toBeNull();
     expect(finalized).toBe(true);
+
+    const unsatisfiable = await fetch(`${origin}/api/v1/system-exports/${jobId}/download`, {
+      headers: {
+        range: `bytes=${archiveBytes.byteLength + 1}-`,
+        "accept-encoding": "gzip, br",
+        origin: TEST_ORIGIN
+      }
+    });
+    expect(unsatisfiable.status).toBe(416);
+    expect(unsatisfiable.headers.get("content-range")).toBe(`bytes */${archiveBytes.byteLength}`);
+    expect(unsatisfiable.headers.get("etag")).toBe(`"${sha256}"`);
+    expect(unsatisfiable.headers.get("cache-control")).toBe("no-store");
+    expect(varyTokens(unsatisfiable.headers.get("vary") ?? undefined)).not.toContain("accept-encoding");
+    expect(unsatisfiable.headers.get("content-encoding")).toBeNull();
   } finally {
     await fixture.cleanup();
   }
@@ -818,7 +832,17 @@ it.each(["GET", "HEAD"] as const)("evaluates static preconditions before unsatis
         });
         expect(response.statusCode).toBe(candidate.status);
         expect(response.headers["content-encoding"]).toBeUndefined();
-        if (candidate.status !== 416) {
+        if (candidate.status === 416) {
+          expect(response.headers.etag).toBe(current.headers.etag);
+          expect(response.headers["cache-control"]).toBe("no-cache");
+          expect(response.headers["accept-ranges"]).toBe("bytes");
+          expect(response.headers["content-range"]).toBe(`bytes */${identity.byteLength}`);
+          expect(varyTokens(response.headers.vary)).toEqual(expect.arrayContaining(["origin", "accept-encoding"]));
+          expect(response.headers["content-security-policy"]).toBeTruthy();
+          expect(response.headers["x-content-type-options"]).toBe("nosniff");
+          expect(response.headers["access-control-allow-origin"]).toBe(TEST_ORIGIN);
+          if (method === "HEAD") expect(response.rawPayload.byteLength).toBe(0);
+        } else {
           expect(response.rawPayload.byteLength).toBe(0);
           expect(response.headers.etag).toBe(current.headers.etag);
           expect(response.headers["cache-control"]).toBe("no-cache");
@@ -829,6 +853,32 @@ it.each(["GET", "HEAD"] as const)("evaluates static preconditions before unsatis
         }
       }
     }
+
+    const hashedIdentity = Buffer.from("Hashed static identity range fixture.");
+    const hashedPath = join(fixture.nextWebRoot, "assets", "conditional-range-AbCd1234.js");
+    await writeFile(hashedPath, hashedIdentity);
+    await writeSidecars(hashedPath, hashedIdentity);
+    const hashed = await fixture.app.inject({
+      url: "/app/assets/conditional-range-AbCd1234.js",
+      headers: { "accept-encoding": "identity" }
+    });
+    expect(hashed.statusCode).toBe(200);
+    const hashedRange = await fixture.app.inject({
+      method,
+      url: "/app/assets/conditional-range-AbCd1234.js",
+      headers: { range: `bytes=${hashedIdentity.byteLength + 1}-`, "accept-encoding": "gzip, br", origin: TEST_ORIGIN }
+    });
+    expect(hashedRange.statusCode).toBe(416);
+    expect(hashedRange.headers.etag).toBe(hashed.headers.etag);
+    expect(hashedRange.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+    expect(hashedRange.headers["accept-ranges"]).toBe("bytes");
+    expect(hashedRange.headers["content-range"]).toBe(`bytes */${hashedIdentity.byteLength}`);
+    expect(varyTokens(hashedRange.headers.vary)).toEqual(expect.arrayContaining(["origin", "accept-encoding"]));
+    expect(hashedRange.headers["content-encoding"]).toBeUndefined();
+    expect(hashedRange.headers["content-security-policy"]).toBeTruthy();
+    expect(hashedRange.headers["x-content-type-options"]).toBe("nosniff");
+    expect(hashedRange.headers["access-control-allow-origin"]).toBe(TEST_ORIGIN);
+    if (method === "HEAD") expect(hashedRange.rawPayload.byteLength).toBe(0);
   } finally {
     await fixture.cleanup();
   }
