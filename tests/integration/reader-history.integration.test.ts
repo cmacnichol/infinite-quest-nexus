@@ -1,5 +1,5 @@
-import { readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
@@ -62,6 +62,11 @@ integration("PostgreSQL exact reader turn lookup", () => {
       client.release();
     }
   });
+
+  async function writeEvidenceFile(filePath: string, contents: string, encoding: BufferEncoding = "utf8"): Promise<void> {
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, contents, encoding);
+  }
 
   async function createCampaignFixture(): Promise<ImportedFixture> {
     const story = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
@@ -246,7 +251,7 @@ integration("PostgreSQL exact reader turn lookup", () => {
         LIMIT 51`,
       [ownerUserId, imported.campaignId, "oldneedle"]
     );
-    await writeFile(
+    await writeEvidenceFile(
       resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T14/explain-2000-turn-search-unmaterialized.json"),
       `${JSON.stringify(unmaterializedHistoryPlan.rows[0]?.["QUERY PLAN"], null, 2)}\n`,
       "utf8"
@@ -270,7 +275,7 @@ integration("PostgreSQL exact reader turn lookup", () => {
         LIMIT 51`,
       [ownerUserId, imported.campaignId, "oldneedle"]
     );
-    await writeFile(
+    await writeEvidenceFile(
       resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T14/explain-2000-turn-search.json"),
       `${JSON.stringify(historyPlan.rows[0]?.["QUERY PLAN"], null, 2)}\n`,
       "utf8"
@@ -908,7 +913,7 @@ integration("PostgreSQL exact reader turn lookup", () => {
       expect(record.actualRows).toEqual(expect.any(Number));
     }
     const explainJsonPath = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T16-scene-window-explain-plans.json";
-    await writeFile(resolve(explainJsonPath), `${JSON.stringify(explainPlanDocuments, null, 2)}\n`, "utf8");
+    await writeEvidenceFile(resolve(explainJsonPath), `${JSON.stringify(explainPlanDocuments, null, 2)}\n`, "utf8");
     process.stdout.write(`T16_EXPLAIN_SPARSE_AND_2000 ${JSON.stringify(explainRecords)}\n`);
     process.stdout.write(`T16_EXPLAIN_JSON_PATH ${explainJsonPath}\n`);
   }, 30_000);
