@@ -63,15 +63,27 @@ async function loadReader(page: Page, illustrated = false) {
 async function capture(page: Page, name: string) {
   if (!process.env.READER_EVIDENCE_DIR) return;
   await mkdir(process.env.READER_EVIDENCE_DIR, { recursive: true });
-  await page.screenshot({ path: resolve(process.env.READER_EVIDENCE_DIR, `${name}.png`), fullPage: true });
+  await page.screenshot({ path: resolve(process.env.READER_EVIDENCE_DIR, `${name}.png`), fullPage: !name.includes("profile-appearance") });
+}
+
+async function openAppearance(page: Page) {
+  await page.locator("#btnOpenUserProfile").click();
+  const dialog = page.locator("#userProfileDialog");
+  await expect(dialog).toBeVisible();
+  const appearance = dialog.locator("[data-reading-appearance]");
+  if (!(await appearance.evaluate(element => (element as HTMLDetailsElement).open))) await appearance.locator("summary").click();
+  await expect(dialog.locator("[data-reader-area-width]")).toBeVisible();
+  return dialog;
 }
 
 for (const illustrated of [false, true]) {
-  test(`${illustrated ? "illustrated" : "text-only"} reader preserves readable prose across desktop and mobile`, async ({ page }) => {
+  const layout = illustrated ? "illustrated" : "text-only";
+  test(`${layout} reader preserves readable prose across desktop and mobile without toolbar appearance controls`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 1000 });
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
     await loadReader(page, illustrated);
+    await expect(page.locator("#btnReaderAppearance, #readerAppearancePanel")).toHaveCount(0);
     const prose = page.locator(illustrated ? ".narration-segment-copy" : ".narration").first();
     for (const width of [1440, 1130, 1100, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
@@ -85,40 +97,35 @@ for (const illustrated of [false, true]) {
       expect(measure.width, `usable prose at ${width}px viewport`).toBeGreaterThan(width === 390 ? 280 : 500);
       expect(measure.paragraphGap).toBeGreaterThanOrEqual(17);
       expect(measure.overflow).toBe(false);
-      if (width === 1440 || width === 390) await capture(page, `${illustrated ? "illustrated" : "text-only"}-${width}`);
+      if (width === 1440 || width === 390) await capture(page, `${layout}-standard-${width}`);
     }
     expect(errors).toEqual([]);
   });
-}
 
-for (const illustrated of [false, true]) {
-  test(`${illustrated ? "illustrated" : "text-only"} toolbar previews and persists font, spacing and full width`, async ({ page }) => {
+  test(`${layout} profile previews and persists font, spacing and full text width`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 1000 });
     const fixture = await loadReader(page, illustrated);
     const prose = page.locator(illustrated ? ".narration-segment-copy" : ".narration").first();
     const originalWidth = (await prose.boundingBox())!.width;
-    await page.locator("#btnReaderAppearance").click();
-    const panel = page.locator("#readerAppearancePanel");
-    await expect(panel).toBeVisible();
-    await panel.locator("[data-reader-width]").selectOption("full");
-    await panel.locator("[data-reader-font-family]").selectOption("serif");
-    await panel.locator("[data-reader-paragraph-spacing]").selectOption("1.5");
+    const dialog = await openAppearance(page);
+    await dialog.locator("[data-reader-width]").selectOption("full");
+    await dialog.locator("[data-reader-font-family]").selectOption("serif");
+    await dialog.locator("[data-reader-paragraph-spacing]").selectOption("1.5");
+    await dialog.locator("[data-reader-preview]").click();
     await expect(prose).toHaveCSS("font-family", /Georgia/);
     await expect(prose.locator("p").first()).toHaveCSS("margin-bottom", "27px");
     expect((await prose.boundingBox())!.width).toBeGreaterThan(originalWidth + 100);
-    await capture(page, `${illustrated ? "illustrated" : "text-only"}-reading-panel-preview`);
     await page.keyboard.press("Escape");
-    await expect(panel).toBeHidden();
-    await expect(page.locator("#btnReaderAppearance")).toBeFocused();
+    await expect(dialog).toBeHidden();
     await expect(prose.locator("p").first()).toHaveCSS("margin-bottom", "18px");
     expect((await prose.boundingBox())!.width).toBeCloseTo(originalWidth, 0);
-    await page.locator("#btnReaderAppearance").click();
-    await panel.locator("[data-reader-width]").selectOption("full");
-    await panel.locator("[data-reader-font-family]").selectOption("serif");
-    await panel.locator("[data-reader-paragraph-spacing]").selectOption("1.5");
-    await panel.getByRole("button", { name: /save/i }).click();
-    await expect(panel).toBeHidden();
-    expect(fixture.settings().readerPreferences).toMatchObject({ widthCh: "full", fontFamily: "serif", paragraphSpacingEm: 1.5 });
+    await openAppearance(page);
+    await dialog.locator("[data-reader-width]").selectOption("full");
+    await dialog.locator("[data-reader-font-family]").selectOption("serif");
+    await dialog.locator("[data-reader-paragraph-spacing]").selectOption("1.5");
+    await page.locator("#btnSaveUserProfile").click();
+    await expect(dialog).toBeHidden();
+    expect(fixture.settings().readerPreferences).toMatchObject({ widthCh: "full", fontFamily: "serif", paragraphSpacingEm: 1.5, areaWidth: "standard" });
     expect(fixture.settings()).toMatchObject({ autoSubmitTurnChoices: false, continuousReading: false, defaultTurnControlStyle: "action_only" });
     await page.reload();
     if (illustrated) {
@@ -128,114 +135,87 @@ for (const illustrated of [false, true]) {
     }
     await expect(prose).toHaveCSS("font-family", /Georgia/);
     await expect(prose.locator("p").first()).toHaveCSS("margin-bottom", "27px");
-    await capture(page, `${illustrated ? "illustrated" : "text-only"}-full-width-serif`);
+    await capture(page, `${layout}-full-text-serif`);
   });
-}
 
-test("reading panel keeps theme contrast and mobile controls usable", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  await loadReader(page);
-  await page.locator("#btnReaderAppearance").click();
-  const panel = page.locator("#readerAppearancePanel");
-  for (const theme of ["dark", "light", "sepia"]) {
-    await panel.locator("select[data-reader-theme]").selectOption(theme);
-    await expect(async () => {
-      const contrasts = await panel.evaluate(element => {
-        const rgba = (text: string) => {
-          if (text.startsWith("color(srgb")) {
-            const values = text.match(/[\d.]+/gu)!.map(Number);
-            return [...values.slice(0, 3).map(value => value * 255), values[3] ?? 1];
-          }
-          const values = text.match(/[\d.]+/gu)!.map(Number);
-          return [...values.slice(0, 3), values[3] ?? 1];
-        };
-        const luminance = (rgb: number[]) => rgb.slice(0, 3).map(value => {
-          const c = value / 255;
-          return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-        }).reduce((sum, c, index) => sum + c * [0.2126, 0.7152, 0.0722][index]!, 0);
-        const surface = rgba(getComputedStyle(element).backgroundColor);
-        return [...element.querySelectorAll("label, button, select")].map(control => {
-          const style = getComputedStyle(control);
-          const foreground = luminance(rgba(style.color));
-          const bg = rgba(style.backgroundColor);
-          const background = luminance(bg.slice(0, 3).map((c, index) => c * bg[3]! + surface[index]! * (1 - bg[3]!)));
-          return { name: control.textContent!.trim().slice(0, 35), ratio: (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05) };
-        });
-      });
-      for (const contrast of contrasts) expect(contrast.ratio, `${theme}: ${contrast.name}`).toBeGreaterThanOrEqual(4.5);
-    }).toPass({ timeout: 2000 });
-  }
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(panel).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await panel.locator("[data-reader-font-family]").selectOption("serif");
-  await panel.locator("[data-reader-paragraph-spacing]").selectOption("1.5");
-  await capture(page, "reading-panel-mobile");
-  await panel.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(panel).toBeHidden();
-  await expect(page.locator(".narration").first()).toHaveCSS("font-family", /Georgia/);
-});
-
-test("reading save failure retains preview and allows retry without changing story preferences", async ({ page }) => {
-  const fixture = await loadReader(page);
-  let fail = true;
-  await page.route("**/api/v1/users/me/profile", async route => {
-    if (fail && route.request().method() === "PATCH") {
-      fail = false;
-      return route.fulfill({ status: 500, json: { message: "Synthetic save failure" } });
-    }
-    return route.fallback();
-  });
-  await page.locator("#btnReaderAppearance").click();
-  const panel = page.locator("#readerAppearancePanel");
-  await panel.locator("[data-reader-font-family]").selectOption("serif");
-  await panel.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(panel.getByRole("status")).toContainText("could not be saved");
-  await expect(panel.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
-  await expect(page.locator(".narration").first()).toHaveCSS("font-family", /Georgia/);
-  await panel.getByRole("button", { name: "Reset defaults" }).click();
-  await expect(page.locator(".narration").first()).not.toHaveCSS("font-family", /Georgia/);
-  await panel.locator("[data-reader-font-family]").selectOption("serif");
-  await panel.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(panel).toBeHidden();
-  expect(fixture.settings()).toMatchObject({ autoSubmitTurnChoices: false, continuousReading: false, defaultTurnControlStyle: "action_only" });
-});
-
-for (const illustrated of [false, true]) {
-  test(`${illustrated ? "illustrated" : "text-only"} reading appearance collapses without losing its preview`, async ({ page }) => {
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await loadReader(page, illustrated);
+  test(`${layout} reading area grows independently of text width and stays responsive`, async ({ page }) => {
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    const fixture = await loadReader(page, illustrated);
+    const app = page.locator(".app");
+    const prose = page.locator(illustrated ? ".narration-segment-copy" : ".narration").first();
+    const standardWidth = (await app.boundingBox())!.width;
+    const standardReadingWidth = (await page.locator(".layout").boundingBox())!.width;
+    const proseWidth = (await prose.boundingBox())!.width;
     let writes = 0;
     page.on("request", request => { if (request.method() === "PATCH") writes += 1; });
-    await page.locator("#btnReaderAppearance").click();
-    const panel = page.locator("#readerAppearancePanel");
-    const toggle = panel.getByRole("button", { name: "Collapse reading appearance" });
-    await panel.locator("[data-reader-font-family]").selectOption("serif");
-    await panel.locator("[data-reader-paragraph-spacing]").selectOption("1.5");
-    await toggle.click();
-    const expand = panel.getByRole("button", { name: "Expand reading appearance" });
-    await expect(expand).toHaveAttribute("aria-expanded", "false");
-    await expect(expand).toBeFocused();
-    await expect(panel.locator("[data-reader-font-family]")).toBeHidden();
-    for (const width of [1440, 390]) {
-      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
-      expect((await panel.boundingBox())!.height).toBeLessThanOrEqual(66);
-      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await expect(page.locator(".narration").first()).toHaveCSS("font-family", /Georgia/);
-      await expect(page.locator(".narration p").first()).toHaveCSS("margin-bottom", "27px");
-      await page.evaluate(() => window.scrollTo(0, 0));
-      await capture(page, `${illustrated ? "illustrated" : "text-only"}-reading-collapsed-${width}`);
-    }
+    const dialog = await openAppearance(page);
+    await expect(dialog.locator("[data-reader-area-width]")).toHaveValue("standard");
+    await dialog.locator("[data-reader-area-width]").selectOption("wide");
+    await dialog.locator("[data-reader-preview]").click();
+    const wideWidth = (await app.boundingBox())!.width;
+    expect(wideWidth).toBeGreaterThan(standardWidth + 200);
+    expect((await page.locator(".layout").boundingBox())!.width).toBeGreaterThan(standardReadingWidth + 200);
+    expect((await prose.boundingBox())!.width).toBeCloseTo(proseWidth, 0);
+    await dialog.locator("[data-reader-area-width]").selectOption("full");
+    await dialog.locator("[data-reader-preview]").click();
+    const fullWidth = (await app.boundingBox())!.width;
+    expect(fullWidth).toBeGreaterThan(wideWidth + 100);
+    expect(fullWidth).toBeGreaterThan(1880);
+    expect((await page.locator(".layout").boundingBox())!.width).toBeCloseTo(fullWidth, 0);
+    expect((await prose.boundingBox())!.width).toBeCloseTo(proseWidth, 0);
+    await page.locator("#btnCancelUserProfile").click();
+    await expect(dialog).toBeHidden();
+    await expect(app).toHaveAttribute("data-reader-area-width", "standard");
+    expect((await app.boundingBox())!.width).toBeCloseTo(standardWidth, 0);
     expect(writes).toBe(0);
-    await expand.focus();
-    await page.keyboard.press("Enter");
-    await expect(toggle).toHaveAttribute("aria-expanded", "true");
-    await expect(panel.locator("[data-reader-font-family]")).toHaveValue("serif");
-    await expect(panel.locator("[data-reader-paragraph-spacing]")).toHaveValue("1.5");
-    await toggle.click();
+    await openAppearance(page);
+    await dialog.locator("[data-reader-area-width]").selectOption("full");
+    await dialog.locator("[data-reader-preview]").click();
     await page.keyboard.press("Escape");
-    await expect(panel).toBeHidden();
-    await expect(page.locator("#btnReaderAppearance")).toBeFocused();
-    await expect(page.locator(".narration p").first()).toHaveCSS("margin-bottom", "18px");
+    await expect(dialog).toBeHidden();
+    await expect(app).toHaveAttribute("data-reader-area-width", "standard");
+    expect((await app.boundingBox())!.width).toBeCloseTo(standardWidth, 0);
+    expect(writes).toBe(0);
+    await openAppearance(page);
+    await dialog.locator("[data-reader-area-width]").selectOption("full");
+    await capture(page, `${layout}-profile-appearance`);
+    await page.locator("#btnSaveUserProfile").click();
+    await expect(dialog).toBeHidden();
+    expect(fixture.settings().readerPreferences).toMatchObject({ areaWidth: "full", widthCh: 72 });
+    await page.reload();
+    if (illustrated) {
+      await expect(page.locator("#storyIllustrationContent img")).toBeVisible();
+      await page.locator("#btnPrev").click();
+      await page.locator("#btnNext").click();
+    }
+    await expect(app).toHaveAttribute("data-reader-area-width", "full");
+    expect((await app.boundingBox())!.width).toBeCloseTo(fullWidth, 0);
+    for (const width of [1920, 980, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1080 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      expect((await app.boundingBox())!.width).toBeGreaterThan(width - 40);
+      if (illustrated) {
+        const columns = await page.locator(".narration-segment").first().evaluate(element => getComputedStyle(element).gridTemplateColumns.split(" ").length);
+        expect(columns, `illustrated columns at ${width}px`).toBe(width === 1920 ? 2 : 1);
+      }
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await capture(page, `${layout}-full-area-${width}`);
+    }
   });
 }
+
+test("profile appearance controls remain usable on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await loadReader(page);
+  const dialog = await openAppearance(page);
+  await dialog.locator("[data-reader-area-width]").selectOption("full");
+  await dialog.locator("[data-reader-font-family]").selectOption("serif");
+  await dialog.locator("[data-reader-paragraph-spacing]").selectOption("1.5");
+  await dialog.locator("[data-reader-preview]").click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await dialog.locator("[data-reader-area-width]").scrollIntoViewIfNeeded();
+  await capture(page, "profile-appearance-mobile");
+  await page.locator("#btnSaveUserProfile").click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator(".narration").first()).toHaveCSS("font-family", /Georgia/);
+});
