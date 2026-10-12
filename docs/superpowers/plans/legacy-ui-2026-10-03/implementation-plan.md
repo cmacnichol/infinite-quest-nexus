@@ -164,7 +164,7 @@ git diff --check
 - Modify apps/web/src/legacy-management-entry.ts
 - Create tests/unit/legacy-edit-session.test.ts
 
-**Interfaces and decisions:** createEditSession<T>(initial:T,equal:(a:T,b:T)=>boolean): {isDirty(current:T):boolean;markSaved(value:T):void}; apps adapter requestEditDismissal({dialog,isDirty,isBusy,save?,discard,confirm}):Promise<'dismissed'|'stayed'>. confirm returns 'save'|'discard'|'stay'; unavailable Save is not offered.
+**Interfaces and decisions:** `createEditSession<T>(initial:T,equal:(a:T,b:T)=>boolean): {isDirty(current:T):boolean;markSaved(value:T):void}`; apps adapter `requestEditDismissal({dialog,isDirty,isBusy,save?,discard,confirm}):Promise<'dismissed'|'stayed'>`. confirm returns 'save'|'discard'|'stay'; unavailable Save is not offered.
 
 **Required regression cases and assertions:**
 - dirty_after_edit_reverts_to_clean
@@ -208,7 +208,7 @@ git diff --check
 - Create tests/e2e/legacy-ui-campaign-edits.e2e.test.ts
 - Review tests/unit/legacy-story-memory-ui.test.ts
 
-**Interfaces and decisions:** Use T02 edit session around the explicit Save campaign form. canLeaveCampaignEditor(nextCampaignId):Promise<boolean>; section feedback states 'saved'|'unsaved'|'saving'|'error'. Immediately saved memory/image sections keep their actual API semantics and independent status.
+**Interfaces and decisions:** Use T02 edit session around the explicit Save campaign form. `canLeaveCampaignEditor(nextCampaignId):Promise<boolean>`; section feedback states 'saved'|'unsaved'|'saving'|'error'. Immediately saved memory/image sections keep their actual API semantics and independent status.
 
 **Required regression cases and assertions:**
 - switch_stay_preserves_title_and_selection
@@ -297,7 +297,7 @@ git diff --check
 - Create tests/unit/legacy-world-navigation.test.ts
 - Create tests/e2e/legacy-ui-world-navigation.e2e.test.ts
 
-**Interfaces and decisions:** openWorldManagement(worldId:string):Promise<void>; selectWorld(worldId) uses monotonically increasing worldSelectionEpoch and optional AbortController. Every details/editor result matches id+epoch before rendering.
+**Interfaces and decisions:** `openWorldManagement(worldId:string):Promise<void>`; selectWorld(worldId) uses monotonically increasing worldSelectionEpoch and optional AbortController. Every details/editor result matches id+epoch before rendering.
 
 **Required regression cases and assertions:**
 - edit_details_selects_clicked_world
@@ -387,7 +387,7 @@ git diff --check
 - Create tests/unit/story-action-drafts.test.ts
 - Create tests/e2e/legacy-ui-draft-storage.e2e.test.ts
 
-**Interfaces and decisions:** createStoryActionDraftStore(database:DraftDatabasePort,now:()=>Date,idFactory:()=>string): {read(scope):Promise<Draft|null>;write(scope,draft,{expectedRevision:string|null}):Promise<WriteResult>;removeIfRevision(scope,expectedRevision:string):Promise<ClearResult>}; WriteResult={outcome:'saved'|'conflict'|'unavailable'|'quota'|'capacity'|'invalid',currentRevision?:string}; ClearResult={outcome:'removed'|'absent'|'conflict'|'unavailable'}; compare and write/delete occur in one IndexedDB readwrite transaction; Scope={userId:string,campaignId:string}; Draft={schemaVersion:1,draftRevision:string,text:string,inputMode:'action'|'scene',baseTurnId:string|null,baseTurnNumber:number,updatedAt:string}; immutable draftRevision changes on each meaningful edit, including retyped identical text. IndexedDB database infiniteQuest-reader-local-v1, object store actionDrafts, key userId+campaignId. DraftDatabasePort is an injected transactional adapter; all operations return Promises.
+**Interfaces and decisions:** `createStoryActionDraftStore(database:DraftDatabasePort,now:()=>Date,idFactory:()=>string): {read(scope):Promise<Draft|null>;write(scope,draft,{expectedRevision:string|null}):Promise<WriteResult>;removeIfRevision(scope,expectedRevision:string):Promise<ClearResult>}`; WriteResult={outcome:'saved'|'conflict'|'unavailable'|'quota'|'capacity'|'invalid',currentRevision?:string}; ClearResult={outcome:'removed'|'absent'|'conflict'|'unavailable'}; compare and write/delete occur in one IndexedDB readwrite transaction; Scope={userId:string,campaignId:string}; Draft={schemaVersion:1,draftRevision:string,text:string,inputMode:'action'|'scene',baseTurnId:string|null,baseTurnNumber:number,updatedAt:string}; immutable draftRevision changes on each meaningful edit, including retyped identical text. IndexedDB database infiniteQuest-reader-local-v1, object store actionDrafts, key userId+campaignId. DraftDatabasePort is an injected transactional adapter; all operations return Promises.
 
 **Required regression cases and assertions:**
 - scope_isolates_user_and_campaign
@@ -543,7 +543,7 @@ git diff --check
 - Create tests/unit/reader-history.test.ts
 - Create tests/integration/reader-history.integration.test.ts
 
-**Interfaces and decisions:** GET /api/v1/campaigns/:campaignId/reader/turns/:turnNumber -> {campaignId,turn:turnSummarySchema}; positive integer turnNumber;404 if owned campaign/turn unavailable. ReaderHistoryApi.getTurn(campaignId,turnNumber,signal?):Promise<ReaderTurnResponse>. Read port getEffectiveTurn(ownerScope,turnNumber). Compose backend adapters through direct packages/application/src/reader-history/index.ts context import, matching existing patterns; no application root barrel export.
+**Interfaces and decisions:** GET /api/v1/campaigns/:campaignId/reader/turns/:turnNumber -> {campaignId,turn:turnSummarySchema}; positive integer turnNumber;404 if owned campaign/turn unavailable. `ReaderHistoryApi.getTurn(campaignId,turnNumber,signal?):Promise<ReaderTurnResponse>`. Read port getEffectiveTurn(ownerScope,turnNumber). Compose backend adapters through direct packages/application/src/reader-history/index.ts context import, matching existing patterns; no application root barrel export.
 
 **Required regression cases and assertions:**
 - turn_number_must_be_positive_integer
