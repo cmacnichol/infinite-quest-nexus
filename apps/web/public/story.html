@@ -87,8 +87,53 @@
           <span id="readerTurnCount" class="reader-turn-count" data-reader-turn-count aria-live="polite">No turns yet</span>
           <button id="btnNext" class="small ghost" type="button" aria-label="Next turn" title="Next turn">Next →</button>
           <button id="btnReaderHistory" class="small ghost" type="button" aria-label="History" title="Open turn history">History</button>
+          <button id="btnReaderAppearance" class="small ghost" type="button" aria-expanded="false" aria-controls="readerAppearancePanel">Reading</button>
           <button id="btnReaderJumpLatest" class="small ghost" type="button" aria-label="Jump to latest" title="Jump to the latest turn">Latest</button>
         </nav>
+        <section id="readerAppearancePanel" class="reader-appearance-panel" aria-labelledby="readerAppearanceTitle" hidden>
+          <h2 id="readerAppearanceTitle">Reading appearance</h2>
+          <p class="mini">Changes preview in the story below. Save to keep them.</p>
+          <div class="reader-appearance-fields">
+            <label><span>Reading width</span>
+              <select data-reader-width>
+                <option value="60">Narrow — 60 characters</option>
+                <option value="72">Comfortable — 72 characters</option>
+                <option value="84">Wide — 84 characters</option>
+                <option value="full">Full available width</option>
+              </select>
+            </label>
+            <label><span>Text size</span>
+              <select data-reader-font-size>
+                <option value="16">16 px</option>
+                <option value="18">18 px</option>
+                <option value="20">20 px</option>
+                <option value="22">22 px</option>
+              </select>
+            </label>
+            <label><span>Line spacing</span>
+              <select data-reader-line-height>
+                <option value="1.5">Compact — 1.5</option>
+                <option value="1.7">Comfortable — 1.7</option>
+                <option value="1.9">Relaxed — 1.9</option>
+              </select>
+            </label>
+            <label><span>Font</span><select data-reader-font-family><option value="sans">Sans serif</option><option value="serif">Serif</option></select></label>
+            <label><span>Paragraph spacing</span><select data-reader-paragraph-spacing><option value="0.5">Compact</option><option value="1">Comfortable</option><option value="1.5">Relaxed</option></select></label>
+            <label><span>Reader colors</span>
+              <select data-reader-theme>
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="sepia">Sepia</option>
+              </select>
+            </label>
+          </div>
+          <p id="readerAppearanceStatus" class="mini" role="status" aria-live="polite"></p>
+          <div class="row wrap">
+            <button id="btnResetReaderAppearance" type="button">Reset defaults</button>
+            <button id="btnCancelReaderAppearance" type="button">Cancel</button>
+            <button id="btnSaveReaderAppearance" class="primary" type="button">Save</button>
+          </div>
+        </section>
         <div id="readerResumePrompt" class="reader-resume-prompt hidden" role="group" aria-label="Saved reading position" hidden>
           <span id="readerResumeMessage"></span>
           <button id="btnResumeReading" class="small primary" type="button">Resume reading</button>
@@ -651,6 +696,7 @@
                 <option value="60">Narrow — 60 characters</option>
                 <option value="72">Comfortable — 72 characters</option>
                 <option value="84">Wide — 84 characters</option>
+                <option value="full">Full available width</option>
               </select>
             </label>
             <label><span>Text size</span>
@@ -668,6 +714,8 @@
                 <option value="1.9">Relaxed — 1.9</option>
               </select>
             </label>
+            <label><span>Font</span><select data-reader-font-family><option value="sans">Sans serif</option><option value="serif">Serif</option></select></label>
+            <label><span>Paragraph spacing</span><select data-reader-paragraph-spacing><option value="0.5">Compact</option><option value="1">Comfortable</option><option value="1.5">Relaxed</option></select></label>
             <label><span>Reader colors</span>
               <select data-reader-theme>
                 <option value="dark">Dark</option>

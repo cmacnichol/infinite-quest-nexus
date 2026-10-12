@@ -304,13 +304,14 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .continuous-reader-status { flex-basis: 100%; text-align: center; color: var(--muted); font-size: .85rem; }
 
 .narration {
-  width: min(100%, calc(var(--reader-width-ch, 72) * 1ch));
+  width: min(100%, var(--reader-prose-width, 72ch));
   margin-inline: auto;
+  font-family: var(--reader-font-family, inherit);
   font-size: var(--reader-font-size, 18px);
   line-height: var(--reader-line-height, 1.7);
   color: var(--reader-text, #fff);
 }
-.narration p { margin: 0 0 1em; }
+.narration p { margin: 0 0 var(--reader-paragraph-spacing, 1em); }
 .narration em { color: var(--reader-emphasis, #f3ddff); }
 .narration strong { color: var(--reader-strong, var(--gold2)); }
 
@@ -338,15 +339,15 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   color: #fff;
   background: #0e0a16;
 }
-.segmented-narration { display: grid; gap: 0; }
+.segmented-narration { display: grid; width: 100%; gap: 0; container-type: inline-size; container-name: illustrated-narration; }
 .narration-segment {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
+  grid-template-columns: minmax(0, 1fr);
   gap: clamp(18px, 3vw, 36px);
   align-items: stretch;
   scroll-margin-top: 110px;
 }
-.narration-segment-copy { min-width: 0; }
+.narration-segment-copy { min-width: 0; width: min(100%, var(--reader-prose-width, 72ch)); margin-inline: auto; }
 .segment-illustration-slot { min-width: 0; position: relative; }
 .segment-illustration-sticky { position: sticky; top: 76px; }
 .segment-illustration-card > .image-wrap {
@@ -403,9 +404,10 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .segment-illustration-meta { position: relative; inset: auto; display: flex; flex-wrap: wrap; gap: 6px; pointer-events: none; }
 .segment-illustration-meta span { padding: 4px 7px; border-radius: 999px; background: rgba(8,10,18,.8); color: #fff; font-size: .7rem; backdrop-filter: blur(8px); }
 
-@media (max-width: 1120px) {
-  .narration-segment { grid-template-columns: 1fr; }
-  .segment-illustration-sticky { position: relative; top: auto; }
+.segment-illustration-sticky { position: relative; top: auto; }
+@container illustrated-narration (min-width: 1000px) {
+  .narration-segment { grid-template-columns: minmax(0, 1fr) minmax(280px, 32%); }
+  .segment-illustration-sticky { position: sticky; top: 76px; }
 }
 
 .choices { display: grid; gap: 10px; }
@@ -871,3 +873,34 @@ dialog.getting-started-dialog { width: min(680px, calc(100vw - 28px)); }
 #activityLogDialog .dialog-actions { margin-top: 12px; }
 #activityLogDialog .mini { margin: 4px 0; }
 #activityLogDialog .activity-log-toolbar { margin: 8px 0; }
+
+.reader-appearance-panel[hidden] { display: none; }
+.reader-appearance-panel { position: sticky; top: var(--reader-panel-top, 128px); z-index: 19; max-height: min(52dvh, 420px); overflow-y: auto; padding: 16px; margin-block: 12px; border: 1px solid var(--reader-border); border-radius: 12px; color: var(--reader-text); background: var(--reader-surface); }
+.reader-appearance-panel h2 { margin: 0; font-size: 1.1rem; }
+.reader-appearance-panel .mini { color: var(--reader-muted); }
+.reader-appearance-panel .reader-appearance-fields { grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); }
+.reader-appearance-panel label { display: grid; gap: 6px; min-width: 0; color: var(--reader-muted); }
+.reader-appearance-panel select { width: 100%; min-height: 44px; }
+.reader-appearance-panel button { min-height: 44px; }
+.reader-appearance-panel :is(button, select):focus-visible { outline: 3px solid var(--reader-focus); outline-offset: 2px; }
+
+#storyContainer .reader-appearance-panel :is(button, select) {
+  color: var(--reader-control-text);
+  background: var(--reader-control-surface);
+  border-color: var(--reader-border);
+}
+#storyContainer .reader-appearance-panel button.primary {
+  color: var(--reader-surface);
+  background: var(--reader-link);
+  border-color: var(--reader-link);
+}
+#storyContainer .reader-appearance-panel button:hover:not(:disabled) {
+  color: var(--reader-link);
+  background: var(--reader-surface);
+  border-color: var(--reader-link);
+}
+#storyContainer .reader-appearance-panel :is(button, select):disabled {
+  opacity: 1;
+  color: var(--reader-disabled-text);
+  background: var(--reader-disabled-surface);
+}

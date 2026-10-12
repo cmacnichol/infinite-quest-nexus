@@ -32,10 +32,10 @@ async function openReadingAppearance(page: Page): Promise<void> {
 }
 
 async function setPreferences(page: Page, preferences: ReaderPreferences): Promise<void> {
-  await page.locator("[data-reader-width]").selectOption(String(preferences.widthCh));
-  await page.locator("[data-reader-font-size]").selectOption(String(preferences.fontSizePx));
-  await page.locator("[data-reader-line-height]").selectOption(String(preferences.lineHeight));
-  await page.locator("select[data-reader-theme]").selectOption(preferences.theme);
+  await page.locator("#userProfileDialog [data-reader-width]").selectOption(String(preferences.widthCh));
+  await page.locator("#userProfileDialog [data-reader-font-size]").selectOption(String(preferences.fontSizePx));
+  await page.locator("#userProfileDialog [data-reader-line-height]").selectOption(String(preferences.lineHeight));
+  await page.locator("#userProfileDialog select[data-reader-theme]").selectOption(preferences.theme);
 }
 
 async function readActualThemeInteractionMetrics(page: Page): Promise<Record<string, ThemeMetricValue>> {
@@ -302,16 +302,16 @@ test("reader appearance previews locally, cancels without writes, and saves all 
   await page.locator("#storyContainer").screenshot({ path: resolve(evidenceDirectory, "reader-dark-desktop.png") });
 
   await openReadingAppearance(page);
-  await expect(page.locator("[data-reader-width]")).toHaveValue("72");
-  await expect(page.locator("[data-reader-font-size]")).toHaveValue("18");
-  await expect(page.locator("[data-reader-line-height]")).toHaveValue("1.7");
-  await expect(page.locator("select[data-reader-theme]")).toHaveValue("dark");
+  await expect(page.locator("#userProfileDialog [data-reader-width]")).toHaveValue("72");
+  await expect(page.locator("#userProfileDialog [data-reader-font-size]")).toHaveValue("18");
+  await expect(page.locator("#userProfileDialog [data-reader-line-height]")).toHaveValue("1.7");
+  await expect(page.locator("#userProfileDialog select[data-reader-theme]")).toHaveValue("dark");
 
   const originalGlobalText = await page.locator("html").evaluate((element) => getComputedStyle(element).getPropertyValue("--text").trim());
   const originalNavigationText = await page.locator("#btnOpenUserProfile").evaluate((element) => getComputedStyle(element).color);
   const cancelPreview = { widthCh: 60, fontSizePx: 16, lineHeight: 1.5, theme: "light" } as const;
   await setPreferences(page, cancelPreview);
-  await page.locator("[data-reader-preview]").click();
+  await page.locator("#userProfileDialog [data-reader-preview]").click();
   await expect(page.locator("#storyContainer")).toHaveAttribute("data-reader-theme", "light");
   expect(await page.locator("html").evaluate((element) => getComputedStyle(element).getPropertyValue("--text").trim())).toBe(originalGlobalText);
   expect(await page.locator("#btnOpenUserProfile").evaluate((element) => getComputedStyle(element).color)).toBe(originalNavigationText);
@@ -323,12 +323,12 @@ test("reader appearance previews locally, cancels without writes, and saves all 
 
   await openReadingAppearance(page);
   await setPreferences(page, { ...savedPreferences, theme: "light" });
-  await page.locator("[data-reader-preview]").click();
+  await page.locator("#userProfileDialog [data-reader-preview]").click();
   await page.locator("#btnCloseUserProfile").click();
   await expect(page.locator("#storyContainer")).toHaveAttribute("data-reader-theme", "dark");
   await openReadingAppearance(page);
   await setPreferences(page, { ...savedPreferences, theme: "sepia" });
-  await page.locator("[data-reader-preview]").click();
+  await page.locator("#userProfileDialog [data-reader-preview]").click();
   await page.keyboard.press("Escape");
   await expect(page.locator("#userProfileDialog")).toBeHidden();
   await expect(page.locator("#storyContainer")).toHaveAttribute("data-reader-theme", "dark");
@@ -337,12 +337,12 @@ test("reader appearance previews locally, cancels without writes, and saves all 
   await openReadingAppearance(page);
   const savePreferences = { widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia" } as const;
   await setPreferences(page, savePreferences);
-  await page.locator("[data-reader-preview]").click();
+  await page.locator("#userProfileDialog [data-reader-preview]").click();
   await expect(page.locator("#storyContainer")).toHaveAttribute("data-reader-theme", "sepia");
   await page.locator("#btnSaveUserProfile").click();
   await expect(page.locator("#userProfileDialog")).toBeVisible();
   await expect(page.locator("[data-profile-status]")).toContainText("could not be saved");
-  await expect(page.locator("select[data-reader-theme]")).toHaveValue("sepia");
+  await expect(page.locator("#userProfileDialog select[data-reader-theme]")).toHaveValue("sepia");
   holdSuccessfulSave = new Promise<void>((resolveSave) => { releaseSuccessfulSave = resolveSave; });
   page.route("**/api/v1/users/me/profile", async (route) => {
     if (route.request().method() !== "PATCH") return route.continue();
@@ -354,8 +354,8 @@ test("reader appearance previews locally, cancels without writes, and saves all 
   });
   await page.locator("#btnSaveUserProfile").click();
   await expect(page.locator("#btnSaveUserProfile")).toBeDisabled();
-  await expect(page.locator("select[data-reader-theme]")).toBeDisabled();
-  expect(await page.locator("select[data-reader-theme]").inputValue()).toBe("sepia");
+  await expect(page.locator("#userProfileDialog select[data-reader-theme]")).toBeDisabled();
+  expect(await page.locator("#userProfileDialog select[data-reader-theme]").inputValue()).toBe("sepia");
   releaseSuccessfulSave();
   await expect(page.locator("#userProfileDialog")).toBeHidden();
   expect(successfulPayload).toMatchObject({
@@ -411,7 +411,7 @@ test("appearance-only save preserves an untouched action-only story setting", as
   await page.goto(`${origin}/story/${fixture.campaignId}`);
   await openReadingAppearance(page);
   await setPreferences(page, { ...savedPreferences, widthCh: 60 });
-  await page.locator("[data-reader-preview]").click();
+  await page.locator("#userProfileDialog [data-reader-preview]").click();
   await page.locator("#btnSaveUserProfile").click();
   await expect(page.locator("#userProfileDialog")).toBeHidden();
   expect(submitted.body?.settings).toMatchObject({
@@ -454,7 +454,7 @@ test("saved reader themes keep real focus, hover, contrast, and viewport behavio
     await page.setViewportSize({ width: 1280, height: 800 });
     await openReadingAppearance(page);
     await setPreferences(page, { ...savedPreferences, theme });
-    await page.locator("[data-reader-preview]").click();
+    await page.locator("#userProfileDialog [data-reader-preview]").click();
     await expect(page.locator("#storyContainer")).toHaveAttribute("data-reader-theme", theme);
     await page.locator("#btnSaveUserProfile").click();
     await expect(page.locator("#userProfileDialog")).toBeHidden();
