@@ -200,3 +200,42 @@ test("reading save failure retains preview and allows retry without changing sto
   await expect(panel).toBeHidden();
   expect(fixture.settings()).toMatchObject({ autoSubmitTurnChoices: false, continuousReading: false, defaultTurnControlStyle: "action_only" });
 });
+
+for (const illustrated of [false, true]) {
+  test(`${illustrated ? "illustrated" : "text-only"} reading appearance collapses without losing its preview`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await loadReader(page, illustrated);
+    let writes = 0;
+    page.on("request", request => { if (request.method() === "PATCH") writes += 1; });
+    await page.locator("#btnReaderAppearance").click();
+    const panel = page.locator("#readerAppearancePanel");
+    const toggle = panel.getByRole("button", { name: "Collapse reading appearance" });
+    await panel.locator("[data-reader-font-family]").selectOption("serif");
+    await panel.locator("[data-reader-paragraph-spacing]").selectOption("1.5");
+    await toggle.click();
+    const expand = panel.getByRole("button", { name: "Expand reading appearance" });
+    await expect(expand).toHaveAttribute("aria-expanded", "false");
+    await expect(expand).toBeFocused();
+    await expect(panel.locator("[data-reader-font-family]")).toBeHidden();
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+      expect((await panel.boundingBox())!.height).toBeLessThanOrEqual(66);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await expect(page.locator(".narration").first()).toHaveCSS("font-family", /Georgia/);
+      await expect(page.locator(".narration p").first()).toHaveCSS("margin-bottom", "27px");
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await capture(page, `${illustrated ? "illustrated" : "text-only"}-reading-collapsed-${width}`);
+    }
+    expect(writes).toBe(0);
+    await expand.focus();
+    await page.keyboard.press("Enter");
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(panel.locator("[data-reader-font-family]")).toHaveValue("serif");
+    await expect(panel.locator("[data-reader-paragraph-spacing]")).toHaveValue("1.5");
+    await toggle.click();
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await expect(page.locator("#btnReaderAppearance")).toBeFocused();
+    await expect(page.locator(".narration p").first()).toHaveCSS("margin-bottom", "18px");
+  });
+}

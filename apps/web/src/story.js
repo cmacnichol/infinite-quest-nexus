@@ -4940,6 +4940,15 @@ function closeReaderAppearance({ cancel = true, focus = true } = {}) {
   if (focus) $("btnReaderAppearance")?.focus({ preventScroll: true });
 }
 
+function setReaderAppearanceCollapsed(collapsed) {
+  $("readerAppearanceBody").hidden = collapsed;
+  $("readerAppearancePanel").classList.toggle("is-collapsed", collapsed);
+  const toggle = $("btnToggleReaderAppearance");
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+  toggle.setAttribute("aria-label", `${collapsed ? "Expand" : "Collapse"} reading appearance`);
+  toggle.textContent = collapsed ? "Expand" : "Collapse";
+}
+
 function openReaderAppearance() {
   const panel = $("readerAppearancePanel");
   if (!panel || readerAppearanceSaving) return;
@@ -4947,6 +4956,7 @@ function openReaderAppearance() {
   setReaderPreferenceControls(normalizeReaderPreferences(state.user?.settings?.readerPreferences), panel);
   $("readerAppearanceStatus").textContent = "";
   panel.style.setProperty("--reader-panel-top", `${readerStickyInset()}px`);
+  setReaderAppearanceCollapsed(false);
   panel.hidden = false;
   $("btnReaderAppearance")?.setAttribute("aria-expanded", "true");
   panel.querySelector("select")?.focus({ preventScroll: true });
@@ -6405,6 +6415,9 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
   $("btnReaderAppearance")?.addEventListener("click", openReaderAppearance);
+  $("btnToggleReaderAppearance")?.addEventListener("click", () => {
+    if (!readerAppearanceSaving) setReaderAppearanceCollapsed(!$("readerAppearanceBody").hidden);
+  });
   $("btnCancelReaderAppearance")?.addEventListener("click", () => closeReaderAppearance());
   $("btnSaveReaderAppearance")?.addEventListener("click", () => { void saveReaderAppearance(); });
   $("btnResetReaderAppearance")?.addEventListener("click", () => {

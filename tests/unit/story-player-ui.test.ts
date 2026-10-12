@@ -4252,6 +4252,12 @@ describe("toolbar reading appearance", () => {
       expect(reader.style.getPropertyValue("--reader-prose-width")).toBe("100%");
       expect(reader.style.getPropertyValue("--reader-font-family")).toContain("Georgia");
       expect(reader.style.getPropertyValue("--reader-paragraph-spacing")).toBe("1.5em");
+      const collapse = document.getElementById("btnToggleReaderAppearance")!;
+      collapse.dispatchEvent(new window.Event("click"));
+      expect(document.getElementById("readerAppearanceBody")!.hidden).toBe(true);
+      expect(collapse.getAttribute("aria-expanded")).toBe("false");
+      expect(reader.style.getPropertyValue("--reader-paragraph-spacing")).toBe("1.5em");
+      expect(updateProfile).not.toHaveBeenCalled();
       document.getElementById("btnCancelReaderAppearance")!.dispatchEvent(new window.Event("click"));
       expect(panel.hidden).toBe(true);
       expect(reader.style.getPropertyValue("--reader-prose-width")).toBe("72ch");

@@ -904,3 +904,24 @@ dialog.getting-started-dialog { width: min(680px, calc(100vw - 28px)); }
   color: var(--reader-disabled-text);
   background: var(--reader-disabled-surface);
 }
+
+.reader-appearance-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reader-appearance-bar button {
+  flex-shrink: 0;
+}
+
+.reader-appearance-panel.is-collapsed {
+  align-self: start;
+  padding: 8px 12px;
+  overflow: visible;
+}
+
+#readerAppearanceBody[hidden] {
+  display: none;
+}
