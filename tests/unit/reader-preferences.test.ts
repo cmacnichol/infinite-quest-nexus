@@ -3,11 +3,11 @@ import { DEFAULT_READER_PREFERENCES, normalizeReaderPreferences } from "../../pa
 
 describe("reader preference policy", () => {
   test("exports immutable defaults and returns fresh normalized preference objects", () => {
-    expect(DEFAULT_READER_PREFERENCES).toEqual({ widthCh: 72, fontSizePx: 18, lineHeight: 1.7, theme: "dark" });
+    expect(DEFAULT_READER_PREFERENCES).toEqual({ widthCh: 72, fontSizePx: 18, lineHeight: 1.7, theme: "dark", fontFamily: "sans", paragraphSpacingEm: 1 });
     expect(Object.isFrozen(DEFAULT_READER_PREFERENCES)).toBe(true);
 
     const normalized = normalizeReaderPreferences({ widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia" });
-    expect(normalized).toEqual({ widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia" });
+    expect(normalized).toEqual({ widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia", fontFamily: "sans", paragraphSpacingEm: 1 });
     expect(normalizeReaderPreferences({ widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia" })).not.toBe(normalized);
     normalized.widthCh = 60;
     expect(normalizeReaderPreferences({ widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia" }).widthCh).toBe(84);
@@ -18,13 +18,29 @@ describe("reader preference policy", () => {
       widthCh: 60,
       fontSizePx: 18,
       lineHeight: 1.7,
-      theme: "dark"
+      theme: "dark",
+      fontFamily: "sans",
+      paragraphSpacingEm: 1
     });
     expect(normalizeReaderPreferences({ theme: "light", ignored: true })).toEqual({
       widthCh: 72,
       fontSizePx: 18,
       lineHeight: 1.7,
-      theme: "light"
+      theme: "light",
+      fontFamily: "sans",
+      paragraphSpacingEm: 1
+    });
+  });
+
+  test.each([0.5, 1, 1.5])("preserves full width, serif font, and paragraph spacing %s", (paragraphSpacingEm) => {
+    expect(normalizeReaderPreferences({ widthCh: "full", fontFamily: "serif", paragraphSpacingEm })).toEqual({
+      widthCh: "full", fontSizePx: 18, lineHeight: 1.7, theme: "dark", fontFamily: "serif", paragraphSpacingEm
+    });
+  });
+
+  test("falls back invalid font and paragraph spacing independently", () => {
+    expect(normalizeReaderPreferences({ widthCh: "full", fontFamily: "script", paragraphSpacingEm: 4 })).toEqual({
+      widthCh: "full", fontSizePx: 18, lineHeight: 1.7, theme: "dark", fontFamily: "sans", paragraphSpacingEm: 1
     });
   });
 

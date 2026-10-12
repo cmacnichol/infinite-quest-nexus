@@ -29,6 +29,8 @@ async function bootLegacyStory({
   pathname = "/story/campaign-1",
   nextCursor = null,
   continuousReading = false,
+  readerPreferences,
+  defaultTurnControlStyle = "flexible_action",
   fetchTurns = vi.fn(),
   syncStatus,
   updateProfile,
@@ -56,6 +58,8 @@ async function bootLegacyStory({
   pathname?: string;
   nextCursor?: string | null;
   continuousReading?: boolean;
+  readerPreferences?: Record<string, unknown>;
+  defaultTurnControlStyle?: string;
   fetchTurns?: ReturnType<typeof vi.fn>;
   syncStatus?: ReturnType<typeof vi.fn>;
   updateProfile?: ReturnType<typeof vi.fn>;
@@ -100,11 +104,14 @@ async function bootLegacyStory({
     ["[data-reader-width]", "72"],
     ["[data-reader-font-size]", "18"],
     ["[data-reader-line-height]", "1.7"],
+    ["[data-reader-font-family]", "sans"],
+    ["[data-reader-paragraph-spacing]", "1"],
     ["select[data-reader-theme]", "dark"]
   ];
   for (const [selector, value] of profileControlDefaults) {
-    const control = document.querySelector(selector);
-    if (control) Object.defineProperty(control, "value", { value, writable: true, configurable: true });
+    for (const control of document.querySelectorAll(selector)) {
+      Object.defineProperty(control, "value", { value, writable: true, configurable: true });
+    }
   }
   const syncCampaign = syncStatus || vi.fn().mockResolvedValue({
     campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 100, storyLengthProfile: "standard" },
@@ -119,7 +126,7 @@ async function bootLegacyStory({
     api: {
       session: {
         get: async () => ({ user: {
-          settings: { continuousReading, autoSubmitTurnChoices: false, defaultTurnControlStyle: "flexible_action" }
+          settings: { continuousReading, readerPreferences, autoSubmitTurnChoices: false, defaultTurnControlStyle }
         } }),
         updateProfile: saveProfile
       },
@@ -4221,4 +4228,88 @@ it("updates the accepted reader count before required sync reconciliation settle
     await new Promise((resolve) => setTimeout(resolve, 20));
     vi.unstubAllGlobals();
   }
+});
+
+describe("toolbar reading appearance", () => {
+  it("previews typography, cancels changes, and saves appearance without changing play settings", async () => {
+    const updateProfile = vi.fn(async (profile) => ({ user: { settings: { autoSubmitTurnChoices: false, ...profile.settings } } }));
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 2), updateProfile, continuousReading: true, defaultTurnControlStyle: "action_only" });
+      const open = document.getElementById("btnReaderAppearance");
+      expect(open).not.toBeNull();
+      open!.dispatchEvent(new window.Event("click"));
+      const panel = document.getElementById("readerAppearancePanel")!;
+      expect(panel.hidden).toBe(false);
+      const change = (selector: string, value: string) => {
+        const control = panel.querySelector(selector)!;
+        Object.defineProperty(control, "value", { value, writable: true, configurable: true });
+        control.dispatchEvent(new window.Event("change", { bubbles: true }));
+      };
+      change("[data-reader-width]", "full");
+      change("[data-reader-font-family]", "serif");
+      change("[data-reader-paragraph-spacing]", "1.5");
+      const reader = document.getElementById("storyContainer")!;
+      expect(reader.style.getPropertyValue("--reader-prose-width")).toBe("100%");
+      expect(reader.style.getPropertyValue("--reader-font-family")).toContain("Georgia");
+      expect(reader.style.getPropertyValue("--reader-paragraph-spacing")).toBe("1.5em");
+      const collapse = document.getElementById("btnToggleReaderAppearance")!;
+      collapse.dispatchEvent(new window.Event("click"));
+      expect(document.getElementById("readerAppearanceBody")!.hidden).toBe(true);
+      expect(collapse.getAttribute("aria-expanded")).toBe("false");
+      expect(reader.style.getPropertyValue("--reader-paragraph-spacing")).toBe("1.5em");
+      expect(updateProfile).not.toHaveBeenCalled();
+      document.getElementById("btnCancelReaderAppearance")!.dispatchEvent(new window.Event("click"));
+      expect(panel.hidden).toBe(true);
+      expect(reader.style.getPropertyValue("--reader-prose-width")).toBe("72ch");
+      expect(updateProfile).not.toHaveBeenCalled();
+      open!.dispatchEvent(new window.Event("click"));
+      change("[data-reader-width]", "full");
+      document.getElementById("btnSaveReaderAppearance")!.dispatchEvent(new window.Event("click"));
+      await vi.waitFor(() => expect(panel.hidden).toBe(true));
+      expect(updateProfile).toHaveBeenCalledWith({ settings: { autoSubmitTurnChoices: false, continuousReading: true, defaultTurnControlStyle: "action_only", readerPreferences: expect.objectContaining({ widthCh: "full" }) } });
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
+
+describe("reading appearance recovery", () => {
+  it("keeps failed previews editable and restores defaults or cancels with Escape", async () => {
+    const updateProfile = vi.fn().mockRejectedValue(new Error("offline"));
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 2), updateProfile });
+      const open = document.getElementById("btnReaderAppearance")!;
+      open.dispatchEvent(new window.Event("click"));
+      const panel = document.getElementById("readerAppearancePanel")!;
+      const width = panel.querySelector("[data-reader-width]") as HTMLSelectElement;
+      width.value = "full";
+      width.dispatchEvent(new window.Event("change", { bubbles: true }));
+      document.getElementById("btnSaveReaderAppearance")!.dispatchEvent(new window.Event("click"));
+      await vi.waitFor(() => expect(document.getElementById("readerAppearanceStatus")?.textContent).toContain("offline"));
+      expect(panel.hidden).toBe(false);
+      expect(width.disabled).toBe(false);
+      expect(document.getElementById("storyContainer")!.style.getPropertyValue("--reader-prose-width")).toBe("100%");
+      document.getElementById("btnResetReaderAppearance")!.dispatchEvent(new window.Event("click"));
+      expect(width.value).toBe("72");
+      expect(document.getElementById("storyContainer")!.style.getPropertyValue("--reader-paragraph-spacing")).toBe("1em");
+      const escape = new window.Event("keydown", { bubbles: true, cancelable: true });
+      Object.defineProperty(escape, "key", { value: "Escape" });
+      width.dispatchEvent(escape);
+      expect(panel.hidden).toBe(true);
+      expect(open.getAttribute("aria-expanded")).toBe("false");
+      expect(updateProfile).toHaveBeenCalledTimes(1);
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
+
+it("restores saved reading appearance as soon as the story loads", async () => {
+  try {
+    const { document } = await bootLegacyStory({ turns: makeTurns(1, 2), readerPreferences: {
+      widthCh: "full", fontFamily: "serif", paragraphSpacingEm: 1.5, fontSizePx: 20, lineHeight: 1.9, theme: "sepia"
+    } });
+    const reader = document.getElementById("storyContainer")!;
+    expect(reader.style.getPropertyValue("--reader-prose-width")).toBe("100%");
+    expect(reader.dataset.readerTheme).toBe("sepia");
+    expect(reader.style.getPropertyValue("--reader-paragraph-spacing")).toBe("1.5em");
+  } finally { vi.unstubAllGlobals(); }
 });

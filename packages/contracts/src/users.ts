@@ -12,16 +12,20 @@ export function normalizeHistoricalDefaultTurnControlStyle(
   return style === "flexible_scene" ? "flexible_scene" : style === "action_only" ? "action_only" : "flexible_action";
 }
 
-export const readerWidthChSchema = z.union([z.literal(60), z.literal(72), z.literal(84)]);
+export const readerWidthChSchema = z.union([z.literal(60), z.literal(72), z.literal(84), z.literal("full")]);
 export const readerFontSizePxSchema = z.union([z.literal(16), z.literal(18), z.literal(20), z.literal(22)]);
 export const readerLineHeightSchema = z.union([z.literal(1.5), z.literal(1.7), z.literal(1.9)]);
+export const readerFontFamilySchema = z.enum(["sans", "serif"]);
+export const readerParagraphSpacingEmSchema = z.union([z.literal(0.5), z.literal(1), z.literal(1.5)]);
 export const readerThemeSchema = z.enum(["dark", "light", "sepia"]);
 
 export const readerPreferencesSchema = z.object({
   widthCh: readerWidthChSchema,
   fontSizePx: readerFontSizePxSchema,
   lineHeight: readerLineHeightSchema,
-  theme: readerThemeSchema
+  theme: readerThemeSchema,
+  fontFamily: readerFontFamilySchema.default("sans"),
+  paragraphSpacingEm: readerParagraphSpacingEmSchema.default(1)
 }).strict();
 
 export type ReaderPreferences = z.infer<typeof readerPreferencesSchema>;
@@ -30,7 +34,9 @@ export const DEFAULT_READER_PREFERENCES: Readonly<ReaderPreferences> = Object.fr
   widthCh: 72,
   fontSizePx: 18,
   lineHeight: 1.7,
-  theme: "dark"
+  theme: "dark",
+  fontFamily: "sans",
+  paragraphSpacingEm: 1
 });
 
 export function normalizeHistoricalReaderPreferences(value: unknown): ReaderPreferences {
@@ -41,7 +47,9 @@ export function normalizeHistoricalReaderPreferences(value: unknown): ReaderPref
     widthCh: readerWidthChSchema.catch(DEFAULT_READER_PREFERENCES.widthCh).parse(preferences.widthCh),
     fontSizePx: readerFontSizePxSchema.catch(DEFAULT_READER_PREFERENCES.fontSizePx).parse(preferences.fontSizePx),
     lineHeight: readerLineHeightSchema.catch(DEFAULT_READER_PREFERENCES.lineHeight).parse(preferences.lineHeight),
-    theme: readerThemeSchema.catch(DEFAULT_READER_PREFERENCES.theme).parse(preferences.theme)
+    theme: readerThemeSchema.catch(DEFAULT_READER_PREFERENCES.theme).parse(preferences.theme),
+    fontFamily: readerFontFamilySchema.catch(DEFAULT_READER_PREFERENCES.fontFamily).parse(preferences.fontFamily),
+    paragraphSpacingEm: readerParagraphSpacingEmSchema.catch(DEFAULT_READER_PREFERENCES.paragraphSpacingEm).parse(preferences.paragraphSpacingEm)
   };
 }
 
