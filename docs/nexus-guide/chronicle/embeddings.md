@@ -12,6 +12,8 @@
 
 Production implementation, shadow comparison, prefixes, and batch size are under **Advanced retrieval**.
 
+**Shadow comparison** controls diagnostics in explicit Chronicle context previews. A preview honors the saved setting and can compare retrieval implementations without replacing the production context. Ordinary turn generation runs only the configured production implementation and its readiness/fallback path, even with Shadow comparison enabled. This does not change saved defaults or the chunk-index jobs queued by **Save & index**.
+
 Leave prefixes blank to use model-aware defaults when available; override them only when the embedding model documents another instruction format. The text profile may appear as **Text fallback**, but its credentials are not copied into an independent embedding profile.
 
 ## Understand health

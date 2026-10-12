@@ -22,6 +22,7 @@ export default defineConfig({
     }
   }],
   build: {
+    target: ["chrome107", "edge107", "firefox104", "safari16"],
     copyPublicDir: true,
     emptyOutDir: true,
     manifest: true,

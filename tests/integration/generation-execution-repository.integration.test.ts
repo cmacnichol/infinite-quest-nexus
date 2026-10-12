@@ -270,7 +270,9 @@ integration("PostgreSQL generation execution repository", () => {
     expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [imported.campaignId])).rows[0].count).toBe(before);
     expect((await pool.query("SELECT status FROM generation_jobs WHERE id=$1", [ready.job.id])).rows[0].status).toBe("committing");
     const commitStarted = performance.now();
+    expect((await pool.query("SELECT count(*)::int AS count FROM activity_event_outbox WHERE source_id=$1 AND snapshot->>'kind'='generation.completed'", [ready.job.id])).rows[0].count).toBe(0);
     const accepted = await ready.repository.commitAcceptedTurn({ ...input, castDiscoveryExecution: execution });
+    expect((await pool.query("SELECT snapshot->>'turnId' AS turn_id FROM activity_event_outbox WHERE source_id=$1 AND snapshot->>'kind'='generation.completed'", [ready.job.id])).rows).toEqual([{ turn_id: accepted.turnId }]);
     if (process.env.CAST_TEST_TIMINGS === "true") process.stdout.write(JSON.stringify({ measurement: "accepted_story_commit_with_discovery_enqueue",
       elapsedMs: performance.now() - commitStarted, discoveryProviderCalls: 0, fixture: "deterministic_local_postgres" }) + "\n");
     const discovery = (await pool.query("SELECT turn_id,owner_user_id,source,execution_snapshot,status FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [imported.campaignId])).rows;

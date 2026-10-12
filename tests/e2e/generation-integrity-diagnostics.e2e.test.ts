@@ -54,19 +54,20 @@ function recoveryFixture() {
           preflightDiagnostic: null,
           diagnosticCode: null
         },
-        privatePromptAndProviderError: PRIVATE_CANARY
+        privatePromptAndProviderError: `${PRIVATE_CANARY} PRIVATE_TRACKER_CANARY`
       }
     }
   };
 }
 
-async function installRecoveryApi(page: Page, options: { operation?: "append" | "replace_latest"; incompatible?: boolean; legacyDiagnostic?: boolean; diagnostic?: unknown; responseFormat?: Record<string, unknown>; review?: Record<string, unknown>; streamLoss?: boolean; profileConflict?: boolean } = {}) {
+async function installRecoveryApi(page: Page, options: { failureDiagnostic?: { code: string; message: string; providerFailure?: Record<string, unknown> }; liveFailure?: boolean; operation?: "append" | "replace_latest"; incompatible?: boolean; legacyDiagnostic?: boolean; diagnostic?: unknown; responseFormat?: Record<string, unknown>; review?: Record<string, unknown>; streamLoss?: boolean; profileConflict?: boolean } = {}) {
   const payloads = recoveryFixture();
   const requests: string[] = [];
   const writes: Array<{ path: string; body: Record<string, unknown> }> = [];
   const recovery = payloads.syncStatus.generationRecovery as any;
   recovery.operationKind = options.operation ?? "append";
   recovery.replacementTurnId = options.operation === "replace_latest" ? payloads.turns.turns[0]!.id : null;
+  if (options.failureDiagnostic) { recovery.status = "failed"; recovery.failureDiagnostic = options.failureDiagnostic; }
   if (options.incompatible) recovery.diagnostic = { code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue" };
   if (options.legacyDiagnostic) delete recovery.diagnostic;
   if (options.diagnostic) recovery.diagnostic = options.diagnostic;
@@ -95,7 +96,12 @@ async function installRecoveryApi(page: Page, options: { operation?: "append" | 
     if (request.method() === "GET" && path === "/api/v1/session") return respond(payloads.session);
     if (request.method() === "GET" && path === "/api/v1/campaigns") return respond(payloads.campaigns);
     if (request.method() === "GET" && path === "/api/v1/worlds") return respond(payloads.worlds);
-    if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/sync-status`) return respond({ ...payloads.syncStatus, generationRecovery: discarded ? null : { ...recovery, attempts: snapshot.attempts } });
+    if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/sync-status`) return respond({ ...payloads.syncStatus,
+      pendingGeneration: options.liveFailure && !requests.some(value => value.endsWith(`/${generationId}/stream`)) ? {
+        id: generationId, status: "generating", action: snapshot.action, expectedTurnNumber: recovery.expectedTurnNumber,
+        createdAt: "2026-10-03T14:14:35.000Z", updatedAt: "2026-10-03T14:14:35.000Z", operationKind: recovery.operationKind, replacementTurnId: recovery.replacementTurnId
+      } : null,
+      generationRecovery: discarded || (options.liveFailure && !requests.some(value => value.endsWith(`/${generationId}/stream`))) ? null : { ...recovery, attempts: snapshot.attempts } });
     if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/turns`) return respond(payloads.turns);
     if (path === `/api/v1/campaigns/${payloads.campaignId}/state`) {
       if (request.method() === "PATCH") {
@@ -147,6 +153,45 @@ async function installRecoveryApi(page: Page, options: { operation?: "append" | 
   });
   return { ...payloads, requests, writes };
 }
+
+for (const [source, message, retryAt, timing] of [
+  ["upstream_provider", "An upstream provider reported a rate limit.", "2099-10-03T14:14:37.000Z", "Provider suggested retry time:"],
+  ["unknown", "The provider did not identify which limit was reached.", "2020-10-03T14:14:37.000Z", "The suggested wait has elapsed; you can retry."]
+] as const) test(`provider failure web-next Story ${source} live and reload permits explicit retry`, async ({ page }) => {
+  const payloads = await installRecoveryApi(page, { liveFailure: true, failureDiagnostic: {
+    code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying.",
+    providerFailure: { version: 1, source: "http_error", httpStatus: 429, upstreamStatus: null, reason: "rate_limit",
+      limitSource: source, retryAfterMs: 2000, retryAt }
+  } });
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", event => { if (event.type() === "error") errors.push(event.text()); });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`${webNextOrigin}/app/story/${payloads.campaignId}`);
+  const recovery = page.locator("[data-story-recovery]");
+  await expect(recovery).toContainText("The provider rate limit was reached. Wait before retrying.");
+  await expect(recovery).toContainText(message);
+  await expect(recovery).toContainText(timing);
+  expect(payloads.requests.filter(value => value.startsWith("POST "))).toEqual([]);
+  await expect(page.locator("body")).not.toContainText(PRIVATE_CANARY);
+  await mkdir("docs/review/assets/provider-failure-diagnostics", { recursive: true });
+  await page.screenshot({ path: `docs/review/assets/provider-failure-diagnostics/${source}-live-desktop.png`, fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: `docs/review/assets/provider-failure-diagnostics/${source}-live-mobile.png`, fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.reload();
+  await expect(recovery).toContainText("The provider rate limit was reached. Wait before retrying.");
+  await expect(recovery).toContainText(message);
+  await expect(recovery).toContainText(timing);
+  await page.screenshot({ path: `docs/review/assets/provider-failure-diagnostics/${source}-reload-desktop.png`, fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(recovery.getByRole("button", { name: "Retry generation", exact: true })).toBeVisible();
+  await page.screenshot({ path: `docs/review/assets/provider-failure-diagnostics/${source}-reload-mobile.png`, fullPage: true });
+  await recovery.getByRole("button", { name: "Retry generation", exact: true }).click();
+  await expect.poll(() => payloads.requests.some(request => request === `POST /api/v1/generation-jobs/${generationId}/retry`)).toBe(true);
+  expect(payloads.requests.filter(request => request === `POST /api/v1/generation-jobs/${generationId}/retry`)).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
 
 test("web-next Story renders only safe recovery guidance and recovery actions", async ({ page }) => {
   const payloads = await installRecoveryApi(page);
@@ -429,10 +474,11 @@ for (const surface of ["legacy", "web-next"] as const) {
 }
 
 for (const surface of ["legacy", "web-next"] as const) {
-  for (const status of ["off", "observed", "passed", "conflict", "uncertain", "unavailable", "old", "unknown", "profile_changed"] as const) {
+  for (const status of ["off", "observed", "passed", "conflict", "uncertain", "unavailable", "old", "unknown", "profile_changed", "tracker_identity"] as const) {
     test(`${surface} recovery safely presents ${status} and preserves discard`, async ({ page }) => {
       const messages = { off: "Continuity review was off.", observed: "Continuity review was observed; it did not block this generation.", passed: "Continuity review passed for the supplied scope only.", conflict: "Continuity review found a conflict in the supplied scope.", uncertain: "Continuity review is uncertain; it was not a full-history pass.", unavailable: "Continuity review was unavailable; no pass was recorded." };
       const diagnostic = status === "unknown" ? { code: "future_unknown_code", action: "retry", private: PRIVATE_CANARY }
+        : status === "tracker_identity" ? { code: "tracker_update_identity_invalid", operation: "story_generation", action: "repair_authority" }
         : status === "profile_changed" ? { code: "authoritative_context_invalid", operation: "story_generation", action: "repair_authority" }
         : status === "old" ? undefined : { code: "context_evidence_omitted", operation: "story_generation", action: "adjust_context", review: { status, automaticRepair: status === "conflict" ? "consumed" : "not_consumed" } };
       const payloads = await installRecoveryApi(page, { legacyDiagnostic: status === "old", diagnostic });
@@ -446,8 +492,12 @@ for (const surface of ["legacy", "web-next"] as const) {
       await expect(recovery).toBeVisible();
       if (status in messages) await expect(recovery).toContainText(messages[status as keyof typeof messages]);
       if (status === "conflict") await expect(recovery).toContainText("The one automatic repair attempt was already used.");
-      if (status === "profile_changed") { await expect(recovery).toContainText("correct the campaign state or character profile"); await expect(recovery.getByRole("button", { name: /^Retry generation/ })).toBeHidden(); }
+      if (status === "profile_changed" || status === "tracker_identity") {
+        await expect(recovery).toContainText("Discard this attempt, correct the campaign state or character profile, then generate a new turn.");
+        await expect(recovery.getByRole("button", { name: /^Retry generation/ })).toBeHidden();
+      }
       await expect(page.locator("body")).not.toContainText(PRIVATE_CANARY);
+      if (status === "tracker_identity") await expect(page.locator("body")).not.toContainText("PRIVATE_TRACKER_CANARY");
       await expect(page.locator("vite-error-overlay")).toHaveCount(0);
       const discard = recovery.getByRole("button", { name: "Discard generation job", exact: true });
       await discard.focus(); await expect(discard).toBeFocused();

@@ -430,7 +430,8 @@ describe("createIllustrationWorkerStateMachine", () => {
       model: null
     });
 
-    const familyStatements = statements.filter(({ text }) => text.includes("illustration_resolution_jobs"));
+    const familyStatements = statements.filter(({ text }) => text.includes("illustration_resolution_jobs") && !text.startsWith("SELECT status") && !text.startsWith("SELECT segment_id"));
+    expect(statements.some(({ text }) => text.startsWith("SELECT status") && text.includes("owner_user_id=$2 FOR UPDATE"))).toBe(true);
     expect(familyStatements).toHaveLength(6);
     const promptClaim = statements.find(({ text }) => text.includes("UPDATE illustration_prompt_jobs jobs"));
     const resolutionClaim = familyStatements[0];
@@ -443,7 +444,7 @@ describe("createIllustrationWorkerStateMachine", () => {
     for (const statement of familyStatements.slice(1)) {
       expect(statement.text).toContain("owner_user_id");
       expect(statement.text).toContain("lease_owner");
-      expect(statement.text).toContain("lease_expires_at >= now()");
+      expect(statement.text).toContain("lease_expires_at > clock_timestamp()");
       expect(statement.values).toEqual(expect.arrayContaining(["job-1", "owner-1", "worker-1"]));
     }
     expect(familyStatements.map(({ text }) => text).join("\n")).not.toContain("error_code");

@@ -1,4 +1,5 @@
 import { generationReviewSummarySchema, type GenerationReviewSummary, type GenerationStreamSnapshot } from "@infinite-quest/contracts";
+import { copySnapshot } from "./projection.js";
 import { GenerationWorkflowProtocolError } from "./types.js";
 
 type GenerationStatus = GenerationStreamSnapshot["status"];
@@ -35,10 +36,23 @@ function isSameSnapshot(left: GenerationStreamSnapshot, right: GenerationStreamS
     && left.partialNarration === right.partialNarration
     && left.errorCode === right.errorCode
     && left.errorMessage === right.errorMessage
+    && left.failureDiagnostic?.code === right.failureDiagnostic?.code
+    && left.failureDiagnostic?.message === right.failureDiagnostic?.message
+    && isSameProviderFailure(left.failureDiagnostic?.providerFailure, right.failureDiagnostic?.providerFailure)
     && left.resultTurnId === right.resultTurnId
     && isSameReview(supportedReview(left.review), supportedReview(right.review))
     && JSON.stringify(left.continuityReviewDiagnostic) === JSON.stringify(right.continuityReviewDiagnostic)
     && isSameResponseFormat(left.responseFormat, right.responseFormat);
+}
+
+function isSameProviderFailure(
+  left: NonNullable<GenerationStreamSnapshot["failureDiagnostic"]>["providerFailure"],
+  right: NonNullable<GenerationStreamSnapshot["failureDiagnostic"]>["providerFailure"]
+): boolean {
+  return left?.version === right?.version && left?.source === right?.source
+    && left?.httpStatus === right?.httpStatus && left?.upstreamStatus === right?.upstreamStatus
+    && left?.reason === right?.reason && left?.limitSource === right?.limitSource
+    && left?.retryAfterMs === right?.retryAfterMs && left?.retryAt === right?.retryAt;
 }
 
 /** Compares the fixed browser-safe response-format projection without reading private job metadata. */
@@ -125,7 +139,7 @@ export function createGenerationMachine(): GenerationMachine {
   return {
     observe(snapshot) {
       if (!highWater) {
-        highWater = snapshot;
+        highWater = copySnapshot(snapshot);
         return accepted(snapshot, snapshot.partialNarration != null);
       }
 
@@ -157,7 +171,7 @@ export function createGenerationMachine(): GenerationMachine {
         retryAcknowledged = false;
         reviewDecisionAcknowledged = null;
         const narrationChanged = highWater.partialNarration !== snapshot.partialNarration;
-        highWater = snapshot;
+        highWater = copySnapshot(snapshot);
         return accepted(snapshot, narrationChanged);
       }
 
@@ -175,13 +189,13 @@ export function createGenerationMachine(): GenerationMachine {
           throw new GenerationWorkflowProtocolError("invalid_snapshot");
         }
         const narrationChanged = highWater.partialNarration !== snapshot.partialNarration;
-        highWater = snapshot;
+        highWater = copySnapshot(snapshot);
         terminalTransition = null;
         return accepted(snapshot, narrationChanged);
       }
 
       const narrationChanged = highWater.partialNarration !== snapshot.partialNarration;
-      highWater = snapshot;
+      highWater = copySnapshot(snapshot);
       terminalTransition = null;
       return accepted(snapshot, narrationChanged);
     },
@@ -203,7 +217,7 @@ export function createGenerationMachine(): GenerationMachine {
 function accepted(snapshot: GenerationStreamSnapshot, narrationChanged: boolean): GenerationMachineObservation {
   return {
     kind: "accepted",
-    snapshot,
+    snapshot: copySnapshot(snapshot),
     narrationChanged,
     terminal: terminalStatuses.has(snapshot.status)
       && !(snapshot.status === "recoverable" && snapshot.review !== undefined)

@@ -1,3 +1,5 @@
+import { captureProviderFailure } from "./provider-failure-diagnostics.js";
+import type { ProviderFailureEvidenceV1 } from "../../contracts/src/provider-failure.js";
 import { createHash } from "node:crypto";
 import type { ProviderType } from "../../contracts/src/generation.js";
 import type { PreparedResponseContract, PreparedResponseContractV2 } from "../../contracts/src/text-response-format.js";
@@ -53,6 +55,8 @@ export type TextProviderProfile = {
 };
 
 export type ProviderRequest = {
+  /** Corroborated invocation inventory, never inferred from failure metadata. */
+  knownProviderNames?: readonly string[];
   systemPrompt: string;
   input: string;
   previousResponseId?: string;
@@ -238,13 +242,15 @@ export class ProviderTransportError extends Error {
 
 /** A provider HTTP failure with only the status and bounded retry hint retained. */
 export class ProviderHttpError extends Error {
+  readonly providerFailure?: ProviderFailureEvidenceV1;
   readonly statusCode: number;
   readonly retryAfterMs: number | null;
 
-  constructor(statusCode: number, retryAfterMs: number | null, message: string) {
+  constructor(statusCode: number, retryAfterMs: number | null, message: string, providerFailure?: ProviderFailureEvidenceV1) {
     super(message);
     this.name = "ProviderHttpError";
     this.statusCode = statusCode;
+    if (providerFailure) this.providerFailure = providerFailure;
     this.retryAfterMs = retryAfterMs;
   }
 }
@@ -1156,6 +1162,13 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
   let response: Response | undefined;
   let evidence = responseContractEvidence();
+  let emittedOutput = false;
+  let providerFailure: ProviderFailureEvidenceV1 | undefined;
+  const capture = (source: ProviderFailureEvidenceV1["source"], body: unknown, bodyStatus: "parsed" | "absent" | "malformed" | "oversized") => captureProviderFailure({
+    source, body, bodyStatus, observedAt: new Date(), httpStatus: response?.status ?? null, headers: response?.headers ?? null,
+    knownProviderNames: request.knownProviderNames ?? [], successfulResponseStarted: response?.ok ?? false, emittedOutput,
+    isOpenRouter: new URL(url).hostname === "openrouter.ai"
+  });
   const send = async (preparedRequest: PreparedProviderRequest) => {
     const response = await sendPreparedProviderRequest(profile, preparedRequest, transport, request.abortSignal);
     await reportResponseHeaders(request, response);
@@ -1171,7 +1184,10 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     try {
       text = await readBoundedResponseText(clone, MAX_PROVIDER_JSON_RESPONSE_BYTES);
     } catch (error) {
-      throw transportFailure(profile, "story generation", url, error, responseStartTimes.get(response) ?? Date.now());
+      providerFailure = capture("http_error", null, error instanceof ProviderResponseTooLargeError ? "oversized" : "malformed");
+      const failure = transportFailure(profile, "story generation", url, error, responseStartTimes.get(response) ?? Date.now());
+      Object.assign(failure, { providerFailure, ...evidence });
+      throw failure;
     } finally {
       await originalCancellation?.catch(() => undefined);
     }
@@ -1181,28 +1197,36 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
         : serializeLegacyProviderRequest(profile, request, { responseFormat: false });
       response = await send(prepared);
     } else {
-      const parsed = text ? (() => { try { return JSON.parse(text); } catch { return {}; } })() : {};
+      let bodyStatus: "parsed" | "absent" | "malformed" = text ? "parsed" : "absent";
+      const parsed = text ? (() => { try { return JSON.parse(text); } catch { bodyStatus = "malformed"; return {}; } })() : {};
+      providerFailure = capture("http_error", parsed, bodyStatus);
       evidence = { ...responseContractEvidence(response, parsed), diagnosticCode: classifyResponseFormatFailure(response.status, parsed) };
       if (request.responseContract) {
         const error = providerHttpError(response, `Provider request failed (${response.status}).`);
-        Object.assign(error, { responseFormatDiagnosticCode: evidence.diagnosticCode, ...evidence });
+        Object.assign(error, { providerFailure, responseFormatDiagnosticCode: evidence.diagnosticCode, ...evidence });
         throw error;
       }
       const data = parsed as Record<string, any>;
       const message = String(data.error?.message || data.error || text || response.statusText).slice(0, 2000);
-      throw providerHttpError(response, `Provider request failed (${response.status}): ${message}`);
+      const failure = providerHttpError(response, `Provider request failed (${response.status}): ${message}`);
+      Object.assign(failure, { providerFailure });
+      throw failure;
     }
   }
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
-    const streamed = await readSseStream(response, request.onChunk, profile, "story generation", url, Boolean(request.responseContract));
+    const streamed = await readSseStream(response, async (delta, accumulated) => {
+      if (delta) emittedOutput = true;
+      await request.onChunk!(delta, accumulated);
+    }, profile, "story generation", url, Boolean(request.responseContract));
     const { content, finalData, allData } = streamed;
     evidence = responseContractStreamEvidence(response, allData, finalData, content);
     const streamUsage = allData.findLast((item) => item.usage)?.usage ?? finalData.usage;
     const sseError = request.responseContract ? structuredSseError(allData) : null;
     if (sseError) {
+      providerFailure = capture("sse_error", sseError, "parsed");
       const error = new Error("Provider returned an SSE error event for the prepared response contract.");
       Object.assign(error, {
-        ...evidence,
+        ...evidence, providerFailure,
         responseFormatDiagnosticCode: classifyResponseFormatFailure(200, sseError),
         observedUsage: observedProviderUsage(streamUsage), observedReportedCost: reportedProviderCost(streamUsage)
       });
@@ -1276,15 +1300,19 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
   };
   } catch (error) {
-    if (!request.responseContract) throw error;
     const source = error as Record<string, any>;
+    providerFailure = source.providerFailure ?? providerFailure ?? (source.responseFormatDiagnosticCode ? undefined : capture("transport_error", null, "absent"));
+    if (!request.responseContract) {
+      Object.assign(error as object, { providerFailure });
+      throw error;
+    }
     throw new PreparedResponseContractError(error, prepared, {
       responseId: safeResponseIdentity(source.responseId) ?? evidence.responseId,
       returnedModel: safeObservedIdentity(source.returnedModel) ?? evidence.returnedModel,
       returnedProviderRoute: safeObservedIdentity(source.returnedProviderRoute) ?? evidence.returnedProviderRoute,
       partialContent: typeof source.partialContent === "string" ? source.partialContent : evidence.partialContent,
       diagnosticCode: source.responseFormatDiagnosticCode ?? source.diagnosticCode ?? evidence.diagnosticCode,
-      observedUsage: source.observedUsage ?? null, observedReportedCost: source.observedReportedCost ?? null
+      observedUsage: source.observedUsage ?? null, observedReportedCost: source.observedReportedCost ?? null, ...(providerFailure ? { providerFailure } : {})
     });
   }
 }

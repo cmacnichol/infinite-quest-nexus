@@ -6,6 +6,7 @@ import type {
   PresetRouteFailureReason
 } from "../../story-engine/src/index.js";
 import type { TextRouteCandidate } from "../../contracts/src/text-execution-plan.js";
+import { projectProviderFailureEvidence, type ProviderFailureEvidenceV1 } from "../../contracts/src/provider-failure.js";
 import { stableStringify } from "../../domain/src/text.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
@@ -27,6 +28,8 @@ type AttemptRow = Readonly<{
   returned_model: string | null;
   returned_provider_route: string | null;
   emitted_output: boolean;
+  response_started_at: Date | string | null;
+  failure_diagnostic: unknown;
 }>;
 
 type CampaignCostAttribution = Readonly<{
@@ -109,12 +112,44 @@ function record(row: AttemptRow): PhysicalAttemptRecord {
       maxOutputTokens: 1
     },
     request: { body: row.request_body, payloadHash: row.request_payload_hash },
-    responseStarted: row.provider_response_id !== null || row.returned_model !== null || row.returned_provider_route !== null,
+    responseStarted: row.response_started_at !== null,
+    failureDiagnostic: projectProviderFailureEvidence(row.failure_diagnostic),
     providerResponseId: row.provider_response_id,
     returnedModel: row.returned_model,
     returnedProviderRoute: row.returned_provider_route,
     emittedOutput: row.emitted_output
   };
+}
+
+/** Optional diagnostics must never prevent durable recording of the original failure. */
+function safeFailureDiagnostic(completion: Parameters<PhysicalAttemptRepository["complete"]>[2]): ProviderFailureEvidenceV1 | null {
+  if (completion.outcome !== "failed" || completion.failureDiagnostic == null) return null;
+  const value = completion.failureDiagnostic;
+  let oversized = false;
+  try {
+    oversized = Buffer.byteLength(JSON.stringify(value), "utf8") > 4096;
+    const parsed = oversized ? null : projectProviderFailureEvidence(value);
+    // PostgreSQL renders jsonb with spaces; reserve headroom for that rendering.
+    if (parsed && Buffer.byteLength(JSON.stringify(parsed, null, 1), "utf8") <= 4096) return parsed;
+    if (parsed) oversized = true;
+  } catch {
+    // A malformed object or unserializable extension cannot mask the failure.
+  }
+  const source = typeof value === "object" && value !== null ? value : {} as Partial<ProviderFailureEvidenceV1>;
+  const status = (value: unknown) => Number.isInteger(value) && Number(value) >= 100 && Number(value) <= 599 ? Number(value) : null;
+  const observedAt = typeof source.observedAt === "string" && /^\d{4}-\d{2}-\d{2}T/u.test(source.observedAt)
+    && Number.isFinite(Date.parse(source.observedAt)) ? new Date(source.observedAt).toISOString() : new Date().toISOString();
+  const fallback: ProviderFailureEvidenceV1 = {
+    version: 1, source: source.source === "http_error" || source.source === "sse_error" ? source.source : "transport_error",
+    observedAt, httpStatus: status(source.httpStatus), upstreamStatus: status(source.upstreamStatus),
+    reason: completion.failureReason, limitSource: "unknown", upstreamCode: null, providerName: null,
+    retryAfterMs: null, retryAt: null, rateLimit: null,
+    successfulResponseStarted: source.successfulResponseStarted === true,
+    emittedOutput: completion.emittedOutput || source.emittedOutput === true,
+    metadataStatus: oversized ? "oversized" : "malformed"
+  };
+  return projectProviderFailureEvidence(fallback)
+    ?? projectProviderFailureEvidence({ ...fallback, observedAt: new Date().toISOString() });
 }
 
 /** Caller holds the discovery job lock from hasLiveReservation; count all logical retries. */
@@ -302,7 +337,7 @@ async function loadAttempt(client: DatabaseClient, attemptId: string): Promise<P
   const result = await client.query<AttemptRow>(
     `SELECT id,status,logical_reservation,plan_hash,requested_preset_slug,requested_preset_version_id,
             requested_preset_config_hash,candidate_ordinal,requested_model,provider_policy,
-            request_payload_hash,request_body,provider_response_id,returned_model,returned_provider_route,emitted_output
+            request_payload_hash,request_body,provider_response_id,returned_model,returned_provider_route,emitted_output,response_started_at,failure_diagnostic
        FROM prepared_text_physical_attempts WHERE id=$1`,
     [attemptId]
   );
@@ -333,7 +368,7 @@ export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool):
         const existing = await client.query<AttemptRow>(
           `SELECT id,status,logical_reservation,plan_hash,requested_preset_slug,requested_preset_version_id,
                   requested_preset_config_hash,candidate_ordinal,requested_model,provider_policy,
-                  request_payload_hash,request_body,provider_response_id,returned_model,returned_provider_route,emitted_output
+                  request_payload_hash,request_body,provider_response_id,returned_model,returned_provider_route,emitted_output,response_started_at,failure_diagnostic
              FROM prepared_text_physical_attempts
             WHERE logical_kind=$1 AND reservation_key=$2 AND candidate_ordinal=$3 FOR UPDATE`,
           [input.logicalReservation.kind, key, input.candidateOrdinal]
@@ -358,7 +393,7 @@ export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool):
            ) VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
            RETURNING id,status,logical_reservation,plan_hash,requested_preset_slug,requested_preset_version_id,
                      requested_preset_config_hash,candidate_ordinal,requested_model,provider_policy,
-                     request_payload_hash,request_body,provider_response_id,returned_model,returned_provider_route,emitted_output`,
+                     request_payload_hash,request_body,provider_response_id,returned_model,returned_provider_route,emitted_output,response_started_at,failure_diagnostic`,
           [input.logicalReservation.ownerUserId, input.logicalReservation.kind, key, JSON.stringify(input.logicalReservation),
             input.planProvenance.planHash, input.planProvenance.preset?.slug ?? null,
             input.planProvenance.preset?.versionId ?? null, input.planProvenance.preset?.configHash ?? null,
@@ -422,11 +457,12 @@ export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool):
         if (!await hasLiveReservation(client, reservation)) return null;
         const attribution = await lockCampaignCostAttribution(client, reservation);
         if ((reservation.kind === "story" || reservation.kind === "illustration" || reservation.kind === "cast_discovery") && !attribution) return null;
+        const failureDiagnostic = safeFailureDiagnostic(completion);
         const updated = await client.query<{ id: string }>(
           `UPDATE prepared_text_physical_attempts
               SET status='completed',outcome=$5,failure_reason=$6,provider_response_id=coalesce(provider_response_id,$7),
                   returned_model=coalesce(returned_model,$8),returned_provider_route=coalesce(returned_provider_route,$9),
-                  usage=$10::jsonb,reported_cost=$11::jsonb,emitted_output=(emitted_output OR $12),completed_at=clock_timestamp()
+                  usage=$10::jsonb,reported_cost=$11::jsonb,emitted_output=(emitted_output OR $12),failure_diagnostic=$13::jsonb,completed_at=clock_timestamp()
             WHERE id=$1 AND owner_user_id=$2 AND logical_kind=$3 AND reservation_key=$4 AND status='dispatched'
               AND (provider_response_id IS NULL OR provider_response_id IS NOT DISTINCT FROM $7)
               AND (returned_model IS NULL OR returned_model IS NOT DISTINCT FROM $8)
@@ -435,13 +471,14 @@ export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool):
           [attemptId, reservation.ownerUserId, reservation.kind, reservationKey(reservation), completion.outcome,
             completion.failureReason ?? null, completion.providerResponseId, completion.returnedModel,
             completion.returnedProviderRoute, completion.usage === null ? null : JSON.stringify(completion.usage),
-            completion.reportedCost === null ? null : JSON.stringify(completion.reportedCost), completion.emittedOutput]
+            completion.reportedCost === null ? null : JSON.stringify(completion.reportedCost), completion.emittedOutput,
+            failureDiagnostic === null ? null : JSON.stringify(failureDiagnostic)]
         );
         if (!updated.rows[0]) return null;
         const attempt = await client.query<AttemptRow>(
           `SELECT id,status,logical_reservation,plan_hash,requested_preset_slug,requested_preset_version_id,
                   requested_preset_config_hash,candidate_ordinal,requested_model,provider_policy,
-                  request_payload_hash,request_body,provider_response_id,returned_model,returned_provider_route,emitted_output
+                  request_payload_hash,request_body,provider_response_id,returned_model,returned_provider_route,emitted_output,response_started_at,failure_diagnostic
              FROM prepared_text_physical_attempts WHERE id=$1`,
           [attemptId]
         );

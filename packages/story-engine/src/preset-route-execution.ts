@@ -1,4 +1,5 @@
 import type { TextRouteCandidate } from "../../contracts/src/text-execution-plan.js";
+import { projectProviderFailureEvidence, type ProviderFailureEvidenceV1 } from "../../contracts/src/provider-failure.js";
 import type { ReportedProviderCost } from "./providers.js";
 
 export type LogicalReservation =
@@ -26,6 +27,7 @@ export type PhysicalAttemptRecord = Readonly<{
   candidate: TextRouteCandidate;
   request: PreparedPhysicalRequest;
   responseStarted?: boolean;
+  failureDiagnostic?: ProviderFailureEvidenceV1 | null;
   providerResponseId?: string | null;
   returnedModel?: string | null;
   returnedProviderRoute?: string | null;
@@ -81,9 +83,11 @@ export type PhysicalAttemptRepository = Readonly<{
   complete(reservation: LogicalReservation, attemptId: string, completion: Readonly<({
     outcome: "succeeded";
     failureReason?: never;
+    failureDiagnostic?: never;
   } | {
     outcome: "failed";
     failureReason: PresetRouteFailureReason;
+    failureDiagnostic?: ProviderFailureEvidenceV1 | null;
   }) & {
     providerResponseId: string | null;
     returnedModel: string | null;
@@ -138,23 +142,29 @@ export class PreparedRouteTerminalError extends Error {
   readonly code: string;
   readonly reason: PresetRouteFailureReason;
   readonly attemptId: string | null;
+  readonly providerResponseId: string | null;
+  readonly providerFailure: ProviderFailureEvidenceV1 | null;
   readonly returnedModel: string | null;
   readonly returnedProviderRoute: string | null;
   physicalAccounting: PhysicalAttemptAccountingSummary | null = null;
 
   constructor(code: string, reason: PresetRouteFailureReason, message: string, attemptId: string | null = null, options?: ErrorOptions,
-    identity?: Readonly<{ returnedModel?: string | null; returnedProviderRoute?: string | null }>) {
+    identity?: Readonly<{ returnedModel?: string | null; returnedProviderRoute?: string | null; providerResponseId?: string | null; providerFailure?: unknown }>) {
     super(message, options);
     this.name = "PreparedRouteTerminalError";
     this.code = code;
     this.reason = reason;
     this.attemptId = attemptId;
+    this.providerResponseId = safeIdentity(identity?.providerResponseId);
+    this.providerFailure = safeProviderFailure(identity?.providerFailure);
     this.returnedModel = identity?.returnedModel ?? null;
     this.returnedProviderRoute = identity?.returnedProviderRoute ?? null;
   }
 }
 
 type RouteFailureCarrier = Readonly<{
+  providerFailure?: unknown;
+  providerResponseId?: unknown;
   routeFailureReason?: unknown;
   reason?: unknown;
   retryAfterMs?: unknown;
@@ -169,14 +179,26 @@ function safeIdentity(value: unknown): string | null {
   return typeof value === "string" && value.trim() && value.length <= 256 ? value : null;
 }
 
+function safeProviderFailure(value: unknown): ProviderFailureEvidenceV1 | null {
+  try {
+    return projectProviderFailureEvidence(value);
+  } catch {
+    // Invalid provider evidence must never mask the original route failure.
+    return null;
+  }
+}
+
 export function classifyPresetRouteFailure(error: unknown): Readonly<PresetRouteFailure & {
+  providerFailure: ProviderFailureEvidenceV1 | null;
   retryAfterMs: number | null;
   providerResponseId: string | null;
   returnedModel: string | null;
   returnedProviderRoute: string | null;
 }> {
   const source = error && typeof error === "object" ? error as RouteFailureCarrier & { statusCode?: unknown; code?: unknown; name?: unknown } : {};
-  const suppliedReason = source.routeFailureReason ?? source.reason;
+  const providerFailure = safeProviderFailure(source.providerFailure);
+  const suppliedReason = source.routeFailureReason ?? source.reason
+    ?? (providerFailure?.reason === "unknown" ? undefined : providerFailure?.reason);
   const supplied = typeof suppliedReason === "string" && [
     "rate_limit", "provider_unavailable", "model_unavailable", "authentication", "schema_invalid", "refusal",
     "cancelled", "deadline", "ambiguous_transport", "invalid_identity", "unknown"
@@ -200,10 +222,14 @@ export function classifyPresetRouteFailure(error: unknown): Readonly<PresetRoute
                   : /timeout|transport/i.test(`${name} ${code}`) ? "ambiguous_transport" : "unknown");
   return {
     reason,
-    emittedOutput: typeof source.partialContent === "string" && source.partialContent.length > 0,
-    responseStarted: safeIdentity(source.responseId) !== null,
-    retryAfterMs: Number.isSafeInteger(source.retryAfterMs) && Number(source.retryAfterMs) >= 0 ? Number(source.retryAfterMs) : null,
-    providerResponseId: safeIdentity(source.responseId),
+    providerFailure,
+    emittedOutput: Boolean(providerFailure?.emittedOutput) || (typeof source.partialContent === "string" && source.partialContent.length > 0),
+    // Only explicit HTTP rejection proves a pre-response outcome. Streaming and
+    // transport failures, or missing legacy evidence, remain conservative.
+    responseStarted: providerFailure?.source === "http_error" ? providerFailure.successfulResponseStarted : true,
+    retryAfterMs: Number.isSafeInteger(source.retryAfterMs) && Number(source.retryAfterMs) >= 0
+      ? Number(source.retryAfterMs) : providerFailure?.retryAfterMs ?? null,
+    providerResponseId: safeIdentity(source.providerResponseId ?? source.responseId),
     returnedModel: safeIdentity(source.returnedModel),
     returnedProviderRoute: safeIdentity(source.returnedProviderRoute)
   };
@@ -402,30 +428,46 @@ export async function executePresetRoutes<T extends Readonly<{
       };
       const source = receivedValue ?? (error && typeof error === "object" ? error as RouteFailureCarrier : {});
       const accounting = source as { observedUsage?: unknown; usage?: unknown; usageReported?: unknown; observedReportedCost?: unknown; reportedCost?: unknown; responseId?: unknown; providerResponseId?: unknown };
-      lastFailure = observed.reason;
-      const failed = await input.attempts.complete(input.logicalReservation, attempt.id, {
-        outcome: "failed", failureReason: observed.reason,
+      const providerFailure = failure.providerFailure ? {
+        ...failure.providerFailure,
+        successfulResponseStarted: responseStarted || failure.providerFailure.successfulResponseStarted,
+        emittedOutput: observed.emittedOutput
+      } : null;
+      const failureIdentity = {
         providerResponseId: failure.providerResponseId ?? safeIdentity(accounting.providerResponseId ?? accounting.responseId) ?? responseEvidence.providerResponseId,
         returnedModel: failure.returnedModel ?? responseEvidence.returnedModel,
         returnedProviderRoute: failure.returnedProviderRoute ?? responseEvidence.returnedProviderRoute,
+        providerFailure
+      };
+      if (!responseStarted && providerFailure?.successfulResponseStarted) {
+        const recorded = await input.attempts.recordResponseStart(input.logicalReservation, attempt.id, failureIdentity);
+        if (!recorded) throw new PreparedRouteTerminalError("prepared_route_lease_lost", "cancelled",
+          "The response-start evidence lost its logical lease.", attempt.id, { cause: error }, failureIdentity);
+      }
+      lastFailure = observed.reason;
+      const failed = await input.attempts.complete(input.logicalReservation, attempt.id, {
+        outcome: "failed", failureReason: observed.reason, failureDiagnostic: providerFailure,
+        providerResponseId: failureIdentity.providerResponseId,
+        returnedModel: failureIdentity.returnedModel,
+        returnedProviderRoute: failureIdentity.returnedProviderRoute,
         emittedOutput: observed.emittedOutput,
         usage: observedUsage(accounting.observedUsage ?? (accounting.usageReported === false ? null : accounting.usage)),
         reportedCost: observedCost(accounting.observedReportedCost ?? accounting.reportedCost)
       });
       if (!failed) {
-        throw new PreparedRouteTerminalError("prepared_route_lease_lost", "cancelled", "The failed physical attempt lost its logical lease.", attempt.id, { cause: error });
+        throw new PreparedRouteTerminalError("prepared_route_lease_lost", "cancelled", "The failed physical attempt lost its logical lease.", attempt.id, { cause: error }, failureIdentity);
       }
       if (!shouldAdvancePresetRoute(observed) || candidateOrdinal === input.candidates.length - 1) {
         const code = observed.reason === "cancelled" ? "prepared_route_cancelled"
           : observed.reason === "deadline" ? "prepared_route_deadline_exceeded"
             : candidateOrdinal === input.candidates.length - 1 && shouldAdvancePresetRoute(observed) ? "prepared_route_exhausted"
               : "prepared_route_terminal";
-        throw new PreparedRouteTerminalError(code, observed.reason, "The prepared route sequence ended without a safe next candidate.", attempt.id, { cause: error });
+        throw new PreparedRouteTerminalError(code, observed.reason, "The prepared route sequence ended without a safe next candidate.", attempt.id, { cause: error }, failureIdentity);
       }
       const delay = failure.retryAfterMs ?? 0;
       const afterFailureRemaining = input.totalDeadlineMs - (now() - startedAt);
       if (delay >= afterFailureRemaining) {
-        throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Retry-After exceeds the prepared route deadline.", attempt.id, { cause: error });
+        throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Retry-After exceeds the prepared route deadline.", attempt.id, { cause: error }, failureIdentity);
       }
       if (delay > 0) {
         const waitAbort = routeAbortSignal(input.signal, afterFailureRemaining);
@@ -436,7 +478,7 @@ export async function executePresetRoutes<T extends Readonly<{
           const code = waitFailure === "deadline" ? "prepared_route_deadline_exceeded"
             : waitFailure === "cancelled" ? "prepared_route_cancelled" : "prepared_route_terminal";
           throw new PreparedRouteTerminalError(code, waitFailure,
-            "The prepared route wait ended before the next candidate could dispatch.", attempt.id, { cause: waitError });
+            "The prepared route wait ended before the next candidate could dispatch.", attempt.id, { cause: waitError }, failureIdentity);
         } finally {
           waitAbort.dispose();
         }

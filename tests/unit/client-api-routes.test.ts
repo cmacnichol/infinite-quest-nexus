@@ -220,11 +220,27 @@ function jobRow(options: MockPoolOptions) {
 }
 
 function mockPool(options: MockPoolOptions = {}): DatabasePool {
+  let activityStatus = "queued";
+  let activityRevision = 0;
   let generationJobReads = 0;
   let userDisplayName = "Initial Owner";
   const query = async (queryInput: unknown, params: unknown[] = []) => {
     const sql = String(queryInput).replaceAll(/\s+/g, " ").trim();
     options.onQuery?.(sql);
+    if (sql.startsWith("UPDATE generation_jobs SET status = 'cancelled'")) activityStatus = "cancelled";
+    if (sql.startsWith("UPDATE generation_jobs SET status = 'discarded'")) activityStatus = "discarded";
+    if (sql.startsWith("UPDATE generation_jobs SET activity_revision = activity_revision + 1")) {
+      expect(params).toEqual([JOB_ID, OWNER_ID]);
+      return { rows: [{ campaign_id: CAMPAIGN_ID, status: activityStatus, activity_revision: String(++activityRevision),
+        attempts: 1, expected_turn_number: 3, result_turn_id: null, error_code: null, occurred_at: NOW }] };
+    }
+    if (sql.startsWith("INSERT INTO activity_event_outbox(")) {
+      expect(params[1]).toBe(OWNER_ID); expect(params[2]).toBe(CAMPAIGN_ID);
+      return { rows: [{ event_id: params[0] }] };
+    }
+    if (sql.startsWith("INSERT INTO campaign_activity_history(owner_user_id,campaign_id,captured_since)")) {
+      expect(params.slice(0, 2)).toEqual([OWNER_ID, CAMPAIGN_ID]); return { rows: [] };
+    }
     if (["BEGIN", "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "COMMIT", "ROLLBACK", "SAVEPOINT enqueue_generation_insert"].includes(sql)) return { rows: [] };
     if (sql.startsWith("SELECT id FROM users")) {
       options.onInitialOwnerRead?.();
@@ -501,7 +517,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       }] };
     }
 
-    if (sql.startsWith("SELECT id, campaign_id AS") && sql.includes("partial_output AS")) {
+    if (sql.includes("SELECT id, campaign_id AS") && sql.includes("partial_output AS")) {
       if (options.missingJob) return { rows: [] };
       generationJobReads += 1;
       options.onGenerationJobRead?.();
@@ -557,7 +573,8 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
         providerPromptProtocolVersion(RETRY_PROMPT_SNAPSHOT),
         { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" }
       ),
-      generationPolicy: null
+      generationPolicy: null,
+      orchestrationPrivate: {}
     }] };
 
     if (sql.startsWith("WITH source AS ( SELECT id, status, campaign_id AS \"campaignId\"")) return { rows: [{

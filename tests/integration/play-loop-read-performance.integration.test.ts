@@ -1,4 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { createPostgresCampaignAuthorityAdapters } from "../../packages/database/src/campaign-state-repository.js";
+import { runPostgresWorldCampaignCommandWithClient } from "../../packages/database/src/world-campaign-transaction.js";
+import { importLegacyStory } from "../helpers/memory-aware-services.js";
+import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
+import { createProvider } from "../helpers/provider-application-fixtures.js";
+import { randomBytes, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -25,6 +31,82 @@ type RouteMetric = {
 };
 
 integration("play-loop read performance", () => {
+  it("keeps selected pending and recovery sync projections bounded with oversized private evidence", async () => {
+    const pool = createDatabasePool(databaseUrl!, 2);
+    try {
+      await migrateDatabase(pool, resolve("database/migrations"));
+      const ownerUserId = await initialOwnerId(pool);
+      const story = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+      story.world.title = `Sync projection ${randomUUID()}`;
+      const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "sync-projection.story", story }));
+      const provider = await createProvider(pool, {
+        name: `Sync projection ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text",
+        baseUrl: "http://127.0.0.1:9911", defaultModel: "projection-model", contextWindowTokens: 32768,
+        maxOutputTokens: 4096, temperature: 0, enabled: true, configuration: {}
+      }, "synthetic-sync-secret");
+      await pool.query("UPDATE generation_jobs SET status='discarded' WHERE campaign_id=$1", [imported.campaignId]);
+      await pool.query(
+        `INSERT INTO generation_jobs (owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status,created_at,updated_at)
+         SELECT $1,$2,$3,'historical-' || sequence,1,'Historical synthetic job','completed',now()-interval '1 day',now()-interval '1 day'
+           FROM generate_series(1,400) sequence`, [ownerUserId, imported.campaignId, provider.id]
+      );
+      const canary = "PRIVATE_SYNC_OVERSIZED_CANARY";
+      const evidence = canary + randomBytes(8 * 1024 * 1024).toString("base64");
+      const source = {
+        lastFailureDiagnostic: { version: 1, category: "provider_rejection", code: "provider_rate_limited",
+          phase: "story_generation", attemptNumber: 1, occurredAt: "2026-10-03T14:14:35.000Z" },
+        queuedResponsePolicy: { version: 1, policy: "auto", model: "projection-model" },
+        generationReview: { version: 1, reviewId: randomUUID(), revision: 1, state: "pending", stage: "continuity", candidateScope: "final",
+          reasons: ["review_unavailable"], eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
+          gateCandidate: { story: { narration: canary } } }
+      };
+      const adapters = createPostgresCampaignAuthorityAdapters(pool, {} as Parameters<typeof createPostgresCampaignAuthorityAdapters>[1]);
+      const client = await pool.connect();
+      try {
+        const read = async () => {
+          let queryCount = 0;
+          const measuredClient = new Proxy(client, { get(target, property) {
+            if (property === "query") return (...args: Parameters<typeof client.query>) => { queryCount += 1; return target.query(...args); };
+            const value = Reflect.get(target, property);
+            return typeof value === "function" ? value.bind(target) : value;
+          } });
+          const snapshot = await runPostgresWorldCampaignCommandWithClient(measuredClient, (transaction) =>
+            adapters.sync.readCampaignSyncSnapshot(transaction, { ownerUserId, campaignId: imported.campaignId })
+          );
+          expect(queryCount).toBe(1);
+          return snapshot;
+        };
+        for (const status of ["generating", "recoverable"] as const) {
+          await client.query("UPDATE generation_jobs SET status='discarded' WHERE campaign_id=$1 AND status IN ('generating','recoverable')", [imported.campaignId]);
+          const job = await client.query<{ id: string }>(
+            `INSERT INTO generation_jobs (owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status,orchestration_private)
+             VALUES ($1,$2,$3,$4,1,'Inspect the archive.',$5,$6::jsonb) RETURNING id`,
+            [ownerUserId, imported.campaignId, provider.id, randomUUID(), status, JSON.stringify(source)]
+          );
+          const expected = await read();
+          await client.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [job.rows[0]!.id, JSON.stringify({ ...source, privateRequestEvidence: evidence })]);
+          const hash = await client.query("SELECT md5(orchestration_private::text) AS hash FROM generation_jobs WHERE id=$1", [job.rows[0]!.id]);
+          const actual = await read();
+          expect(actual).toEqual(expected);
+          expect(JSON.stringify(actual)).toContain(job.rows[0]!.id);
+          expect(JSON.stringify(actual)).not.toContain(canary);
+          expect(Buffer.byteLength(JSON.stringify(actual))).toBeLessThan(32_768);
+          expect(actual.syncToken).toBe(expected.syncToken);
+          if (status === "recoverable") {
+            expect(JSON.stringify(actual)).toContain(source.generationReview.reviewId);
+            expect(actual.projection.generationRecovery).toMatchObject({ failureDiagnostic: {
+              code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying."
+            } });
+          }
+          expect(await client.query("SELECT md5(orchestration_private::text) AS hash FROM generation_jobs WHERE id=$1", [job.rows[0]!.id])).toEqual(hash);
+        }
+        await expect(runPostgresWorldCampaignCommandWithClient(client, (transaction) =>
+          adapters.sync.readCampaignSyncSnapshot(transaction, { ownerUserId: randomUUID(), campaignId: imported.campaignId })
+        )).rejects.toMatchObject({ kind: "not_found" });
+      } finally { client.release(); }
+    } finally { await pool.end(); }
+  }, 120_000);
+
   it("profiles bounded hot routes with deterministic query budgets and realistic fixture cardinalities", async () => {
     const result = await runPlayLoopBenchmark({
       databaseUrl: databaseUrl!,

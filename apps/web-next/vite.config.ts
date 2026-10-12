@@ -7,6 +7,7 @@ export default defineConfig({
   base: "/app/",
   plugins: [webAwesomeAssets()],
   build: {
+    target: ["chrome107", "edge107", "firefox104", "safari16"],
     emptyOutDir: true,
     manifest: true,
     outDir: "dist"

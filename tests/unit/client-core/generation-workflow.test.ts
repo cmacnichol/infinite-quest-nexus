@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CampaignSyncStatus, GenerationActionResponse, GenerationEnqueueResponse, GenerationResult, GenerationReviewDecisionRequest, GenerationReviewDetail, GenerationStreamSnapshot } from "../../../packages/contracts/src/index.js";
 import { createGenerationWorkflow, GenerationWorkflowProtocolError } from "../../../packages/client-core/src/index.js";
+import { generationDiagnosticPresentation } from "../../../packages/client-core/src/generation/projection.js";
 import type { AbortSignalLike, PendingSubmissionStore } from "../../../packages/client-core/src/ports.js";
 import type {
   GenerationApiPort,
@@ -168,6 +169,16 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
 }
 
 describe("generation workflow", () => {
+  it("presents tracker identity recovery as a non-retryable discard and authority repair", () => {
+    expect(generationDiagnosticPresentation({
+      code: "tracker_update_identity_invalid",
+      operation: "story_generation",
+      action: "repair_authority"
+    })).toMatchObject({
+      retryable: false,
+      message: "Discard this attempt, correct the campaign state or character profile, then generate a new turn. Your draft can be reused."
+    });
+  });
   it("keeps watching duplicate pending reviews until an explicit retry completes", async () => {
     const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
     const pending = snapshot({ status: "recoverable", review: reviewSummary() });
@@ -1041,5 +1052,22 @@ describe("generation workflow", () => {
 
     await expect(run.cancelGeneration()).rejects.toMatchObject({ kind: "action_response_mismatch" } satisfies Partial<GenerationWorkflowProtocolError>);
     expect(pending.value?.jobId).toBe(jobId);
+  });
+});
+
+describe("provider failure workflow propagation", () => {
+  it("retains nested evidence on a live failure without initiating advisory retries", async () => {
+    const providerFailure = { version: 1 as const, source: "http_error" as const, httpStatus: 429, upstreamStatus: null,
+      reason: "rate_limit" as const, limitSource: "upstream_provider" as const, retryAfterMs: 15000, retryAt: "2026-10-03T15:00:15.000Z" };
+    const failureDiagnostic = { code: "provider_rate_limited" as const,
+      message: "The provider rate limit was reached. Wait before retrying.", providerFailure };
+    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const source = sourceFromSessions([[{ kind: "snapshot", snapshot: snapshot({ status: "failed", failureDiagnostic }) }]]);
+    const workflow = createGenerationWorkflow({ api: client, source, clock: { now: () => Date.parse(providerFailure.retryAt) + 60000 }, pendingSubmissions: store() });
+    const run = await workflow.submit(campaignId, submission());
+    const events = await collect(run.watch(signal()));
+    expect(events).toContainEqual(expect.objectContaining({ type: "status", snapshot: expect.objectContaining({ failureDiagnostic }) }));
+    expect(client.retries).toBe(0);
+    expect(source.calls).toBe(1);
   });
 });

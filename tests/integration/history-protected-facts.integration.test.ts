@@ -5,12 +5,14 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { loadCurrentContinuityCorrection, loadVerifiedProtectedFacts, verifyCapturedOptionalGenerationFacts } from "../../packages/database/src/campaign-continuity-repository.js";
 import { buildCanonicalChronicleFacts } from "../../packages/domain/src/chronicle-memory-helpers.js";
 import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
-import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
+import { loadPostgresChronicleGenerationAuthorityContext, loadPostgresChronicleGenerationCandidatesContext } from "../../packages/database/src/chronicle-generation-context.js";
 import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
+import { generationEvidenceManifestSchema } from "../../packages/application/src/memory/generation-context.js";
 
 import { planGenerationPromptContext } from "../../services/runtime/src/generation-context-planner.js";
 import { serializeProviderRequest } from "../../packages/story-engine/src/index.js";
+import type { RuntimeTextExecution } from "../../services/runtime/src/provider-credential-transport-adapter.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe.sequential : describe.skip;
 
@@ -32,10 +34,10 @@ integration("verified protected-fact authority", () => {
 
   afterAll(async () => { await pool?.end(); });
 
-  async function fixture() {
+  async function fixture(activeTurnNumber = 3) {
     const world = await pool.query<{ id: string }>("INSERT INTO worlds(owner_user_id,title) VALUES($1,$2) RETURNING id", [ownerUserId, `Protected facts ${crypto.randomUUID()}`]);
     const version = await pool.query<{ id: string }>("INSERT INTO world_versions(owner_user_id,world_id,version_number,content) VALUES($1,$2,1,$3::jsonb) RETURNING id", [ownerUserId, world.rows[0]!.id, JSON.stringify({ world: { title: "Protected facts" } })]);
-    const campaign = await pool.query<{ id: string }>("INSERT INTO campaigns(owner_user_id,world_version_id,title,active_turn_number) VALUES($1,$2,$3,3) RETURNING id", [ownerUserId, version.rows[0]!.id, "Protected facts"]);
+    const campaign = await pool.query<{ id: string }>("INSERT INTO campaigns(owner_user_id,world_version_id,title,active_turn_number) VALUES($1,$2,$3,$4) RETURNING id", [ownerUserId, version.rows[0]!.id, "Protected facts", activeTurnNumber]);
     await pool.query("INSERT INTO campaign_state(owner_user_id,campaign_id) VALUES($1,$2)", [ownerUserId, campaign.rows[0]!.id]);
     return { campaignId: campaign.rows[0]!.id, worldVersionId: version.rows[0]!.id };
   }
@@ -48,6 +50,47 @@ integration("verified protected-fact authority", () => {
   async function insertAcceptedFact(scope: { campaignId: string; worldVersionId: string }, turnId: string, turnNumber: number, fact: { id: string; factIndex: number; content: string }) {
     await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,lower($8),$6)`, [fact.id, ownerUserId, scope.campaignId, scope.worldVersionId, turnId, turnNumber, fact.factIndex, fact.content]);
+  }
+
+  async function insertChronicleFact(scope: { campaignId: string; worldVersionId: string }, turnId: string, turnNumber: number, fact: { id: string; content: string }) {
+    await pool.query(`INSERT INTO chronicle_memories(id,owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate,importance,entities,metadata)
+      VALUES($1,$2,$3,$4,$5,'canonical_fact',$6,$7,32,1,ARRAY[]::text[],'{}'::jsonb)`,
+    [fact.id, ownerUserId, scope.campaignId, scope.worldVersionId, turnId, turnNumber, fact.content]);
+  }
+
+  async function planV5Request(scope: { campaignId: string; worldVersionId: string }, expectedTurnNumber: number, query: string) {
+    const policy = defaultStoryMemoryPolicy("r3");
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true, promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, providerConfigurationFingerprint: "c".repeat(64) } as const;
+    const scopeWithProtocol = { ownerUserId, ...scope, operationKind: "append" as const, expectedTurnNumber, query, storyMemoryPolicy };
+    const frozen = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
+      ...scopeWithProtocol, baseIdentityVersion: "generation-base-v4", captureRecentWindow: true, recentWindowTurns: 11,
+      captureStoryLedger: true, captureProtectedFacts: true
+    }));
+    const authority = await withTransaction(pool, (client) => loadPostgresChronicleGenerationAuthorityContext(client, {
+      ...scopeWithProtocol, expectedBaseIdentity: frozen.baseIdentity
+    }));
+    const provider: RuntimeTextExecution & { baseUrl: string } = { id: "v5-protected-facts-writer", name: "V5 protected facts writer", providerRole: "text",
+      providerType: "openai_compatible" as const, model: "deterministic-test", baseUrl: "http://fixture.invalid/v1",
+      contextWindowTokens: 32_000, maxOutputTokens: 512, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: async () => { throw new Error("The generation-context planner must not execute the text provider."); } };
+    const plan = (context: typeof authority) => planGenerationPromptContext(context, provider, "System", "Continue the story.", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 32_000, 31_488,
+      "77777777-7777-4777-8777-777777777777", "story_memory", policy, undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const reservationPlan = plan({ ...authority, candidates: [] });
+    const reservation = { recentTurnIds: reservationPlan.promptContext.recentTurns?.map((turn) => turn.sourceId) ?? [],
+      protectedFactIds: reservationPlan.promptContext.protectedFacts?.map((fact) => fact.id) ?? [] };
+    const client = await pool.connect();
+    let retrieved;
+    try {
+      retrieved = await loadPostgresChronicleGenerationCandidatesContext(client, { ...scopeWithProtocol, retrievalBudgetTokens: 30_000 },
+        authority, {} as never, reservation, { useSavepoints: false });
+    } finally { client.release(); }
+    const planned = plan(retrieved);
+    const requestBody = serializeProviderRequest(provider, { systemPrompt: "System", input: planned.storyInput }).body;
+    const manifest = generationEvidenceManifestSchema.parse(planned.sourceManifest);
+    return { authority, retrieved, planned, requestBody, manifest };
   }
 
   async function load(scope: { campaignId: string; worldVersionId: string }, baseTurnNumber = 3) {
@@ -68,12 +111,15 @@ integration("verified protected-fact authority", () => {
     const oldTurnId = await acceptedTurn(scope.campaignId, 1, oldSnapshot);
     const old = buildCanonicalChronicleFacts({ campaignId: scope.campaignId, turnId: oldTurnId, ...oldSnapshot, entityCatalog: [] })[0]!;
     await insertAcceptedFact(scope, oldTurnId, 1, old);
+    await insertChronicleFact(scope, oldTurnId, 1, old);
     await pool.query(`INSERT INTO campaign_state_edits(owner_user_id,campaign_id,revision,effective_turn_number,state_snapshot_private)
-      VALUES($1,$2,1,2,$3::jsonb)`, [ownerUserId, scope.campaignId, JSON.stringify({ canonicalFacts: [] })]);
+      VALUES($1,$2,1,2,$3::jsonb)`, [ownerUserId, scope.campaignId, JSON.stringify({ continuitySummary: "", scratchpad: "", openThreads: [],
+      canonicalFacts: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] })]);
     const laterSnapshot = { canonicalFacts: ["A brass key hangs above the harbor gate."], canonicalFactUpdates: [] };
     const laterTurnId = await acceptedTurn(scope.campaignId, 3, laterSnapshot);
     const later = buildCanonicalChronicleFacts({ campaignId: scope.campaignId, turnId: laterTurnId, ...laterSnapshot, entityCatalog: [] })[0]!;
     await insertAcceptedFact(scope, laterTurnId, 3, later);
+    await insertChronicleFact(scope, laterTurnId, 3, later);
     const before = await pool.query("SELECT id,valid_until_turn FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [scope.campaignId]);
 
     const result = await load(scope);
@@ -83,6 +129,13 @@ integration("verified protected-fact authority", () => {
     expect(result.candidateRows).toBe(2);
     expect(result.sourceBytes).toBeGreaterThan(0);
     await expect(pool.query("SELECT id,valid_until_turn FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [scope.campaignId])).resolves.toMatchObject({ rows: before.rows });
+
+    const composed = await planV5Request(scope, 4, "Recall the old harbor gate and tell me why it was opened.");
+    expect(composed.authority.authority.storyLedger).toBeDefined();
+    expect(composed.authority.authority.protectedFacts?.some((fact) => fact.id === old.id)).toBe(false);
+    expect(composed.retrieved.candidates.some((candidate) => candidate.id === old.id)).toBe(false);
+    expect(composed.requestBody).not.toContain(old.content);
+    expect(composed.manifest.entries.some((entry) => entry.canonicalFactId === old.id)).toBe(false);
   });
 
   it("captures a nonempty correction frontier before the base and retains it through a later accepted turn", async () => {
@@ -253,46 +306,83 @@ integration("verified protected-fact authority", () => {
   });
 
   it("withholds foreign, retired, future, mismatched, imported, and missing projection candidates without repairing rows", async () => {
-    const scope = await fixture();
+    const scope = await fixture(10);
     const other = await fixture();
-    const snapshot = { canonicalFacts: ["The retained seal is silver.", "The index must match.", "The source text must match.", "The retired fact is gone.", "The missing projection never arrives."], canonicalFactUpdates: [] };
-    const turnId = await acceptedTurn(scope.campaignId, 1, snapshot);
-    const facts = buildCanonicalChronicleFacts({ campaignId: scope.campaignId, turnId, ...snapshot, entityCatalog: [] });
-    await insertAcceptedFact(scope, turnId, 1, facts[0]!);
-    await insertAcceptedFact(scope, turnId, 1, { ...facts[1]!, factIndex: 9 });
+    const seedFact = async (turnNumber: number, sourceContent: string, storedContent = sourceContent,
+      options: { factIndex?: number; validFromTurn?: number; validUntilTurn?: number } = {}) => {
+      const snapshot = { canonicalFacts: [sourceContent], canonicalFactUpdates: [] };
+      const turnId = await acceptedTurn(scope.campaignId, turnNumber, snapshot);
+      const fact = buildCanonicalChronicleFacts({ campaignId: scope.campaignId, turnId, ...snapshot, entityCatalog: [] })[0]!;
+      await insertAcceptedFact(scope, turnId, turnNumber, { ...fact, factIndex: options.factIndex ?? 0, content: storedContent });
+      if (options.validFromTurn !== undefined || options.validUntilTurn !== undefined) {
+        await pool.query("UPDATE campaign_canonical_facts SET valid_from_turn=COALESCE($2,valid_from_turn), valid_until_turn=$3 WHERE id=$1",
+          [fact.id, options.validFromTurn ?? null, options.validUntilTurn ?? null]);
+      }
+      await insertChronicleFact(scope, turnId, turnNumber, { id: fact.id, content: storedContent });
+      return { ...fact, content: storedContent, turnId };
+    };
+    const corrected = await seedFact(1, "The moon vault old seal was explicitly erased.");
+    const badIndex = await seedFact(2, "The moon vault index seal has a bad source index.", undefined, { factIndex: 9 });
+    const badText = await seedFact(3, "The moon vault source seal matches its accepted turn.", "The moon vault forged seal has different source text.");
+    const inactive = await seedFact(4, "The moon vault inactive seal has expired.", undefined, { validUntilTurn: 10 });
+    const future = await seedFact(5, "The moon vault future seal is not active yet.", undefined, { validFromTurn: 11 });
+    const missingTurnId = await acceptedTurn(scope.campaignId, 6, { canonicalFacts: [], canonicalFactUpdates: [] });
+    const missing = { id: crypto.randomUUID(), content: "The moon vault missing-source seal is invalid." };
     await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
-      VALUES($1,$2,$3,$4,$5,1,2,'The projection text differs.','the projection text differs.',1)`, [facts[2]!.id, ownerUserId, scope.campaignId, scope.worldVersionId, turnId]);
-    await insertAcceptedFact(scope, turnId, 1, facts[3]!);
-    await pool.query("UPDATE campaign_canonical_facts SET valid_until_turn=3 WHERE id=$1", [facts[3]!.id]);
+      VALUES($1,$2,$3,$4,$5,6,0,$6,lower($6),6)`, [missing.id, ownerUserId, scope.campaignId, scope.worldVersionId, missingTurnId, missing.content]);
+    await insertChronicleFact(scope, missingTurnId, 6, missing);
+    await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
+      VALUES($1,$2,$3,$4,$5,6,1,$6,lower($6),6)`, [crypto.randomUUID(), ownerUserId, scope.campaignId, scope.worldVersionId, missingTurnId, "z".repeat(16_001)]);
+    await acceptedTurn(scope.campaignId, 7, { canonicalFacts: [], canonicalFactUpdates: [] });
+    await acceptedTurn(scope.campaignId, 8, { canonicalFacts: [], canonicalFactUpdates: [] });
     await pool.query(`INSERT INTO campaign_state_edits(owner_user_id,campaign_id,revision,effective_turn_number,state_snapshot_private)
-      VALUES($1,$2,1,2,$3::jsonb)`, [ownerUserId, scope.campaignId, JSON.stringify({ canonicalFacts: [{ id: facts[0]!.id, content: facts[0]!.content }] })]);
-    const futureSnapshot = { canonicalFacts: ["The future row is not authority yet."], canonicalFactUpdates: [] };
-    const futureTurnId = await acceptedTurn(scope.campaignId, 4, futureSnapshot);
-    const future = buildCanonicalChronicleFacts({ campaignId: scope.campaignId, turnId: futureTurnId, ...futureSnapshot, entityCatalog: [] })[0]!;
-    await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
-      VALUES($1,$2,$3,$4,$5,4,0,$6,lower($6),1)`, [future.id, ownerUserId, scope.campaignId, scope.worldVersionId, futureTurnId, future.content]);
-    await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
-      VALUES($1,$2,$3,$4,$5,1,7,$6,lower($6),1)`, [crypto.randomUUID(), ownerUserId, scope.campaignId, scope.worldVersionId, turnId, "z".repeat(16_001)]);
-    const foreignTurnId = await acceptedTurn(other.campaignId, 1, { canonicalFacts: ["Foreign fact."], canonicalFactUpdates: [] });
-    const foreign = buildCanonicalChronicleFacts({ campaignId: other.campaignId, turnId: foreignTurnId, canonicalFacts: ["Foreign fact."], entityCatalog: [] })[0]!;
+      VALUES($1,$2,1,1,$3::jsonb)`, [ownerUserId, scope.campaignId, JSON.stringify({ continuitySummary: "", scratchpad: "", openThreads: [],
+      canonicalFacts: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] })]);
+    const importedText = "The moon vault imported seal has no accepted source ID.";
+    await pool.query("UPDATE campaign_state SET initial_state_snapshot=$2::jsonb WHERE campaign_id=$1",
+      [scope.campaignId, JSON.stringify({ canonicalFacts: [{ id: null, content: importedText }] })]);
+    const retained = await seedFact(9, "The moon vault retained seal remains secure.");
+    await acceptedTurn(scope.campaignId, 10, { canonicalFacts: [], canonicalFactUpdates: [] });
+    const foreignSnapshot = { canonicalFacts: ["The moon vault foreign seal is a canary."], canonicalFactUpdates: [] };
+    const foreignTurnId = await acceptedTurn(other.campaignId, 1, foreignSnapshot);
+    const foreign = buildCanonicalChronicleFacts({ campaignId: other.campaignId, turnId: foreignTurnId, ...foreignSnapshot, entityCatalog: [] })[0]!;
     await insertAcceptedFact(other, foreignTurnId, 1, foreign);
-    await pool.query("UPDATE campaign_state SET initial_state_snapshot=$2::jsonb WHERE campaign_id=$1", [scope.campaignId, JSON.stringify({ canonicalFacts: [{ id: null, content: "Imported facts have no protected ID." }] })]);
-    const before = await pool.query("SELECT id,content,source_fact_index,valid_until_turn FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [scope.campaignId]);
+    const before = await pool.query("SELECT id,content,source_turn_id,source_state_edit_id,source_fact_index,valid_from_turn,valid_until_turn FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [scope.campaignId]);
+    const turnsBefore = await pool.query("SELECT turn_number,state_snapshot_private FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [scope.campaignId]);
+    const correctionsBefore = await pool.query("SELECT id,state_snapshot_private FROM campaign_state_edits WHERE campaign_id=$1 ORDER BY revision", [scope.campaignId]);
+    const campaignStateBefore = await pool.query("SELECT initial_state_snapshot FROM campaign_state WHERE campaign_id=$1", [scope.campaignId]);
 
-    const result = await load(scope);
+    const result = await load(scope, 10);
 
-    expect(result.facts).toEqual([{ id: facts[0]!.id, turnNumber: 1, content: facts[0]!.content }]);
+    expect(result.facts).toEqual([{ id: retained.id, turnNumber: 9, content: retained.content }]);
     expect(result.facts.map((fact) => fact.id)).not.toContain(future.id);
     expect(result.facts.map((fact) => fact.id)).not.toContain(foreign.id);
-    expect(result.coverage.futureSourceCount).toBe(1);
+    expect(result.coverage.futureSourceCount).toBe(0);
     expect(result.coverage.oversizedCandidateCount).toBe(1);
-    expect(result.coverage.withheldCandidateCount).toBeGreaterThanOrEqual(4);
+    expect(result.coverage.withheldCandidateCount).toBe(5);
     const client = await pool.connect();
     try {
-      await expect(loadVerifiedProtectedFacts(client, { ...scope, ownerUserId: crypto.randomUUID() }, 3)).resolves.toMatchObject({ facts: [] });
-      await expect(loadVerifiedProtectedFacts(client, { ...scope, ownerUserId, worldVersionId: other.worldVersionId }, 3)).resolves.toMatchObject({ facts: [] });
+      await expect(loadVerifiedProtectedFacts(client, { ...scope, ownerUserId: crypto.randomUUID() }, 10)).resolves.toMatchObject({ facts: [] });
+      await expect(loadVerifiedProtectedFacts(client, { ...scope, ownerUserId, worldVersionId: other.worldVersionId }, 10)).resolves.toMatchObject({ facts: [] });
     } finally { client.release(); }
-    await expect(pool.query("SELECT id,content,source_fact_index,valid_until_turn FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [scope.campaignId])).resolves.toMatchObject({ rows: before.rows });
+    await expect(pool.query("SELECT id,content,source_turn_id,source_state_edit_id,source_fact_index,valid_from_turn,valid_until_turn FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [scope.campaignId])).resolves.toMatchObject({ rows: before.rows });
+
+    const composed = await planV5Request(scope, 11, "Recall every moon vault seal and its current condition.");
+    expect(composed.authority.authority.optionalFactFrontier).toMatchObject({ effectiveTurnNumber: 1, facts: [] });
+    const withheld = [corrected, badIndex, badText, inactive, future, missing, { id: foreign.id, content: foreign.content }];
+    for (const fact of withheld) {
+      expect(composed.retrieved.candidates.some((candidate) => candidate.id === fact.id)).toBe(false);
+      expect(composed.requestBody).not.toContain(fact.content);
+      expect(composed.manifest.entries.some((entry) => entry.canonicalFactId === fact.id)).toBe(false);
+    }
+    expect(composed.requestBody).toContain(retained.content);
+    expect(composed.requestBody).not.toContain(importedText);
+    expect(composed.manifest.entries.some((entry) => entry.content === importedText)).toBe(false);
+    const sourceAfter = await pool.query("SELECT id,content,source_turn_id,source_state_edit_id,source_fact_index,valid_from_turn,valid_until_turn FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [scope.campaignId]);
+    expect(sourceAfter.rows).toEqual(before.rows);
+    expect((await pool.query("SELECT turn_number,state_snapshot_private FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [scope.campaignId])).rows).toEqual(turnsBefore.rows);
+    expect((await pool.query("SELECT id,state_snapshot_private FROM campaign_state_edits WHERE campaign_id=$1 ORDER BY revision", [scope.campaignId])).rows).toEqual(correctionsBefore.rows);
+    expect((await pool.query("SELECT initial_state_snapshot FROM campaign_state WHERE campaign_id=$1", [scope.campaignId])).rows).toEqual(campaignStateBefore.rows);
   });
 
   it("withholds explicit-ID accepted and correction facts when only their source indices are tampered", async () => {

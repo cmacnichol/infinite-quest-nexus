@@ -83,3 +83,13 @@ describe("response-format eligibility", () => {
     expect(resolveResponseFormatEligibility({ ...input, now: "2026-09-16T00:00:00.000Z" })).toMatchObject({ status: "advertised", reason: "expired" });
   });
 });
+
+
+it("preserves explicit safe provider evidence when wrapping a prepared response failure", async () => {
+  const { PreparedResponseContractError } = await import("../../packages/story-engine/src/provider-response-format.js");
+  const { captureProviderFailure } = await import("../../packages/story-engine/src/provider-failure-diagnostics.js");
+  const providerFailure = captureProviderFailure({ source: "http_error", httpStatus: 429, headers: null, body: {}, bodyStatus: "parsed", observedAt: new Date(now), knownProviderNames: [], successfulResponseStarted: false, emittedOutput: false });
+  const wrapped = new PreparedResponseContractError(Object.assign(new Error("private"), { providerFailure }), { body: "{}", payloadHash: "hash" });
+  expect(wrapped.providerFailure).toEqual(providerFailure);
+  expect(wrapped.message).not.toContain("private");
+});

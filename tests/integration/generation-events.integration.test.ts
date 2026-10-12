@@ -294,7 +294,7 @@ integration("generation job notification delivery", () => {
         if (property === "query") {
           return async (...argumentsList: Parameters<DatabasePool["query"]>) => {
             const statement = String(argumentsList[0]).replaceAll(/\s+/g, " ").trim();
-            if (statement.startsWith("SELECT id, campaign_id AS") && statement.includes("partial_output AS")) {
+            if (statement.includes('SELECT id, campaign_id AS "campaignId"') && statement.includes("partial_output AS")) {
               generationJobReads += 1;
             }
             return target.query(...argumentsList);
@@ -343,8 +343,22 @@ integration("generation job notification delivery", () => {
         latencies.push(performance.now() - startedAt);
       }
       const terminalFrame = stream.nextFrame();
-      await pool.query("UPDATE generation_jobs SET status = 'cancelled' WHERE id = $1", [jobId]);
-      await expect(terminalFrame).resolves.toMatchObject({ id: jobId, status: "cancelled" });
+      const failure = { version: 1, category: "provider_rejection", code: "provider_rate_limited", phase: "story_generation",
+        attemptNumber: 1, occurredAt: "2026-10-03T14:14:35.000Z", providerFailure: {
+          version: 1, source: "http_error", observedAt: "2026-10-03T14:14:35.000Z", httpStatus: 429, upstreamStatus: null,
+          reason: "rate_limit", limitSource: "unknown", upstreamCode: null, providerName: "PRIVATE_PROVIDER_CANARY",
+          retryAfterMs: 2000, retryAt: "2026-10-03T14:14:37.000Z", rateLimit: null,
+          successfulResponseStarted: false, emittedOutput: false, metadataStatus: "absent"
+        } };
+      await pool.query("UPDATE generation_jobs SET status='failed', orchestration_private=jsonb_build_object('lastFailureDiagnostic',$2::jsonb) WHERE id=$1", [jobId, JSON.stringify(failure)]);
+      const terminal = await terminalFrame;
+      expect(terminal).toMatchObject({ id: jobId, status: "failed", failureDiagnostic: { providerFailure: {
+        source: "http_error", httpStatus: 429, limitSource: "unknown", retryAfterMs: 2000
+      } } });
+      expect(JSON.stringify(terminal)).not.toContain("PRIVATE_PROVIDER_CANARY");
+      const reloaded = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}` });
+      expect(reloaded.statusCode).toBe(200);
+      expect(reloaded.json().failureDiagnostic).toEqual(terminal.failureDiagnostic);
 
       latencies.sort((left, right) => left - right);
       const p95 = latencies[Math.ceil(latencies.length * 0.95) - 1]!;
@@ -359,7 +373,7 @@ integration("generation job notification delivery", () => {
       });
       expect({ sampleCount: latencies.length, p95 }).toMatchObject({ sampleCount: 20, p95: expect.any(Number) });
       expect(p95).toBeLessThanOrEqual(500);
-      expect(generationJobReads).toBe(23);
+      expect(generationJobReads).toBe(24); // Includes the explicit GET reload above.
     } finally {
       stream?.close();
       await app.close();
@@ -677,7 +691,7 @@ integration("generation job notification delivery", () => {
           "0099_worker_text_plan_protocol_fences",
           "0100_prepared_text_physical_attempts",
           "0101_durable_campaign_physical_attempt_costs",
-          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity", "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit"
+          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity", "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit", "0114_provider_failure_diagnostics", "0115_story_activity"
         ]);
       await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
          `SELECT (

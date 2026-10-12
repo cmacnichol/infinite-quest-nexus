@@ -26,6 +26,8 @@ import {
   type ProductionSystemArchiveWorkerLane,
 } from "./system-archive-worker.js";
 
+import { createActivityComposition } from "../../runtime/src/activity-composition.js";
+
 export type WorkerDependencies = Readonly<{
   generation: GenerationWorkerApplication;
   illustration: IllustrationWorkerApplication;
@@ -44,6 +46,7 @@ export type WorkerOptionalLanes = Readonly<{
   authoring?(): Promise<boolean>;
   authoringCleanup?(): Promise<boolean>;
   castDiscovery?(): Promise<boolean>;
+  activityMaintenance?(): Promise<boolean>;
 }>;
 
 export type StartedGeneration = Readonly<{
@@ -106,10 +109,11 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
 }
 
 type ActiveLane = {
-  name: "illustration" | "chronicle" | "asset" | "system-archive" | "authoring" | "authoring-cleanup" | "cast-discovery";
+  name: "illustration" | "chronicle" | "asset" | "system-archive" | "authoring" | "authoring-cleanup" | "cast-discovery" | "activity-maintenance";
   active: Set<Promise<boolean>>;
   nextEligibleAt: number;
   pollAfterWork?: boolean;
+  intervalMs?: number;
   run(): Promise<boolean>;
 };
 
@@ -144,6 +148,7 @@ function defaultOptionalLanes(
   signal: AbortSignal,
 ): WorkerOptionalLanes {
   return {
+    activityMaintenance: createActivityComposition(pool).maintenance.tick,
     illustration: async () => {
       const request = { workerId, leaseSeconds: config.workerLeaseSeconds };
       if (generationIllustration
@@ -266,6 +271,8 @@ export async function runWorker(
     ...(config.aiAuthoringJobsEnabled === true && configuredAuthoring ? { authoring: configuredAuthoring } : {}),
     ...(config.castDiscoveryEnabled === true && castRun ? { castDiscovery: castRun } : {}) };
   const lanes: ActiveLane[] = [
+    ...(optionalLanes.activityMaintenance === undefined ? [] : [{ name: "activity-maintenance" as const,
+      active: new Set<Promise<boolean>>(), nextEligibleAt: 0, pollAfterWork: true, intervalMs: 1000, run: optionalLanes.activityMaintenance }]),
     ...(optionalLanes.castDiscovery === undefined ? [] : [{ name: "cast-discovery" as const,
       active: new Set<Promise<boolean>>(), nextEligibleAt: 0, run: optionalLanes.castDiscovery }]),
     { name: "illustration", active: new Set(), nextEligibleAt: 0, run: optionalLanes.illustration },
@@ -355,11 +362,11 @@ export async function runWorker(
         .then((worked) => {
           lane.nextEligibleAt = worked && !lane.pollAfterWork
             ? 0
-            : Date.now() + config.workerPollIntervalMs;
+            : Date.now() + (lane.intervalMs ?? config.workerPollIntervalMs);
           return worked;
         })
         .catch((error) => {
-          lane.nextEligibleAt = Date.now() + config.workerPollIntervalMs;
+          lane.nextEligibleAt = Date.now() + (lane.intervalMs ?? config.workerPollIntervalMs);
           logger.error({
             event: `worker_${lane.name}_error`,
             workerId,
@@ -371,6 +378,8 @@ export async function runWorker(
                   ...(diagnostic === undefined ? {} : { diagnostic }),
                 };
               })()
+              : lane.name === "activity-maintenance"
+                ? { errorCode: "activity-maintenance-failed" }
               : lane.name === "cast-discovery"
                 ? { errorCode: "cast-discovery-failed", message: "Character discovery failed." }
               : lane.name === "authoring" || lane.name === "authoring-cleanup"

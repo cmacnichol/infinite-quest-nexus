@@ -163,6 +163,29 @@ async function runPresetFixture(options: Readonly<{
 }
 
 describe("prepared text executor stream durability", () => {
+  it("retains rejected HTTP evidence and records no successful response start", async () => {
+    const providerFailure = {
+      version: 1 as const, source: "http_error" as const, observedAt: "2026-10-03T12:00:00.000Z",
+      httpStatus: 429, upstreamStatus: null, reason: "rate_limit" as const, limitSource: "unknown" as const,
+      upstreamCode: null, providerName: null, retryAfterMs: 1000, retryAt: "2026-10-03T12:00:01.000Z",
+      rateLimit: null, successfulResponseStarted: false, emittedOutput: false, metadataStatus: "absent" as const
+    };
+    const attempts = repository(vi.fn()); const complete = vi.spyOn(attempts, "complete");
+    const start = vi.spyOn(attempts, "recordResponseStart");
+    const execute = vi.fn(async (request: ProviderRequest): Promise<ProviderResult> => {
+      await request.onResponseHeaders?.({ statusCode: 429, providerResponseId: "rejected" });
+      throw Object.assign(new Error("PRIVATE"), { statusCode: 429, responseId: "rejected", providerFailure });
+    });
+    const executor = createPreparedTextExecutor({ attempts, loadAuthority: async () => authority(execute) });
+    const input = executionInput(vi.fn());
+    const singleCandidatePlan = { ...input.plan, candidates: input.plan.candidates.slice(0, 1) };
+    input.plan = { ...singleCandidatePlan, planHash: textExecutionPlanHash(singleCandidatePlan) };
+    const error = await executor.execute(input).catch((error: unknown) => error);
+    expect(error).toMatchObject({ attemptId: "attempt-0", providerFailure, providerResponseId: "rejected", physicalAccounting: { attemptCount: 1 } });
+    expect(complete.mock.calls[0]?.[2]).toMatchObject({ failureDiagnostic: providerFailure });
+    expect(start).not.toHaveBeenCalled(); expect(execute).toHaveBeenCalledTimes(1);
+  });
+
   it("waits for capacity before reserving or charging a physical attempt", async () => {
     const attempts = repository(vi.fn());
     const reserve = vi.spyOn(attempts, "reserve");

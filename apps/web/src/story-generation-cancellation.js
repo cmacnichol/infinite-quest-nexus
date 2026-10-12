@@ -26,13 +26,14 @@ export async function cancelGeneration({
   restoreGenerationDisplay,
   abortLocalMonitoring,
   reloadCampaign,
-  recordActivity,
+  recordObservation,
   toast,
   showBusy
 }) {
   if (!state.generationDisplayActive || !state.generationJobId) return;
 
   const jobId = state.generationJobId;
+  const campaignId = state.campaignId;
   const cancelButton = getCancelButton();
   if (cancelButton) {
     cancelButton.disabled = true;
@@ -43,24 +44,27 @@ export async function cancelGeneration({
   try {
     await requestCancellation(jobId);
   } catch (error) {
+    if (state.campaignId !== campaignId || state.generationJobId !== jobId) return;
     if (cancelButton) {
       cancelButton.disabled = false;
       cancelButton.textContent = "Cancel generation";
     }
+    recordObservation?.(error, jobId, campaignId);
     toast(`Could not cancel generation: ${error.message}`);
     return;
   }
 
+  if (state.campaignId !== campaignId || state.generationJobId !== jobId) return;
   clearPendingSubmission();
   state.pendingGeneration = null;
   state.cancellationConfirmed = true;
   abortLocalMonitoring();
   restoreGenerationDisplay();
   try {
-    await reloadCampaign(state.campaignId);
-    recordActivity("system", "Generation cancelled", `jobId=${jobId}`);
+    await reloadCampaign(campaignId);
     toast("Generation cancelled.");
   } catch (error) {
+    recordObservation?.(error, jobId, campaignId);
     toast(`Generation cancelled, but campaign reload failed: ${error.message}`);
   }
 }
@@ -70,14 +74,18 @@ export async function reconcileRemoteGenerationCancellation({
   clearPendingSubmission,
   restoreGenerationDisplay,
   reloadCampaign,
+  recordObservation,
   toast
 }) {
+  const campaignId = state.campaignId;
+  const jobId = state.generationJobId;
   clearPendingSubmission();
   state.pendingGeneration = null;
   restoreGenerationDisplay();
   try {
-    await reloadCampaign(state.campaignId);
+    await reloadCampaign(campaignId);
   } catch (error) {
+    recordObservation?.(error, jobId, campaignId);
     toast(`Generation cancelled, but campaign reload failed: ${error.message}`);
   }
   return cancellationError();

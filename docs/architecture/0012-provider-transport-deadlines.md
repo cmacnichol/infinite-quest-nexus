@@ -16,6 +16,8 @@ The worker writes a base transport event and a job-correlated event to container
 
 ## Consequences
 
+Physical text attempts additionally retain bounded versioned HTTP/SSE/transport failure evidence: observed timestamp, statuses, finite reason/source, recognized limiter metadata, advisory retry timing and explicit response-start/output flags. A rejected HTTP request ID is distinct from successful response start; SSE failures retain actual HTTP 200. Public GET/SSE/reload diagnostics expose only the safe projection. Raw provider messages, error bodies, unrestricted headers, prompts and credentials remain prohibited in these fields and logs. Historical null evidence stays unknown. See [operator workflow](../runbooks/provider-failure-diagnostics.md).
+
 - Slow local models can be given more than five minutes without being canceled by the Node HTTP client.
 - Shorter deadlines can be selected independently for remote or auxiliary providers.
 - Docker logs contain actionable transport causes even when the browser receives only a safe error message.

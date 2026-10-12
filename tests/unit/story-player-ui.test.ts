@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createContext, runInContext } from "node:vm";
 import { generationResultSchema } from "../../packages/contracts/src/index.js";
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
@@ -1036,7 +1037,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       });
       expect(syncStatus).toHaveBeenCalledWith("campaign-from-url");
       expect(document.getElementById("storyTitle")?.textContent).toBe("URL campaign");
-      expect(document.title).toBe("URL campaign — Infinite Quest");
+      expect(document.title).toBe("URL campaign " + String.fromCharCode(0x2014) + " Infinite Quest");
+      expect(storyScript).toContain("sessionActivityNotice();");
+      expect(storyScript).not.toContain('window.location.href = "/nexus/#campaigns";');
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1437,7 +1440,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).not.toContain('async function enqueueGenerationSubmission(submission)');
     expect(storyScript).toContain('function updateGenerationProgress(job)');
     expect(storyScript).toContain('async function resumePendingGeneration()');
-    expect(storyScript).toContain('const run = await composition.workflow.resume(state.campaignId);');
+    expect(storyScript).toContain('const run = await composition.workflow.resume(resumeScope.campaignId);');
     expect(storyScript).toContain('The original turn was preserved.');
     expect(storyScript).toContain('class="replacement-pending-banner"');
   });
@@ -1498,7 +1501,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       restoreGenerationDisplay: () => { events.push("restore-display"); },
       abortLocalMonitoring: () => { events.push("abort-monitoring"); },
       reloadCampaign: async (campaignId: string) => { events.push(`reload:${campaignId}`); },
-      recordActivity: () => { events.push("record"); },
+      recordObservation: () => { events.push("observation"); },
       toast: () => { events.push("toast"); },
       showBusy: () => { events.push("busy"); }
     });
@@ -1510,7 +1513,6 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       "abort-monitoring",
       "restore-display",
       "reload:campaign-1",
-      "record",
       "toast"
     ]);
     expect(state.pendingGeneration).toBeNull();
@@ -1539,7 +1541,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       restoreGenerationDisplay: () => { events.push("restore-display"); },
       abortLocalMonitoring: () => { events.push("abort-monitoring"); },
       reloadCampaign: async () => { events.push("reload"); },
-      recordActivity: () => { events.push("record"); },
+      recordObservation: () => { events.push("observation"); },
       toast: (message: string) => { events.push(message); },
       showBusy: () => { events.push("busy"); }
     });
@@ -1548,7 +1550,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(button.textContent).toBe("Cancel generation");
     expect(state.pendingGeneration).toBe(pendingGeneration);
     expect(state.generationDisplayActive).toBe(true);
-    expect(events).toEqual(["busy", "Could not cancel generation: Still generating"]);
+    expect(events).toEqual(["busy", "observation", "Could not cancel generation: Still generating"]);
   });
 
   it("reloads authoritative state when remote monitoring reports cancellation", async () => {
@@ -1573,6 +1575,126 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(events).toEqual(["clear-pending", "restore-display", "reload:campaign-1"]);
   });
 
+  it("ignores an accepted completion when the same campaign reloads during draft cleanup", async () => {
+    const finalizeStart = storyScript.indexOf("async function finalizeCompletedGeneration(result)");
+    const finalizeEnd = storyScript.indexOf("\nfunction restoreViewportAfterRender", finalizeStart);
+    const finalizeSource = storyScript.slice(finalizeStart, finalizeEnd);
+    const draftCleanup = deferred<void>();
+    const calls: string[] = [];
+    let epoch = 7;
+    const context = createContext({
+      activityActivationEpoch: epoch,
+      campaignLoadSequence: 12,
+      activityScope: () => ({ campaignId: "campaign-1", epoch }),
+      activityScopeCurrent: (scope: { campaignId: string; epoch: number }) => scope.campaignId === "campaign-1" && scope.epoch === epoch,
+      state: {
+        campaignId: "campaign-1",
+        retainedAppendDraft: { text: "keep this draft" },
+        pendingGeneration: { id: "generation-1" },
+        streamingAutoFollow: true
+      },
+      clearAcceptedActionDraft: vi.fn(() => draftCleanup.promise),
+      setStorySyncStatus: vi.fn(() => calls.push("sync-status")),
+      activity: { setJobActive: vi.fn(() => calls.push("job-inactive")), refresh: vi.fn() },
+      $: () => null,
+      window: { scrollX: 0, scrollY: 0 },
+      clearPendingSubmission: vi.fn(() => calls.push("clear-pending")),
+      composition: { failedTurnPrompts: { clear: vi.fn(() => calls.push("clear-failed-prompt")) } },
+      hideGenerationRecovery: vi.fn(() => calls.push("hide-recovery")),
+      commitGenerationDisplay: vi.fn(() => calls.push("commit-display")),
+      replaceStreamingPreviewWithAcceptedTurn: vi.fn(() => { calls.push("replace-scene"); return true; }),
+      clearStreamingPreview: vi.fn(() => calls.push("clear-preview")),
+      loadCampaign: vi.fn(() => calls.push("load-campaign")),
+      reconcileCompletedGeneration: vi.fn(() => calls.push("reconcile")),
+      restoreActionDraftForCampaign: vi.fn(() => calls.push("restore-draft")),
+      restoreViewportAfterRender: vi.fn(() => calls.push("restore-viewport")),
+      pollImageJobs: vi.fn(() => calls.push("poll-images")),
+      pollIllustrationResolution: vi.fn(() => Promise.resolve())
+    });
+    const finalizeCompletedGeneration = runInContext(`(${finalizeSource})`, context) as (result: Record<string, unknown>) => Promise<void>;
+    const finalization = finalizeCompletedGeneration({
+      id: "generation-1",
+      campaignId: "campaign-1",
+      action: "Open the gate",
+      operationKind: "append",
+      expectedTurnNumber: 2,
+      resultTurnId: "turn-2",
+      turnNumber: 2
+    });
+
+    expect(context.clearAcceptedActionDraft).toHaveBeenCalledOnce();
+    epoch += 1;
+    context.activityActivationEpoch = epoch;
+    context.campaignLoadSequence = 13;
+    draftCleanup.resolve();
+    await finalization;
+
+    expect(calls).toEqual([]);
+    expect(context.state).toMatchObject({
+      campaignId: "campaign-1",
+      retainedAppendDraft: { text: "keep this draft" },
+      pendingGeneration: { id: "generation-1" }
+    });
+    expect(context.clearPendingSubmission).not.toHaveBeenCalled();
+    expect(context.hideGenerationRecovery).not.toHaveBeenCalled();
+    expect(context.commitGenerationDisplay).not.toHaveBeenCalled();
+    expect(context.replaceStreamingPreviewWithAcceptedTurn).not.toHaveBeenCalled();
+    expect(context.clearStreamingPreview).not.toHaveBeenCalled();
+    expect(context.loadCampaign).not.toHaveBeenCalled();
+  });
+
+  it("does not restore the old viewport after a fallback reload is superseded", async () => {
+    const finalizeStart = storyScript.indexOf("async function finalizeCompletedGeneration(result)");
+    const finalizeEnd = storyScript.indexOf("\nfunction restoreViewportAfterRender", finalizeStart);
+    const finalizeSource = storyScript.slice(finalizeStart, finalizeEnd);
+    const reload = deferred<boolean>();
+    const calls: string[] = [];
+    let epoch = 4;
+    const context = createContext({
+      campaignLoadSequence: 21,
+      activityScope: () => ({ campaignId: "campaign-1", epoch }),
+      activityScopeCurrent: (scope: { campaignId: string; epoch: number }) => scope.campaignId === "campaign-1" && scope.epoch === epoch,
+      state: { campaignId: "campaign-1", streamingAutoFollow: false },
+      clearAcceptedActionDraft: vi.fn().mockResolvedValue(undefined),
+      setStorySyncStatus: vi.fn(),
+      activity: { setJobActive: vi.fn(), refresh: vi.fn() },
+      $: () => ({ id: "streaming-preview" }),
+      window: { scrollX: 15, scrollY: 640 },
+      clearPendingSubmission: vi.fn(),
+      composition: { failedTurnPrompts: { clear: vi.fn() } },
+      hideGenerationRecovery: vi.fn(),
+      commitGenerationDisplay: vi.fn(),
+      replaceStreamingPreviewWithAcceptedTurn: vi.fn(() => false),
+      clearStreamingPreview: vi.fn(() => calls.push("clear-preview")),
+      loadCampaign: vi.fn(() => { calls.push("load-campaign"); return reload.promise; }),
+      restoreViewportAfterRender: vi.fn(() => calls.push("restore-viewport")),
+      reconcileCompletedGeneration: vi.fn(),
+      restoreActionDraftForCampaign: vi.fn(),
+      pollImageJobs: vi.fn(),
+      pollIllustrationResolution: vi.fn(() => Promise.resolve())
+    });
+    const finalizeCompletedGeneration = runInContext(`(${finalizeSource})`, context) as (result: Record<string, unknown>) => Promise<void>;
+    const finalization = finalizeCompletedGeneration({
+      id: "generation-2",
+      campaignId: "campaign-1",
+      action: "Open the gate",
+      operationKind: "append",
+      expectedTurnNumber: 2,
+      resultTurnId: "turn-2",
+      turnNumber: 2
+    });
+
+    await vi.waitFor(() => expect(context.loadCampaign).toHaveBeenCalledOnce());
+    expect(context.loadCampaign).toHaveBeenCalledWith("campaign-1", { autoScroll: false });
+    epoch += 1;
+    context.campaignLoadSequence = 22;
+    reload.resolve(true);
+    await finalization;
+
+    expect(calls).toEqual(["clear-preview", "load-campaign"]);
+    expect(context.restoreViewportAfterRender).not.toHaveBeenCalled();
+  });
+
   it("reconciles an accepted generation result without reloading the campaign view", () => {
     const finalizeStart = storyScript.indexOf("async function finalizeCompletedGeneration(result)");
     const finalizeEnd = storyScript.indexOf("\nasync function observeGenerationRun", finalizeStart);
@@ -1584,7 +1706,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(finalize).toContain("replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)");
     expect(finalize).toContain("await reconcileCompletedGeneration(result);");
     expect(finalize).toContain("if (!replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)) {");
-    expect(finalize).toContain("await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });");
+    expect(finalize).toContain("const loading = loadCampaign(state.campaignId, { autoScroll: !preserveViewport });");
+    expect(finalize).toContain("if (!await loading || !activityScopeCurrent(reloadScope) || campaignLoadSequence !== reloadSequence) return;");
     expect(reconcile).not.toContain("loadCampaign(");
   });
 
@@ -1634,11 +1757,13 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain("async function finalizeCompletedGeneration(result)");
     expect(storyScript).toContain('const preserveViewport = Boolean($("streamingPreviewCard")) && !state.streamingAutoFollow;');
     expect(storyScript).toContain("if (!replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)) {");
-    expect(storyScript).toContain('await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });\n    restoreViewportAfterRender(viewport);');
+    expect(storyScript).toContain('const loading = loadCampaign(state.campaignId, { autoScroll: !preserveViewport });');
+    expect(storyScript).toContain('if (!await loading || !activityScopeCurrent(reloadScope) || campaignLoadSequence !== reloadSequence) return;');
     expect(storyScript).toContain("function restoreViewportAfterRender(viewport)");
     expect(storyScript).toContain("window.requestAnimationFrame(() => {");
     expect(storyScript).toContain('window.scrollTo({ ...viewport, behavior: "auto" });');
     expect(storyScript).toContain('onCompleted: (result) => {');
+    expect(storyScript).toContain('if (!currentMonitor()) return;');
     expect(storyScript).toContain('flushStoryStreamNarration(streamIdentity);');
     expect(storyScript).toContain('return finalizeCompletedGeneration(result);');
     expect(storyScript).toContain('await finalizeCompletedGeneration(result);');
@@ -1915,10 +2040,10 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("manages the enabled illustration rail, prompt editing, polling, and generation activity", () => {
     expect(storyScript).toContain('function pollImageJobs({ initialSegments = null } = {})');
     expect(storyScript).toContain('function renderSceneImageJob(job)');
-    expect(storyScript).toContain('function recordImageJobActivity(job, options = {})');
-    expect(storyScript).toContain('recordActivity("success", "Illustration generated"');
-    expect(storyScript).toContain('recordActivity("error", "Illustration generation failed"');
-    expect(storyScript).toContain('recordActivity("image", "Illustration generation progress"');
+    expect(storyScript).not.toContain("function recordImageJobActivity");
+    expect(storyScript).toContain("void activity?.refresh();");
+    expect(storyScript).toContain('observeActivity("browser.illustration_command_failed"');
+    expect(storyScript).not.toContain("recordActivity(");
     expect(storyScript).toContain('["queued", "generating", "provider_pending", "downloading"]');
     expect(storyScript).toContain('aria-label", `Illustration generation progress');
     expect(storyScript).toContain('illustrationApi.imageJobs(poll.campaignId)');
@@ -1942,7 +2067,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('illustrationApi.regenerateSegmentImage(segmentId');
     expect(storyScript).toContain("const isCurrentTurn = Number(turn.turnNumber) === Number(state.campaign?.activeTurnNumber);");
     expect(storyHtml).toContain('id="imagePromptDialogTitle"');
-    expect(storyScript).toContain('async function pollIllustrationResolution(turnId)');
+    expect(storyScript).toContain('async function pollIllustrationResolution(turnId, observationScope = activityScope())');
     expect(storyScript).not.toContain("function installIllustrationSegmentObserver()");
     expect(storyScript).toContain("function segmentIllustrationMarkup(turn, turnIndex, segment, segmentCount)");
     expect(storyScript).toContain('class="segment-illustration-sticky"');
@@ -3916,10 +4041,10 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
 
   it("provides toast notifications, activity logging, and onboarding verification", () => {
     expect(storyScript).toContain('function toast(msg, duration)');
-    expect(storyScript).toContain('function recordActivity(category, title, detail)');
-    expect(storyScript).toContain('function copyActivityDiagnostics()');
+    expect(storyScript).toContain("function observeActivity(");
+    expect(storyScript).toContain("createStoryActivityView");
     expect(storyScript).toContain('async function checkOnboarding()');
-    expect(storyScript).toContain('const btnCopyDiagnostics = $("btnCopyDiagnostics") || $("btnCopyActivityLog");');
+    expect(storyHtml).toContain('id="btnDownloadActivityLog"');
   });
 
   it("styles the Story Player with dark fantasy tokens, responsive rules, and animations", () => {

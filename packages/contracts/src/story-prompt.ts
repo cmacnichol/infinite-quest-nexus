@@ -176,6 +176,7 @@ const diagnosticActionByCode = {
   continuity_output_budget_exceeded: "adjust_output_or_state",
   provider_context_overflow: "check_provider_window",
   authoritative_context_invalid: "repair_authority",
+  tracker_update_identity_invalid: "repair_authority",
   prompt_override_incompatible: "update_prompt",
   prompt_protocol_upgrade_required: "discard_and_reenqueue",
   event_coverage_failed: "retry_event",

@@ -85,6 +85,29 @@ describe("worker concurrency scheduler", () => {
     productionCompositions.createSystemArchive.mockReset();
   });
 
+  it("activity failure leaves generation running and drains only its active batch on shutdown", async () => {
+    const controller = new AbortController();
+    const execution = deferred<boolean>();
+    const maintenance = deferred<boolean>();
+    let claims = 0;
+    const generation: GenerationWorkerApplication = {
+      claimNext: vi.fn(async () => ++claims === 1 ? claim("1") : null),
+      executeClaimed: vi.fn(() => execution.promise)
+    };
+    const optionalLanes = { ...idleOptionalLanes(), activityMaintenance: vi.fn(() => maintenance.promise) };
+    const running = runWorker(pool, workerConfig(1), controller.signal, {
+      generation, illustration: inertWorkerIllustration, memory: inertWorkerMemory, optionalLanes
+    });
+    await vi.waitFor(() => expect(optionalLanes.activityMaintenance).toHaveBeenCalledOnce());
+    expect(generation.executeClaimed).toHaveBeenCalledOnce();
+    maintenance.reject(new Error("PRIVATE CANARY"));
+    await vi.waitFor(() => expect(log.error).toHaveBeenCalled());
+    expect(JSON.stringify(log.error.mock.calls)).not.toContain("PRIVATE CANARY");
+    controller.abort();
+    execution.resolve(true);
+    await running;
+    expect(optionalLanes.activityMaintenance).toHaveBeenCalledOnce();
+  });
   it("closes production resources when the gated System Archive lane fails to start", async () => {
     const maintenanceClose = vi.fn(async () => undefined);
     const publicationClose = vi.fn(async () => undefined);

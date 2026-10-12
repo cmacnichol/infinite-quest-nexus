@@ -1472,3 +1472,10 @@ describe("text provider adapters", () => {
     }
   });
 });
+
+
+it("captures bounded failure evidence for compatible calls without a prepared contract", async () => {
+  const fetcher = vi.fn(async () => new Response('{"error":{"code":429}}', { status: 429, headers: { "retry-after": "2" } }));
+  await expect(callTextProvider({ ...profile, providerType: "openai_compatible" }, { systemPrompt: "private", input: "private", responseFormatFallback: "forbid" }, createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({ providerFailure: { source: "http_error", httpStatus: 429, upstreamStatus: 429, successfulResponseStarted: false, retryAfterMs: 2000 } });
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});

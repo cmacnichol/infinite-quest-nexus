@@ -1,3 +1,4 @@
+import { captureImageActivity, captureSegmentActivity } from "./illustration-activity.js";
 import type {
   PrivateNormalizedAssetFinalizationHandle,
   PrivateNormalizedAssetRequestChildBindingsInput,
@@ -357,6 +358,7 @@ export function createPostgresIllustrationAssetPublicationRepository(
         ],
       );
       if (!completed.rows[0]) throw stableError("illustration_publication_lease_lost");
+      await captureImageActivity(database, job.id, job.ownerUserId, "image.completed");
 
       if (job.segmentId) {
         for (const publication of ordered) {
@@ -422,10 +424,11 @@ export function createPostgresIllustrationAssetPublicationRepository(
         );
       }
       if (job.segmentId) {
-        await database.query(
-          "UPDATE turn_illustration_segments SET status='completed',updated_at=now() WHERE id=$1 AND owner_user_id=$2",
+        const segmentChanged = await database.query(
+          "UPDATE turn_illustration_segments SET status='completed',updated_at=now() WHERE id=$1 AND owner_user_id=$2 AND status <> 'completed' RETURNING id",
           [job.segmentId, job.ownerUserId],
         );
+        if (segmentChanged.rows[0]) await captureSegmentActivity(database, job.segmentId, job.ownerUserId, "illustration_segment.completed");
         await database.query(
           `UPDATE turn_illustration_sets sets
               SET status=CASE

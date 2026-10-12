@@ -157,6 +157,7 @@ export function createPreparedTextExecutor(input: Readonly<{
             preparedRequest: { ...attempt.preparedRequest, operation: "story generation", budgetAudit: null },
             abortSignal: attempt.signal,
             onResponseHeaders: async (headers) => {
+              // A rejected request may carry an ID; only successful headers record response start.
               if (headers.statusCode >= 200 && headers.statusCode < 300) {
                 await attempt.onResponseStart({ providerResponseId: headers.providerResponseId ?? null });
               }

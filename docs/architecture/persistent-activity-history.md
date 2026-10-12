@@ -1,0 +1,9 @@
+# Keep Story operational history separate and publish a transactional outbox
+
+Accepted decision, 2026-10-03. Capture strictly projected operational events in the same PostgreSQL transaction as each successful guarded generation/image/segment mutation, then publish committed snapshots under one advisory lock into a separate ordered feed. This preserves browser-closed work and rollback/idempotency while avoiding the cursor gap produced by allocating sequences concurrently in source transactions; publisher failure delays display without changing accepted authority.
+
+The existing private portable `activity_events` ledger remains authoritative for its original purpose. The three new operational tables and source activity revisions are excluded from portable System/Campaign Archives, so import begins with empty operational history. Historical source IDs survive source cleanup, but owner/campaign deletion removes the feed. A dedicated revision distinguishes image retries whose attempt count resets.
+
+The trade-off is extra bounded transaction writes and serialized publication throughput. Use the existing optional worker lane rather than introducing a new service or queue; measure capacity before changing topology. Retain published events for 30 days from publication and receipts for 7 days; preserve pending/quarantined rows and expose honest coverage/reset signals. No historical backfill or browser-observation upload is attempted. Browser cache exposure requires current server identity and campaign access, with an explicit local-only fallback for older APIs and no strict meta additions.
+
+See [operations and additive rollback](../runbooks/activity-history.md), the [design specification](../superpowers/specs/2026-10-03-persistent-legacy-activity.md), and [verification evidence](../review/legacy-activity-verification.md).

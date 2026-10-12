@@ -1,3 +1,4 @@
+import { captureImageActivity, captureSegmentActivity, illustrationActivityDiagnostic, type ImageActivityKind } from "../../../packages/database/src/illustration-activity.js";
 import type {
   ClaimedIllustrationWorkerJob,
   IllustrationWorkerJobFamily,
@@ -126,9 +127,9 @@ async function claimNext(
   const current = binding(family);
   return withTransaction(pool, async (client) => {
     if (family === "prompt") await client.query("SELECT set_config('app.text_plan_protocol', '2', true)");
-    const result = await client.query<ClaimedRow>(
+    const result = await client.query<ClaimedRow & { previous_status: string; previous_remote_job_id?: string | null }>(
       `WITH candidate AS (
-         SELECT id FROM ${current.table}
+         SELECT id, status AS previous_status${family === "image" ? ", remote_job_id AS previous_remote_job_id" : ""} FROM ${current.table}
           WHERE ${current.claimableWhere}
           ORDER BY ${current.claimOrder}
           FOR UPDATE SKIP LOCKED LIMIT 1
@@ -141,10 +142,12 @@ async function claimNext(
               updated_at = now()${family === "resolution" ? ",\n              reason_code = NULL" : ""}
          FROM candidate
         WHERE jobs.id = candidate.id
-       RETURNING jobs.${current.projection}`,
+       RETURNING jobs.${current.projection}, candidate.previous_status${family === "image" ? ", candidate.previous_remote_job_id" : ""}`,
       [current.activeStatus, request.workerId, request.leaseSeconds],
     );
-    return claimed(result.rows[0], family, request);
+    const row = result.rows[0];
+    if (row && family === "image" && row.previous_status === "queued" && !row.previous_remote_job_id) await captureImageActivity(client, row.id, row.owner_user_id, "image.generating");
+    return claimed(row, family, request);
   });
 }
 
@@ -157,7 +160,7 @@ async function loadClaimed(
     `SELECT ${current.projection}
        FROM ${current.table}
       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = $4
-        AND lease_expires_at >= now()`,
+        AND lease_expires_at > clock_timestamp()`,
     [scope.jobId, scope.ownerUserId, scope.workerId, current.activeStatus],
   );
   return claimed(result.rows[0], scope.family, scope);
@@ -170,9 +173,9 @@ async function heartbeat(
   const current = binding(scope.family);
   const result = await pool.query(
     `UPDATE ${current.table}
-        SET lease_expires_at = now() + ($4::text || ' seconds')::interval, updated_at = now()
+        SET lease_expires_at = clock_timestamp() + ($4::text || ' seconds')::interval, updated_at = clock_timestamp()
       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = $5
-        AND lease_expires_at >= now()`,
+        AND lease_expires_at > clock_timestamp()`,
     [scope.jobId, scope.ownerUserId, scope.workerId, scope.leaseSeconds, current.activeStatus],
   );
   return result.rowCount === 1;
@@ -185,27 +188,42 @@ async function transition(
 ): Promise<boolean> {
   const current = binding(scope.family);
   if (!current.allowedTransitions.includes(next.status)) return false;
-  const result = await pool.query(
-    `UPDATE ${current.table}
-        SET status = $4,
-            ${transitionFailureAssignments(scope.family)}
-            ${transitionCompletionAssignment(scope.family)}
-            lease_owner = CASE WHEN $6 THEN NULL ELSE lease_owner END,
-            lease_expires_at = CASE WHEN $6 THEN NULL ELSE lease_expires_at END,
-            updated_at = now()
-      WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = $7
-        AND lease_expires_at >= now()`,
-    [
-      scope.jobId,
-      scope.ownerUserId,
-      scope.workerId,
-      next.status,
-      JSON.stringify(next.metadata ?? {}),
-      terminal(next.status),
-      current.activeStatus
-    ],
-  );
-  return result.rowCount === 1;
+  return withTransaction(pool, async (client) => {
+    const previous = await client.query<{ status: string; error_code?: string; asset_id?: string; remote_job_id?: string | null }>(`SELECT status${scope.family === "image" ? ", error_code, asset_id, remote_job_id" : ""} FROM ${current.table} WHERE id=$1 AND owner_user_id=$2 FOR UPDATE`, [scope.jobId, scope.ownerUserId]);
+    const result = await client.query(
+      `UPDATE ${current.table}
+          SET status = $4,
+              ${transitionFailureAssignments(scope.family)}
+              ${transitionCompletionAssignment(scope.family)}
+              lease_owner = CASE WHEN $6 THEN NULL ELSE lease_owner END,
+              lease_expires_at = CASE WHEN $6 THEN NULL ELSE lease_expires_at END,
+              updated_at = clock_timestamp()
+        WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = $7
+          AND lease_expires_at > clock_timestamp()`,
+      [
+        scope.jobId,
+        scope.ownerUserId,
+        scope.workerId,
+        next.status,
+        JSON.stringify(next.metadata ?? {}),
+        terminal(next.status),
+        current.activeStatus
+      ],
+    );
+    // Provider state completion alone is not asset publication; the publication repository captures success.
+    if (result.rowCount === 1 && scope.family === "image" && next.status !== "completed") {
+      const kind = `image.${next.status}` as ImageActivityKind;
+      const currentCode = typeof next.metadata?.code === "string" ? next.metadata.code : undefined;
+      const last = next.status === "provider_pending" ? await client.query<{ kind: string }>("SELECT snapshot->>'kind' AS kind FROM activity_event_outbox WHERE source='image' AND source_id=$1 ORDER BY activity_revision DESC LIMIT 1", [scope.jobId]) : null;
+      const repeatedPending = next.status === "provider_pending" && (Boolean(previous.rows[0]?.remote_job_id) || last?.rows[0]?.kind === "image.provider_pending");
+      if (!repeatedPending && (previous.rows[0]?.status !== next.status || JSON.stringify(illustrationActivityDiagnostic(kind, currentCode)) !== JSON.stringify(illustrationActivityDiagnostic(kind, previous.rows[0]?.error_code)))) await captureImageActivity(client, scope.jobId, scope.ownerUserId, kind, currentCode);
+    }
+    if (result.rowCount === 1 && scope.family !== "image" && ["failed", "recoverable", "cancelled"].includes(next.status) && previous.rows[0]?.status !== next.status) {
+      const source = await client.query<{ segment_id: string | null }>(`SELECT segment_id FROM ${current.table} WHERE id=$1 AND owner_user_id=$2`, [scope.jobId, scope.ownerUserId]);
+      if (source.rows[0]?.segment_id) await captureSegmentActivity(client, source.rows[0].segment_id, scope.ownerUserId, "illustration_segment.failed");
+    }
+    return result.rowCount === 1;
+  });
 }
 
 async function retry(
@@ -214,20 +232,23 @@ async function retry(
   next: IllustrationWorkerRetry,
 ): Promise<boolean> {
   const current = binding(scope.family);
-  const result = await pool.query(
-    `UPDATE ${current.table}
-        SET status = 'queued',
-            next_attempt_at = COALESCE($4::timestamptz, now() + interval '15 seconds'),
-            ${retryFailureAssignments(scope.family)}
-            completed_at = NULL,
-            lease_owner = NULL,
-            lease_expires_at = NULL,
-            updated_at = now()
-      WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status IN ($7, 'recoverable')
-        AND lease_expires_at >= now()`,
-    [scope.jobId, scope.ownerUserId, scope.workerId, next.retryAt ?? null, next.code, next.message, current.activeStatus],
-  );
-  return result.rowCount === 1;
+  return withTransaction(pool, async (client) => {
+    const result = await client.query(
+      `UPDATE ${current.table}
+          SET status = 'queued',
+              next_attempt_at = COALESCE($4::timestamptz, clock_timestamp() + interval '15 seconds'),
+              ${retryFailureAssignments(scope.family)}
+              completed_at = NULL,
+              lease_owner = NULL,
+              lease_expires_at = NULL,
+              updated_at = clock_timestamp()
+        WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status IN ($7, 'recoverable')
+          AND lease_expires_at > clock_timestamp()`,
+      [scope.jobId, scope.ownerUserId, scope.workerId, next.retryAt ?? null, next.code, next.message, current.activeStatus],
+    );
+    if (result.rowCount === 1 && scope.family === "image") await captureImageActivity(client, scope.jobId, scope.ownerUserId, "image.retry_queued");
+    return result.rowCount === 1;
+  });
 }
 
 async function resolvePrompt(
@@ -256,7 +277,7 @@ async function resolvePrompt(
   }>(
     `${source}
       WHERE jobs.id = $1 AND jobs.owner_user_id = $2 AND jobs.lease_owner = $3 AND jobs.status = $4
-        AND jobs.lease_expires_at >= now()`,
+        AND jobs.lease_expires_at > clock_timestamp()`,
     [scope.jobId, scope.ownerUserId, scope.workerId, current.activeStatus],
   );
   const row = result.rows[0];

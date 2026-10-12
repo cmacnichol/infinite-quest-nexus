@@ -2439,6 +2439,7 @@ export async function loadChronicleRetrievalStage(
     : [entityExpandedQuery, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
   const config = await loadContextConfig(client, scope);
   const productionImplementation = config?.retrieval_implementation ?? "legacy_hybrid";
+  const runShadowComparisons = Boolean(config?.retrieval_shadow_enabled && !options.generationCandidates);
   const executeLegacy = async (
     implementation: "lexical" | "legacy_hybrid",
     executionConfig: EmbeddingConfigRow | undefined,
@@ -2743,7 +2744,7 @@ export async function loadChronicleRetrievalStage(
   };
 
   let retrievalExecutions: RetrievalExecution[];
-  if (config?.retrieval_shadow_enabled) {
+  if (runShadowComparisons) {
     const lexicalConfig = config ? { ...config, embedding_enabled: false } : undefined;
     const productionExecution = await executeProduction(
       productionImplementation,

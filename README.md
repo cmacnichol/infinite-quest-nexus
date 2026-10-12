@@ -94,7 +94,7 @@ Maintainers can follow the [GitHub Pages publishing guide](docs/contributing/git
 
 ## Development
 
-Source-level development requires Node.js 22.13 or newer and the pnpm version declared in `package.json`. Use `corepack pnpm` when your global pnpm version differs.
+Source-level development requires Node.js 22.19 or newer and the pnpm version declared in `package.json`. Use `corepack pnpm` when your global pnpm version differs.
 
 ```powershell
 pnpm install --frozen-lockfile

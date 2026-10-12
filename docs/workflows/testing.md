@@ -30,8 +30,6 @@ pnpm test:unit --exclude '**/.worktrees/**' --exclude '**/.codex/**'
 
 For focused database tests, pass `--config vitest.integration.config.ts`; it provisions the dedicated test database and installs per-file isolation. Direct Vitest invocation without that configuration may exit successfully while skipping database cases when `TEST_DATABASE_URL` is absent. The full `pnpm test:integration` runner selects that configuration automatically.
 
-To run integration tests against an existing disposable PostgreSQL root database, set `INFINITEQUEST_TEST_DATABASE_URL` to an explicit loopback URL for `infinitequest_test` or a database named `infinitequest_test_<suffix>`, then run the same integration configuration or `pnpm test:integration`. The URL must use `postgres` or `postgresql`, target `localhost` or `127.0.0.1`, and must not use query parameters that override the host, database, or service. This opt-in skips shared Compose database provisioning; `setup-isolated-database.ts` still creates and drops its disposable database for each test file. `TEST_DATABASE_URL` remains the per-file isolation handoff and is not an opt-in setting. Keep credentials in the local environment; do not commit credential-bearing URLs or environment files.
-
 Report passed, failed, and skipped checks separately, including reasons for skips. Unit tests do not establish real PostgreSQL, browser, or live-provider behavior. A skipped integration or browser check is not a pass.
 
 ## Generation rejection review verification
@@ -310,7 +308,12 @@ The [continuity evaluator runbook](../runbooks/story-continuity-evaluation.md) c
 
 Generation-review changes also require `tests/integration/story-continuity-review.integration.test.ts` with the PostgreSQL integration configuration. Its deterministic SSE fixture must cover a complete streamed candidate, the review decision, and the subsequent commit or restart. Record provider-call counts separately for primary generation, review, and repair. When a Keep decision is involved, verify the saved candidate hash and exact accepted payload, then verify the next turn receives accepted fiction but no private review finding or foreign-campaign canary. Illustration enqueue failures must leave the accepted turn intact.
 
+## Persistent Story activity history
+
+The [activity history runbook](../runbooks/activity-history.md) documents additive rollout/rollback, retention, publication health, quarantine and cache coverage. See [acceptance evidence](../review/legacy-activity-verification.md) for the composed PostgreSQL/API/provider workflow, portability checks, browser screenshots and separately reported limitations.
+
 ## Owned Story-only runtime PostgreSQL container
+
 
 On Windows, the disposable [Story-only runtime CLI](../../scripts/story-only-ui-runtime.ts) connects its temporary Docker network to an existing PostgreSQL container. Set `STORY_ONLY_RUNTIME_POSTGRES_CONTAINER` to the coordinator-owned container name matching the private database configuration before invoking the CLI directly. An unset value retains `infinitequest-story-only-test`; an empty or unsafe name fails before database allocation, file cleanup, or Docker commands. The same resolved name is used for network connection, the runtime database hostname, and disconnection on both successful close and startup failure. Only the fixture's generated database is dropped.
 

@@ -1,4 +1,6 @@
+import { PreparedRouteTerminalError } from "../../packages/story-engine/src/preset-route-execution.js";
 import { describe, expect, it, vi } from "vitest";
+import { CampaignTrackerUpdateError } from "../../packages/domain/src/campaign-trackers.js";
 import { deriveTextExecutionPlan, presetPromptInjectedRemotely, STORY_PRESET_ROUTE_PROTOCOL_V2, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import type {
   ClaimedGeneration,
@@ -631,6 +633,52 @@ function authorizeReviewRetry(job: GenerationExecutionPayload, checkpoint: Gener
 }
 
 describe("generation executor adapter", () => {
+  it("keeps a tracker identity commit error recoverable with repair-authority diagnostics", async () => {
+    const job = completeGenerationExecutionPayload();
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true),
+      markGenerating: vi.fn(async () => true), saveOrchestration: vi.fn(async () => true),
+      savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true),
+      markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => { throw new CampaignTrackerUpdateError("ambiguous_name"); }),
+      markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Provider", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 16_000,
+      maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async () => ({
+        content: JSON.stringify({ narration: "The gate opens.", choices: ["Enter.", "Wait.", "Study.", "Call."],
+          custom_action_suggestion: "Study the lock.", scratchpad: "", tracker_updates: [], image_prompt: "",
+          continuity_summary: "The gate is open.", canonical_facts: [], superseded_facts: [],
+          canonical_fact_updates: [], open_threads: [] }),
+        responseId: "tracker-response", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance",
+        usage: {}, reportedCost: null, rawMetadata: {}
+      }))
+    };
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [],
+        baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
+      loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."),
+      recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "tracker-identity", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(provider.execute).toHaveBeenCalledTimes(1);
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "tracker_update_identity_invalid",
+      errorMessage: "Tracker updates could not be matched safely. Discard this attempt and resolve the tracker identity before generating again.",
+      recoveryMetadata: {
+        reason: "tracker_update_identity_invalid",
+        diagnostic: { code: "tracker_update_identity_invalid", operation: "story_generation", action: "repair_authority" }
+      }
+    }));
+    expect(repository.markFailed).not.toHaveBeenCalled();
+  });
   function dispatchedContinuityCheckpoint() {
     const binding = { draftHash: "a".repeat(64), producingRequestHash: "b".repeat(64), manifestHash: "c".repeat(64),
       providerConfigurationHash: "d".repeat(64), promptHash: "e".repeat(64), promptProtocol: "story-continuity-review-v1" as const, policyHash: "f".repeat(64) };
@@ -1334,6 +1382,58 @@ describe("generation executor adapter", () => {
     expect(repository.pauseForReview).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       stage: "structure", candidateScope: "main", reasons: ["output_incomplete"], gateCandidate: expect.objectContaining({ story: null })
     }));
+  });
+
+  it.each([
+    ["rate_limit", "provider_rate_limited", "provider_rejection"],
+    ["authentication", "provider_authentication_failed", "provider_rejection"],
+    ["provider_unavailable", "provider_route_unavailable", "provider_rejection"],
+    ["model_unavailable", "provider_model_unavailable", "provider_rejection"],
+    ["refusal", "provider_refusal", "format"],
+    ["schema_invalid", "provider_schema_invalid", "format"],
+    ["deadline", "provider_request_timeout", "provider_timeout"],
+    ["unknown", "generation_failed", "unknown"]
+  ] as const)("preserves wrapped route failure %s without leaking private errors", async (reason, code, category) => {
+    const responseIdentity = reason === "unknown" ? "https://PRIVATE_PROVIDER_CANARY/token?secret=credential" : "rejected-id";
+    const providerFailure = {
+      version: 1 as const, source: "http_error" as const, observedAt: "2026-10-03T12:00:00.000Z",
+      httpStatus: 429, upstreamStatus: null, reason, limitSource: "unknown" as const,
+      upstreamCode: null, providerName: null, retryAfterMs: null, retryAt: null,
+      rateLimit: null, successfulResponseStarted: false, emittedOutput: false, metadataStatus: "absent" as const
+    };
+    const failedLogs = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    const job = completeGenerationExecutionPayload();
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined),
+      markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "unexpected" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Validation phase provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async () => { throw new Error("PRIVATE_PROVIDER_CANARY", { cause:
+        Object.assign(new PreparedRouteTerminalError("prepared_route_terminal", reason, "PRIVATE_PROVIDER_CANARY", "physical-id"), { providerFailure, providerResponseId: responseIdentity }) }); })
+    };
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."),
+      recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "validation-phase", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(repository.markFailed).toHaveBeenCalledWith(expect.objectContaining({
+      lastFailureDiagnostic: expect.objectContaining({ category, code, phase: "story_generation", attemptNumber: 1, providerFailure })
+    }));
+    expect(failedLogs).toHaveBeenCalledWith(expect.objectContaining({ physicalAttemptId: "physical-id", providerResponseId: reason === "unknown" ? null : responseIdentity,
+      providerFailureSource: "http_error", providerFailureHttpStatus: 429, providerFailureSuccessfulResponseStarted: false }));
+    expect(JSON.stringify(failedLogs.mock.calls)).not.toContain("PRIVATE_PROVIDER_CANARY");
+    failedLogs.mockRestore();
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(repository.markFailed).mock.calls)).not.toContain("PRIVATE_PROVIDER_CANARY");
   });
 
   it("records a fatal diagnostic against the phase that actually failed", async () => {

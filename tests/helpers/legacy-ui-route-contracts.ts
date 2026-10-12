@@ -104,6 +104,7 @@ export const legacyDashboardRouteContracts = [
 ] as const satisfies readonly LegacyUiRouteContract[];
 
 export const legacyStoryRouteContracts = [
+  story("GET", "/api/v1/campaigns/:campaignId/activity"),
   story("GET", "/api/v1/meta"),
   story("GET", "/api/v1/session"),
   story("PATCH", "/api/v1/users/me/profile"),

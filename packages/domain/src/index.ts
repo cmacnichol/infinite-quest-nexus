@@ -21,3 +21,4 @@ export * from "./source-world-proposal.js";
 export * from "./campaign-cast.js";
 export * from "./campaign-cast-context.js";
 export * from "./story-history-projection.js";
+export * from "./activity.js";

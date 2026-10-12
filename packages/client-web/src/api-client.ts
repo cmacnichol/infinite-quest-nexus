@@ -1,3 +1,4 @@
+import { createActivityApi, type ActivityApi } from "./activity-api.js";
 import { ApiContractError } from "@infinite-quest/client-core";
 import {
   campaignListResponseSchema,
@@ -132,6 +133,7 @@ export interface NexusApiClient {
   campaigns: CampaignApi;
   generation: GenerationApi;
   illustrations: IllustrationApi;
+  activity: ActivityApi;
   worlds: WorldApi;
   meta: ShellApi;
   session: SessionApi;
@@ -343,5 +345,5 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
     list: (signal) => http.request(withSignal({ method: "GET", path: "/providers", responseSchema: providerListResponseSchema }, signal))
   };
 
-  return { campaigns, generation, illustrations, worlds, meta, session, providers };
+  return { campaigns, generation, illustrations, activity: createActivityApi({ http }), worlds, meta, session, providers };
 }

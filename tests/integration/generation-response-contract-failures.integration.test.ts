@@ -61,6 +61,7 @@ integration("response-contract provider failures", () => {
   let presetMetadataAvailable = true;
   let sceneCoverageResults: boolean[] = [];
   let sceneStoryRequestCount = 0;
+  let postOutputRejection = false;
   const requestBodies: string[] = [];
   const ownedJobIds: string[] = [];
 
@@ -140,8 +141,9 @@ integration("response-contract provider failures", () => {
           return;
         }
         if (scenario === "route_rate_limit") {
-          response.writeHead(429, { "content-type": "application/json", "retry-after": "0" });
-          response.end(JSON.stringify({ error: { code: "rate_limit", message: "fixture availability rejection" } }));
+          response.writeHead(429, { "content-type": "application/json", "retry-after": "2", "x-generation-id": "rejected-rate-limit-id" });
+          response.end(JSON.stringify({ error: { code: "rate_limit_exceeded", message: canary,
+            metadata: { limit_source: "upstream_provider", raw: canary, remedy_hint: canary } } }));
           return;
         }
         if (scenario === "route_exhausted") {
@@ -265,7 +267,8 @@ integration("response-contract provider failures", () => {
           model: scenario === "route_partial_stream" ? partialRequest.model : "observed-stream-model",
           provider: scenario === "route_partial_stream" ? partialRequest.provider?.only?.[0] : "observed-stream-route",
           choices: [{ delta: { content: partialJson }, finish_reason: null }]
-        })}\n\n`);
+        })}\n\n${postOutputRejection ? `data: ${JSON.stringify({ error: { code: 429, message: canary,
+          metadata: { limit_source: "upstream_provider" } } })}\n\n` : ""}`);
       });
     });
     await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
@@ -283,7 +286,7 @@ integration("response-contract provider failures", () => {
       );
       ownedJobIds.length = 0;
     }
-    requestBodies.length = 0; continuityReviewCalls = 0; presetMetadataAvailable = true; sceneCoverageResults = []; sceneStoryRequestCount = 0;
+    requestBodies.length = 0; continuityReviewCalls = 0; presetMetadataAvailable = true; sceneCoverageResults = []; sceneStoryRequestCount = 0; postOutputRejection = false;
   });
 
   function records(streaming: boolean) {
@@ -390,7 +393,12 @@ integration("response-contract provider failures", () => {
   }
 
   async function authority(campaignId: string) {
-    return (await pool.query(`SELECT (SELECT count(*)::int FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL) AS accepted, (SELECT to_jsonb(cs) FROM campaign_state cs WHERE cs.campaign_id=$1) AS state, (SELECT count(*)::int FROM campaign_canonical_facts WHERE campaign_id=$1) AS facts, (SELECT count(*)::int FROM chronicle_jobs WHERE campaign_id=$1) AS chronicle`, [campaignId])).rows[0];
+    return (await pool.query(`SELECT (SELECT count(*)::int FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL) AS accepted,
+      (SELECT jsonb_agg(to_jsonb(t) ORDER BY t.id) FROM turns t WHERE campaign_id=$1 AND accepted_at IS NOT NULL) AS ledger,
+      (SELECT to_jsonb(cs) FROM campaign_state cs WHERE cs.campaign_id=$1) AS state,
+      (SELECT count(*)::int FROM campaign_canonical_facts WHERE campaign_id=$1) AS facts,
+      (SELECT jsonb_agg(to_jsonb(m) ORDER BY m.id) FROM chronicle_memories m WHERE campaign_id=$1) AS memories,
+      (SELECT count(*)::int FROM chronicle_jobs WHERE campaign_id=$1) AS chronicle`, [campaignId])).rows[0];
   }
 
   async function executeJob(value: Awaited<ReturnType<typeof fixture>>, job: { id: string }, expectedExecution = true) {
@@ -1043,6 +1051,80 @@ integration("response-contract provider failures", () => {
     expect(await authority(value.campaignId)).toEqual(before);
   }, 60_000);
 
+  it.each(["append", "replace_latest"] as const)("provider failure composes durable %s evidence and explicit Retry without authority mutation", async (operation) => {
+    scenario = "success";
+    const value = await fixture("required", false, true, "fallback");
+    await executeOnce(value);
+    let job = await value.application.enqueueAppend({ ownerUserId, campaignId: value.campaignId },
+      { ...value.request, idempotencyKey: randomUUID() });
+    ownedJobIds.push(job.id);
+    if (operation === "replace_latest") {
+      await executeJob(value, job);
+      const current = (await pool.query("SELECT active_turn_number FROM campaigns WHERE id=$1", [value.campaignId])).rows[0]!.active_turn_number;
+      job = await value.application.enqueueReplacement({ ownerUserId, campaignId: value.campaignId }, generationRetryLatestRequestSchema.parse({
+        action: "Open the observatory archive.", providerProfileId: value.providerId,
+        textSelection: { kind: "openrouter_preset", slug: "native-fallback" }, expectedCurrentTurnNumber: current,
+        idempotencyKey: randomUUID(), context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
+      }));
+      ownedJobIds.push(job.id);
+      requestBodies.length = 0;
+      scenario = "route_rate_limit";
+    }
+    requestBodies.length = 0;
+    scenario = "route_rate_limit";
+    const before = await authority(value.campaignId);
+    const target = operation === "replace_latest"
+      ? before.ledger.find((turn: { turn_number: number }) => turn.turn_number === Math.max(...before.ledger.map((turn: { turn_number: number }) => turn.turn_number)))
+      : null;
+    const costsBefore = await createProviderCostRepository(pool).getCampaignCostSummary({ ownerUserId, campaignId: value.campaignId });
+    const repository = await executeJob(value, job);
+    const readAttempts = () => pool.query(`SELECT id,reservation_key,logical_reservation,outcome,provider_response_id,response_started_at,
+      failure_diagnostic,usage,reported_cost FROM prepared_text_physical_attempts
+      WHERE owner_user_id=$1 AND logical_reservation->>'generationJobId'=$2 ORDER BY reserved_at,id`, [ownerUserId, job.id]);
+    const failed = (await readAttempts()).rows;
+    expect(failed).toEqual([expect.objectContaining({ outcome: "failed", provider_response_id: "rejected-rate-limit-id",
+      response_started_at: null, usage: null, reported_cost: null, failure_diagnostic: expect.objectContaining({
+        version: 1, source: "http_error", httpStatus: 429, reason: "rate_limit", limitSource: "upstream_provider",
+        retryAfterMs: 2000, successfulResponseStarted: false, emittedOutput: false, metadataStatus: "recognized"
+      }) })]);
+    const publicJob = await value.application.getJob({ ownerUserId, jobId: job.id });
+    expect(publicJob).toMatchObject({ status: "failed", resultTurnId: null, failureDiagnostic: { code: "provider_rate_limited",
+      providerFailure: { source: "http_error", httpStatus: 429, limitSource: "upstream_provider", retryAfterMs: 2000 } } });
+    expect(JSON.stringify(publicJob)).not.toContain(canary);
+    expect(JSON.stringify(publicJob)).not.toContain("metadataStatus");
+    expect(await value.application.getJob({ ownerUserId, jobId: job.id })).toEqual(publicJob);
+    await expect(value.application.getJob({ ownerUserId: randomUUID(), jobId: job.id })).rejects.toMatchObject({ kind: "not_found" });
+    expect(await authority(value.campaignId)).toEqual(before);
+    expect(await createProviderCostRepository(pool).getCampaignCostSummary({ ownerUserId, campaignId: value.campaignId })).toEqual(costsBefore);
+    expect(requestBodies).toHaveLength(1);
+    expect(await repository.claimNext({ workerId: "no-background-retry", leaseSeconds: 30 })).toBeNull();
+    scenario = "success";
+    await value.application.retry({ ownerUserId, jobId: job.id });
+    await executeJob(value, job);
+    const attempts = (await readAttempts()).rows;
+    expect(attempts).toHaveLength(2);
+    expect(attempts.find(attempt => attempt.id === failed[0]!.id)).toEqual(failed[0]);
+    const succeeded = attempts.find(attempt => attempt.outcome === "succeeded")!;
+    expect(succeeded).toMatchObject({ failure_diagnostic: null });
+    expect(succeeded.id).not.toBe(failed[0]!.id);
+    expect(succeeded.reservation_key).not.toBe(failed[0]!.reservation_key);
+    expect(requestBodies).toHaveLength(2);
+    expect(JSON.parse(requestBodies[1]!)).toEqual(JSON.parse(requestBodies[0]!));
+    expect(await value.application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", resultTurnId: expect.any(String) });
+    const completed = await value.application.getJob({ ownerUserId, jobId: job.id });
+    const after = await authority(value.campaignId);
+    const unchanged = before.ledger.filter((turn: { id: string }) => turn.id !== target?.id);
+    expect(unchanged.length).toBeGreaterThan(0);
+    expect(after.accepted).toBe(before.accepted + (operation === "append" ? 1 : 0));
+    expect(after.ledger.filter((turn: { id: string }) => turn.id !== completed.resultTurnId)).toEqual(unchanged);
+    expect(after.ledger.filter((turn: { id: string }) => turn.id === completed.resultTurnId)).toEqual([
+      expect.objectContaining({ turn_number: target?.turn_number ?? Math.max(...before.ledger.map((turn: { turn_number: number }) => turn.turn_number)) + 1 })
+    ]);
+    if (target) expect(after.ledger.some((turn: { id: string }) => turn.id === target.id)).toBe(false);
+    expect(await repository.claimNext({ workerId: "no-duplicate-commit", leaseSeconds: 30 })).toBeNull();
+    expect(requestBodies).toHaveLength(2);
+  }, 60_000);
+
   it("retains the preset request and schema rejection without a concrete-model retry", async () => {
     scenario = "route_exhausted";
     const value = await fixture("required", false, true, "fallback");
@@ -1079,6 +1161,45 @@ integration("response-contract provider failures", () => {
       }) })
     ]);
     expect(await authority(value.campaignId)).toEqual(before);
+  }, 60_000);
+
+  it.each(["missing", "malformed", "sse", "output", "started", "request_hash", "logical_attempt", "foreign_job", "stale_attempt"] as const)(
+    "provider failure explicit Retry preserves the fence for %s evidence", async (kind) => {
+      scenario = "route_rate_limit";
+      const value = await fixture("required", false, true, "fallback");
+      const before = await authority(value.campaignId);
+      await executeOnce(value);
+      const physical = (await pool.query("SELECT id FROM prepared_text_physical_attempts WHERE logical_reservation->>'generationJobId'=$1", [value.job.id])).rows[0]!.id;
+      if (kind === "missing") await pool.query("UPDATE prepared_text_physical_attempts SET failure_diagnostic=NULL WHERE id=$1", [physical]);
+      if (kind === "malformed") await pool.query("UPDATE prepared_text_physical_attempts SET failure_diagnostic=$2::jsonb WHERE id=$1", [physical, JSON.stringify({ version: 1 })]);
+      if (kind === "sse") await pool.query("UPDATE prepared_text_physical_attempts SET failure_diagnostic=jsonb_set(failure_diagnostic,'{source}','\"sse_error\"') WHERE id=$1", [physical]);
+      if (kind === "output") await pool.query("UPDATE prepared_text_physical_attempts SET emitted_output=true WHERE id=$1", [physical]);
+      if (kind === "started") await pool.query("UPDATE prepared_text_physical_attempts SET response_started_at=now() WHERE id=$1", [physical]);
+      if (kind === "request_hash") await pool.query("UPDATE prepared_text_physical_attempts SET request_payload_hash=$2 WHERE id=$1", [physical, "f".repeat(64)]);
+      if (kind === "foreign_job") await pool.query("UPDATE prepared_text_physical_attempts SET logical_reservation=jsonb_set(logical_reservation,'{generationJobId}',to_jsonb($2::text)) WHERE id=$1", [physical, randomUUID()]);
+      if (kind === "logical_attempt") await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_set(orchestration_private,'{logicalAttempt,id}',to_jsonb($2::text)) WHERE id=$1", [value.job.id, randomUUID()]);
+      if (kind === "stale_attempt") await pool.query("UPDATE generation_jobs SET attempts=attempts+1 WHERE id=$1", [value.job.id]);
+      await value.application.retry({ ownerUserId, jobId: value.job.id });
+      scenario = "success";
+      await executeOnce(value);
+      expect(requestBodies).toHaveLength(1);
+      expect(await authority(value.campaignId)).toEqual(before);
+      expect(await value.application.getJob({ ownerUserId, jobId: value.job.id })).toMatchObject({ status: "recoverable", resultTurnId: null });
+    }, 60_000
+  );
+
+  it("provider failure after SSE output keeps actual HTTP 200 and never redispatches", async () => {
+    scenario = "route_partial_stream"; postOutputRejection = true;
+    const value = await fixture("required", true, true, "fallback");
+    const before = await authority(value.campaignId);
+    await executeOnce(value);
+    const row = (await pool.query("SELECT response_started_at,emitted_output,failure_diagnostic FROM prepared_text_physical_attempts WHERE logical_reservation->>'generationJobId'=$1", [value.job.id])).rows[0]!;
+    expect(row).toMatchObject({ response_started_at: expect.any(Date), emitted_output: true, failure_diagnostic: {
+      source: "sse_error", httpStatus: 200, upstreamStatus: 429, successfulResponseStarted: true, emittedOutput: true
+    } });
+    expect(requestBodies).toHaveLength(1);
+    expect(await authority(value.campaignId)).toEqual(before);
+    expect(JSON.stringify(generationJobSnapshotSchema.parse(await value.application.getJob({ ownerUserId, jobId: value.job.id })))).not.toContain(canary);
   }, 60_000);
 
   it.each(["route_refusal"] as const)("retains partial usage and reported cost for charged 2xx %s without fallback or state mutation", async (failureScenario) => {
@@ -1145,7 +1266,7 @@ integration("response-contract provider failures", () => {
     expect(requestBodies).toHaveLength(1);
     expect(JSON.parse(requestBodies[0]!).model).toBe("@preset/native-fallback");
     expect(attempts.rows).toEqual([
-      expect.objectContaining({ candidateOrdinal: 0, status: "completed", outcome: "failed", failureReason: "unknown",
+      expect.objectContaining({ candidateOrdinal: 0, status: "completed", outcome: "failed", failureReason: "ambiguous_transport",
         providerResponseId: "partial-stream-id", responseStartedAt: expect.any(Date), usage: null, reportedCost: null })
     ]);
     expect(job.orchestrationPrivate.preparedResponseFailures).toEqual([

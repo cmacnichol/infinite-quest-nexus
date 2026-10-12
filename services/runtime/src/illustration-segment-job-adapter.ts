@@ -1,3 +1,4 @@
+import { captureSegmentActivity } from "../../../packages/database/src/illustration-activity.js";
 import type {
   IllustrationBackfillRequest,
   IllustrationConfig,
@@ -407,12 +408,14 @@ async function queueSegmentDelivery(
   }
   const providerPrompt = composeIllustrationProviderPrompt(prompt.trim(), sanitizedReference, characterReferenceTemplate);
   if (!await lockActiveProvisionalGeneration(client, ownerUserId, segment.campaign_id, segment.generation_job_id, segment.turn_id)) return false;
-  await client.query(
+  const segmentChanged = await client.query(
     `UPDATE turn_illustration_segments
         SET resolved_prompt = $3, prompt_source = $4, status = 'generating', updated_at = now()
-      WHERE id = $1 AND owner_user_id = $2`,
+      WHERE id = $1 AND owner_user_id = $2 RETURNING id`,
     [segment.id, ownerUserId, prompt.trim(), promptSource]
   );
+  if (!segmentChanged.rows[0]) return false;
+  if (promptSource === "ai_fallback") await captureSegmentActivity(client, segment.id, ownerUserId, "illustration_segment.direct_fallback");
   await client.query(
     `UPDATE turn_illustration_sets SET status = 'generating'
       WHERE id = $1 AND owner_user_id = $2 AND status IN ('queued', 'refining')`,
@@ -548,6 +551,7 @@ async function createProvisionalSegmentInTransaction(
   );
   const segment = segmentResult.rows[0];
   if (!segment) return true; // Already exists
+  if (config.segment_prompt_mode === "ai_refined") await captureSegmentActivity(client, segment.id, ownerUserId, "illustration_segment.refining");
 
   if (config.segment_prompt_mode === "direct" || textExecutionSnapshot?.state === "unavailable") {
     const providerPrompt = composeIllustrationProviderPrompt(
@@ -561,6 +565,7 @@ async function createProvisionalSegmentInTransaction(
         WHERE id = $1 AND owner_user_id = $2`,
       [segment.id, ownerUserId, directPrompt.trim()]
     );
+    if (config.segment_prompt_mode === "ai_refined") await captureSegmentActivity(client, segment.id, ownerUserId, "illustration_segment.direct_fallback");
     const imageProvider = await directProvider(
       providers, ownerUserId, "image", config.provider_profile_id || config.campaign_image_provider_id, config.model,
     );
@@ -843,6 +848,7 @@ async function createTurnSet(
         config.segment_prompt_mode === "ai_refined" ? "refining" : "queued", visualReference]
     );
     const segment = segmentResult.rows[0]!;
+    if (config.segment_prompt_mode === "ai_refined") await captureSegmentActivity(client, segment.id, ownerUserId, "illustration_segment.refining");
     if (config.segment_prompt_mode === "direct") {
       await queueSegmentDelivery(
         client, ownerUserId, segment, config, directPrompt, "direct",
@@ -1200,12 +1206,12 @@ export async function removeSegmentIllustrationVariant(
 }
 
 export async function enqueueSegmentProviderImage(
-  pool: DatabasePool,
+  pool: DatabasePool | DatabaseClient,
   segmentId: string,
   providers: IllustrationProviderCollaborators,
 ) {
   const ownerUserId = await initialOwnerId(pool);
-  return withTransaction(pool, async (client) => {
+  const work = async (client: DatabaseClient) => {
     const result = await client.query<SegmentRow>(
       `SELECT segments.id, segments.owner_user_id, segments.campaign_id, segments.turn_id,
               segments.generation_job_id,
@@ -1254,7 +1260,8 @@ export async function enqueueSegmentProviderImage(
     });
     if (!job) throw Object.assign(new Error("The segment image job could not be created."), { statusCode: 409 });
     return { id: job.id, duplicate: false };
-  });
+  };
+  return isDatabasePool(pool) ? withTransaction(pool, work) : work(pool);
 }
 
 export function parseRefinedPrompt(content: string): string {
@@ -1489,6 +1496,9 @@ export async function runIllustrationPromptJob(
     const responseId = String(result.metadata.responseId || "");
     const portMetadata = result.metadata;
     await withTransaction(pool, async (client) => {
+      if (!await lockActiveProvisionalGeneration(client, claimed.owner_user_id, segment.campaign_id, segment.generation_job_id, segment.turn_id)) return;
+      const liveClaim = await client.query("SELECT id FROM illustration_prompt_jobs WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND attempts=$4 AND status='refining' AND lease_expires_at > clock_timestamp() FOR UPDATE", [claimed.id, claimed.owner_user_id, workerId, claimed.attempts]);
+      if (!liveClaim.rows[0]) return;
       const currentConfig = await loadConfig(client, claimed.owner_user_id, claimed.campaign_id);
       await queueSegmentDelivery(
         client, claimed.owner_user_id, segment, currentConfig, prompt, "ai_refined",
@@ -1496,13 +1506,14 @@ export async function runIllustrationPromptJob(
         segment.character_visual_reference,
         promptContent(claimed.prompt_snapshot, "illustration_character_reference")
       );
-      await client.query(
+      const completed = await client.query(
         `UPDATE illustration_prompt_jobs
             SET status = 'completed', response_id = $3, completed_at = now(), updated_at = now(),
                 lease_owner = NULL, lease_expires_at = NULL, error_code = NULL, error_message = NULL
-          WHERE id = $1 AND lease_owner = $2 AND status = 'refining'`,
+          WHERE id = $1 AND lease_owner = $2 AND status = 'refining' AND lease_expires_at > clock_timestamp() RETURNING id`,
         [claimed.id, workerId, responseId]
       );
+      if (!completed.rows[0]) throw Object.assign(new Error("Illustration prompt claim expired before completion."), { code: "lease_lost" });
       const physicalAttemptId = typeof portMetadata?.physicalAttemptId === "string" ? portMetadata.physicalAttemptId : null;
       if (portMetadata && !physicalAttemptId) {
         const profile = await client.query<{ provider_type: string }>(
@@ -1536,6 +1547,9 @@ export async function runIllustrationPromptJob(
       storyOperation: "illustration_prompt_refinement"
     });
     await withTransaction(pool, async (client) => {
+      if (!await lockActiveProvisionalGeneration(client, claimed.owner_user_id, segment.campaign_id, segment.generation_job_id, segment.turn_id)) return;
+      const liveClaim = await client.query("SELECT id FROM illustration_prompt_jobs WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND attempts=$4 AND status='refining' AND lease_expires_at > clock_timestamp() FOR UPDATE", [claimed.id, claimed.owner_user_id, workerId, claimed.attempts]);
+      if (!liveClaim.rows[0]) return;
       if (claimed.attempts >= claimed.max_attempts) {
         const config = await loadConfig(client, claimed.owner_user_id, claimed.campaign_id);
         await queueSegmentDelivery(
@@ -1544,27 +1558,29 @@ export async function runIllustrationPromptJob(
           segment.character_visual_reference,
           promptContent(claimed.prompt_snapshot, "illustration_character_reference")
         );
-        await client.query(
+        const fallback = await client.query(
           `UPDATE illustration_prompt_jobs
               SET status = 'fallback', completed_at = now(), updated_at = now(),
                   error_code = $3, error_message = $4,
                   lease_owner = NULL, lease_expires_at = NULL
-            WHERE id = $1 AND lease_owner = $2 AND status = 'refining'`,
+            WHERE id = $1 AND lease_owner = $2 AND status = 'refining' AND lease_expires_at > clock_timestamp() RETURNING id`,
           [claimed.id, workerId,
             typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "refinement_exhausted",
             error instanceof Error ? error.message.slice(0, 4000) : String(error).slice(0, 4000)]
         );
+        if (!fallback.rows[0]) throw Object.assign(new Error("Illustration prompt claim expired before fallback."), { code: "lease_lost" });
       } else {
-        await client.query(
+        const recoverable = await client.query(
           `UPDATE illustration_prompt_jobs
               SET status = 'recoverable', next_attempt_at = now() + interval '15 seconds',
                   error_code = $3, error_message = $4,
                   lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-            WHERE id = $1 AND lease_owner = $2 AND status = 'refining'`,
+            WHERE id = $1 AND lease_owner = $2 AND status = 'refining' AND lease_expires_at > clock_timestamp() RETURNING id`,
           [claimed.id, workerId,
             typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "refinement_failed",
             error instanceof Error ? error.message.slice(0, 4000) : String(error).slice(0, 4000)]
         );
+        if (recoverable.rows[0]) await captureSegmentActivity(client, segment.id, claimed.owner_user_id, "illustration_segment.failed");
       }
     });
   }

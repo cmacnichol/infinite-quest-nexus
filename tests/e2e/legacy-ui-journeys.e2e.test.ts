@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import {
+  activityPageSchema,
   campaignSyncStatusSchema,
   generationJobSnapshotSchema,
   generationResultSchema,
@@ -840,6 +841,11 @@ test("explicit_reader_window_bounds: startup and older-scene paging stay bounded
     const settings = fixtureUser.settings as Record<string, unknown>;
     fixtureUser.settings = { ...settings, continuousReading: true };
     const instrumentation = await installLegacyUiFixture(page, fixture);
+    // Activity performs its own fresh access proof; it must not bypass owner checks.
+    await page.route(`**/api/v1/campaigns/${fixture.campaignId}/activity**`, route => route.fulfill({ json: activityPageSchema.parse({
+      version: 1, events: [], nextBefore: null, nextAfter: null, hasMore: false,
+      coverage: { capturedSince: null, retentionDays: 30, oldestAvailableSequence: null, latestPublishedSequence: "0", pendingPublication: false, incomplete: false, resetRequired: false }
+    }) }));
     const requests: Array<{ method: string; path: string; url: string }> = [];
     const sceneWindowResponses: Array<{
       readonly request: { readonly anchorTurnNumber: number; readonly anchorTurnId: string; readonly direction: "older" | "newer"; readonly neighborLimit: number };
@@ -926,7 +932,8 @@ test("explicit_reader_window_bounds: startup and older-scene paging stay bounded
           && url.searchParams.has("before");
       });
       expect(cursorReads, `startup cursor reads for ${turnCount} accepted turns`).toEqual([]);
-      expect(instrumentation.requests.filter(request => request.path === `/api/v1/campaigns/${fixture.campaignId}/sync-status`)).toHaveLength(1);
+      // One reader hydration plus one independent Activity access-verification read.
+      await expect.poll(() => instrumentation.requests.filter(request => request.path === `/api/v1/campaigns/${fixture.campaignId}/sync-status`).length).toBe(2);
       expect(instrumentation.writes).toEqual([]);
     } finally {
       await context.close();
