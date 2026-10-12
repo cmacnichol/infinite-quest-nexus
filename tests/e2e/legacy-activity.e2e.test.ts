@@ -280,6 +280,7 @@ test("successful Undo persists exactly one safe observation through campaign rel
   page.on("dialog", dialog => dialog.accept());
   await page.keyboard.press("Escape");
   const before = api.syncs();
+  await page.getByText("More story actions", { exact: true }).click();
   await page.locator("#btnUndo").click();
   await expect.poll(() => api.syncs()).toBeGreaterThan(before);
   await expect.poll(() => page.evaluate(() => (window as any).__activity.getState().observations.filter((entry: any) => entry.kind === "browser.undo_result").length)).toBe(1);
@@ -365,7 +366,10 @@ for (const safety of ["campaign switch", "access denial"] as const) {
       await page.evaluate(id => { (window as any).__switchPromise = (window as any).__loadCampaign(id); }, campaignB);
       api.releaseSession(); await page.evaluate(() => (window as any).__switchPromise);
       await expect(page).toHaveTitle("Second campaign — Infinite Quest");
-    } else await expect(page.locator("body")).toContainText("Error loading campaign");
+    } else {
+      await expect(page.locator("#storyLoadRecovery")).toBeVisible();
+      await expect(page.locator("#storyLoadRecoveryTitle")).toHaveText("Campaign not found");
+    }
     expect(await page.evaluate(() => (window as any).__resumeCalls)).toBe(0);
     expect(api.writes).toEqual([]); expect(api.errors).toEqual([]);
   });

@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { resolve } from "node:path";
 import { buildServer } from "../../services/api/src/server.js";
 import { inertStorageServerOptions as serverOptions } from "../helpers/build-server-options.js";
-import { userProfileSchema, userSettingsSchema, userProfileUpdateSchema } from "../../packages/contracts/src/users.js";
+import { historicalUserSettingsSchema, userProfileSchema, userSettingsSchema, userProfileUpdateSchema } from "../../packages/contracts/src/users.js";
+import { createPostgresSessionProfileRepository } from "../../packages/database/src/world-generation-repository.js";
+import { createPostgresWorldCampaignTransactionPort } from "../../packages/database/src/world-campaign-transaction.js";
+import { testWorldCampaignApplication } from "../helpers/build-server-options.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 
@@ -69,6 +72,16 @@ describe("user profile and settings contracts", () => {
     const settings = userSettingsSchema.parse({});
     expect(settings.autoSubmitTurnChoices).toBe(true);
     expect(settings.continuousReading).toBe(false);
+    expect(settings.readerPreferences).toEqual({ widthCh: 72, fontSizePx: 18, lineHeight: 1.7, theme: "dark" });
+  });
+
+  it("normalizes malformed historical reader preferences field by field without dropping other settings", () => {
+    const settings = historicalUserSettingsSchema.parse({
+      readerPreferences: { widthCh: 60, fontSizePx: 999, lineHeight: 0.4, theme: "neon" },
+      customFlag: 123
+    });
+    expect(settings.readerPreferences).toEqual({ widthCh: 60, fontSizePx: 18, lineHeight: 1.7, theme: "dark" });
+    expect(settings).toMatchObject({ customFlag: 123 });
   });
 
   it("parses userProfileSchema with default or provided settings", () => {
@@ -100,49 +113,74 @@ describe("user profile and settings contracts", () => {
     expect(update.settings?.autoSubmitTurnChoices).toBe(false);
     expect(update.settings?.continuousReading).toBe(true);
   });
+
+  it("rejects explicitly invalid reader preferences in a profile update", () => {
+    expect(() => userProfileUpdateSchema.parse({
+      settings: { readerPreferences: { widthCh: 61, fontSizePx: 18, lineHeight: 1.7, theme: "dark" } }
+    })).toThrow();
+  });
+
+  it("leaves omitted reader preferences absent from a partial settings update", () => {
+    const update = userProfileUpdateSchema.parse({ settings: { continuousReading: true } });
+    expect(Object.hasOwn(update.settings ?? {}, "readerPreferences")).toBe(false);
+  });
 });
 
 describe("user service and API endpoints", () => {
   it("returns session user profile and updates settings via endpoints", async () => {
     const mockUserId = "22222222-2222-4222-8222-222222222222";
-    let currentSettings: Record<string, unknown> = { autoSubmitTurnChoices: true, continuousReading: false };
+    let currentSettings: Record<string, unknown> = {
+      autoSubmitTurnChoices: true,
+      continuousReading: false,
+      defaultTurnControlStyle: "flexible_scene",
+      readerPreferences: { widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia" },
+      extensionSetting: { retained: true }
+    };
     let currentDisplayName = "Initial Owner";
+    let lastSettingsPatch: Record<string, unknown> | null = null;
 
-    const mockPool = {
+    const mockClient = {
       query: async (sql: string, params?: unknown[]) => {
+        if (sql === "BEGIN" || sql.startsWith("BEGIN TRANSACTION") || sql === "COMMIT" || sql === "ROLLBACK") {
+          return { rows: [] };
+        }
+        if (sql.includes("SELECT id, system_key AS \"systemKey\"")) {
+          return { rows: [{ id: mockUserId, systemKey: "initial-owner", displayName: currentDisplayName, settings: currentSettings }] };
+        }
+        if (sql.includes("UPDATE users") && sql.includes("settings = CASE")) {
+          currentDisplayName = (params?.[1] as string | null) ?? currentDisplayName;
+          const serializedPatch = params?.[2] as string | null;
+          if (serializedPatch !== null) {
+            lastSettingsPatch = JSON.parse(serializedPatch) as Record<string, unknown>;
+            currentSettings = { ...currentSettings, ...lastSettingsPatch };
+          }
+          return { rowCount: 1, rows: [{ id: mockUserId, systemKey: "initial-owner", displayName: currentDisplayName, settings: currentSettings }] };
+        }
+        return { rows: [] };
+      },
+      release: () => {}
+    };
+    const mockPool = {
+      connect: async () => mockClient,
+      query: async (sql: string) => {
         if (sql.includes("SELECT id FROM users WHERE system_key = 'initial-owner'")) {
           return { rows: [{ id: mockUserId }] };
-        }
-        if (sql.includes("SELECT id, system_key")) {
-          return {
-            rows: [{
-              id: mockUserId,
-              systemKey: "initial-owner",
-              displayName: currentDisplayName,
-              settings: currentSettings
-            }]
-          };
-        }
-        if (sql.includes("UPDATE users SET display_name = $1, settings = COALESCE(settings")) {
-          currentDisplayName = params?.[0] as string;
-          const patch = JSON.parse(params?.[1] as string);
-          currentSettings = { ...currentSettings, ...patch };
-          return { rowCount: 1, rows: [] };
-        }
-        if (sql.includes("UPDATE users SET settings = COALESCE(settings")) {
-          const patch = JSON.parse(params?.[0] as string);
-          currentSettings = { ...currentSettings, ...patch };
-          return { rowCount: 1, rows: [] };
-        }
-        if (sql.includes("UPDATE users SET display_name = $1")) {
-          currentDisplayName = params?.[0] as string;
-          return { rowCount: 1, rows: [] };
         }
         return { rows: [] };
       }
     } as unknown as DatabasePool;
 
-    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
+    const sessionProfile = createPostgresSessionProfileRepository();
+    const transaction = createPostgresWorldCampaignTransactionPort(mockPool);
+    const worldCampaign = testWorldCampaignApplication({
+      getSessionProfile: (scope) => transaction.read((database) => sessionProfile.getSessionProfile(database, scope)),
+      updateSessionProfile: (scope, request) => transaction.command(async (database) => {
+        const result = await sessionProfile.updateSessionProfile(database, scope, request);
+        if (!result.ok) throw new Error("Seeded session profile update unexpectedly failed.");
+        return result.value;
+      })
+    });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool, worldCampaign }));
 
     const getSessionRes = await app.inject({
       method: "GET",
@@ -159,7 +197,7 @@ describe("user service and API endpoints", () => {
       url: "/api/v1/users/me/profile",
       payload: {
         displayName: "Updated Owner",
-        settings: { autoSubmitTurnChoices: false, continuousReading: true }
+        settings: { autoSubmitTurnChoices: false, continuousReading: true, defaultTurnControlStyle: "flexible_scene" }
       }
     });
     expect(patchRes.statusCode).toBe(200);
@@ -175,6 +213,27 @@ describe("user service and API endpoints", () => {
     expect(getMeRes.statusCode).toBe(200);
     expect(JSON.parse(getMeRes.payload).user.settings.autoSubmitTurnChoices).toBe(false);
     expect(JSON.parse(getMeRes.payload).user.settings.continuousReading).toBe(true);
+
+    const legacySettingsPatch = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/users/me/profile",
+      payload: { settings: { autoSubmitTurnChoices: false, continuousReading: false, defaultTurnControlStyle: "flexible_scene" } }
+    });
+    expect(legacySettingsPatch.statusCode).toBe(200);
+    expect(Object.hasOwn(lastSettingsPatch ?? {}, "readerPreferences")).toBe(false);
+    expect(JSON.parse(legacySettingsPatch.payload).user.settings.readerPreferences).toEqual({ widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia" });
+    expect(JSON.parse(legacySettingsPatch.payload).user.settings.extensionSetting).toEqual({ retained: true });
+    expect(JSON.parse(legacySettingsPatch.payload).user.settings.defaultTurnControlStyle).toBe("flexible_scene");
+
+    const displayNamePatch = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/users/me/profile",
+      payload: { displayName: "Reader With New Name" }
+    });
+    expect(displayNamePatch.statusCode).toBe(200);
+    expect(JSON.parse(displayNamePatch.payload).user.settings.readerPreferences).toEqual({ widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia" });
+    expect(JSON.parse(displayNamePatch.payload).user.settings.extensionSetting).toEqual({ retained: true });
+    expect(JSON.parse(displayNamePatch.payload).user.settings.defaultTurnControlStyle).toBe("flexible_scene");
 
     await app.close();
   });

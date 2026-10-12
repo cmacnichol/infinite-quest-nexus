@@ -39,7 +39,7 @@ for (const surface of ["legacy", "web-next"] as const) {
       }] });
       return respond({});
     });
-    const origin = surface === "legacy" ? "http://127.0.0.1:43173" : "http://127.0.0.1:43174";
+    const origin = surface === "legacy" ? `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}` : `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}`;
     if (surface === "legacy") {
       const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
       await page.route(`${origin}/story/${fixture.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));

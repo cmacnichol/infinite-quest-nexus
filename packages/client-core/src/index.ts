@@ -98,6 +98,84 @@ export type {
   HttpMethod
 } from "./errors.js";
 export * from "./campaign-cast-editor.js";
+export { createEditSession } from "./edit-session.js";
+export type { EditSession } from "./edit-session.js";
+export { buildCampaignCreateRequest, createCampaignCreationDraft } from "./campaign-creation-draft.js";
+export type {
+  CampaignCreationDraft,
+  CampaignCreationUserSettings,
+  CampaignCreationWorld
+} from "./campaign-creation-draft.js";
+export { resolveResumeCampaign } from "./resume-campaign.js";
+export type { ResumeCampaign } from "./resume-campaign.js";
+export { DEFAULT_READER_PREFERENCES, normalizeReaderPreferences } from "./reader-preferences.js";
+export type { ReaderPreferences } from "./reader-preferences.js";
+export { filterSortCampaigns, filterSortWorlds } from "./management-collections.js";
+export type { CampaignCollectionOptions, WorldCollectionOptions } from "./management-collections.js";
+export { providerReadinessForRole } from "./provider-readiness.js";
+export type {
+  ProviderInventoryObservation,
+  ProviderInventoryStatus,
+  ProviderReadinessResult,
+  ProviderReadinessRole,
+  ProviderReadinessState,
+  ProviderReadinessCapabilityState
+} from "./provider-readiness.js";
+export {
+  STORY_HISTORY_PAGE_LIMIT,
+  STORY_HISTORY_RAW_CACHE_LIMIT,
+  createStoryHistoryWindow,
+  installStoryHistoryWindowPage,
+  selectStoryHistoryPreview,
+  storyHistoryVisibleTurns,
+  storyHistoryPageRequest
+} from "./story-history-window.js";
+export type {
+  StoryHistoryTurn,
+  StoryHistoryPage,
+  StoryHistoryPageRequest,
+  StoryHistoryWindowState,
+  StoryHistoryVisibleWindow
+} from "./story-history-window.js";
+export {
+  normalizeStoryHistorySearchQuery,
+  createStoryHistorySearchState,
+  beginStoryHistorySearch,
+  beginStoryHistorySearchPage,
+  settleStoryHistorySearch,
+  validateStoryHistoryJumpTarget
+} from "./story-history-search.js";
+export type {
+  StoryHistorySearchScope,
+  StoryHistorySearchRequest,
+  StoryHistorySearchOutcome,
+  StoryHistorySearchState
+} from "./story-history-search.js";
+export {
+  STORY_CONTINUOUS_READER_WINDOW_LIMIT,
+  STORY_CONTINUOUS_READER_NEIGHBOR_LIMIT,
+  createStoryContinuousReaderState,
+  selectStoryReadIdentity,
+  beginStoryContinuousReaderGroup,
+  settleStoryContinuousReaderResponse,
+  settleStoryContinuousReaderFailure,
+  beginStoryContinuousReaderRetry,
+  settleStoryContinuousReaderAnchorRefresh,
+  settleStoryContinuousReaderAnchorRefreshFailure,
+  reconcileStoryAcceptedSceneReplacement
+} from "./story-continuous-reader.js";
+export type {
+  StoryReadIdentity,
+  StoryContinuousReaderScope,
+  StoryContinuousReaderFailureKind,
+  StoryContinuousReaderRequest,
+  StoryContinuousReaderAnchorRefreshRequest,
+  StoryContinuousReaderState,
+  StoryContinuousReaderBootstrap,
+  StoryContinuousReaderInitialization,
+  StoryContinuousReaderRetry,
+  StoryContinuousReaderAnchorRefreshResult
+} from "./story-continuous-reader.js";
 
 export * from "./activity/types.js";
 export * from "./activity/cache.js";

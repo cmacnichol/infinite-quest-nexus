@@ -1,5 +1,5 @@
 export const LEGACY_MIGRATION_ALLOWLIST = Object.freeze([
-  "apps/web/public/nexus.js",
+  "apps/web/src/nexus.js",
   "packages/contracts/src/imports.ts",
   "packages/domain/src/infinite-worlds.ts",
   "packages/domain/src/legacy-campaign-normalization.ts",

@@ -8,6 +8,7 @@ import {
   sessionResponseSchema,
   turnListResponseSchema,
   worldListResponseSchema,
+  DEFAULT_READER_PREFERENCES,
   type CampaignSyncStatus,
   type CampaignSummary,
   type UserProfile
@@ -76,7 +77,8 @@ export function quietLeafApiPayloads(options: QuietLeafFixtureOptions = {}): Qui
     settings: {
       autoSubmitTurnChoices: false,
       continuousReading: options.returningUser === true,
-      defaultTurnControlStyle: "action_only"
+      defaultTurnControlStyle: "action_only",
+      readerPreferences: { ...DEFAULT_READER_PREFERENCES }
     }
   } satisfies UserProfile;
   const pendingGeneration = options.pendingGeneration ? {

@@ -241,7 +241,15 @@ test("retry replaces the latest accepted turn without appending history", async 
   const before = beforeTurns.turns.length;
   const replacedId = beforeTurns.turns.at(-1)?.id;
   expect(replacedId).toBeTruthy();
-  await page.locator("#btnRetry").click();
+  const storyMore = page.locator("details[data-story-more]");
+  if (!await storyMore.evaluate(details => (details as HTMLDetailsElement).open)) {
+    await storyMore.locator(":scope > summary").click();
+  }
+  await expect(storyMore).toHaveAttribute("open", "");
+  const retry = storyMore.locator("#btnRetry");
+  await expect(retry).toBeVisible();
+  await expect(retry).toBeEnabled();
+  await retry.click();
   await expect(page.locator("#retryPromptDialog")).toHaveAttribute("open", "");
   await page.locator("#retryPromptEditor").fill("Replace the latest safe station scene with this distinct direction.");
   await page.locator("#btnRetryPromptSubmit").click();

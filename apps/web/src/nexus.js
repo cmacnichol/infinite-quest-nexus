@@ -1,21 +1,27 @@
-import { createImageLibraryBrowser } from "/nexus/image-library-browser.js";
 import {
-  createProviderPresetsApi,
+  buildCampaignCreateRequest,
+  createCampaignCreationDraft,
+  createEditSession,
   createSelectionEditorState,
-  nativePresetSupport,
+  filterSortCampaigns,
+  filterSortWorlds,
+  providerReadinessForRole,
   reduceSelectionEditor,
+  resolveResumeCampaign,
   serializeSelectionEditorPatch
-} from "/nexus/legacy-management.js";
+} from "@infinite-quest/client-core";
+import { createProviderPresetsApi, nativePresetSupport } from "@infinite-quest/client-web";
+import { bindEditDialogDismissal, requestEditDismissal } from "./legacy-edit-session.js";
+import { createLegacySectionLoader } from "./legacy-section-loader.js";
+import { bindLegacyTabGroup } from "./legacy-tabs.js";
 
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
-const assetLibraryBrowser = createImageLibraryBrowser({
-  dialog: elements.assetLibraryDialog,
-  grid: elements.assetLibraryGrid,
-  status: elements.assetLibraryStatus,
-  filterContainer: elements.assetLibraryFilters,
-  loadMore: elements.assetLibraryLoadMore,
-  closeButton: elements.closeAssetLibrary
+const campaignSectionLoader = createLegacySectionLoader({
+  loadSection: (request) => loadCampaignSettingsSectionData(request)
 });
+let assetLibraryBrowserPromise = null;
+let assetLibraryImportRetryNonce = 0;
+const MAX_ASSET_LIBRARY_RETRY_NONCE = 0x7fffffff;
 let selectedFile = null;
 let selectedImportSource = null;
 let selectedImport = null;
@@ -26,7 +32,108 @@ let selectedCampaign = null;
 let campaignSelectionRequest = 0;
 let campaignStoryMemorySettings = null;
 const CAMPAIGN_SETTINGS_PANEL_IDS = Object.freeze(["overview", "story", "illustrations", "chronicle", "usage"]);
+const campaignSettingsSectionLoadEpochs = new Map();
+let campaignSaveInProgress = false;
+let campaignLeavePromptOpen = false;
+let campaignLeavePrompt = null;
+
+function campaignSettingsSnapshot() {
+  return {
+    title: elements.campaignTitle.value,
+    status: elements.campaignStatus.value,
+    textProviderProfileId: elements.campaignTextProvider.value || null,
+    turnControlStyle: elements.campaignTurnControlStyle.value,
+    storyLengthProfile: elements.campaignStoryLengthProfile.value,
+    storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)
+  };
+}
+
+function createCampaignEditGuard(createEditSession, equal) {
+  let campaignId = null;
+  let loadEpoch = null;
+  let session = null;
+  const isCurrent = (getCurrentCampaignId, getCurrentEpoch) => getCurrentCampaignId() === campaignId && getCurrentEpoch() === loadEpoch;
+
+  return {
+    reset(nextCampaignId, nextLoadEpoch, initialSnapshot) {
+      campaignId = nextCampaignId;
+      loadEpoch = nextLoadEpoch;
+      session = createEditSession(initialSnapshot, equal);
+    },
+    isDirty(snapshot) {
+      return Boolean(session?.isDirty(snapshot));
+    },
+    markSaved(nextCampaignId, nextLoadEpoch, snapshot) {
+      if (!session || campaignId !== nextCampaignId || loadEpoch !== nextLoadEpoch) return false;
+      session.markSaved(snapshot);
+      return true;
+    },
+    async canLeave(nextCampaignId, { getCurrentCampaignId, getCurrentEpoch, getSnapshot, confirm, save, discard = () => {} }) {
+      if (!session) return true;
+      const dirty = session.isDirty(getSnapshot());
+      if (nextCampaignId === campaignId) return !dirty;
+      if (!dirty) return true;
+      const capturedCampaignId = campaignId;
+      const capturedEpoch = loadEpoch;
+      const stillCurrent = () => capturedCampaignId === campaignId && capturedEpoch === loadEpoch
+        && isCurrent(getCurrentCampaignId, getCurrentEpoch);
+      const decision = await confirm();
+      if (!stillCurrent() || decision === "stay") return false;
+      if (decision === "discard") {
+        await discard();
+        session.markSaved(getSnapshot());
+        return true;
+      }
+      if (decision !== "save") return false;
+      const snapshot = getSnapshot();
+      if (!(await save(snapshot)) || !stillCurrent()) return false;
+      return !session.isDirty(getSnapshot());
+    }
+  };
+}
+
+const campaignEditGuard = createCampaignEditGuard(
+  createEditSession,
+  (left, right) => JSON.stringify(left) === JSON.stringify(right)
+);
 let activeCampaignSettingsPanel = "overview";
+const CAMPAIGN_SETTINGS_SECTIONS = Object.freeze({
+  overview: null,
+  story: "story",
+  illustrations: "illustrations",
+  chronicle: "chronicle",
+  usage: "usage"
+});
+const CAMPAIGN_SETTINGS_SECTION_LABELS = Object.freeze({
+  story: "Story behavior",
+  illustrations: "Illustrations",
+  chronicle: "Chronicle",
+  usage: "Usage"
+});
+const CAMPAIGN_SETTINGS_SECTION_CONTROLS = Object.freeze({
+  illustrations: [
+    "illustrationSourcePolicy", "campaignImageProvider", "illustrationModel", "illustrationSize", "illustrationAspectRatio",
+    "illustrationQuality", "illustrationOutputFormat", "illustrationMaxAttempts", "illustrationMatchingScope",
+    "illustrationConfidenceProfile", "illustrationRepetitionWindow", "illustrationSegmentWordCount", "illustrationImagesPerSegment",
+    "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "previewIllustrationBackfill", "previewIllustrationRebuild",
+    "saveIllustrationConfig", "discoverIllustrationModels"
+  ],
+  chronicle: [
+    "embeddingEnabled", "embeddingRetrievalImplementation", "embeddingRetrievalShadowEnabled", "embeddingProvider",
+    "discoverEmbeddingModels", "embeddingModel", "embeddingDocumentPrefix", "embeddingQueryPrefix", "embeddingBatchSize",
+    "saveEmbeddingConfig", "reindexEmbeddings", "reindexMemory"
+  ]
+});
+const CAMPAIGN_SETTINGS_SELECTION_CONTROLS = Object.freeze([
+  "campaignTitle", "campaignStatus", "campaignWorldVersion", "campaignTextProvider", "campaignTurnControlStyle", "campaignStoryLengthProfile",
+  "campaignStoryContextBudgetTokens", "saveCampaign", "transferCampaign", "editCampaignCharacter", "loadCampaign", "exportCampaign", "deleteCampaign",
+  "illustrationSourcePolicy", "campaignImageProvider", "illustrationModel", "illustrationSize", "illustrationAspectRatio", "illustrationQuality",
+  "illustrationOutputFormat", "illustrationMaxAttempts", "illustrationMatchingScope", "illustrationConfidenceProfile", "illustrationRepetitionWindow",
+  "illustrationSegmentWordCount", "illustrationImagesPerSegment", "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "embeddingEnabled",
+  "embeddingRetrievalImplementation", "embeddingRetrievalShadowEnabled", "embeddingProvider", "discoverEmbeddingModels", "embeddingModel",
+  "embeddingDocumentPrefix", "embeddingQueryPrefix", "embeddingBatchSize", "budgetTokens", "compression", "memoryQuery"
+]);
+let campaignCoreReady = false;
 
 function normalizedTurnControlStyle(value) {
   return value === "flexible_scene" ? "flexible_scene" : "flexible_action";
@@ -38,18 +145,49 @@ function savedTurnControlStyle(value, existingStyle) {
 }
 let worlds = [];
 let campaigns = [];
+let campaignsLoaded = false;
+let campaignsLoadError = false;
+const dashboardWorkflowErrors = new Map();
+let selectedCampaignIsExplicit = false;
 let selectedWorld = null;
+let worldSelectionId = "";
+let worldSelectionEpoch = 0;
+let worldSelectionIntentEpoch = 0;
 let managementWorldFilter = "all";
+let managementCampaignStatus = "active";
+let managementCampaignSort = "updated-desc";
+let managementWorldSort = "updated-desc";
+let dashboardWorldSearchTimer = 0;
+let managementCampaignSearchTimer = 0;
+let managementWorldSearchTimer = 0;
 let worldAuthorMode = "create";
 let worldAuthorWorkingContent = null;
 let worldAuthorSelectedCover = null;
 let worldAuthorBusy = false;
+let worldAuthorActiveStep = "basics";
+let worldAuthorBusyControlSnapshot = null;
+let worldAuthorTabBinding = null;
+let worldVersionReadiness = null;
+let worldVersionReadinessError = "";
+let worldVersionReadinessCheckedId = "";
+let worldVersionReadinessLoading = false;
+let providerSaveBusy = false;
+const editDialogSessions = new WeakMap();
+const editDialogBindingDisposers = new WeakMap();
 let dashboardWorld = null;
 const dashboardWorldDetails = new Map();
+const dashboardWorldDetailRequests = new Map();
+const dashboardWorldDetailRequestEpochs = new Map();
+const dashboardInitialStatsSources = new Set(["worlds", "campaigns"]);
+let dashboardInitialStatsPromise = null;
+let dashboardWorldDetailsSelectionEpoch = 0;
 let worldVersionCharacters = [];
 let worldVersionCampaignReady = false;
 let createCampaignSubmitting = false;
 let createCampaignCommitted = false;
+let campaignCreationSessionEpoch = 0;
+let campaignCreationDialogSession = null;
+let campaignCreationEntryPoint = "management";
 let playableCharacterLoadSequence = 0;
 let editingCharacterId = "";
 let characterModalWorkingCharacter = null;
@@ -62,6 +200,9 @@ const characterRowOriginals = new WeakMap();
 const legacyStorageKey = "infiniteQuestNexusClientState.v1";
 let detectedBrowserStory = null;
 let providers = [];
+let providerInventoryObservations = [];
+let providerInventoryRequestSequence = 0;
+const providerInventoryRequestEpochs = new Map();
 let selectedProvider = null;
 let embeddingConfig = null;
 let illustrationConfig = null;
@@ -88,6 +229,7 @@ let illustrationRefinementPromptValue = "";
 let defaultIllustrationRefinementPrompt = "";
 let sessionUser = null;
 let transferPreviewSequence = 0;
+let transferTargetVersionsRequestEpoch = 0;
 let transferPreview = null;
 let transferIdempotencyKey = "";
 let promptLibrary = null;
@@ -143,6 +285,114 @@ function setCampaignSettingsPanel(panelId, { focus = false } = {}) {
     const activeTab = elements.campaignSettingsRail.querySelector('[aria-selected="true"]');
     activeTab?.scrollIntoView({ block: "nearest", inline: "center" });
   }
+  void loadCampaignSettingsSectionForPanel(panelId);
+}
+
+function campaignSettingsSectionFeedback(panelId) {
+  const panel = document.querySelector(`[data-campaign-settings-content="${panelId}"]`);
+  if (!panel) return null;
+  let feedback = panel.querySelector("[data-campaign-section-feedback]");
+  if (!feedback) {
+    feedback = document.createElement("div");
+    feedback.className = "status hidden";
+    feedback.dataset.campaignSectionFeedback = panelId;
+    feedback.setAttribute("role", "status");
+    feedback.setAttribute("aria-live", "polite");
+    panel.prepend(feedback);
+  }
+  return feedback;
+}
+
+function setCampaignSettingsSectionFeedback(panelId, status, message, selectionRequest, campaignId) {
+  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+  const feedback = campaignSettingsSectionFeedback(panelId);
+  if (!feedback) return;
+  feedback.replaceChildren();
+  feedback.className = status === "error" ? "status error" : status === "loading" ? "status" : "status hidden";
+  if (!message) return;
+  const text = document.createElement("span");
+  text.textContent = message;
+  feedback.append(text);
+  if (status === "error") {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "button secondary inline-action";
+    retry.dataset.action = "retry-campaign-section";
+    retry.textContent = `Retry ${CAMPAIGN_SETTINGS_SECTION_LABELS[panelId]}`;
+    retry.addEventListener("click", () => { void loadCampaignSettingsSectionForPanel(panelId); });
+    feedback.append(retry);
+  }
+}
+
+function setCampaignSettingsSectionContentVisibility(panelId, visible) {
+  const bodies = document.querySelectorAll(`[data-campaign-section-body="${panelId}"]`);
+  for (const body of bodies) {
+    if (visible) {
+      if (body.dataset.selectionHidden !== "true") continue;
+      body.classList.remove("hidden");
+      delete body.dataset.selectionHidden;
+    } else if (!body.classList.contains("hidden")) {
+      body.dataset.selectionHidden = "true";
+      body.classList.add("hidden");
+    }
+  }
+}
+
+function updateCampaignMigrationAvailability() {
+  const targetVersion = Number(elements.campaignWorldVersion.selectedOptions[0]?.dataset.versionNumber);
+  const currentVersionIsAvailable = Boolean(selectedCampaign
+    && [...elements.campaignWorldVersion.options].some((option) => option.value === selectedCampaign.worldVersionId));
+  elements.migrateCampaign.disabled = !selectedCampaign
+    || elements.campaignWorldVersion.disabled
+    || !currentVersionIsAvailable
+    || elements.campaignWorldVersion.value === selectedCampaign.worldVersionId
+    || !Number.isSafeInteger(targetVersion)
+    || targetVersion <= selectedCampaign.worldVersionNumber;
+}
+
+function setCampaignSettingsSectionControls(section, disabled) {
+  const availabilityManaged = section === "illustrations"
+    ? new Set(["campaignImageProvider", "discoverIllustrationModels", "illustrationSegmentWordCount", "illustrationImagesPerSegment", "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "previewIllustrationBackfill", "previewIllustrationRebuild"])
+    : section === "chronicle"
+      ? new Set(["discoverEmbeddingModels", "embeddingModel", "reindexEmbeddings"])
+      : new Set();
+  for (const id of CAMPAIGN_SETTINGS_SECTION_CONTROLS[section] || []) {
+    if (!disabled && availabilityManaged.has(id)) continue;
+    const control = elements[id];
+    if (control) control.disabled = disabled;
+  }
+}
+
+function loadCampaignSettingsSectionForPanel(panelId) {
+  const section = CAMPAIGN_SETTINGS_SECTIONS[panelId];
+  const campaignId = selectedCampaign?.id;
+  const selectionRequest = campaignSelectionRequest;
+  if (!section || !campaignId || !campaignCoreReady) return;
+  const sectionLoadEpoch = (campaignSettingsSectionLoadEpochs.get(panelId) || 0) + 1;
+  campaignSettingsSectionLoadEpochs.set(panelId, sectionLoadEpoch);
+  if (section === "chronicle") {
+    elements.budgetTokens.disabled = false;
+    elements.compression.disabled = false;
+    elements.memoryQuery.disabled = false;
+    elements.previewContext.disabled = false;
+  }
+  setCampaignSettingsSectionFeedback(panelId, "loading", `Loading ${CAMPAIGN_SETTINGS_SECTION_LABELS[section]}…`, selectionRequest, campaignId);
+  void campaignSectionLoader.loadSection(section).then(() => {
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId
+      || campaignSettingsSectionLoadEpochs.get(panelId) !== sectionLoadEpoch) return;
+    setCampaignSettingsSectionContentVisibility(panelId, true);
+    setCampaignSettingsSectionFeedback(panelId, "success", "", selectionRequest, campaignId);
+  }).catch((error) => {
+    if (error?.name === "AbortError" || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId
+      || campaignSettingsSectionLoadEpochs.get(panelId) !== sectionLoadEpoch) return;
+    setCampaignSettingsSectionFeedback(
+      panelId,
+      "error",
+      safeWorkflowFailure(`${CAMPAIGN_SETTINGS_SECTION_LABELS[section]} could not be loaded.`, error),
+      selectionRequest,
+      campaignId
+    );
+  });
 }
 
 function handleCampaignSettingsRailKeydown(event) {
@@ -205,18 +455,65 @@ function renderCampaignStoryMemorySettings(settings, { draftLevel = null, messag
   status.className = "field-note";
 }
 
-async function loadCampaignStoryMemory(campaignId, selectionRequest) {
+async function loadCampaignStoryMemory(campaignId, selectionRequest, signal) {
+  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return null;
   campaignStoryMemorySettings = null;
   renderCampaignStoryMemorySettings(null, { message: "Loading the saved Story Memory level for this campaign." });
   try {
-    const settings = readCampaignStoryMemorySettings(await api(`/api/v1/campaigns/${campaignId}/story-memory`));
-    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+    const settings = readCampaignStoryMemorySettings(await api(`/api/v1/campaigns/${campaignId}/story-memory`, { signal }));
+    if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     campaignStoryMemorySettings = settings;
     renderCampaignStoryMemorySettings(settings);
+    return settings;
   } catch (error) {
-    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
-    renderCampaignStoryMemorySettings(null, { message: `Story Memory settings are unavailable: ${error.message || String(error)}` });
+    if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+    renderCampaignStoryMemorySettings(null, { message: safeWorkflowFailure("Story Memory settings are unavailable.", error) });
+    throw error;
   }
+}
+
+function campaignSectionRequestIsCurrent(request) {
+  return campaignCoreReady
+    && !request.signal.aborted
+    && request.selectionEpoch === campaignSelectionRequest
+    && selectedCampaign?.id === request.campaignId;
+}
+
+async function loadCampaignSettingsSectionData(request) {
+  if (!campaignSectionRequestIsCurrent(request)) throw new DOMException("The campaign selection changed.", "AbortError");
+  const { campaignId, selectionEpoch, section, signal } = request;
+  if (section === "story") {
+    const settings = await loadCampaignStoryMemory(campaignId, selectionEpoch, signal);
+    if (!campaignSectionRequestIsCurrent(request)) throw new DOMException("The campaign selection changed.", "AbortError");
+    return settings;
+  }
+  if (section === "illustrations") {
+    await Promise.all([
+      loadIllustrationConfig(selectionEpoch, signal),
+      loadLatestImageJob(false, selectionEpoch, signal)
+    ]);
+    if (!campaignSectionRequestIsCurrent(request)) throw new DOMException("The campaign selection changed.", "AbortError");
+    setCampaignSettingsSectionControls(section, false);
+    return true;
+  }
+  if (section === "chronicle") {
+    const [metrics] = await Promise.all([
+      refreshCampaignMemoryMetrics(selectionEpoch, signal),
+      loadEmbeddingConfig(selectionEpoch, signal)
+    ]);
+    if (!campaignSectionRequestIsCurrent(request)) throw new DOMException("The campaign selection changed.", "AbortError");
+    setCampaignSettingsSectionControls(section, false);
+    if (["queued", "running"].includes(metrics?.semanticHealth?.jobStatus) && metrics.semanticHealth.jobId) {
+      void resumeEmbeddingJobProgress(metrics.semanticHealth.jobId, campaignId, selectionEpoch);
+    }
+    return metrics;
+  }
+  if (section === "usage") {
+    const summary = await refreshCampaignCostSummary(selectionEpoch, signal);
+    if (!campaignSectionRequestIsCurrent(request)) throw new DOMException("The campaign selection changed.", "AbortError");
+    return summary;
+  }
+  throw new Error(`Unknown campaign settings section: ${section}`);
 }
 
 async function saveCampaignStoryMemory() {
@@ -233,6 +530,8 @@ async function saveCampaignStoryMemory() {
     if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     campaignStoryMemorySettings = settings;
     renderCampaignStoryMemorySettings(settings);
+    campaignSectionLoader.invalidate("story");
+    setCampaignSettingsSectionFeedback("story", "success", "", selectionRequest, campaignId);
     campaignMessage("Story Memory level saved for future turns. Existing and in-flight turns keep their frozen policy.", "success");
   } catch (error) {
     if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
@@ -247,13 +546,29 @@ function syncCampaignSettingsRailOrientation(mediaQuery) {
   elements.campaignSettingsRail.setAttribute("aria-orientation", mediaQuery.matches ? "horizontal" : "vertical");
 }
 
+function clearContextPreviewPresentation() {
+  contextPreviewSequence += 1;
+  elements.contextSummary.className = "status hidden";
+  elements.contextSummary.textContent = "";
+  elements.contextPreview.textContent = "The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.";
+}
+
 function clearCampaignEditorSelection({ focus = false } = {}) {
+  campaignCoreReady = false;
+  campaignSectionLoader.setSelection("", campaignSelectionRequest);
+  clearContextPreviewPresentation();
+  for (const panelId of CAMPAIGN_SETTINGS_PANEL_IDS) {
+    if (panelId !== "overview") setCampaignSettingsSectionContentVisibility(panelId, false);
+  }
+  campaignEditGuard.reset(null, campaignSelectionRequest, campaignSettingsSnapshot());
+  renderCampaignSaveFeedback("saved");
   setCampaignSettingsAvailability(false);
   campaignStoryMemorySettings = null;
   elements.memoryTitle.textContent = "Select a campaign";
   elements.campaignEditorSummary.textContent = "";
-  elements.campaignStatusMessage.textContent = "";
-  elements.campaignStatusMessage.className = "status hidden";
+  elements.campaignWorldLink.hidden = true;
+  if (!managementSelectionErrorIsCurrent("campaigns")) elements.campaignStatusMessage.textContent = "";
+  if (!managementSelectionErrorIsCurrent("campaigns")) elements.campaignStatusMessage.className = "status hidden";
   renderCampaignStoryMemorySettings(null, { message: "Select a campaign to load its saved Story Memory level." });
   [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.campaignStoryContextBudgetTokens, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.editCampaignCharacter, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor, elements.previewIllustrationBackfill, elements.previewIllustrationRebuild, elements.saveIllustrationConfig, elements.discoverIllustrationModels, elements.reindexMemory, elements.previewContext, elements.saveEmbeddingConfig, elements.reindexEmbeddings, elements.embeddingEnabled, elements.embeddingRetrievalImplementation, elements.embeddingRetrievalShadowEnabled, elements.embeddingProvider, elements.discoverEmbeddingModels, elements.embeddingModel, elements.embeddingDocumentPrefix, elements.embeddingQueryPrefix, elements.embeddingBatchSize, elements.budgetTokens, elements.compression, elements.memoryQuery].forEach((element) => { element.disabled = true; });
   elements.campaignCostSection.classList.add("hidden");
@@ -327,8 +642,90 @@ function modalFormSnapshot(dialog) {
     if (control instanceof HTMLInputElement && ["checkbox", "radio"].includes(control.type)) {
       return `${control.id}:${control.checked}`;
     }
+    if (control instanceof HTMLInputElement && control.type === "password") {
+      return `${control.id}:${Boolean(control.value)}`;
+    }
     return `${control.id}:${control.value}`;
   }).join("\u001f");
+}
+
+function beginEditDialogSession(dialog, returnFocusTo) {
+  const previous = editDialogSessions.get(dialog);
+  const state = {
+    epoch: (previous?.epoch || 0) + 1,
+    returnFocusTo: returnFocusTo || (document.activeElement instanceof HTMLElement ? document.activeElement : undefined),
+    editSession: createEditSession(modalFormSnapshot(dialog), (left, right) => left === right)
+  };
+  editDialogSessions.set(dialog, state);
+  const dispose = bindEditDialogDismissal(dialog, () => ({
+    isDirty: () => state.editSession.isDirty(modalFormSnapshot(dialog)),
+    isBusy: () => (dialog === elements.providerDialog && providerSaveBusy)
+      || (dialog === elements.worldAuthorDialog && worldAuthorBusy)
+      || (dialog === elements.characterDialog && characterModalBusy),
+    confirm: () => requestStagedEditDecision(dialog === elements.characterDialog && characterModalScope === "campaign"),
+    ...(dialog === elements.characterDialog && characterModalScope === "campaign"
+      ? { save: () => saveCharacterFromModal({ preventDefault() {} }) }
+      : {}),
+    discard: () => {
+      if (dialog === elements.providerDialog) resetProviderForm();
+      state.editSession.markSaved(modalFormSnapshot(dialog));
+    },
+    returnFocusTo: state.returnFocusTo,
+    isCurrent: () => editDialogSessions.get(dialog) === state
+  }));
+  editDialogBindingDisposers.set(dialog, dispose);
+}
+
+function openEditDialog(dialog, returnFocusTo) {
+  beginEditDialogSession(dialog, returnFocusTo);
+  openManagedModal(dialog);
+}
+
+async function requestStagedEditDecision(allowSave = false) {
+  elements.discardChangesTitle.textContent = "Discard unsaved changes?";
+  elements.discardChangesMessage.textContent = "Your edits have not been saved. Keep editing or discard them and close this window.";
+  elements.discardChangesDialog.querySelector('button[value="keep"]').textContent = "Keep editing";
+  setCampaignSaveDecisionVisible(allowSave);
+  elements.saveCampaignEditsDecision.textContent = "Save changes";
+  elements.discardChangesDialog.returnValue = "";
+  openManagedModal(elements.discardChangesDialog);
+  return new Promise((resolve) => {
+    elements.discardChangesDialog.addEventListener("close", () => {
+      const value = elements.discardChangesDialog.returnValue;
+      setCampaignSaveDecisionVisible(false);
+      resolve(value === "discard" ? "discard" : value === "save" && allowSave ? "save" : "stay");
+    }, { once: true });
+  });
+}
+
+function setCampaignSaveDecisionVisible(visible) {
+  elements.saveCampaignEditsDecision.hidden = !visible;
+  elements.saveCampaignEditsDecision.style.display = visible ? "" : "none";
+}
+
+function dismissEditDialog(dialog) {
+  const state = editDialogSessions.get(dialog);
+  if (!state) {
+    dialog.close();
+    return Promise.resolve("dismissed");
+  }
+  return requestEditDismissal({
+    dialog,
+    isDirty: () => state.editSession.isDirty(modalFormSnapshot(dialog)),
+    isBusy: () => (dialog === elements.providerDialog && providerSaveBusy)
+      || (dialog === elements.worldAuthorDialog && worldAuthorBusy)
+      || (dialog === elements.characterDialog && characterModalBusy),
+    confirm: () => requestStagedEditDecision(dialog === elements.characterDialog && characterModalScope === "campaign"),
+    ...(dialog === elements.characterDialog && characterModalScope === "campaign"
+      ? { save: () => saveCharacterFromModal({ preventDefault() {} }) }
+      : {}),
+    discard: () => {
+      if (dialog === elements.providerDialog) resetProviderForm();
+      state.editSession.markSaved(modalFormSnapshot(dialog));
+    },
+    returnFocusTo: state.returnFocusTo,
+    isCurrent: () => editDialogSessions.get(dialog) === state
+  });
 }
 
 function openManagedModal(dialog) {
@@ -348,6 +745,11 @@ function clickedDialogBackdrop(dialog, event) {
 }
 
 function requestModalDismissal(dialog) {
+  if (dialog === elements.createCampaignDialog && createCampaignSubmitting) return;
+  if ([elements.providerDialog, elements.worldAuthorDialog, elements.characterDialog].includes(dialog)) {
+    dismissEditDialog(dialog);
+    return;
+  }
   if (dialog === elements.characterDialog && characterModalBusy) return;
   if (dialog === elements.worldAuthorDialog && worldAuthorBusy) return;
   if (dialog.dataset.dismissMode === "cancel") {
@@ -367,11 +769,25 @@ function installClickAwayModalDismissal() {
     dialog.addEventListener("click", (event) => {
       if (dialog.open && clickedDialogBackdrop(dialog, event)) requestModalDismissal(dialog);
     });
-    dialog.addEventListener("close", () => modalBaselines.delete(dialog));
+    dialog.addEventListener("close", () => {
+      modalBaselines.delete(dialog);
+      editDialogBindingDisposers.get(dialog)?.();
+      editDialogSessions.delete(dialog);
+    });
   });
   elements.discardChangesDialog.addEventListener("close", () => {
     if (elements.discardChangesDialog.returnValue === "discard" && discardModalTarget?.open) discardModalTarget.close();
     discardModalTarget = null;
+  });
+  elements.worldForm.querySelectorAll("details > summary").forEach((summary) => {
+    summary.addEventListener("click", (event) => {
+      if (worldAuthorBusy) event.preventDefault();
+    });
+  });
+  elements.characterDialog.querySelectorAll("details > summary").forEach((summary) => {
+    summary.addEventListener("click", (event) => {
+      if (characterModalBusy) event.preventDefault();
+    });
   });
 }
 
@@ -427,51 +843,428 @@ function applyStoryProviderContextBudget() {
 }
 
 function updateStoryViewLink() {
-  if (!elements.storyViewLink) return;
-  const lastCampaignId = localStorage.getItem("infiniteQuestLastCampaignId");
-  let storyHref = "/story";
-  if (selectedCampaign) {
-    storyHref = "/story/" + encodeURIComponent(selectedCampaign.id);
-  } else if (lastCampaignId) {
-    storyHref = "/story/" + encodeURIComponent(lastCampaignId);
+  const resumeCampaign = campaignsLoaded
+    ? resolveResumeCampaign(
+      campaigns,
+      localStorage.getItem("infiniteQuestLastCampaignId"),
+      selectedCampaignIsExplicit ? selectedCampaign?.id : null
+    )
+    : null;
+  const hasResumeTarget = Boolean(resumeCampaign);
+  const storyHref = hasResumeTarget ? `/story/${encodeURIComponent(resumeCampaign.id)}` : "/nexus/#campaigns";
+  if (elements.readingStoryExportLink) {
+    elements.readingStoryExportLink.href = storyHref;
+    elements.readingStoryExportLink.textContent = hasResumeTarget
+      ? `Open ${resumeCampaign.title} Story exports`
+      : "Choose a campaign to open its Story exports";
+    elements.readingStoryExportLink.setAttribute("aria-disabled", String(!hasResumeTarget));
   }
-  elements.storyViewLink.href = storyHref;
-  if (elements.dashboardStoryLink) elements.dashboardStoryLink.href = storyHref;
+  const label = hasResumeTarget
+    ? "Continue latest story "
+    : campaignsLoadError
+      ? "Retry campaign list "
+      : campaignsLoaded
+        ? "No active stories "
+        : "Loading campaigns ";
+  [elements.storyViewLink, elements.dashboardStoryLink].filter(Boolean).forEach((link) => {
+    link.href = storyHref;
+    link.setAttribute("aria-disabled", String(!hasResumeTarget));
+    link.tabIndex = hasResumeTarget ? 0 : -1;
+  });
+  if (elements.dashboardStoryLink?.firstChild?.nodeType === Node.TEXT_NODE) {
+    elements.dashboardStoryLink.firstChild.textContent = label;
+  }
 }
 
-function applyManagementView() {
-  const hash = window.location.hash || "#dashboard";
-  const dashboardView = hash === "#dashboard";
-  const providerView = hash === "#providers";
-  const promptLibraryView = hash === "#prompt-library";
-  const dataTransferView = hash === "#data-transfer" || hash === "#imports";
-  document.body.dataset.managementView = dashboardView ? "dashboard" : providerView ? "providers" : promptLibraryView ? "prompt-library" : dataTransferView ? "data-transfer" : "worlds";
-  elements.managementTitle.textContent = providerView ? "Provider Management" : promptLibraryView ? "Prompt Library" : dataTransferView ? "Data Transfer" : hash === "#campaigns" ? "Campaign Management" : "World Management";
+const MANAGEMENT_HISTORY_STATE_KEY = "__infiniteQuestNexusManagement";
+const MANAGEMENT_ROUTE_NAMES = new Set(["#dashboard", "#world-library", "#campaigns", "#providers", "#prompt-library", "#data-transfer", "#imports"]);
+const UUID_ROUTE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+let managementNavigationIntent = 0;
+let managementSelectionErrorIntent = null;
+let managementSelectionErrorMessage = "";
+let managementSelectionActionErrorMessage = "";
+let managementSelectionActionErrorTargetId = "";
+let acceptedManagementHash = window.location.hash || "#dashboard";
+let acceptedManagementRoute = null;
+let acceptedManagementHistoryIndex = Number.NaN;
+let managementRollback = null;
+let ignoredManagementHashChange = "";
+let acceptedManagementHistoryLength = window.history.length;
+let acceptedManagementNativeEntryIndex = window.navigation?.currentEntry?.index ?? null;
+let managementPendingHashEntries = 0;
+let initialWorldListReady = false;
+let initialCampaignListReady = false;
+
+function parseManagementRoute(hash) {
+  const question = hash.indexOf("?");
+  const routeName = (question < 0 ? hash : hash.slice(0, question)) || "#dashboard";
+  const view = routeName === "#dashboard" ? "dashboard"
+    : routeName === "#world-library" ? "worlds"
+      : routeName === "#campaigns" ? "campaigns"
+        : routeName === "#providers" ? "providers"
+          : routeName === "#prompt-library" ? "prompt-library"
+            : routeName === "#data-transfer" || routeName === "#imports" ? "data-transfer"
+              : "worlds";
+  const parameters = new URLSearchParams(question < 0 ? "" : hash.slice(question + 1));
+  const worldIds = parameters.getAll("worldId");
+  const campaignIds = parameters.getAll("campaignId");
+  let selection = null;
+  let selectionError = "";
+  if (worldIds.length || campaignIds.length) {
+    const worldSelection = worldIds.length === 1 && UUID_ROUTE_PATTERN.test(worldIds[0] || "");
+    const campaignSelection = campaignIds.length === 1 && UUID_ROUTE_PATTERN.test(campaignIds[0] || "");
+    if (worldIds.length && campaignIds.length) selectionError = "Choose one world or campaign link at a time.";
+    else if (worldIds.length && view !== "worlds") selectionError = "This link asks for a world, but it does not open the Worlds workspace.";
+    else if (campaignIds.length && view !== "campaigns") selectionError = "This link asks for a campaign, but it does not open the Campaigns workspace.";
+    else if (worldIds.length && !worldSelection) selectionError = "This world link does not contain a valid world ID.";
+    else if (campaignIds.length && !campaignSelection) selectionError = "This campaign link does not contain a valid campaign ID.";
+    else if (worldSelection) selection = { kind: "world", id: worldIds[0].toLowerCase() };
+    else if (campaignSelection) selection = { kind: "campaign", id: campaignIds[0].toLowerCase() };
+  }
+  return { view, routeName, selection, selectionError };
+}
+
+function managementHistoryState(index) {
+  const current = window.history.state;
+  const preserved = current && typeof current === "object" && !Array.isArray(current)
+    ? current
+    : current == null ? {} : { __infiniteQuestPreviousHistoryState: current };
+  return { ...preserved, [MANAGEMENT_HISTORY_STATE_KEY]: { index } };
+}
+
+function managementHistoryIndex(state = window.history.state) {
+  const index = state?.[MANAGEMENT_HISTORY_STATE_KEY]?.index;
+  return Number.isSafeInteger(index) && index >= 0 ? index : null;
+}
+
+function replaceManagementHistoryIndex(index) {
+  window.history.replaceState(managementHistoryState(index), "", window.location.href);
+}
+
+function managementRouteHref(hash) {
+  return `${window.location.pathname}${window.location.search}${hash}`;
+}
+
+function managementSelectionHash(view, kind, id) {
+  if (!UUID_ROUTE_PATTERN.test(String(id || ""))) return view === "worlds" ? "#world-library" : "#campaigns";
+  const parameter = kind === "world" ? "worldId" : "campaignId";
+  return `${view === "worlds" ? "#world-library" : "#campaigns"}?${parameter}=${encodeURIComponent(String(id).toLowerCase())}`;
+}
+
+function managementSelectionError(route, message) {
+  if (managementSelectionErrorIntent !== managementNavigationIntent) {
+    managementSelectionActionErrorMessage = "";
+    managementSelectionActionErrorTargetId = "";
+  }
+  managementSelectionErrorIntent = managementNavigationIntent;
+  managementSelectionErrorMessage = message;
+  const visibleMessage = [managementSelectionActionErrorMessage, message].filter(Boolean).join(" ");
+  if (route.view === "worlds") {
+    elements.worldStatus.textContent = visibleMessage;
+    elements.worldStatus.className = "status error";
+    const pendingReadFailure = dashboardWorkflowErrors.get("worlds");
+    if (pendingReadFailure) showManagementSelectionReadFailure("worlds", pendingReadFailure.message);
+    else addWorkflowRetry(elements.worldStatus, "workflowRetryWorlds", "Retry world list", () => retryWorldWorkflowRead());
+  } else if (route.view === "campaigns") {
+    elements.campaignStatusMessage.textContent = visibleMessage;
+    elements.campaignStatusMessage.className = "status error";
+    elements.campaignStatusMessage.classList.remove("hidden");
+    const pendingReadFailure = dashboardWorkflowErrors.get("campaigns");
+    if (pendingReadFailure) showManagementSelectionReadFailure("campaigns", pendingReadFailure.message);
+    else addWorkflowRetry(elements.campaignStatusMessage, "workflowRetryCampaigns", "Retry campaign list", () => retryCampaignWorkflowRead());
+  }
+}
+
+function managementSelectionErrorIsCurrent(view) {
+  return managementSelectionErrorIntent === managementNavigationIntent
+    && acceptedManagementRoute?.view === view;
+}
+
+function clearResolvedManagementSelectionError(view) {
+  if (!managementSelectionErrorIsCurrent(view)) return;
+  const host = view === "worlds" ? elements.worldStatus : elements.campaignStatusMessage;
+  const selectedId = view === "worlds" ? selectedWorld?.id : selectedCampaign?.id;
+  const message = managementSelectionActionErrorTargetId === selectedId ? managementSelectionActionErrorMessage : "";
+  managementSelectionErrorIntent = null;
+  managementSelectionErrorMessage = "";
+  managementSelectionActionErrorMessage = "";
+  managementSelectionActionErrorTargetId = "";
+  const readFailure = host.querySelector(".workflow-read-failure");
+  for (const retry of host.querySelectorAll("#workflowRetryWorlds, #workflowRetryCampaigns")) {
+    if (!readFailure?.contains(retry)) retry.remove();
+  }
+  for (const feedback of host.querySelectorAll(".workflow-retry-feedback")) {
+    if (!readFailure?.contains(feedback)) feedback.remove();
+  }
+  host.replaceChildren();
+  if (message) host.append(document.createTextNode(message));
+  else if (view === "worlds" && !readFailure) host.append(document.createTextNode("World content is stored in PostgreSQL, never embedded in this client."));
+  if (readFailure) host.append(readFailure);
+  host.className = message ? "status error" : "status";
+  if (view === "campaigns" && !message && !readFailure) host.classList.add("hidden");
+}
+
+function showManagementSelectionReadFailure(view, message) {
+  const host = view === "worlds" ? elements.worldStatus : elements.campaignStatusMessage;
+  const isWorld = view === "worlds";
+  const retryId = isWorld ? "workflowRetryWorlds" : "workflowRetryCampaigns";
+  const label = isWorld ? "Retry world list" : "Retry campaign list";
+  const retry = isWorld ? () => retryWorldWorkflowRead() : () => retryCampaignWorkflowRead();
+  setWorkflowReadFailure(host, view, message, retryId, label, retry);
+}
+
+async function applyExplicitManagementSelection(route, intent, selectionOptions = {}) {
+  if (intent !== managementNavigationIntent || acceptedManagementRoute !== route) return;
+  if (route.selectionError) {
+    managementSelectionError(route, route.selectionError);
+    return;
+  }
+  if (!route.selection) return;
+  if (route.selection.kind === "world") {
+    if (!initialWorldListReady) return;
+    const target = worlds.find((world) => world.id === route.selection.id);
+    if (!target) {
+      managementSelectionError(route, `World ${route.selection.id} is not available in this library. Select an available world or check the link.`);
+      return;
+    }
+    const selectionIntentEpoch = selectionOptions.selectionIntentEpoch ?? ++worldSelectionIntentEpoch;
+    await selectWorld(target.id, { selectionIntentEpoch, preserveWorkflowFeedbackForWorldId: selectionOptions.preserveWorkflowFeedbackForWorldId });
+    if (intent === managementNavigationIntent && acceptedManagementRoute === route && selectedWorld?.id === target.id) clearResolvedManagementSelectionError("worlds");
+    return;
+  }
+  if (!initialCampaignListReady) return;
+  const target = campaigns.find((campaign) => campaign.id === route.selection.id);
+  if (!target) {
+    managementSelectionError(route, `Campaign ${route.selection.id} is not available in this library. Select an available campaign or check the link.`);
+    return;
+  }
+  if (selectedCampaign?.id !== target.id) await selectCampaign(target, { preserveWorkflowFeedbackForCampaignId: selectionOptions.preserveWorkflowFeedbackForCampaignId });
+  if (intent === managementNavigationIntent && acceptedManagementRoute === route && selectedCampaign?.id === target.id) clearResolvedManagementSelectionError("campaigns");
+}
+
+function managementHeading(route) {
+  const headingId = route.view === "dashboard" ? "dashboardTitle"
+    : route.view === "worlds" ? "world-library-title"
+      : route.view === "campaigns" ? "memoryTitle"
+        : route.view === "providers" ? "provider-title"
+          : route.view === "prompt-library" ? "promptLibraryTitle"
+            : "dataTransferTitle";
+  const heading = document.getElementById(headingId);
+  if (heading && !heading.hasAttribute("tabindex")) heading.tabIndex = -1;
+  return heading;
+}
+
+function applyManagementView(hash, { focus = false } = {}) {
+  const route = parseManagementRoute(hash || "#dashboard");
+  const dashboardView = route.view === "dashboard";
+  const providerView = route.view === "providers";
+  const promptLibraryView = route.view === "prompt-library";
+  const dataTransferView = route.view === "data-transfer";
+  const campaignView = route.view === "campaigns";
+  document.body.dataset.managementView = route.view;
+  elements.managementHeader.hidden = dashboardView;
+  elements.dashboard.hidden = !dashboardView;
+  elements.providers.hidden = !providerView;
+  elements["world-library"].hidden = route.view !== "worlds";
+  elements.campaigns.hidden = !campaignView;
+  elements["prompt-library"].hidden = !promptLibraryView;
+  document.querySelectorAll(".data-transfer-management").forEach((section) => { section.hidden = !dataTransferView; });
+  elements.managementTitle.textContent = providerView ? "Provider Management" : promptLibraryView ? "Prompt Library" : dataTransferView ? "Data Transfer" : campaignView ? "Campaign Management" : "World Management";
   elements.managementDescription.textContent = providerView
     ? "Add and manage provider profiles independently for story text, image generation, and Chronicle embeddings."
     : promptLibraryView
       ? "Edit the application-owned instructions used for text and image generation. Changes apply to newly queued work."
       : dataTransferView
         ? "Move an owner library, world, campaign, external import, or readable story through its supported portable format."
-      : hash === "#campaigns"
-      ? "Configure campaigns, Chronicle memory, provider selection, illustrations, and world-version migrations."
-      : "Author reusable versioned worlds, configure campaigns, and inspect the fiction-only memory selected for generation.";
+        : campaignView
+          ? "Configure campaigns, Chronicle memory, provider selection, illustrations, and world-version migrations."
+          : "Author reusable versioned worlds and keep each campaign pinned to its chosen immutable world version.";
   document.title = dashboardView ? "Infinite Quest Nexus" : `${elements.managementTitle.textContent} · Infinite Quest Nexus`;
 
   [elements.navDashboard, elements.navProviders, elements.navPromptLibrary, elements.navWorlds, elements.navCampaigns, elements.navDataTransfer].forEach((link) => link?.classList.remove("active"));
   if (dashboardView) elements.navDashboard?.classList.add("active");
   if (providerView) elements.navProviders?.classList.add("active");
   if (promptLibraryView) { elements.navPromptLibrary?.classList.add("active"); void loadPromptLibrary(); }
-  if (hash === "#world-library") elements.navWorlds?.classList.add("active");
-  if (hash === "#campaigns") elements.navCampaigns?.classList.add("active");
+  if (route.routeName === "#world-library") elements.navWorlds?.classList.add("active");
+  if (campaignView) elements.navCampaigns?.classList.add("active");
   if (dataTransferView) elements.navDataTransfer?.classList.add("active");
   elements.navSetup?.classList.toggle("active", !dashboardView);
-
   updateStoryViewLink();
+  projectDashboardWorkflowErrorToRoute(route);
+  if (focus && ![...document.querySelectorAll("dialog[open]")].length) managementHeading(route)?.focus({ preventScroll: true });
+  return route;
 }
 
-applyManagementView();
-window.addEventListener("hashchange", applyManagementView);
+function isManagementRouteHash(hash) {
+  const routeName = ((hash || "#dashboard").split("?", 1)[0]) || "#dashboard";
+  return MANAGEMENT_ROUTE_NAMES.has(routeName);
+}
+
+async function canLeaveManagementRoute(nextRoute) {
+  for (const dialog of [elements.providerDialog, elements.worldAuthorDialog, elements.characterDialog]) {
+    if (!dialog?.open) continue;
+    if (worldAuthorBusy || providerSaveBusy || characterModalBusy) return false;
+    await dismissEditDialog(dialog);
+    if (dialog.open) return false;
+  }
+  if (elements.createCampaignDialog?.open && (createCampaignSubmitting || createCampaignCommitted)) return false;
+  if (acceptedManagementRoute?.view === "campaigns"
+    && (nextRoute.view !== "campaigns" || (nextRoute.selection?.kind === "campaign" && nextRoute.selection.id !== selectedCampaign?.id))) {
+    if (!(await canLeaveCampaignEditor(nextRoute.view === "campaigns" ? nextRoute.selection?.id ?? null : null))) return false;
+  }
+  return true;
+}
+
+function rollbackManagementHistory(destinationIndex, fallbackDelta = 1) {
+  if (managementRollback) return;
+  const currentIndex = acceptedManagementHistoryIndex;
+  const delta = destinationIndex == null || destinationIndex === currentIndex
+    ? fallbackDelta
+    : currentIndex - destinationIndex;
+  if (!delta) return;
+  managementRollback = { hash: acceptedManagementHash, index: currentIndex, candidateHash: window.location.hash || "#dashboard" };
+  window.history.go(delta);
+}
+
+function finishManagementHistoryRollback() {
+  if (!managementRollback) return false;
+  const rollback = managementRollback;
+  managementRollback = null;
+  acceptedManagementHash = window.location.hash || "#dashboard";
+  acceptedManagementHistoryIndex = managementHistoryIndex() ?? rollback.index;
+  acceptedManagementHistoryLength = window.history.length;
+  acceptedManagementNativeEntryIndex = window.navigation?.currentEntry?.index ?? null;
+  managementPendingHashEntries = 0;
+  ignoredManagementHashChange = acceptedManagementHash === rollback.candidateHash ? "" : acceptedManagementHash;
+  acceptedManagementRoute = applyManagementView(acceptedManagementHash);
+  return true;
+}
+
+function restoreAcceptedManagementRouteInCurrentEntry() {
+  window.history.replaceState(managementHistoryState(acceptedManagementHistoryIndex), "", managementRouteHref(acceptedManagementHash));
+  acceptedManagementHistoryLength = window.history.length;
+  managementPendingHashEntries = 0;
+  acceptedManagementRoute = applyManagementView(acceptedManagementHash);
+}
+
+async function acceptManagementRoute(hash, { source = "link", focus = true, destinationIndex = null } = {}) {
+  if (!isManagementRouteHash(hash)) return false;
+  const intent = ++managementNavigationIntent;
+  const nextRoute = parseManagementRoute(hash);
+  const previousHash = acceptedManagementHash;
+  const previousIndex = acceptedManagementHistoryIndex;
+  const previousRoute = acceptedManagementRoute;
+  if (!(await canLeaveManagementRoute(nextRoute))) {
+    if (intent === managementNavigationIntent && source === "popstate") rollbackManagementHistory(destinationIndex);
+    else if (intent === managementNavigationIntent && source === "hashchange") rollbackManagementHistory(destinationIndex, -1);
+    else if (intent === managementNavigationIntent && source === "unindexed") restoreAcceptedManagementRouteInCurrentEntry();
+    return false;
+  }
+  if (intent !== managementNavigationIntent || acceptedManagementRoute !== previousRoute || acceptedManagementHash !== previousHash) return false;
+
+  managementSelectionErrorIntent = null;
+  managementSelectionErrorMessage = "";
+  if (source === "link") {
+    if (hash !== previousHash) {
+      acceptedManagementHistoryIndex = previousIndex + 1;
+      window.history.pushState(managementHistoryState(acceptedManagementHistoryIndex), "", managementRouteHref(hash));
+      acceptedManagementHistoryLength = window.history.length;
+    }
+  } else if (source === "hashchange") {
+    acceptedManagementHistoryIndex = destinationIndex ?? previousIndex + 1;
+    if (managementHistoryIndex() !== acceptedManagementHistoryIndex) replaceManagementHistoryIndex(acceptedManagementHistoryIndex);
+    acceptedManagementHistoryLength = window.history.length;
+  } else if (source === "popstate") {
+    const poppedIndex = destinationIndex;
+    acceptedManagementHistoryIndex = poppedIndex == null ? Math.max(0, previousIndex - 1) : poppedIndex;
+    if (poppedIndex == null) replaceManagementHistoryIndex(acceptedManagementHistoryIndex);
+    acceptedManagementHistoryLength = window.history.length;
+  } else if (source === "unindexed") {
+    acceptedManagementHistoryIndex = previousIndex + 1;
+    replaceManagementHistoryIndex(acceptedManagementHistoryIndex);
+    acceptedManagementHistoryLength = window.history.length;
+  }
+
+  acceptedManagementHash = hash || "#dashboard";
+  acceptedManagementRoute = applyManagementView(acceptedManagementHash, { focus });
+  acceptedManagementNativeEntryIndex = window.navigation?.currentEntry?.index ?? null;
+  managementPendingHashEntries = 0;
+  closeNavigationMenus();
+  if (elements.worldDetailsDialog?.open) elements.worldDetailsDialog.close();
+  await applyExplicitManagementSelection(acceptedManagementRoute, intent);
+  return true;
+}
+
+function initializeManagementHistory() {
+  const existingIndex = managementHistoryIndex();
+  acceptedManagementHistoryIndex = existingIndex ?? 0;
+  if (existingIndex == null) replaceManagementHistoryIndex(acceptedManagementHistoryIndex);
+  acceptedManagementHistoryLength = window.history.length;
+  acceptedManagementNativeEntryIndex = window.navigation?.currentEntry?.index ?? null;
+  acceptedManagementRoute = applyManagementView(acceptedManagementHash);
+}
+
+initializeManagementHistory();
+document.addEventListener("click", (event) => {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
+  if (!(anchor instanceof HTMLAnchorElement) || anchor.target || anchor.hasAttribute("download")) return;
+  const target = new URL(anchor.href, window.location.href);
+  if (target.origin !== window.location.origin || target.pathname !== window.location.pathname || target.search !== window.location.search || !isManagementRouteHash(target.hash)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  void acceptManagementRoute(target.hash, { source: "link", focus: true });
+}, true);
+
+window.addEventListener("popstate", (event) => {
+  if (finishManagementHistoryRollback()) return;
+  const hash = window.location.hash || "#dashboard";
+  const destinationIndex = managementHistoryIndex(event.state);
+  if (!isManagementRouteHash(hash)) return;
+  ignoredManagementHashChange = hash;
+  setTimeout(() => { if (ignoredManagementHashChange === hash) ignoredManagementHashChange = ""; }, 0);
+  const historyLength = window.history.length;
+  const previousHistoryLength = acceptedManagementHistoryLength;
+  const nativeEntryIndex = window.navigation?.currentEntry?.index ?? null;
+  const hasNativeHistoryIndex = nativeEntryIndex != null && acceptedManagementNativeEntryIndex != null;
+  const nativeEntryDelta = hasNativeHistoryIndex
+    ? nativeEntryIndex - acceptedManagementNativeEntryIndex
+    : null;
+  const directHashEntry = destinationIndex == null && (hasNativeHistoryIndex
+    ? nativeEntryDelta > 0
+    : historyLength > previousHistoryLength && event.state != null);
+  const unindexedRouteEntry = destinationIndex == null && !directHashEntry && !hasNativeHistoryIndex && hash !== acceptedManagementHash;
+  if (directHashEntry) {
+    managementPendingHashEntries = nativeEntryDelta != null
+      ? Math.max(1, nativeEntryDelta)
+      : Math.max(1, managementPendingHashEntries + Math.max(0, historyLength - previousHistoryLength));
+  } else managementPendingHashEntries = 0;
+  const observedIndex = directHashEntry ? acceptedManagementHistoryIndex + managementPendingHashEntries : destinationIndex;
+  if (directHashEntry) replaceManagementHistoryIndex(observedIndex);
+  acceptedManagementHistoryLength = historyLength;
+  void acceptManagementRoute(hash, {
+    source: directHashEntry ? "hashchange" : unindexedRouteEntry ? "unindexed" : "popstate",
+    focus: true,
+    destinationIndex: observedIndex
+  });
+});
+
+window.addEventListener("hashchange", () => {
+  const hash = window.location.hash || "#dashboard";
+  if (ignoredManagementHashChange === hash) {
+    ignoredManagementHashChange = "";
+    return;
+  }
+  if (!isManagementRouteHash(hash)) return;
+  const nativeEntryIndex = window.navigation?.currentEntry?.index ?? null;
+  const nativeEntryDelta = nativeEntryIndex != null && acceptedManagementNativeEntryIndex != null
+    ? nativeEntryIndex - acceptedManagementNativeEntryIndex
+    : null;
+  const source = nativeEntryDelta != null
+    ? nativeEntryDelta > 0 ? "hashchange" : "unindexed"
+    : window.history.length > acceptedManagementHistoryLength ? "hashchange" : "unindexed";
+  void acceptManagementRoute(hash, { source, focus: true });
+});
 
 async function api(path, options = {}) {
   const hasBody = options.body !== undefined && options.body !== null;
@@ -1590,6 +2383,48 @@ function applyArtwork(element, record) {
   element.classList.add("has-image");
 }
 
+function reconcileKeyedCollection(container, records, keyAttribute, createNode, updateNode) {
+  const selector = `:scope > [data-${keyAttribute}]`;
+  const existing = new Map([...container.querySelectorAll(selector)].map((node) => [node.dataset[keyAttribute.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())], node]));
+  const retained = new Set();
+  const nodes = records.map((record) => {
+    const key = String(record.id);
+    const current = existing.get(key);
+    if (!current) return createNode(record);
+    retained.add(current);
+    updateNode(current, record);
+    return current;
+  });
+  const desired = new Set(nodes);
+  for (const node of existing.values()) if (!retained.has(node)) node.remove();
+  for (const child of [...container.children]) if (!desired.has(child)) child.remove();
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+    const current = container.children[index];
+    if (current !== node) container.insertBefore(node, current || null);
+  }
+}
+
+function collectionClearButton(label, clear) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "button secondary compact-button collection-clear";
+  button.textContent = "Clear filters";
+  button.setAttribute("aria-label", `Clear ${label} search and filters`);
+  button.addEventListener("click", clear);
+  return button;
+}
+
+function collectionEmptyState(message, label, clear) {
+  const state = document.createElement("div");
+  state.className = "collection-empty-state";
+  const description = document.createElement("p");
+  description.className = "muted collection-empty";
+  description.textContent = message;
+  state.append(description, collectionClearButton(label, clear));
+  return state;
+}
+
 function worldPreview(world, detail = dashboardWorldDetails.get(world.id)) {
   const content = world?.latestPreview || detail?.latestPreview || detail?.draftContent?.world || {};
   return {
@@ -1597,13 +2432,14 @@ function worldPreview(world, detail = dashboardWorldDetails.get(world.id)) {
     tone: String(content.tone || "Open-ended"),
     description: String(content.premise || content.backgroundStory || "A published world ready for a new campaign."),
     firstAction: String(content.firstAction || "Begin the adventure."),
-    imageUrl: detail?.imageUrl || content.imageUrl || content.artworkUrl || ""
+    imageUrl: detail?.imageUrl || world?.imageUrl || content.imageUrl || content.artworkUrl || ""
   };
 }
 
-function createDashboardWorldCard(world) {
+function createDashboardWorldCard(world, card = null) {
   const preview = worldPreview(world);
-  const card = document.createElement("button");
+  const isNew = !card;
+  card ||= document.createElement("button");
   card.type = "button";
   card.className = "dashboard-card world-card";
   card.dataset.worldId = world.id;
@@ -1639,44 +2475,70 @@ function createDashboardWorldCard(world) {
   ctaArrow.textContent = "→";
   cta.append(ctaLabel, ctaArrow);
   body.append(title, description, meta, cta);
-  card.append(art, body);
-  card.addEventListener("click", () => openWorldDetails(world.id));
+  card.replaceChildren(art, body);
+  if (isNew) card.addEventListener("click", () => openWorldDetails(world.id));
   return card;
 }
 
 function renderDashboardWorlds() {
   if (!elements.dashboardWorlds) return;
-  const query = elements.worldSearch.value.trim().toLocaleLowerCase();
-  const available = worlds.filter((world) => world.status !== "archived" && world.latestVersionId).filter((world) => {
-    const preview = worldPreview(world);
-    return [world.title, preview.genre, preview.tone, preview.description].join(" ").toLocaleLowerCase().includes(query);
+  const available = filterSortWorlds(worlds.filter((world) => world.status !== "archived" && world.latestVersionId), {
+    query: elements.worldSearch?.value ?? "",
+    status: "all",
+    sort: "updated-desc"
   });
-  elements.dashboardWorlds.replaceChildren();
   if (!available.length) {
+    elements.dashboardWorlds.replaceChildren();
     const empty = document.createElement("p");
     empty.className = "carousel-empty";
-    empty.textContent = query ? "No worlds match that search." : "No published worlds are available yet. Open World Management to prepare one.";
+    empty.textContent = elements.worldSearch?.value.trim() ? "No worlds match that search." : "No published worlds are available yet. Open World Management to prepare one.";
     elements.dashboardWorlds.append(empty);
     return;
   }
-  available.forEach((world) => elements.dashboardWorlds.append(createDashboardWorldCard(world)));
+  reconcileKeyedCollection(elements.dashboardWorlds, available, "world-id", createDashboardWorldCard, (card, world) => createDashboardWorldCard(world, card));
 }
 
-async function hydrateDashboardWorlds() {
-  const available = worlds.filter((world) => world.status !== "archived" && world.latestVersionId);
-  await Promise.all(available.map(async (world) => {
-    if (dashboardWorldDetails.has(world.id)) return;
-    try {
-      dashboardWorldDetails.set(world.id, await api(`/api/v1/worlds/${world.id}`));
-    } catch {
-      // The summary card remains usable if optional detail hydration fails.
-    }
-  }));
-  renderDashboardWorlds();
+async function getDashboardWorldDetails(worldId) {
+  if (dashboardWorldDetails.has(worldId)) return dashboardWorldDetails.get(worldId);
+  const pending = dashboardWorldDetailRequests.get(worldId);
+  if (pending) return pending;
+
+  const requestEpoch = beginDashboardWorldDetailRequest(worldId);
+  const request = Promise.resolve()
+    .then(() => api(`/api/v1/worlds/${encodeURIComponent(worldId)}`))
+    .then((detail) => {
+      if (isDashboardWorldDetailRequestCurrent(worldId, requestEpoch) && worlds.some((world) => world.id === worldId)) {
+        dashboardWorldDetails.set(worldId, detail);
+      }
+      return detail;
+    })
+    .finally(() => {
+      if (dashboardWorldDetailRequests.get(worldId) === request) dashboardWorldDetailRequests.delete(worldId);
+    });
+  dashboardWorldDetailRequests.set(worldId, request);
+  return request;
 }
 
-function createDashboardCampaignCard(campaign) {
-  const card = document.createElement("button");
+function beginDashboardWorldDetailRequest(worldId) {
+  const requestEpoch = (dashboardWorldDetailRequestEpochs.get(worldId) || 0) + 1;
+  dashboardWorldDetailRequestEpochs.set(worldId, requestEpoch);
+  return requestEpoch;
+}
+
+function isDashboardWorldDetailRequestCurrent(worldId, requestEpoch) {
+  return dashboardWorldDetailRequestEpochs.get(worldId) === requestEpoch;
+}
+
+function invalidateDashboardWorldDetails(worldId) {
+  if (!worldId) return;
+  dashboardWorldDetails.delete(worldId);
+  if (typeof dashboardWorldDetailRequests !== "undefined") dashboardWorldDetailRequests.delete(worldId);
+  dashboardWorldDetailRequestEpochs.set(worldId, (dashboardWorldDetailRequestEpochs.get(worldId) || 0) + 1);
+}
+
+function createDashboardCampaignCard(campaign, card = null) {
+  const isNew = !card;
+  card ||= document.createElement("button");
   card.type = "button";
   card.className = "dashboard-card campaign-card";
   card.dataset.campaignId = campaign.id;
@@ -1714,27 +2576,97 @@ function createDashboardCampaignCard(campaign) {
   ctaArrow.textContent = "→";
   cta.append(ctaLabel, ctaArrow);
   body.append(title, description, meta, cta);
-  card.append(art, body);
-  card.addEventListener("click", () => {
-    localStorage.setItem("infiniteQuestLastCampaignId", campaign.id);
+  card.replaceChildren(art, body);
+  if (isNew) card.addEventListener("click", () => {
     window.location.assign(`/story/${encodeURIComponent(campaign.id)}`);
   });
   return card;
 }
 
+function renderCampaignListLoadState() {
+  if (!elements.dashboardCampaigns) return;
+  elements.dashboardCampaigns.replaceChildren();
+  const message = document.createElement("p");
+  message.className = "carousel-empty";
+  message.textContent = campaignsLoadError
+    ? "Your campaigns could not be loaded. Check your connection and try again."
+    : "Loading your campaigns…";
+  elements.dashboardCampaigns.append(message);
+  if (!campaignsLoadError) return;
+  const retry = document.createElement("button");
+  retry.id = "campaignLoadRetry";
+  retry.type = "button";
+  retry.textContent = "Retry campaign list";
+  retry.addEventListener("click", () => { void loadCampaigns().catch((error) => setStatus(error.message || String(error), "error")); });
+  elements.dashboardCampaigns.append(retry);
+}
+
 function renderDashboardCampaigns() {
   if (!elements.dashboardCampaigns) return;
-  const query = elements.campaignSearch.value.trim().toLocaleLowerCase();
-  const matches = campaigns.filter((campaign) => [campaign.title, campaign.worldTitle, campaign.selectedCharacterName].join(" ").toLocaleLowerCase().includes(query));
-  elements.dashboardCampaigns.replaceChildren();
+  if (!campaignsLoaded) {
+    renderCampaignListLoadState();
+    return;
+  }
+  const matches = filterSortCampaigns(campaigns, { status: "active", sort: "updated-desc" }).slice(0, 5);
   if (!matches.length) {
+    elements.dashboardCampaigns.replaceChildren();
     const empty = document.createElement("p");
     empty.className = "carousel-empty";
-    empty.textContent = query ? "No campaigns match that search." : "No campaigns yet. Choose an available world to begin one.";
+    empty.textContent = campaigns.some((campaign) => campaign.status === "archived")
+      ? "No active campaigns. Archived campaigns remain available in Campaign Management."
+      : "No campaigns yet. Choose an available world to begin one.";
     elements.dashboardCampaigns.append(empty);
     return;
   }
-  matches.forEach((campaign) => elements.dashboardCampaigns.append(createDashboardCampaignCard(campaign)));
+  reconcileKeyedCollection(elements.dashboardCampaigns, matches, "campaign-id", createDashboardCampaignCard, (card, campaign) => createDashboardCampaignCard(campaign, card));
+}
+
+function createManagementCampaignButton(campaign, button = null) {
+  const isNew = !button;
+  button ||= document.createElement("button");
+  button.className = `campaign-button${selectedCampaign?.id === campaign.id ? " active" : ""}`;
+  button.type = "button";
+  button.dataset.campaignId = campaign.id;
+  button.setAttribute("aria-pressed", String(selectedCampaign?.id === campaign.id));
+  const title = document.createElement("strong");
+  title.textContent = campaign.title;
+  const details = document.createElement("span");
+  details.textContent = `${campaign.activeTurnNumber} accepted turns · ${campaign.worldTitle} v${campaign.worldVersionNumber}${campaign.selectedCharacterName ? ` · ${campaign.selectedCharacterName}` : ""}${campaign.worldUpdateAvailable ? " · update available" : ""}${campaign.status === "archived" ? " · archived" : ""}`;
+  button.replaceChildren(title, details);
+  if (isNew) button.addEventListener("click", () => {
+    const currentCampaign = campaigns.find((item) => item.id === button.dataset.campaignId);
+    if (!currentCampaign) return;
+    if (UUID_ROUTE_PATTERN.test(String(currentCampaign.id || ""))) {
+      void acceptManagementRoute(managementSelectionHash("campaigns", "campaign", currentCampaign.id), { source: "link", focus: true });
+    } else void selectCampaign(currentCampaign);
+  });
+  return button;
+}
+
+function clearCampaignCollectionFilters() {
+  window.clearTimeout(managementCampaignSearchTimer);
+  elements.managementCampaignSearch.value = "";
+  elements.managementCampaignStatus.value = "active";
+  elements.managementCampaignSort.value = "updated-desc";
+  managementCampaignStatus = "active";
+  managementCampaignSort = "updated-desc";
+  renderManagementCampaigns();
+  elements.managementCampaignSearch.focus();
+}
+
+function renderManagementCampaigns() {
+  if (!campaignsLoaded) return;
+  const query = elements.managementCampaignSearch?.value ?? "";
+  const matches = filterSortCampaigns(campaigns, { query, status: managementCampaignStatus, sort: managementCampaignSort });
+  const resultCount = elements.managementCampaignResults;
+  if (resultCount) resultCount.textContent = `Showing ${matches.length} of ${campaigns.length} campaign${campaigns.length === 1 ? "" : "s"}`;
+  if (!matches.length) {
+    elements.campaignList.replaceChildren();
+    const message = campaigns.length ? "No campaigns match this search and filter." : "No database-backed campaigns yet.";
+    elements.campaignList.append(collectionEmptyState(message, "campaign", clearCampaignCollectionFilters));
+    return;
+  }
+  reconcileKeyedCollection(elements.campaignList, matches, "campaign-id", createManagementCampaignButton, (button, campaign) => createManagementCampaignButton(campaign, button));
 }
 
 function dashboardReportedCost(costs) {
@@ -1753,8 +2685,29 @@ function dashboardReportedCost(costs) {
   return { total, providers: [...new Set(providers)].join(" · ") || "Reported by configured providers" };
 }
 
-async function loadDashboardStats() {
-  if (!elements.dashboardStatsGrid) return;
+function loadDashboardStats(source = "") {
+  if (!elements.dashboardStatsGrid) return Promise.resolve();
+  const initialSource = dashboardInitialStatsSources.delete(source);
+  if (!initialSource) dashboardInitialStatsPromise = null;
+  let request = initialSource ? dashboardInitialStatsPromise : null;
+  if (!request) {
+    request = readAndRenderDashboardStats();
+    if (initialSource) dashboardInitialStatsPromise = request;
+    void request.then((succeeded) => {
+      if ((!succeeded || dashboardInitialStatsSources.size === 0) && dashboardInitialStatsPromise === request) {
+        dashboardInitialStatsPromise = null;
+      }
+    });
+  }
+  if (initialSource && dashboardInitialStatsSources.size === 0) {
+    void request.then(() => {
+      if (dashboardInitialStatsPromise === request) dashboardInitialStatsPromise = null;
+    });
+  }
+  return request;
+}
+
+async function readAndRenderDashboardStats() {
   try {
     const stats = await api("/api/v1/dashboard/stats");
     const reportedCost = dashboardReportedCost(stats.providerCosts);
@@ -1766,6 +2719,7 @@ async function loadDashboardStats() {
     elements.statCostProviders.textContent = reportedCost.providers;
     elements.statCostProviders.title = reportedCost.providers;
     elements.dashboardStatsStatus.textContent = `${number(stats.worlds?.total)} worlds · ${number(stats.campaigns?.total)} campaigns total`;
+    return true;
   } catch (error) {
     elements.statWorlds.textContent = number(worlds.filter((world) => world.status !== "archived" && world.latestVersionId).length);
     elements.statCampaigns.textContent = number(campaigns.filter((campaign) => campaign.status === "active").length);
@@ -1774,22 +2728,25 @@ async function loadDashboardStats() {
     elements.statCost.textContent = "Unavailable";
     elements.statCostProviders.textContent = "Refresh to retry provider totals";
     elements.dashboardStatsStatus.textContent = error.message || "Dashboard statistics are temporarily unavailable.";
+    return false;
   }
 }
 
 async function openWorldDetails(worldId) {
+  const selectionEpoch = ++dashboardWorldDetailsSelectionEpoch;
   const summary = worlds.find((world) => world.id === worldId);
   if (!summary) return;
-  let detail = dashboardWorldDetails.get(worldId);
-  if (!detail) {
-    try {
-      detail = await api(`/api/v1/worlds/${worldId}`);
-      dashboardWorldDetails.set(worldId, detail);
-    } catch (error) {
-      elements.dashboardStatsStatus.textContent = error.message || String(error);
-      return;
-    }
+  let detail;
+  const detailRequest = getDashboardWorldDetails(worldId);
+  const requestEpoch = dashboardWorldDetailRequestEpochs.get(worldId);
+  try {
+    detail = await detailRequest;
+  } catch (error) {
+    if (selectionEpoch !== dashboardWorldDetailsSelectionEpoch || !isDashboardWorldDetailRequestCurrent(worldId, requestEpoch)) return;
+    elements.dashboardStatsStatus.textContent = error.message || String(error);
+    return;
   }
+  if (selectionEpoch !== dashboardWorldDetailsSelectionEpoch || !isDashboardWorldDetailRequestCurrent(worldId, requestEpoch) || !worlds.some((world) => world.id === worldId)) return;
   dashboardWorld = { ...summary, ...detail, latestVersionId: summary.latestVersionId, latestVersionNumber: summary.latestVersionNumber };
   const preview = worldPreview(summary, detail);
   elements.worldDetailsTitle.textContent = summary.title;
@@ -1809,81 +2766,239 @@ async function openWorldDetails(worldId) {
   elements.worldDetailsMedia.style.backgroundImage = "";
   applyArtwork(elements.worldDetailsMedia, preview);
   elements.beginCampaignFromWorld.disabled = !summary.latestVersionId;
-  elements.editWorldDetails.href = `#world-library`;
+  elements.editWorldDetails.href = managementSelectionHash("worlds", "world", summary.id);
   openManagedModal(elements.worldDetailsDialog);
 }
 
-async function openQuickCampaign() {
-  if (!dashboardWorld?.latestVersionId) return;
-  elements.worldDetailsDialog.close();
-  elements.quickCampaignWorld.textContent = `${dashboardWorld.title} · version ${dashboardWorld.latestVersionNumber}`;
-  elements.quickCampaignName.value = `${dashboardWorld.title} Adventure`;
-  elements.quickCampaignCharacter.replaceChildren(new Option("Loading characters…", ""));
-  elements.confirmQuickCampaign.disabled = true;
-  elements.quickCampaignStatus.className = "status hidden";
-  openManagedModal(elements.quickCampaignDialog);
-  try {
-    const result = await api(`/api/v1/world-versions/${dashboardWorld.latestVersionId}/playable-characters`);
-    const characters = Array.isArray(result.characters) ? result.characters : [];
-    elements.quickCampaignCharacter.replaceChildren();
-    if (!result.readiness?.ready || !characters.length) {
-      elements.quickCampaignCharacter.append(new Option("No playable characters available", ""));
-      elements.quickCampaignCharacterNote.textContent = result.readiness?.issues?.[0]?.message || "Publish this world with a playable character before creating a campaign.";
-      refreshModalBaseline(elements.quickCampaignDialog);
-      return;
-    }
-    if (characters.length > 1) elements.quickCampaignCharacter.append(new Option("Choose a character", ""));
-    characters.forEach((character) => elements.quickCampaignCharacter.append(new Option(character.name, character.id)));
-    if (characters.length === 1) elements.quickCampaignCharacter.value = characters[0].id;
-    elements.quickCampaignCharacterNote.textContent = characters.length === 1
-      ? `${characters[0].name} will be snapshotted into the campaign.`
-      : `Choose one of ${characters.length} published playable characters.`;
-    elements.confirmQuickCampaign.disabled = false;
-    refreshModalBaseline(elements.quickCampaignDialog);
-    elements.quickCampaignName.focus();
-  } catch (error) {
-    elements.quickCampaignStatus.textContent = error.message || String(error);
-    elements.quickCampaignStatus.className = "status error";
-    refreshModalBaseline(elements.quickCampaignDialog);
-  }
+async function openWorldManagement(worldId) {
+  if (!worldId) return;
+  await acceptManagementRoute(managementSelectionHash("worlds", "world", worldId), { source: "link", focus: true });
 }
 
-async function createQuickCampaign(event) {
-  event.preventDefault();
-  if (!dashboardWorld?.latestVersionId) return;
-  const title = elements.quickCampaignName.value.trim();
-  const selectedCharacterId = elements.quickCampaignCharacter.value;
-  if (!title || !selectedCharacterId) return;
-  elements.confirmQuickCampaign.disabled = true;
-  elements.quickCampaignStatus.textContent = "Creating your campaign and opening the first scene…";
-  elements.quickCampaignStatus.className = "status";
-  try {
-    const campaign = await api("/api/v1/campaigns", {
-      method: "POST",
-      body: JSON.stringify({ title, worldVersionId: dashboardWorld.latestVersionId, selectedCharacterId })
-    });
-    localStorage.setItem("infiniteQuestLastCampaignId", campaign.id);
-    window.location.assign(`/story/${encodeURIComponent(campaign.id)}`);
-  } catch (error) {
-    elements.confirmQuickCampaign.disabled = false;
-    elements.quickCampaignStatus.textContent = error.message || String(error);
-    elements.quickCampaignStatus.className = "status error";
-  }
+async function openQuickCampaign() {
+  const world = dashboardWorld ? { ...dashboardWorld } : null;
+  if (!world?.latestVersionId) return;
+  elements.worldDetailsDialog.close();
+  campaignCreationEntryPoint = "dashboard";
+  openCampaignCreation({
+    worldId: world.id,
+    worldVersionId: world.latestVersionId,
+    initialDraft: { title: `${world.title} Adventure` }
+  });
 }
 
 function scrollCarousel(element, direction) {
-  element.scrollBy({ left: direction * Math.max(280, element.clientWidth * .82), behavior: "smooth" });
+  element.scrollBy({
+    left: direction * Math.max(280, element.clientWidth * .82),
+    behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
+  });
+}
+
+function scrollPromptLibrary(direction) {
+  if (!elements.promptLibraryList) return;
+  elements.promptLibraryList.scrollBy({
+    left: direction * Math.max(260, elements.promptLibraryList.clientWidth * .8),
+    behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
+  });
 }
 
 function worldMessage(message, type = "") {
+  if (managementSelectionErrorIsCurrent("worlds")) {
+    if (type === "error") {
+      managementSelectionActionErrorMessage = message;
+      managementSelectionActionErrorTargetId = selectedWorld?.id || "";
+      elements.worldStatus.textContent = `${message} ${managementSelectionErrorMessage}`;
+      elements.worldStatus.className = "status error";
+      const pendingReadFailure = dashboardWorkflowErrors.get("worlds");
+      if (pendingReadFailure) showManagementSelectionReadFailure("worlds", pendingReadFailure.message);
+      else addWorkflowRetry(elements.worldStatus, "workflowRetryWorlds", "Retry world list", () => retryWorldWorkflowRead());
+    }
+    return;
+  }
+  const pendingReadFailure = dashboardWorkflowErrors.get("worlds");
+  delete elements.worldStatus.dataset.workflowReadFailure;
+  elements.worldStatus.querySelector("#workflowRetryWorlds")?.remove();
   elements.worldStatus.textContent = message;
   elements.worldStatus.className = `status ${type}`.trim();
+  if (pendingReadFailure) setWorkflowReadFailure(elements.worldStatus, "worlds", pendingReadFailure.message, "workflowRetryWorlds", "Retry world list", () => retryWorldWorkflowRead());
 }
 
 function campaignMessage(message, type = "") {
+  if (managementSelectionErrorIsCurrent("campaigns")) {
+    if (type === "error") {
+      managementSelectionActionErrorMessage = message;
+      managementSelectionActionErrorTargetId = selectedCampaign?.id || "";
+      elements.campaignStatusMessage.textContent = `${message} ${managementSelectionErrorMessage}`;
+      elements.campaignStatusMessage.className = "status error";
+      elements.campaignStatusMessage.classList.remove("hidden");
+      const pendingReadFailure = dashboardWorkflowErrors.get("campaigns");
+      if (pendingReadFailure) showManagementSelectionReadFailure("campaigns", pendingReadFailure.message);
+      else addWorkflowRetry(elements.campaignStatusMessage, "workflowRetryCampaigns", "Retry campaign list", () => retryCampaignWorkflowRead());
+    }
+    return;
+  }
+  const pendingReadFailure = dashboardWorkflowErrors.get("campaigns");
+  delete elements.campaignStatusMessage.dataset.workflowReadFailure;
+  elements.campaignStatusMessage.querySelector("#workflowRetryCampaigns")?.remove();
   elements.campaignStatusMessage.textContent = message;
   elements.campaignStatusMessage.className = `status ${type}`.trim();
   elements.campaignStatusMessage.classList.remove("hidden");
+  if (pendingReadFailure) setWorkflowReadFailure(elements.campaignStatusMessage, "campaigns", pendingReadFailure.message, "workflowRetryCampaigns", "Retry campaign list", () => retryCampaignWorkflowRead());
+}
+
+function setWorkflowReadFailure(host, key, message, retryId, label, retry) {
+  host.dataset.workflowReadFailure = key;
+  host.classList.remove("hidden");
+  let feedback = host.querySelector(".workflow-read-failure");
+  if (!feedback) {
+    feedback = document.createElement("div");
+    feedback.className = "workflow-read-failure status error";
+    host.append(feedback);
+  }
+  feedback.replaceChildren();
+  const readMessage = document.createElement("span");
+  readMessage.className = "workflow-read-message";
+  readMessage.textContent = message;
+  feedback.append(readMessage);
+  const previousRetry = host.querySelector(`#${retryId}`);
+  if (previousRetry && !feedback.contains(previousRetry)) previousRetry.remove();
+  addWorkflowRetry(feedback, retryId, label, retry);
+}
+
+function clearWorkflowReadFailure(host, key, retryId, message = "") {
+  if (host.dataset.workflowReadFailure !== key) return;
+  delete host.dataset.workflowReadFailure;
+  const feedback = host.querySelector(".workflow-read-failure");
+  feedback?.remove();
+  if ((key === "worlds" || key === "campaigns") && managementSelectionErrorIsCurrent(key)) {
+    managementSelectionError(acceptedManagementRoute, managementSelectionErrorMessage);
+  } else if (!host.textContent.trim()) host.classList.add("hidden");
+}
+
+function projectDashboardWorkflowErrorToRoute(route) {
+  const target = route.view === "worlds"
+    ? { key: "worlds", host: elements.worldStatus, retryId: "workflowRetryWorlds", label: "Retry world list", retry: () => retryWorldWorkflowRead() }
+    : route.view === "campaigns"
+      ? { key: "campaigns", host: elements.campaignStatusMessage, retryId: "workflowRetryCampaigns", label: "Retry campaign list", retry: () => retryCampaignWorkflowRead() }
+      : route.view === "providers"
+        ? { key: "providers", host: elements.providerStatus, retryId: "workflowRetryProviders", label: "Retry provider profiles", retry: () => retryProviderWorkflowRead() }
+        : null;
+  if (!target) return;
+  const failure = dashboardWorkflowErrors.get(target.key);
+  if (failure) setWorkflowReadFailure(target.host, target.key, failure.message, target.retryId, target.label, target.retry);
+}
+
+function reportWorldListReadFailure(message) {
+  if (acceptedManagementRoute?.view === "worlds") {
+    if (managementSelectionErrorIsCurrent("worlds")) showManagementSelectionReadFailure("worlds", message);
+    else setWorkflowReadFailure(elements.worldStatus, "worlds", message, "workflowRetryWorlds", "Retry world list", () => retryWorldWorkflowRead());
+  }
+  reportDashboardWorkflowError("worlds", message, () => retryWorldWorkflowRead());
+}
+
+function reportCampaignListReadFailure(message) {
+  if (acceptedManagementRoute?.view === "campaigns") {
+    if (managementSelectionErrorIsCurrent("campaigns")) showManagementSelectionReadFailure("campaigns", message);
+    else setWorkflowReadFailure(elements.campaignStatusMessage, "campaigns", message, "workflowRetryCampaigns", "Retry campaign list", () => retryCampaignWorkflowRead());
+  }
+  reportDashboardWorkflowError("campaigns", message, () => retryCampaignWorkflowRead());
+}
+
+function reportProviderListReadFailure(message) {
+  if (acceptedManagementRoute?.view === "providers") {
+    setWorkflowReadFailure(elements.providerStatus, "providers", message, "workflowRetryProviders", "Retry provider profiles", () => retryProviderWorkflowRead());
+  }
+  reportDashboardWorkflowError("providers", message, () => retryProviderWorkflowRead());
+}
+
+function addWorkflowRetry(host, id, label, retry) {
+  host.querySelector(`#${id}`)?.remove();
+  host.querySelector(".workflow-retry-feedback")?.remove();
+  const button = document.createElement("button");
+  button.id = id;
+  button.className = "button secondary";
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", async () => {
+    host.querySelector(".workflow-retry-feedback")?.remove();
+    button.disabled = true;
+    button.textContent = "Retrying…";
+    try {
+      await retry();
+      host.querySelector(".workflow-retry-feedback")?.remove();
+    } catch (error) {
+      if (!host.isConnected || !button.isConnected || !host.contains(button)) return;
+      const feedback = document.createElement("span");
+      feedback.className = "workflow-retry-feedback";
+      feedback.setAttribute("role", "status");
+      feedback.textContent = safeWorkflowFailure("Retry failed. You can try again.", error);
+      host.insertBefore(feedback, button);
+    } finally {
+      if (!button.isConnected) return;
+      button.disabled = false;
+      button.textContent = label;
+    }
+  });
+  host.append(document.createTextNode(" "), button);
+}
+
+async function retryWorldWorkflowRead() {
+  const route = acceptedManagementRoute;
+  const intent = managementNavigationIntent;
+  const selectionIntentEpoch = worldSelectionIntentEpoch;
+  const preserveWorkflowFeedbackForWorldId = selectedWorld?.id || route?.selection?.kind === "world" && route.selection.id || "";
+  const requestedWorldId = route?.selection?.kind === "world" ? route.selection.id : "";
+  await loadWorlds(requestedWorldId, { selectionIntentEpoch, preserveWorkflowFeedbackForWorldId, preferRequestedWorld: Boolean(requestedWorldId) });
+  if (route === acceptedManagementRoute && intent === managementNavigationIntent) {
+    await applyExplicitManagementSelection(route, intent, { selectionIntentEpoch, preserveWorkflowFeedbackForWorldId });
+  }
+}
+
+async function retryCampaignWorkflowRead() {
+  const route = acceptedManagementRoute;
+  const intent = managementNavigationIntent;
+  const preserveWorkflowFeedbackForCampaignId = selectedCampaign?.id || route?.selection?.kind === "campaign" && route.selection.id || "";
+  const selectionRequest = campaignSelectionRequest;
+  const requestedCampaignId = route?.selection?.kind === "campaign" ? route.selection.id : selectedCampaign?.id || "";
+  await loadCampaigns(requestedCampaignId, { focusNoSelection: true, preserveWorkflowFeedbackForCampaignId, selectionRequest, navigationIntent: intent });
+  if (route === acceptedManagementRoute && intent === managementNavigationIntent) {
+    await applyExplicitManagementSelection(route, intent, { preserveWorkflowFeedbackForCampaignId });
+  }
+}
+
+async function retryProviderWorkflowRead() {
+  await loadProviders("", { preserveWorkflowFeedback: true });
+}
+
+function safeWorkflowFailure(label, error) {
+  const correlationId = typeof error?.correlationId === "string" && /^[a-z0-9-]{1,80}$/iu.test(error.correlationId)
+    ? ` Reference: ${error.correlationId}.`
+    : "";
+  return `${label}${correlationId}`;
+}
+
+function renderDashboardWorkflowErrors() {
+  const host = elements.dashboardWorkflowStatus;
+  if (!host) return;
+  host.replaceChildren();
+  for (const [key, entry] of dashboardWorkflowErrors) {
+    const item = document.createElement("div");
+    item.dataset.workflow = key;
+    item.append(document.createTextNode(entry.message));
+    addWorkflowRetry(item, `workflowDashboardRetry${key[0].toUpperCase()}${key.slice(1)}`, `Retry ${key}`, entry.retry);
+    host.append(item);
+  }
+  host.classList.toggle("hidden", dashboardWorkflowErrors.size === 0);
+}
+
+function reportDashboardWorkflowError(key, message, retry) {
+  dashboardWorkflowErrors.set(key, { message, retry });
+  renderDashboardWorkflowErrors();
+}
+
+function clearDashboardWorkflowError(key) {
+  dashboardWorkflowErrors.delete(key);
+  renderDashboardWorkflowErrors();
 }
 
 function requestTypedDelete(title, message, details = []) {
@@ -2079,9 +3194,13 @@ function setProfileValue(profile, path, value) {
 }
 
 function profileFromForm() {
-  const profile = emptyCharacterProfile();
+  const sourceProfile = characterModalWorkingCharacter?.profile;
+  const profile = sourceProfile && typeof sourceProfile === "object"
+    ? copyJsonValue(sourceProfile)
+    : emptyCharacterProfile();
   for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
     const raw = elements[id].value.trim();
+    if (sourceProfile && !raw && profileValue(sourceProfile, path) === undefined) continue;
     const value = path === "identity.aliases"
       ? raw.split(",").map((entry) => entry.trim()).filter(Boolean)
       : path === "appearance.distinguishingFeatures"
@@ -2101,6 +3220,7 @@ function profileHasGuidance(profile) {
 
 function populateCharacterForm(character, readOnly = false) {
   characterModalWorkingCharacter = copyJsonValue(character);
+  elements.characterDialog.querySelectorAll(".character-advanced-disclosure").forEach((disclosure) => { disclosure.open = false; });
   elements.characterName.value = String(character.name || "");
   elements.characterGuidance.value = String(character.characterText || "");
   const profile = character.profile || emptyCharacterProfile();
@@ -2131,6 +3251,10 @@ function setCharacterModalControls(readOnly, busy = false) {
   elements.characterDialog.querySelectorAll(".character-edit-row input, .character-row-remove").forEach((control) => {
     control.disabled = readOnly || busy;
   });
+  elements.characterDialog.querySelectorAll("details > summary").forEach((summary) => {
+    summary.setAttribute("aria-disabled", String(busy));
+    summary.tabIndex = busy ? -1 : 0;
+  });
   elements.characterGeneratorPrompt.disabled = busy || characterModalScope === "campaign";
   elements.saveCharacter.disabled = readOnly || busy;
   elements.deleteCharacter.disabled = readOnly || busy;
@@ -2148,7 +3272,7 @@ function updateWorldAuthorCharacters(characters) {
 }
 
 function openCharacterDialog(characterId = "") {
-  if (!elements.worldAuthorDialog.open || !worldAuthorWorkingContent) return;
+  if (worldAuthorBusy || !elements.worldAuthorDialog.open || !worldAuthorWorkingContent) return;
   const readOnly = false;
   const character = characterId
     ? playableCharactersFromContent(worldAuthorWorkingContent).find((item) => item.id === characterId)
@@ -2159,6 +3283,7 @@ function openCharacterDialog(characterId = "") {
   }
   editingCharacterId = character?.id || "";
   characterModalScope = "world";
+  elements.characterPlayableContext.textContent = "Playable character · This character is part of the world's playable roster.";
   characterProfileOrganizationResult = null;
   characterProfileOrganizationApplied = false;
   const initial = character || { id: "", name: "", characterText: "", rpgStats: [], defaultTriggers: [], source: { type: "world-library-editor" } };
@@ -2169,7 +3294,7 @@ function openCharacterDialog(characterId = "") {
   elements.characterDialogDescription.textContent = character
     ? "Update this character in the world authoring form."
     : "Create a playable character for this world authoring form.";
-  elements.saveCharacter.textContent = character ? "Save changes" : "Add character";
+  elements.saveCharacter.textContent = "Apply to world draft";
   elements.saveCharacter.classList.toggle("hidden", readOnly);
   elements.deleteCharacter.classList.toggle("hidden", !character || readOnly);
   elements.cancelCharacter.textContent = readOnly ? "Close" : "Cancel";
@@ -2177,7 +3302,7 @@ function openCharacterDialog(characterId = "") {
   elements.characterDialog.querySelector(".eyebrow").textContent = "World Library";
   setCharacterStatus();
   setCharacterModalControls(readOnly);
-  openManagedModal(elements.characterDialog);
+  openEditDialog(elements.characterDialog);
   if (!readOnly) elements.characterName.focus();
 }
 
@@ -2189,12 +3314,20 @@ function characterRowsFromForm(kind, characterId) {
     const values = Object.fromEntries([...editor.querySelectorAll("[data-character-field]")].map((input) => [input.dataset.characterField, input.value.trim()]));
     const hasContent = Object.values(values).some(Boolean);
     if (!hasContent) continue;
-    if (!values.name) throw new Error(`${isStat ? "Every statistic" : "Every tracker"} with content needs a name.`);
+    if (!values.name) {
+      const error = new Error(`${isStat ? "Every statistic" : "Every tracker"} with content needs a name.`);
+      error.control = editor.querySelector('[data-character-field="name"]');
+      throw error;
+    }
     const original = characterRowOriginals.get(editor) || {};
     const id = String(original.id || opaqueCharacterId());
     if (isStat) {
       const numeric = values.value === "" ? 50 : Number(values.value);
-      if (!Number.isInteger(numeric) || numeric < 1 || numeric > 99) throw new Error(`The value for “${values.name}” must be a whole number from 1 to 99.`);
+      if (!Number.isInteger(numeric) || numeric < 1 || numeric > 99) {
+        const error = new Error(`The value for “${values.name}” must be a whole number from 1 to 99.`);
+        error.control = editor.querySelector('[data-character-field="value"]');
+        throw error;
+      }
       result.push({ ...original, id, name: values.name, value: numeric, note: values.note || "" });
     } else {
       result.push({
@@ -2264,17 +3397,10 @@ function managementWorldPreview(world) {
   return world?.draftPreview || world?.latestPreview || {};
 }
 
-function managementWorldMatchesFilter(world) {
-  if (managementWorldFilter === "archived") return world.status === "archived";
-  if (world.status === "archived") return managementWorldFilter === "all";
-  if (managementWorldFilter === "draft") return !world.latestVersionId;
-  if (managementWorldFilter === "published") return Boolean(world.latestVersionId);
-  return true;
-}
-
-function createManagementWorldCard(world) {
+function createManagementWorldCard(world, card = null) {
   const preview = managementWorldPreview(world);
-  const card = document.createElement("button");
+  const isNew = !card;
+  card ||= document.createElement("button");
   card.type = "button";
   card.className = `dashboard-card world-card management-world-card${selectedWorld?.id === world.id ? " selected" : ""}`;
   card.dataset.worldId = world.id;
@@ -2314,38 +3440,56 @@ function createManagementWorldCard(world) {
   ctaArrow.textContent = "→";
   cta.append(ctaLabel, ctaArrow);
   body.append(title, description, meta, cta);
-  card.append(art, body);
-  card.addEventListener("click", () => void selectWorld(world.id));
+  card.replaceChildren(art, body);
+  if (isNew) card.addEventListener("click", () => {
+    if (UUID_ROUTE_PATTERN.test(String(world.id || ""))) {
+      void acceptManagementRoute(managementSelectionHash("worlds", "world", world.id), { source: "link", focus: true });
+    } else void selectWorld(world.id);
+  });
   return card;
 }
 
-function renderManagementWorlds() {
-  const query = elements.managementWorldSearch.value.trim().toLocaleLowerCase();
-  const matches = worlds.filter(managementWorldMatchesFilter).filter((world) => {
-    const preview = managementWorldPreview(world);
-    return [world.title, preview.genre, preview.tone, preview.premise, preview.backgroundStory]
-      .join(" ")
-      .toLocaleLowerCase()
-      .includes(query);
+function clearWorldCollectionFilters() {
+  window.clearTimeout(managementWorldSearchTimer);
+  elements.managementWorldSearch.value = "";
+  elements.managementWorldSort.value = "updated-desc";
+  managementWorldFilter = "all";
+  managementWorldSort = "updated-desc";
+  elements.managementWorldFilters.querySelectorAll("[data-world-filter]").forEach((button) => {
+    const active = button.dataset.worldFilter === "all";
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
   });
-  elements.worldManagementCarousel.replaceChildren();
-  if (!matches.length) {
-    const empty = document.createElement("p");
-    empty.className = "carousel-empty";
-    empty.textContent = query ? "No worlds match that search and filter." : "No worlds match this status filter.";
-    elements.worldManagementCarousel.append(empty);
-    return;
-  }
-  matches.forEach((world) => elements.worldManagementCarousel.append(createManagementWorldCard(world)));
+  renderManagementWorlds();
+  elements.managementWorldSearch.focus();
 }
 
-async function loadWorlds(preselectId = "") {
+function renderManagementWorlds() {
+  const query = elements.managementWorldSearch?.value ?? "";
+  const matches = filterSortWorlds(worlds, { query, status: managementWorldFilter, sort: managementWorldSort });
+  if (elements.managementWorldResults) elements.managementWorldResults.textContent = `Showing ${matches.length} of ${worlds.length} world${worlds.length === 1 ? "" : "s"}`;
+  if (!matches.length) {
+    elements.worldManagementCarousel.replaceChildren();
+    const message = worlds.length ? "No worlds match this search and filter." : "No worlds are available yet.";
+    elements.worldManagementCarousel.append(collectionEmptyState(message, "world", clearWorldCollectionFilters));
+    return;
+  }
+  reconcileKeyedCollection(elements.worldManagementCarousel, matches, "world-id", createManagementWorldCard, (card, world) => createManagementWorldCard(world, card));
+}
+
+async function loadWorlds(preselectId = "", selectionOptions = {}) {
+  const selectionIntentEpoch = selectionOptions.selectionIntentEpoch ?? worldSelectionIntentEpoch;
   ({ worlds } = await api("/api/v1/worlds"));
+  clearDashboardWorkflowError("worlds");
+  clearWorkflowReadFailure(elements.worldStatus, "worlds", "workflowRetryWorlds", "World content is stored in PostgreSQL, never embedded in this client.");
   renderDashboardWorlds();
   renderManagementWorlds();
-  void hydrateDashboardWorlds();
-  void loadDashboardStats();
+  void loadDashboardStats("worlds");
+  if (selectionIntentEpoch !== worldSelectionIntentEpoch) return;
   if (!worlds.length) {
+    const missingWorldId = selectedWorld?.id;
+    worldSelectionId = "";
+    worldSelectionEpoch += 1;
     selectedWorld = null;
     worldVersionCharacters = [];
     worldVersionCampaignReady = false;
@@ -2353,52 +3497,117 @@ async function loadWorlds(preselectId = "") {
     elements.worldSelectionPanel.classList.add("hidden");
     setWorldEditorDisabled(true);
     elements.worldCampaignReadiness.textContent = "Create a world before checking campaign readiness.";
+    if (missingWorldId && selectionOptions.preserveWorkflowFeedbackForWorldId === missingWorldId && !managementSelectionErrorIsCurrent("worlds")) {
+      elements.worldStatus.replaceChildren();
+      elements.worldStatus.className = "status";
+    }
     return;
   }
-  const targetId = preselectId || selectedWorld?.id;
-  if (targetId && worlds.some((world) => world.id === targetId)) await selectWorld(targetId);
+  const targetId = selectionOptions.preferRequestedWorld && preselectId
+    ? preselectId
+    : worldSelectionId || preselectId || selectedWorld?.id;
+  if (targetId && worlds.some((world) => world.id === targetId)) await selectWorld(targetId, { ...selectionOptions, selectionIntentEpoch });
   else if (selectedWorld && !worlds.some((world) => world.id === selectedWorld.id)) {
+    const missingWorldId = selectedWorld.id;
+    worldSelectionId = "";
+    worldSelectionEpoch += 1;
     selectedWorld = null;
     elements.worldSelectionPanel.classList.add("hidden");
     setWorldEditorDisabled(true);
     renderManagementWorlds();
+    if (selectionOptions.preserveWorkflowFeedbackForWorldId === missingWorldId && !managementSelectionErrorIsCurrent("worlds")) {
+      elements.worldStatus.replaceChildren();
+      elements.worldStatus.className = "status";
+    }
   } else if (!selectedWorld) {
     elements.worldSelectionPanel.classList.add("hidden");
     setWorldEditorDisabled(true);
   }
 }
 
-async function selectWorld(worldId) {
-  const coverPollSequence = ++worldCoverJobPollSequence;
-  selectedWorld = await api(`/api/v1/worlds/${worldId}`);
-  renderManagementWorlds();
-  elements.worldSelectionPanel.classList.remove("hidden");
-  elements.worldEditorTitle.textContent = selectedWorld.title;
-  elements.worldEditorMeta.textContent = `${selectedWorld.status} · draft revision ${selectedWorld.draftRevision} · ${selectedWorld.versions.length} published version${selectedWorld.versions.length === 1 ? "" : "s"} · ${number(selectedWorld.campaigns?.length || 0)} campaign${Number(selectedWorld.campaigns?.length || 0) === 1 ? "" : "s"}`;
-  elements.worldReleaseNotes.value = "";
-  elements.worldVersionSelect.replaceChildren(new Option(selectedWorld.versions.length ? "Latest published version" : "No published versions", ""));
-  for (const version of selectedWorld.versions) {
-    elements.worldVersionSelect.append(new Option(`Version ${version.versionNumber}${version.releaseNotes ? ` · ${version.releaseNotes}` : ""}`, version.id));
+async function loadWorldResult(worldId, selectionIntentEpoch, selectionOptions = {}) {
+  invalidateDashboardWorldDetails(worldId);
+  await loadWorlds(worldId, { ...selectionOptions, selectionIntentEpoch, preferRequestedWorld: true });
+}
+
+async function selectWorld(worldId, selectionOptions = {}) {
+  const selectionIntentEpoch = selectionOptions.selectionIntentEpoch ?? ++worldSelectionIntentEpoch;
+  if (selectionIntentEpoch !== worldSelectionIntentEpoch) return;
+  const committedAuthorRefresh = selectionOptions.committedAuthorSession
+    && editDialogSessions.get(elements.worldAuthorDialog) === selectionOptions.committedAuthorSession
+    && worldAuthorBusy;
+  if (elements.worldAuthorDialog.open && !committedAuthorRefresh) {
+    const dismissal = await dismissEditDialog(elements.worldAuthorDialog);
+    if (dismissal !== "dismissed" || elements.worldAuthorDialog.open) return;
   }
-  elements.worldVersionSelect.disabled = !selectedWorld.versions.length;
-  setWorldEditorDisabled(false);
-  const archived = selectedWorld.status === "archived";
-  elements.archiveWorld.textContent = archived ? "Restore" : "Archive";
-  elements.editWorldDraft.disabled = archived;
-  elements.worldReleaseNotes.disabled = archived;
-  elements.publishWorld.disabled = archived;
-  elements.createCampaignModalBtn.disabled = true;
-  elements.confirmCreateCampaign.disabled = true;
-  elements.exportWorld.disabled = !selectedWorld.versions.length;
-  elements.createWorldShare.disabled = !selectedWorld.versions.length;
-  elements.revokeWorldShare.disabled = !selectedWorld.versions.length;
-  elements.forkWorldModalBtn.disabled = !selectedWorld.versions.length;
-  updateWorldVersionDeleteAvailability();
-  elements.deleteWorld.disabled = false;
-  updateCharacterGeneratorAvailability();
-  await loadWorldVersionPlayableCharacters();
-  worldMessage(archived ? "This world is archived. Restore it before editing or publishing." : "World selected. Draft editing opens in the authoring modal.");
-  void resumeWorldCoverJob(worldId, coverPollSequence);
+  if (selectionIntentEpoch !== worldSelectionIntentEpoch) return;
+  const selectionEpoch = ++worldSelectionEpoch;
+  worldSelectionId = worldId;
+  const coverPollSequence = ++worldCoverJobPollSequence;
+  elements.worldSelectionPanel.classList.remove("hidden");
+  setWorldEditorDisabled(true);
+  elements.worldVersionSelect.disabled = true;
+  elements.newCampaignCharacter.disabled = true;
+  const preserveWorkflowFeedback = selectionOptions.preserveWorkflowFeedbackForWorldId === worldId;
+  if (!preserveWorkflowFeedback) worldMessage("Loading selected world…");
+  const detailRetryCount = selectionOptions.detailRetryCount ?? 0;
+  const detailRequest = getDashboardWorldDetails(worldId);
+  const detailRequestEpoch = dashboardWorldDetailRequestEpochs.get(worldId);
+  try {
+    const world = await detailRequest;
+    if (!isCurrentWorldSelection(worldId, selectionEpoch)) return;
+    if (!isDashboardWorldDetailRequestCurrent(worldId, detailRequestEpoch)) {
+      if (detailRetryCount < 1) {
+        return selectWorld(worldId, { ...selectionOptions, selectionIntentEpoch, detailRetryCount: detailRetryCount + 1 });
+      }
+      worldMessage("World details changed while loading. Select this world again to retry.", "error");
+      return;
+    }
+    if (world?.id !== worldId) throw new Error("The selected world response did not match the requested world.");
+    selectedWorld = world;
+    renderManagementWorlds();
+    elements.worldEditorTitle.textContent = selectedWorld.title;
+    elements.worldEditorMeta.textContent = `${selectedWorld.status} · draft revision ${selectedWorld.draftRevision} · ${selectedWorld.versions.length} published version${selectedWorld.versions.length === 1 ? "" : "s"} · ${number(selectedWorld.campaigns?.length || 0)} campaign${Number(selectedWorld.campaigns?.length || 0) === 1 ? "" : "s"}`;
+    elements.worldReleaseNotes.value = "";
+    elements.worldVersionSelect.replaceChildren(new Option(selectedWorld.versions.length ? "Latest published version" : "No published versions", ""));
+    for (const version of selectedWorld.versions) {
+      elements.worldVersionSelect.append(new Option(`Version ${version.versionNumber}${version.releaseNotes ? ` · ${version.releaseNotes}` : ""}`, version.id));
+    }
+    elements.worldVersionSelect.disabled = !selectedWorld.versions.length;
+    setWorldEditorDisabled(false);
+    const archived = selectedWorld.status === "archived";
+    elements.archiveWorld.textContent = archived ? "Restore" : "Archive";
+    elements.editWorldDraft.disabled = archived;
+    elements.worldReleaseNotes.disabled = archived;
+    elements.publishWorld.disabled = archived;
+    elements.createCampaignModalBtn.disabled = true;
+    elements.confirmCreateCampaign.disabled = true;
+    elements.exportWorld.disabled = !selectedWorld.versions.length;
+    elements.createWorldShare.disabled = !selectedWorld.versions.length;
+    elements.revokeWorldShare.disabled = !selectedWorld.versions.length;
+    elements.forkWorldModalBtn.disabled = !selectedWorld.versions.length;
+    updateWorldVersionDeleteAvailability();
+    elements.deleteWorld.disabled = false;
+    updateCharacterGeneratorAvailability();
+    await loadWorldVersionPlayableCharacters({ worldId, selectionEpoch });
+    if (!isCurrentWorldSelection(worldId, selectionEpoch)) return;
+    if (!preserveWorkflowFeedback) worldMessage(archived ? "This world is archived. Restore it before editing or publishing." : "World selected. Draft editing opens in the authoring modal.");
+    void resumeWorldCoverJob(worldId, coverPollSequence);
+  } catch (error) {
+    if (!isCurrentWorldSelection(worldId, selectionEpoch)) return;
+    if (!isDashboardWorldDetailRequestCurrent(worldId, detailRequestEpoch)) {
+      if (detailRetryCount < 1) {
+        return selectWorld(worldId, { ...selectionOptions, selectionIntentEpoch, detailRetryCount: detailRetryCount + 1 });
+      }
+      worldMessage("World details changed while loading. Select this world again to retry.", "error");
+      return;
+    }
+    worldMessage(safeWorkflowFailure("The selected world could not be loaded.", error), "error");
+  }
+}
+
+function isCurrentWorldSelection(worldId, selectionEpoch) {
+  return worldSelectionEpoch === selectionEpoch && worldSelectionId === worldId;
 }
 
 function emptyWorldContent() {
@@ -2421,8 +3630,212 @@ function setWorldAuthorStatus(message = "", type = "") {
   elements.worldAuthorStatus.className = `status ${type}`.trim();
 }
 
+const WORLD_AUTHOR_STEPS = Object.freeze([
+  { id: "basics", panel: "world-author-overview", next: "lore", nextLabel: "Continue to Lore" },
+  { id: "lore", panel: "world-author-lore", next: "character", nextLabel: "Continue to Playable character" },
+  { id: "character", panel: "world-author-mechanics", next: "review", nextLabel: "Continue to Review" },
+  { id: "review", panel: "world-author-review", next: "basics", nextLabel: "Back to Basics" }
+]);
+const WORLD_CHARACTER_READINESS_ISSUES = new Set([
+  "no-playable-characters",
+  "missing-character-id",
+  "duplicate-character-id",
+  "missing-character-name",
+  "missing-character-text"
+]);
+
+function worldAuthorStep(id) {
+  return WORLD_AUTHOR_STEPS.find((step) => step.id === id) || WORLD_AUTHOR_STEPS[0];
+}
+
+function setWorldAuthorStep(id) {
+  if (worldAuthorBusy) return;
+  const step = worldAuthorStep(id);
+  worldAuthorActiveStep = step.id;
+  for (const button of elements.worldAuthorSteps.querySelectorAll("[data-world-author-step]")) {
+    const active = button.dataset.worldAuthorStep === step.id;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "step");
+    else button.removeAttribute("aria-current");
+  }
+  for (const panel of elements.worldAuthorDialog.querySelectorAll('.tab-content[data-tab-group="world-author"]')) {
+    panel.classList.toggle("active", panel.id === step.panel);
+  }
+  worldAuthorTabBinding?.sync();
+  renderWorldAuthorChecklist();
+}
+
+if (elements.worldAuthorSteps) {
+  const worldAuthorTabs = [...elements.worldAuthorSteps.querySelectorAll("[data-world-author-step]")].flatMap((tab) => {
+    const key = tab.dataset.worldAuthorStep;
+    const panel = document.getElementById(tab.dataset.tabTarget || "");
+    return key && panel ? [{ key, tab, panel }] : [];
+  });
+  worldAuthorTabBinding = bindLegacyTabGroup({
+    root: elements.worldAuthorSteps,
+    tabs: worldAuthorTabs,
+    getSelectedKey: () => worldAuthorActiveStep,
+    onActivate: setWorldAuthorStep
+  });
+}
+
+function renderWorldAuthorChecklist() {
+  if (!elements.worldAuthorBasicsStatus) return;
+  const titleReady = Boolean(elements.worldTitle.value.trim());
+  const loreReady = [elements.worldPremise.value, elements.worldBackground.value, elements.worldFirstAction.value]
+    .some((value) => value.trim());
+  const characters = playableCharactersFromContent(worldAuthorWorkingContent || {});
+  const basicsStatus = titleReady ? "Title added" : "Title required before saving";
+  const loreStatus = loreReady ? "Author guidance added (optional)" : "Optional author guidance";
+  const characterStatus = characters.length
+    ? `${characters.length} playable character${characters.length === 1 ? "" : "s"} in this draft`
+    : "Add at least one playable character for a campaign-ready published version. Draft saving is still available.";
+  elements.worldAuthorBasicsStatus.textContent = basicsStatus;
+  elements.worldAuthorLoreStatus.textContent = loreStatus;
+  elements.worldAuthorCharacterStatus.textContent = characterStatus;
+  elements.worldAuthorBasicsStatus.parentElement.dataset.stepState = titleReady ? "complete" : "incomplete";
+  elements.worldAuthorLoreStatus.parentElement.dataset.stepState = loreReady ? "complete" : "optional";
+  elements.worldAuthorCharacterStatus.parentElement.dataset.stepState = characters.length ? "complete" : "incomplete";
+  for (const button of elements.worldAuthorSteps.querySelectorAll("[data-world-author-step]")) {
+    const stepId = button.dataset.worldAuthorStep;
+    const ready = stepId === "basics" ? titleReady : stepId === "lore" ? loreReady : stepId === "character" ? characters.length > 0 : titleReady && characters.length > 0;
+    button.dataset.stepState = ready ? "complete" : "incomplete";
+    button.setAttribute("aria-label", `${button.textContent.trim()}${stepId === "lore" ? ", optional" : ready ? ", guidance complete" : ", guidance incomplete"}`);
+  }
+  const step = worldAuthorStep(worldAuthorActiveStep);
+  elements.worldAuthorStepGuidance.textContent = step.id === "basics"
+    ? titleReady ? "Title added. Genre and tone remain optional author guidance." : "Add the required title. Genre and tone are optional author guidance."
+    : step.id === "lore"
+      ? "Lore fields are optional guidance. Save this draft whenever you are ready."
+      : step.id === "character"
+        ? "A published version needs a complete playable character before a campaign can start. This checklist is guidance, not server validation."
+        : "Review the current draft guidance and the separate server assessment for its published version.";
+  elements.worldAuthorNextStep.textContent = step.nextLabel;
+  renderWorldAuthorPublishedReadiness();
+}
+
+function renderWorldAuthorPublishedReadiness() {
+  const container = elements.worldAuthorPublishedReadiness;
+  if (!container) return;
+  container.replaceChildren();
+  if (worldAuthorMode === "create") {
+    container.className = "status world-author-published-readiness";
+    container.textContent = "No published version is available for this new world. The current draft has not been assessed.";
+    return;
+  }
+  const versionId = selectedWorldVersionId();
+  const version = selectedWorld?.versions?.find((candidate) => candidate.id === versionId);
+  if (!versionId || !version) {
+    container.className = "status world-author-published-readiness";
+    container.textContent = "No published version is available for assessment. The current draft has not been assessed.";
+    return;
+  }
+  const label = `${selectedWorld?.title || "Selected world"}, published version ${version.versionNumber}`;
+  const message = document.createElement("p");
+  message.className = "world-author-readiness-summary";
+  if (worldVersionReadinessLoading && worldVersionReadinessCheckedId === versionId) {
+    message.textContent = `Checking server readiness for ${label}… The current draft has not been assessed.`;
+    container.className = "status world-author-published-readiness";
+    container.append(message);
+    return;
+  }
+  if (worldVersionReadinessError && worldVersionReadinessCheckedId === versionId) {
+    container.className = "status error world-author-published-readiness";
+    message.textContent = `Server readiness for ${label} could not be checked. This is unknown, not campaign-ready; the current draft has not been assessed. ${worldVersionReadinessError}`;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "button secondary compact-button";
+    retry.textContent = "Retry server assessment";
+    retry.disabled = worldAuthorBusy || worldVersionReadinessLoading;
+    retry.addEventListener("click", () => {
+      if (worldAuthorBusy || worldVersionReadinessLoading) return;
+      void loadWorldVersionPlayableCharacters({ worldId: selectedWorld?.id || "", selectionEpoch: worldSelectionEpoch });
+    });
+    container.append(message, retry);
+    return;
+  }
+  if (!worldVersionReadiness || worldVersionReadiness.worldVersionId !== versionId) {
+    container.className = "status world-author-published-readiness";
+    message.textContent = `No server assessment is available for ${label}. The current draft has not been assessed.`;
+    container.append(message);
+    return;
+  }
+  container.className = `status ${worldVersionReadiness.ready ? "success" : "error"} world-author-published-readiness`;
+  message.textContent = `Server assessment for ${label}: ${worldVersionReadiness.ready ? "Campaign-ready" : "Not campaign-ready"}. This assessment applies to this immutable version only; current draft changes have not been assessed.`;
+  container.append(message);
+  const issues = Array.isArray(worldVersionReadiness.issues) ? worldVersionReadiness.issues : [];
+  if (!issues.length) return;
+  const list = document.createElement("ul");
+  list.className = "world-author-readiness-issues";
+  for (const issue of issues) {
+    const item = document.createElement("li");
+    const text = document.createElement("span");
+    text.textContent = typeof issue === "string" ? issue : String(issue?.message || "The server reported a readiness issue.");
+    item.append(text);
+    if (issue && typeof issue === "object" && WORLD_CHARACTER_READINESS_ISSUES.has(String(issue.code || ""))) {
+      const characterId = String(issue.characterId || "");
+      const character = playableCharactersFromContent(worldAuthorWorkingContent || {}).find((candidate) => candidate.id === characterId);
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = "button secondary compact-button";
+      action.textContent = character ? `Open character editor for ${character.name}` : "Open playable character editor";
+      action.disabled = worldAuthorBusy;
+      action.addEventListener("click", () => {
+        if (worldAuthorBusy) return;
+        setWorldAuthorStep("character");
+        if (character) openCharacterDialog(character.id);
+        else elements.addPlayableCharacter.focus();
+      });
+      item.append(action);
+    }
+    list.append(item);
+  }
+  container.append(list);
+}
+
+function setWorldAuthorSaveControlsBusy(session, busy) {
+  if (busy) {
+    if (!session || editDialogSessions.get(elements.worldAuthorDialog) !== session || !elements.worldAuthorDialog.open) return null;
+    const controls = [...elements.worldForm.querySelectorAll("input, select, textarea, button")];
+    const disclosureStates = [...elements.worldForm.querySelectorAll("details")].map((details) => [details, details.open]);
+    const summaryStates = [...elements.worldForm.querySelectorAll("details > summary")].map((summary) => [summary, summary.getAttribute("aria-disabled"), summary.tabIndex]);
+    const snapshot = {
+      session,
+      controls: controls.map((control) => [control, control.disabled]),
+      disclosureStates,
+      summaryStates,
+      focusTarget: document.activeElement instanceof HTMLElement ? document.activeElement : null
+    };
+    for (const control of controls) control.disabled = true;
+    for (const [summary] of summaryStates) {
+      summary.setAttribute("aria-disabled", "true");
+      summary.tabIndex = -1;
+    }
+    elements.worldAuthorDialog.setAttribute("aria-busy", "true");
+    elements.worldAuthorStatus.focus();
+    return snapshot;
+  }
+  const snapshot = worldAuthorBusyControlSnapshot;
+  if (!snapshot || snapshot.session !== session || editDialogSessions.get(elements.worldAuthorDialog) !== session) return;
+  for (const [control, disabled] of snapshot.controls) {
+    if (control.isConnected) control.disabled = disabled;
+  }
+  for (const [disclosure, open] of snapshot.disclosureStates) {
+    if (disclosure.isConnected) disclosure.open = open;
+  }
+  for (const [summary, ariaDisabled, tabIndex] of snapshot.summaryStates) {
+    if (!summary.isConnected) continue;
+    if (ariaDisabled === null) summary.removeAttribute("aria-disabled");
+    else summary.setAttribute("aria-disabled", ariaDisabled);
+    summary.tabIndex = tabIndex;
+  }
+  elements.worldAuthorDialog.removeAttribute("aria-busy");
+  if (elements.worldAuthorDialog.open && snapshot.focusTarget?.isConnected && !snapshot.focusTarget.disabled) snapshot.focusTarget.focus();
+}
+
 function populateWorldAuthorForm(content) {
   worldAuthorWorkingContent = copyJsonValue(content || emptyWorldContent());
+  elements.worldGenreToneDisclosure.open = false;
   const overview = worldAuthorWorkingContent.world || {};
   elements.worldTitle.value = overview.title || "";
   elements.worldGenre.value = overview.genre || "";
@@ -2433,6 +3846,7 @@ function populateWorldAuthorForm(content) {
   elements.worldRules.value = overview.rules || "";
   elements.worldCharacterRevision.value = "0";
   renderPlayableCharacterRoster(playableCharactersFromContent(worldAuthorWorkingContent));
+  renderWorldAuthorChecklist();
 }
 
 function resetWorldCoverAuthoring() {
@@ -2468,10 +3882,13 @@ function openWorldAuthor(mode) {
   elements.worldGeneratorAvailability.innerHTML = textAvailable
     ? "Generation uses the configured default text provider."
     : 'Configure a default text provider in <a href="#providers">Provider Setup</a> to enable generation.';
+  elements.worldAuthorDialog.removeAttribute("aria-busy");
+  worldAuthorBusyControlSnapshot = null;
   populateWorldAuthorForm(mode === "create" ? emptyWorldContent() : selectedWorld.draftContent);
+  setWorldAuthorStep("basics");
   resetWorldCoverAuthoring();
   setWorldAuthorStatus(mode === "create" ? "Enter a title manually or generate a complete world from a concept." : "Review your changes before saving this draft.");
-  openManagedModal(elements.worldAuthorDialog);
+  openEditDialog(elements.worldAuthorDialog);
   elements.worldTitle.focus();
 }
 
@@ -2598,6 +4015,8 @@ async function monitorWorldCoverJobWithSequence(jobId, worldId, sequence) {
     if (selectedWorld?.id !== worldId || sequence !== worldCoverJobPollSequence) return null;
     const job = await api(`/api/v1/image-jobs/${jobId}`);
     if (job.status === "completed") {
+      invalidateDashboardWorldDetails(worldId);
+      if (selectedWorld?.id !== worldId || sequence !== worldCoverJobPollSequence) return job;
       renderWorldCoverJobStatus(job);
       selectedWorld.imageUrl = job.assetUrl;
       const cached = worlds.find((world) => world.id === worldId);
@@ -2606,6 +4025,7 @@ async function monitorWorldCoverJobWithSequence(jobId, worldId, sequence) {
       renderManagementWorlds();
       return job;
     }
+    if (selectedWorld?.id !== worldId || sequence !== worldCoverJobPollSequence) return null;
     if (["failed", "recoverable", "cancelled", "expired"].includes(job.status)) {
       throw new Error(job.errorMessage || "World cover generation did not complete.");
     }
@@ -2655,8 +4075,42 @@ function updateWorldCoverChoice() {
   else elements.worldCoverStatus.textContent = worldAuthorMode === "edit" && artworkUrl(selectedWorld) ? "The current cover will be kept." : "No cover will be applied.";
 }
 
+function loadAssetLibraryBrowser() {
+  if (!assetLibraryBrowserPromise) {
+    const imageLibraryModuleUrl = "/nexus/image-library-browser.js";
+    const retryQuery = assetLibraryImportRetryNonce > 0
+      ? `?retry=${assetLibraryImportRetryNonce}`
+      : "";
+    assetLibraryBrowserPromise = import(/* @vite-ignore */ `${imageLibraryModuleUrl}${retryQuery}`)
+      .then(({ createImageLibraryBrowser }) => createImageLibraryBrowser({
+        dialog: elements.assetLibraryDialog,
+        grid: elements.assetLibraryGrid,
+        status: elements.assetLibraryStatus,
+        filterContainer: elements.assetLibraryFilters,
+        loadMore: elements.assetLibraryLoadMore,
+        closeButton: elements.closeAssetLibrary
+      }))
+      .catch((error) => {
+        assetLibraryBrowserPromise = null;
+        assetLibraryImportRetryNonce = assetLibraryImportRetryNonce >= MAX_ASSET_LIBRARY_RETRY_NONCE
+          ? 1
+          : assetLibraryImportRetryNonce + 1;
+        throw error;
+      });
+  }
+  return assetLibraryBrowserPromise;
+}
+
 async function openAssetLibrary(onSelect, context = {}) {
-  await assetLibraryBrowser.open({ mode: onSelect ? "picker" : "browse", onSelect, context });
+  let browser;
+  try {
+    browser = await loadAssetLibraryBrowser();
+  } catch (error) {
+    elements.worldCoverStatus.className = "status error";
+    elements.worldCoverStatus.textContent = safeWorkflowFailure("The image library could not be loaded. Try again.", error);
+    return;
+  }
+  await browser.open({ mode: onSelect ? "picker" : "browse", onSelect, context });
 }
 
 async function chooseWorldCoverFromLibrary() {
@@ -2671,19 +4125,21 @@ async function chooseWorldCoverFromLibrary() {
   }, worldAuthorMode === "edit" && selectedWorld ? { worldId: selectedWorld.id } : {});
 }
 
-async function applyWorldCoverChoice(worldId) {
+async function applyWorldCoverChoice(worldId, selectionIntentEpoch) {
   const mode = document.querySelector('input[name="worldCoverMode"]:checked')?.value || "keep";
   if (mode === "keep") return "";
   if (mode === "library") {
     const assetId = elements.worldCoverAssetId.value;
     if (!assetId) throw new Error("Choose a retained image before saving the world.");
     await api(`/api/v1/worlds/${worldId}/cover-asset`, { method: "PUT", body: JSON.stringify({ assetId }) });
-    await loadWorlds(worldId);
+    invalidateDashboardWorldDetails(worldId);
+    await loadWorlds(worldId, { selectionIntentEpoch });
     return " Retained cover attached.";
   }
   if (mode === "remove") {
     await api(`/api/v1/worlds/${worldId}/cover-asset`, { method: "PUT", body: JSON.stringify({ assetId: null }) });
-    await loadWorlds(worldId);
+    invalidateDashboardWorldDetails(worldId);
+    await loadWorlds(worldId, { selectionIntentEpoch });
     return " Cover removed.";
   }
   const job = await api(`/api/v1/worlds/${worldId}/cover`, {
@@ -2697,6 +4153,7 @@ async function applyWorldCoverChoice(worldId) {
       replace: Boolean(selectedWorld?.imageUrl)
     })
   });
+  invalidateDashboardWorldDetails(worldId);
   void monitorWorldCoverJob(job.id, worldId).catch((error) => worldMessage(`World saved, but cover generation failed: ${error.message || String(error)}`, "error"));
   return " Cover generation queued.";
 }
@@ -2711,9 +4168,10 @@ async function saveWorldDraft(event) {
     return;
   }
   worldAuthorBusy = true;
-  elements.saveWorldDraft.disabled = true;
-  elements.cancelWorldAuthor.disabled = true;
   const mode = worldAuthorMode;
+  const selectionIntentEpoch = mode === "create" ? ++worldSelectionIntentEpoch : worldSelectionIntentEpoch;
+  const committedAuthorSession = editDialogSessions.get(elements.worldAuthorDialog);
+  worldAuthorBusyControlSnapshot = setWorldAuthorSaveControlsBusy(committedAuthorSession, true);
   const expectedRevision = selectedWorld?.draftRevision;
   const content = worldContentFromForm();
   setWorldAuthorStatus(mode === "create" ? "Creating authoritative world draft…" : "Saving world draft…");
@@ -2730,11 +4188,21 @@ async function saveWorldDraft(event) {
         body: JSON.stringify({ expectedRevision, title, content })
       });
     }
-    await loadWorlds(worldId);
+    if (mode === "create") {
+      await loadWorldResult(worldId, selectionIntentEpoch, { committedAuthorSession });
+    } else {
+      invalidateDashboardWorldDetails(worldId);
+      await loadWorlds(worldId, { committedAuthorSession, selectionIntentEpoch });
+    }
+    if (worldAuthorBusyControlSnapshot?.session === committedAuthorSession) {
+      setWorldAuthorSaveControlsBusy(committedAuthorSession, false);
+      worldAuthorBusyControlSnapshot = null;
+    }
+    worldAuthorBusy = false;
     elements.worldAuthorDialog.close("saved");
     let coverMessage = "";
     try {
-      coverMessage = await applyWorldCoverChoice(worldId);
+      coverMessage = await applyWorldCoverChoice(worldId, selectionIntentEpoch);
     } catch (coverError) {
       worldMessage(`World ${mode === "create" ? "created" : "saved"}, but its cover could not be updated: ${coverError.message || String(coverError)}`, "error");
       return;
@@ -2747,6 +4215,11 @@ async function saveWorldDraft(event) {
     );
   } catch (error) {
     if (mode === "create" && authoritativeCreateCompleted) {
+      if (worldAuthorBusyControlSnapshot?.session === committedAuthorSession) {
+        setWorldAuthorSaveControlsBusy(committedAuthorSession, false);
+        worldAuthorBusyControlSnapshot = null;
+      }
+      worldAuthorBusy = false;
       elements.worldAuthorDialog.close("saved");
       worldMessage(`World created, but the management library could not reload it: ${error.message || String(error)} Refresh worlds before trying again.`, "error");
       return;
@@ -2755,14 +4228,20 @@ async function saveWorldDraft(event) {
       ? "The world draft changed while this modal was open. Your entries are still here; close and reload the world before saving."
       : error.message || String(error), "error");
   } finally {
-    worldAuthorBusy = false;
-    elements.saveWorldDraft.disabled = false;
-    elements.cancelWorldAuthor.disabled = false;
+    if (worldAuthorBusyControlSnapshot?.session === committedAuthorSession
+      && editDialogSessions.get(elements.worldAuthorDialog) === committedAuthorSession) {
+      setWorldAuthorSaveControlsBusy(committedAuthorSession, false);
+      worldAuthorBusyControlSnapshot = null;
+    }
+    if (editDialogSessions.get(elements.worldAuthorDialog) === committedAuthorSession) {
+      worldAuthorBusy = false;
+      if (elements.worldAuthorDialog.open) renderWorldAuthorChecklist();
+    }
   }
 }
 
 async function generateCharacterFromPrompt() {
-  if (!worldAuthorWorkingContent || characterModalBusy) return;
+  if ((worldAuthorBusy && characterModalScope === "world") || !worldAuthorWorkingContent || characterModalBusy) return;
   const prompt = elements.characterGeneratorPrompt.value.trim();
   if (!prompt) {
     setCharacterStatus("Describe the character you want the default text model to create.", "error");
@@ -2854,12 +4333,19 @@ function renderCharacterProfileReview(result) {
 }
 
 async function organizeCharacterProfile() {
-  if (characterModalBusy) return;
+  if ((worldAuthorBusy && characterModalScope === "world") || characterModalBusy) return;
   let character;
   try {
     character = characterFromForm();
   } catch (error) {
     setCharacterStatus(error.message || String(error), "error");
+    const control = error.control;
+    if (control instanceof HTMLElement) {
+      const disclosure = control.closest("details");
+      if (disclosure) disclosure.open = true;
+      control.focus();
+      if (control.willValidate && !control.validity.valid) control.reportValidity();
+    }
     return;
   }
   const campaignScope = characterModalScope === "campaign";
@@ -2887,7 +4373,7 @@ async function organizeCharacterProfile() {
 }
 
 function applyCharacterProfileReview() {
-  if (!characterProfileOrganizationResult) return;
+  if ((worldAuthorBusy && characterModalScope === "world") || !characterProfileOrganizationResult) return;
   let appliedCount = 0;
   for (const checkbox of elements.characterProfileReviewList.querySelectorAll("[data-profile-path]:checked")) {
     const path = checkbox.dataset.profilePath;
@@ -2921,6 +4407,7 @@ async function openCampaignCharacterDialog() {
       defaultTriggers: result.defaultTriggers || [],
       source: { type: "campaign-character-profile" }
     });
+    elements.characterPlayableContext.textContent = "Campaign character profile · This editable campaign copy does not change its immutable world version.";
     elements.characterDialog.querySelector(".eyebrow").textContent = "Campaign";
     elements.characterDialogTitle.textContent = "Edit campaign character profile";
     elements.characterDialogDescription.textContent = "This editable campaign copy can diverge without changing its immutable world-version snapshot.";
@@ -2932,7 +4419,7 @@ async function openCampaignCharacterDialog() {
     elements.cancelCharacter.textContent = "Cancel";
     setCharacterStatus();
     setCharacterModalControls(false);
-    openManagedModal(elements.characterDialog);
+    openEditDialog(elements.characterDialog);
     elements.characterName.focus();
   } catch (error) {
     campaignMessage(error.message || String(error), "error");
@@ -2941,12 +4428,19 @@ async function openCampaignCharacterDialog() {
 
 async function saveCharacterFromModal(event) {
   event.preventDefault();
-  if (characterModalBusy) return;
+  if ((worldAuthorBusy && characterModalScope === "world") || characterModalBusy) return;
   let character;
   try {
     character = characterFromForm();
   } catch (error) {
     setCharacterStatus(error.message || String(error), "error");
+    const control = error.control;
+    if (control instanceof HTMLElement) {
+      const disclosure = control.closest("details");
+      if (disclosure) disclosure.open = true;
+      control.focus();
+      if (control.willValidate && !control.validity.valid) control.reportValidity();
+    }
     return;
   }
   if (characterModalScope === "campaign") {
@@ -2996,7 +4490,7 @@ async function saveCharacterFromModal(event) {
 }
 
 async function deleteCharacterFromModal() {
-  if (!worldAuthorWorkingContent || !editingCharacterId || characterModalBusy) return;
+  if ((worldAuthorBusy && characterModalScope === "world") || !worldAuthorWorkingContent || !editingCharacterId || characterModalBusy) return;
   const name = elements.characterName.value.trim() || "this character";
   if (!window.confirm(`Delete “${name}” from the current draft? Published versions and existing campaigns remain unchanged. Removing the last character makes this world unavailable for new campaigns until another character is added and published.`)) return;
   const roster = playableCharactersFromContent(worldAuthorWorkingContent).filter((item) => item.id !== editingCharacterId);
@@ -3011,14 +4505,18 @@ async function deleteCharacterFromModal() {
 
 async function publishSelectedWorld() {
   if (!selectedWorld) return;
+  const worldId = selectedWorld.id;
+  const selectionIntentEpoch = worldSelectionIntentEpoch;
+  const expectedRevision = selectedWorld.draftRevision;
   elements.publishWorld.disabled = true;
   worldMessage("Publishing immutable world version…");
   try {
-    const published = await api(`/api/v1/worlds/${selectedWorld.id}/publish`, {
+    const published = await api(`/api/v1/worlds/${worldId}/publish`, {
       method: "POST",
-      body: JSON.stringify({ expectedRevision: selectedWorld.draftRevision, releaseNotes: elements.worldReleaseNotes.value })
+      body: JSON.stringify({ expectedRevision, releaseNotes: elements.worldReleaseNotes.value })
     });
-    await loadWorlds(selectedWorld.id);
+    invalidateDashboardWorldDetails(worldId);
+    await loadWorlds(worldId, { selectionIntentEpoch });
     await loadCampaigns();
     worldMessage(`Version ${published.versionNumber} published. Existing campaigns remain pinned to their current versions.`, "success");
   } catch (error) {
@@ -3095,10 +4593,19 @@ function updateWorldVersionDeleteAvailability() {
 }
 
 function updateCampaignCreationAvailability() {
+  const session = campaignCreationDialogSession;
   const hasPublishedVersion = Boolean(selectedWorldVersionId());
   const hasRequiredSelection = worldVersionCharacters.length === 1 || Boolean(elements.newCampaignCharacter.value);
   elements.createCampaignModalBtn.disabled = !hasPublishedVersion || !worldVersionCampaignReady;
-  elements.confirmCreateCampaign.disabled = createCampaignSubmitting || !hasPublishedVersion || !worldVersionCampaignReady || !hasRequiredSelection;
+  const dialogReady = Boolean(session?.ready && session.characters?.some((character) => character.id === elements.newCampaignCharacter.value));
+  const scopeIsCurrent = Boolean(session && campaignCreationScopeIsCurrent(session));
+  const canSubmit = Boolean(session && scopeIsCurrent && dialogReady && elements.newCampaignTitle.value.trim() && !createCampaignSubmitting && !createCampaignCommitted);
+  elements.confirmCreateCampaign.disabled = !canSubmit;
+  elements.createAndStartCampaign.disabled = !canSubmit;
+  if (session && !scopeIsCurrent && !createCampaignCommitted) {
+    setCreateCampaignStatus("The selected world or version changed. Close this dialog and open campaign creation again.");
+  }
+  if (!session) elements.confirmCreateCampaign.disabled = !hasPublishedVersion || !worldVersionCampaignReady || !hasRequiredSelection;
 }
 
 function setCreateCampaignStatus(message = "") {
@@ -3111,13 +4618,28 @@ function setWorldCampaignReadiness(message, type = "") {
   elements.worldCampaignReadiness.className = `status ${type}`.trim();
 }
 
-async function loadWorldVersionPlayableCharacters() {
+async function loadWorldVersionPlayableCharacters(selection = {}) {
   const sequence = ++playableCharacterLoadSequence;
+  const worldId = selection.worldId || selectedWorld?.id || "";
+  const selectionEpoch = selection.selectionEpoch ?? worldSelectionEpoch;
   const worldVersionId = selectedWorldVersionId();
+  if (elements.worldAuthorDialog.open && worldVersionId) {
+    worldVersionReadinessCheckedId = worldVersionId;
+    worldVersionReadinessLoading = true;
+    worldVersionReadinessError = "";
+    worldVersionReadiness = null;
+    renderWorldAuthorPublishedReadiness();
+  }
+  const isCurrent = () => sequence === playableCharacterLoadSequence
+    && isCurrentWorldSelection(worldId, selectionEpoch)
+    && selectedWorld?.id === worldId
+    && worldVersionId === selectedWorldVersionId();
   worldVersionCharacters = [];
   worldVersionCampaignReady = false;
-  elements.newCampaignCharacter.replaceChildren(new Option(worldVersionId ? "Loading characters…" : "Publish a world version first", ""));
-  elements.newCampaignCharacter.disabled = true;
+  if (!elements.createCampaignDialog.open) {
+    elements.newCampaignCharacter.replaceChildren(new Option(worldVersionId ? "Loading characters…" : "Publish a world version first", ""));
+    elements.newCampaignCharacter.disabled = true;
+  }
   updateCampaignCreationAvailability();
   if (!worldVersionId) {
     setWorldCampaignReadiness("Publish a world version with at least one playable character before creating a campaign.");
@@ -3125,43 +4647,57 @@ async function loadWorldVersionPlayableCharacters() {
   }
   setWorldCampaignReadiness("Checking whether the selected world version is campaign-ready…");
   try {
-    const response = await api(`/api/v1/world-versions/${worldVersionId}/playable-characters`);
-    if (sequence !== playableCharacterLoadSequence || worldVersionId !== selectedWorldVersionId()) return;
+    const response = await api(`/api/v1/world-versions/${encodeURIComponent(worldVersionId)}/playable-characters`);
+    if (!isCurrent()) return;
     worldVersionCharacters = Array.isArray(response.characters) ? response.characters : [];
     const hasReadinessAssessment = response.readiness && typeof response.readiness.ready === "boolean";
     worldVersionCampaignReady = hasReadinessAssessment ? response.readiness.ready : worldVersionCharacters.length > 0;
+    worldVersionReadiness = hasReadinessAssessment ? { worldVersionId, ready: response.readiness.ready, issues: Array.isArray(response.readiness.issues) ? response.readiness.issues : [] } : null;
+    worldVersionReadinessCheckedId = worldVersionId;
+    worldVersionReadinessError = hasReadinessAssessment ? "" : "The server did not return a readiness assessment.";
+    worldVersionReadinessLoading = false;
+    renderWorldAuthorPublishedReadiness();
     const firstReadinessIssue = Array.isArray(response.readiness?.issues) ? response.readiness.issues[0] : null;
     const firstReadinessIssueMessage = typeof firstReadinessIssue === "string"
       ? firstReadinessIssue
       : String(firstReadinessIssue?.message || "").trim();
-    const options = [];
-    if (!worldVersionCharacters.length) options.push(new Option("No playable characters available", ""));
-    else if (worldVersionCharacters.length > 1) options.push(new Option("Choose a player character", ""));
-    for (const character of worldVersionCharacters) {
-      options.push(new Option(`${character.name} · ${character.rpgStatCount} stats · ${character.defaultTriggerCount} trackers`, character.id));
-    }
-    elements.newCampaignCharacter.replaceChildren(...options);
-    if (worldVersionCharacters.length === 1) elements.newCampaignCharacter.value = worldVersionCharacters[0].id;
-    elements.newCampaignCharacter.disabled = worldVersionCharacters.length < 2;
-    if (!worldVersionCampaignReady) {
-      const issue = firstReadinessIssueMessage || "Add at least one complete playable character.";
-      const message = `${issue} This world version is not campaign-ready; update the draft and publish a new version before creating a campaign.`;
-      elements.newCampaignCharacterNote.textContent = message;
-      setWorldCampaignReadiness(message, "error");
-    } else if (worldVersionCharacters.length > 1) {
-      elements.newCampaignCharacterNote.textContent = `Choose one of ${worldVersionCharacters.length} playable characters. The choice is snapshotted into the campaign.`;
-      setWorldCampaignReadiness(`Campaign-ready with ${worldVersionCharacters.length} playable characters. Choose one when creating a campaign.`, "success");
-    } else {
-      elements.newCampaignCharacterNote.textContent = "This world version has one playable character, which will be snapshotted automatically.";
-      setWorldCampaignReadiness("Campaign-ready with one playable character.", "success");
+    if (!elements.createCampaignDialog.open) {
+      const options = [];
+      if (!worldVersionCharacters.length) options.push(new Option("No playable characters available", ""));
+      else if (worldVersionCharacters.length > 1) options.push(new Option("Choose a player character", ""));
+      for (const character of worldVersionCharacters) {
+        options.push(new Option(`${character.name} · ${character.rpgStatCount} stats · ${character.defaultTriggerCount} trackers`, character.id));
+      }
+      elements.newCampaignCharacter.replaceChildren(...options);
+      if (worldVersionCharacters.length === 1) elements.newCampaignCharacter.value = worldVersionCharacters[0].id;
+      elements.newCampaignCharacter.disabled = worldVersionCharacters.length < 2;
+      if (!worldVersionCampaignReady) {
+        const issue = firstReadinessIssueMessage || "Add at least one complete playable character.";
+        const message = `${issue} This world version is not campaign-ready; update the draft and publish a new version before creating a campaign.`;
+        elements.newCampaignCharacterNote.textContent = message;
+        setWorldCampaignReadiness(message, "error");
+      } else if (worldVersionCharacters.length > 1) {
+        elements.newCampaignCharacterNote.textContent = `Choose one of ${worldVersionCharacters.length} playable characters. The choice is snapshotted into the campaign.`;
+        setWorldCampaignReadiness(`Campaign-ready with ${worldVersionCharacters.length} playable characters. Choose one when creating a campaign.`, "success");
+      } else {
+        elements.newCampaignCharacterNote.textContent = "This world version has one playable character, which will be snapshotted automatically.";
+        setWorldCampaignReadiness("Campaign-ready with one playable character.", "success");
+      }
     }
     updateCampaignCreationAvailability();
   } catch (error) {
-    if (sequence !== playableCharacterLoadSequence || worldVersionId !== selectedWorldVersionId()) return;
+    if (!isCurrent()) return;
+    worldVersionReadinessCheckedId = worldVersionId;
+    worldVersionReadinessLoading = false;
+    worldVersionReadiness = null;
+    worldVersionReadinessError = error.message || String(error);
+    renderWorldAuthorPublishedReadiness();
     worldVersionCharacters = [];
     worldVersionCampaignReady = false;
-    elements.newCampaignCharacter.replaceChildren(new Option("Characters unavailable", ""));
-    elements.newCampaignCharacterNote.textContent = error.message || String(error);
+    if (!elements.createCampaignDialog.open) {
+      elements.newCampaignCharacter.replaceChildren(new Option("Characters unavailable", ""));
+      elements.newCampaignCharacterNote.textContent = error.message || String(error);
+    }
     setWorldCampaignReadiness(`Campaign readiness could not be checked: ${elements.newCampaignCharacterNote.textContent}`, "error");
     updateCampaignCreationAvailability();
     worldMessage(elements.newCampaignCharacterNote.textContent, "error");
@@ -3176,13 +4712,14 @@ async function forkSelectedWorld() {
     elements.forkWorldTitle.focus();
     return;
   }
+  const selectionIntentEpoch = ++worldSelectionIntentEpoch;
   try {
     const fork = await api(`/api/v1/worlds/${selectedWorld.id}/fork`, {
       method: "POST",
       body: JSON.stringify({ title, sourceWorldVersionId: selectedWorldVersionId() })
     });
     elements.forkWorldTitle.value = "";
-    await loadWorlds(fork.worldId);
+    await loadWorldResult(fork.worldId, selectionIntentEpoch);
     worldMessage("Fork created as an unpublished independent draft.", "success");
     if (elements.forkWorldDialog) elements.forkWorldDialog.close();
   } catch (error) {
@@ -3192,15 +4729,18 @@ async function forkSelectedWorld() {
 
 async function toggleWorldArchive() {
   if (!selectedWorld) return;
+  const worldId = selectedWorld.id;
+  const selectionIntentEpoch = worldSelectionIntentEpoch;
   const nextStatus = selectedWorld.status === "archived"
     ? (selectedWorld.versions.length ? "active" : "draft")
     : "archived";
   try {
-    await api(`/api/v1/worlds/${selectedWorld.id}`, { method: "PATCH", body: JSON.stringify({ status: nextStatus }) });
-    await loadWorlds(selectedWorld.id);
+    await api(`/api/v1/worlds/${worldId}`, { method: "PATCH", body: JSON.stringify({ status: nextStatus }) });
+    invalidateDashboardWorldDetails(worldId);
+    await loadWorlds(worldId, { selectionIntentEpoch });
     worldMessage(nextStatus === "archived" ? "World archived. Existing campaigns remain available." : "World restored.", "success");
   } catch (error) {
-    worldMessage(error.message || String(error), "error");
+    worldMessage(safeWorkflowFailure("World archive status could not be changed.", error), "error");
   }
 }
 
@@ -3210,17 +4750,20 @@ async function deleteSelectedWorld() {
     worldMessage("Delete every campaign using this world before deleting the world.", "error");
     return;
   }
+  const worldId = selectedWorld.id;
   const expectedTitle = selectedWorld.title;
   const confirmed = await requestTypedDelete(expectedTitle, `This permanently deletes “${expectedTitle}”, its draft, and all published versions. This cannot be undone.`);
   if (!confirmed) return;
+  const selectionIntentEpoch = worldSelectionIntentEpoch;
   elements.deleteWorld.disabled = true;
   try {
-    await api(`/api/v1/worlds/${selectedWorld.id}`, {
+    await api(`/api/v1/worlds/${worldId}`, {
       method: "DELETE",
       body: JSON.stringify({ confirmation: "DELETE", expectedTitle })
     });
-    selectedWorld = null;
-    await loadWorlds();
+    invalidateDashboardWorldDetails(worldId);
+    if (selectedWorld?.id === worldId) selectedWorld = null;
+    await loadWorlds("", { selectionIntentEpoch });
     worldMessage(`World “${expectedTitle}” was permanently deleted.`, "success");
   } catch (error) {
     worldMessage(error.message || String(error), "error");
@@ -3268,6 +4811,7 @@ async function deleteSelectedWorldVersion() {
   if (!confirmed) return;
 
   const worldId = selectedWorld.id;
+  const selectionIntentEpoch = worldSelectionIntentEpoch;
   const selectedCampaignId = selectedCampaign?.id || "";
   elements.deleteWorldVersion.disabled = true;
   worldMessage(`Deleting world version ${version.versionNumber}…`);
@@ -3276,7 +4820,8 @@ async function deleteSelectedWorldVersion() {
       method: "DELETE",
       body: JSON.stringify({ confirmation: "DELETE", expectedVersionNumber: version.versionNumber })
     });
-    await loadWorlds(worldId);
+    invalidateDashboardWorldDetails(worldId);
+    await loadWorlds(worldId, { selectionIntentEpoch });
     await loadCampaigns(selectedCampaignId);
     worldMessage(`World version ${version.versionNumber} was permanently deleted. Remaining version numbers were unchanged.`, "success");
   } catch (error) {
@@ -3355,14 +4900,139 @@ async function revokeSelectedWorldShare() {
   }
 }
 
-async function createCampaignFromWorld() {
-  if (createCampaignSubmitting || createCampaignCommitted) return;
-  setCreateCampaignStatus();
-  if (!selectedWorld || !selectedWorldVersionId()) return;
-  if (!worldVersionCampaignReady) {
-    setCreateCampaignStatus(elements.worldCampaignReadiness.textContent || "This world version is not campaign-ready.");
-    return;
+function campaignCreationScopeIsCurrent(session) {
+  if (session.entryPoint === "dashboard") {
+    return dashboardWorld?.id === session.worldId && dashboardWorld?.latestVersionId === session.worldVersionId;
   }
+  return selectedWorld?.id === session.worldId && selectedWorldVersionId() === session.worldVersionId;
+}
+
+function campaignCreationSessionIsCurrent(session) {
+  return campaignCreationDialogSession === session
+    && session.epoch === campaignCreationSessionEpoch
+    && elements.createCampaignDialog.open
+    && campaignCreationScopeIsCurrent(session);
+}
+
+function renderCampaignCreationVersion(session, versionNumber = null) {
+  const worldTitle = session.worldTitle || "Selected world";
+  const numberLabel = versionNumber || session.versionNumber;
+  elements.createCampaignWorldVersion.textContent = `${worldTitle} · Version ${numberLabel || "selected"} · Immutable version`;
+}
+
+function updateCampaignCreationDialogAvailability() {
+  const session = campaignCreationDialogSession;
+  const selectedCharacterId = elements.newCampaignCharacter.value;
+  const characterIsAvailable = Boolean(session?.characters?.some((character) => character.id === selectedCharacterId));
+  const canSubmit = Boolean(session && campaignCreationScopeIsCurrent(session) && session.ready && characterIsAvailable && elements.newCampaignTitle.value.trim()
+    && !createCampaignSubmitting && !createCampaignCommitted);
+  elements.confirmCreateCampaign.disabled = !canSubmit;
+  elements.createAndStartCampaign.disabled = !canSubmit;
+}
+
+function setCampaignCreationFieldsDisabled(disabled) {
+  elements.newCampaignTitle.disabled = disabled;
+  elements.newCampaignCharacter.disabled = disabled || !campaignCreationDialogSession?.ready;
+  elements.newCampaignTurnControlStyle.disabled = disabled;
+  elements.cancelCreateCampaign.disabled = disabled;
+  elements.createCampaignAdvanced.querySelector("summary").setAttribute("aria-disabled", String(disabled));
+}
+
+async function loadCampaignCreationCharacters(session) {
+  try {
+    const result = await api(`/api/v1/world-versions/${encodeURIComponent(session.worldVersionId)}/playable-characters`);
+    if (!campaignCreationSessionIsCurrent(session)) return;
+    const characters = Array.isArray(result.characters) ? result.characters.filter((character) =>
+      typeof character?.id === "string" && character.id.trim().length > 0 && character.id.trim().length <= 200
+      && typeof character?.name === "string") : [];
+    if (!result.readiness?.ready || !characters.length) {
+      const issue = result.readiness?.issues?.[0]?.message || "Publish this world version with a playable character before creating a campaign.";
+      setCreateCampaignStatus(issue);
+      session.ready = false;
+      updateCampaignCreationDialogAvailability();
+      return;
+    }
+    const draft = createCampaignCreationDraft({
+      world: { id: session.worldId, worldVersionId: session.worldVersionId, title: session.worldTitle, playableCharacters: characters },
+      userSettings: sessionUser?.settings
+    });
+    session.characters = characters;
+    session.draft = draft;
+    session.ready = true;
+    const options = characters.map((character) => new Option(character.name, character.id));
+    if (characters.length > 1) options.unshift(new Option("Choose a character", ""));
+    elements.newCampaignCharacter.replaceChildren(...options);
+    elements.newCampaignCharacter.disabled = createCampaignSubmitting || createCampaignCommitted;
+    const requestedCharacterId = session.initialDraft?.selectedCharacterId;
+    elements.newCampaignCharacter.value = characters.some((character) => character.id === requestedCharacterId)
+      ? requestedCharacterId
+      : characters.length === 1 ? characters[0].id : "";
+    draft.selectedCharacterId = elements.newCampaignCharacter.value || null;
+    elements.newCampaignCharacterNote.textContent = characters.length === 1
+      ? `${characters[0].name} will be snapshotted into the campaign.`
+      : `Choose one of ${characters.length} published playable characters. The selected character is snapshotted into this campaign.`;
+    if (elements.newCampaignTitle.value === session.initialTitle
+      && normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value) === session.initialTurnControlStyle) {
+      refreshModalBaseline(elements.createCampaignDialog);
+    }
+    updateCampaignCreationDialogAvailability();
+  } catch (error) {
+    if (!campaignCreationSessionIsCurrent(session)) return;
+    setCreateCampaignStatus(error.message || String(error));
+    elements.newCampaignCharacter.disabled = true;
+    session.ready = false;
+    updateCampaignCreationDialogAvailability();
+  }
+}
+
+function openCampaignCreation({ worldId, worldVersionId, initialDraft = null }) {
+  const entryPoint = campaignCreationEntryPoint;
+  const world = worlds.find((candidate) => candidate.id === worldId);
+  const detailTitle = selectedWorld?.id === worldId ? selectedWorld.title : dashboardWorld?.id === worldId ? dashboardWorld.title : world?.title;
+  const version = selectedWorld?.id === worldId ? selectedWorld.versions?.find((candidate) => candidate.id === worldVersionId)
+    : dashboardWorld?.id === worldId && dashboardWorld.latestVersionId === worldVersionId ? { versionNumber: dashboardWorld.latestVersionNumber } : null;
+  const title = typeof initialDraft?.title === "string" ? initialDraft.title : "";
+  const initialTurnControlStyle = normalizedTurnControlStyle(initialDraft?.turnControlStyle || sessionUser?.settings?.defaultTurnControlStyle);
+  const session = {
+    epoch: ++campaignCreationSessionEpoch,
+    worldId,
+    worldVersionId,
+    worldTitle: detailTitle || "Selected world",
+    versionNumber: version?.versionNumber || null,
+    entryPoint,
+    initialDraft,
+    initialTitle: title,
+    initialTurnControlStyle,
+    characters: [],
+    draft: null,
+    ready: false,
+    committedCampaignId: null
+  };
+  campaignCreationDialogSession = session;
+  createCampaignSubmitting = false;
+  createCampaignCommitted = false;
+  elements.createCampaignDialog.dataset.dismissMode = "confirm";
+  elements.newCampaignTitle.value = title;
+  setCampaignCreationFieldsDisabled(false);
+  elements.newCampaignCharacter.disabled = true;
+  elements.newCampaignCharacter.replaceChildren(new Option("Loading playable characters…", ""));
+  elements.newCampaignCharacter.value = "";
+  elements.newCampaignTurnControlStyle.value = initialTurnControlStyle;
+  elements.createCampaignAdvanced.open = false;
+  elements.openCommittedCampaign.hidden = true;
+  elements.openCommittedCampaign.disabled = false;
+  setCreateCampaignStatus();
+  renderCampaignCreationVersion(session);
+  updateCampaignCreationDialogAvailability();
+  openManagedModal(elements.createCampaignDialog);
+  elements.newCampaignTitle.focus();
+  void loadCampaignCreationCharacters(session);
+}
+
+async function createCampaignFromWorld(event) {
+  if (createCampaignSubmitting || createCampaignCommitted) return;
+  const session = campaignCreationDialogSession;
+  if (!session || !campaignCreationSessionIsCurrent(session) || !session.ready) return;
   const title = elements.newCampaignTitle.value.trim();
   if (!title) {
     setCreateCampaignStatus("Enter a title for the new campaign.");
@@ -3370,42 +5040,79 @@ async function createCampaignFromWorld() {
     return;
   }
   const selectedCharacterId = elements.newCampaignCharacter.value;
-  if (worldVersionCharacters.length > 1 && !selectedCharacterId) {
-    setCreateCampaignStatus("Choose a player character for the new campaign.");
+  if (!session.characters.some((character) => character.id === selectedCharacterId)) {
+    setCreateCampaignStatus("Choose a playable character from this published version.");
     elements.newCampaignCharacter.focus();
     return;
   }
+  const startAfterCreate = event?.submitter?.value === "start";
+  const draft = {
+    ...session.draft,
+    title,
+    selectedCharacterId,
+    turnControlStyle: normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value),
+    startAfterCreate
+  };
+  let request;
+  try {
+    request = buildCampaignCreateRequest(draft);
+  } catch (error) {
+    setCreateCampaignStatus(error.message || String(error));
+    return;
+  }
+  const body = JSON.stringify(request);
   createCampaignSubmitting = true;
-  updateCampaignCreationAvailability();
+  setCampaignCreationFieldsDisabled(true);
+  updateCampaignCreationDialogAvailability();
+  setCreateCampaignStatus("Creating campaign…");
   try {
     let campaign;
     try {
-      campaign = await api("/api/v1/campaigns", {
-        method: "POST",
-        body: JSON.stringify({
-          title,
-          worldVersionId: selectedWorldVersionId(),
-          turnControlStyle: normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value),
-          ...(selectedCharacterId ? { selectedCharacterId } : {})
-        })
-      });
+      campaign = await api("/api/v1/campaigns", { method: "POST", body });
     } catch (error) {
-      setCreateCampaignStatus(error.message || String(error));
-      worldMessage(error.message || String(error), "error");
+      if (campaignCreationDialogSession === session) setCreateCampaignStatus(error.message || String(error));
       return;
     }
+    session.committedCampaignId = campaign.id;
     createCampaignCommitted = true;
-    elements.newCampaignTitle.value = "";
-    if (elements.createCampaignDialog) elements.createCampaignDialog.close();
+    setCampaignCreationFieldsDisabled(true);
+    elements.cancelCreateCampaign.disabled = false;
+    refreshModalBaseline(elements.createCampaignDialog);
+    let persistenceWarning = "";
     try {
-      await loadCampaigns(campaign.id);
-      worldMessage(`Campaign created for ${campaign.selectedCharacterName || "the selected character"} from the selected immutable world version.`, "success");
+      localStorage.setItem("infiniteQuestLastCampaignId", campaign.id);
     } catch (error) {
-      worldMessage(`Campaign was created, but the list could not refresh: ${error.message || String(error)}. Use Refresh campaigns in Campaigns to see it.`, "error");
+      persistenceWarning = ` The campaign is committed, but the remembered campaign could not be saved: ${error.message || String(error)}`;
+    }
+    if (startAfterCreate) {
+      try {
+        window.location.assign(`/story/${encodeURIComponent(session.committedCampaignId)}`);
+        elements.createCampaignDialog.close();
+      } catch (error) {
+        setCreateCampaignStatus(`Campaign was created, but the story could not be opened: ${error.message || String(error)}.${persistenceWarning}`);
+        elements.openCommittedCampaign.hidden = false;
+      }
+      return;
+    }
+    try {
+      await loadCampaigns(session.committedCampaignId, { explicitPreselect: true });
+      if (campaignCreationDialogSession === session) {
+        elements.createCampaignDialog.close();
+        worldMessage(`Campaign created for ${campaign.selectedCharacterName || "the selected character"} from the selected immutable world version.${persistenceWarning}`, "success");
+      }
+    } catch (error) {
+      if (campaignCreationDialogSession === session) {
+        setCreateCampaignStatus(`Campaign was created, but the campaign list could not refresh: ${error.message || String(error)}.${persistenceWarning} Open the story or return to Campaigns and refresh the list.`);
+        elements.openCommittedCampaign.hidden = false;
+      }
     }
   } finally {
-    createCampaignSubmitting = false;
-    updateCampaignCreationAvailability();
+    if (campaignCreationDialogSession === session) {
+      createCampaignSubmitting = false;
+      setCampaignCreationFieldsDisabled(createCampaignCommitted);
+      if (createCampaignCommitted) elements.cancelCreateCampaign.disabled = false;
+      updateCampaignCreationDialogAvailability();
+    }
   }
 }
 
@@ -3414,23 +5121,51 @@ function openCreateCampaignDialog() {
     worldMessage(elements.worldCampaignReadiness.textContent || "This world version is not campaign-ready.", "error");
     return;
   }
-  createCampaignCommitted = false;
-  setCreateCampaignStatus();
-  elements.newCampaignTitle.value = "";
-  elements.newCampaignCharacter.value = worldVersionCharacters.length === 1 ? worldVersionCharacters[0].id : "";
-  updateCampaignCreationAvailability();
-  openManagedModal(elements.createCampaignDialog);
+  campaignCreationEntryPoint = "management";
+  openCampaignCreation({ worldId: selectedWorld.id, worldVersionId: selectedWorldVersionId() });
 }
 
-async function loadCampaigns(preselectId = "", { focusNoSelection = false } = {}) {
-  ({ campaigns } = await api("/api/v1/campaigns"));
+function openCommittedCampaignStory() {
+  const campaignId = campaignCreationDialogSession?.committedCampaignId;
+  if (!campaignId) return;
+  try { localStorage.setItem("infiniteQuestLastCampaignId", campaignId); } catch { /* The committed campaign remains openable by its ID. */ }
+  try {
+    window.location.assign(`/story/${encodeURIComponent(campaignId)}`);
+  } catch (error) {
+    setCreateCampaignStatus(`Campaign was created, but the story could not be opened: ${error.message || String(error)}`);
+  }
+}
+
+async function loadCampaigns(preselectId = "", { focusNoSelection = false, explicitPreselect = false, preserveWorkflowFeedbackForCampaignId = "", selectionRequest = null, navigationIntent = null } = {}) {
+  try {
+    ({ campaigns } = await api("/api/v1/campaigns"));
+  } catch (error) {
+    campaignsLoadError = !campaignsLoaded;
+    if (!campaignsLoaded) {
+      renderCampaignListLoadState();
+      updateStoryViewLink();
+    }
+    throw error;
+  }
+  clearDashboardWorkflowError("campaigns");
+  clearWorkflowReadFailure(elements.campaignStatusMessage, "campaigns", "workflowRetryCampaigns");
+  campaignsLoaded = true;
+  campaignsLoadError = false;
+  const rememberedCampaignId = localStorage.getItem("infiniteQuestLastCampaignId");
+  if (rememberedCampaignId && !campaigns.some((campaign) => campaign.id === rememberedCampaignId && campaign.status === "active")) {
+    localStorage.removeItem("infiniteQuestLastCampaignId");
+  }
   renderDashboardCampaigns();
-  void loadDashboardStats();
-  elements.campaignList.replaceChildren();
+  updateStoryViewLink();
+  void loadDashboardStats("campaigns");
+  if ((selectionRequest !== null && selectionRequest !== campaignSelectionRequest)
+    || (navigationIntent !== null && navigationIntent !== managementNavigationIntent)) return;
+  renderManagementCampaigns();
   if (!campaigns.length) {
-    elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
+    if (!(await canLeaveCampaignEditor(null))) return;
     campaignSelectionRequest += 1;
     selectedCampaign = null;
+    selectedCampaignIsExplicit = false;
     updateStoryViewLink();
     clearCampaignEditorSelection({ focus: focusNoSelection });
     elements.illustrationSourcePolicy.value = "off";
@@ -3438,139 +5173,307 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false } = {}
     elements.campaignCostSection.classList.add("hidden");
     return;
   }
-  for (const campaign of campaigns) {
-    const button = document.createElement("button");
-    button.className = "campaign-button";
-    button.type = "button";
-    button.dataset.campaignId = campaign.id;
-    const title = document.createElement("strong");
-    title.textContent = campaign.title;
-    const details = document.createElement("span");
-    details.textContent = `${campaign.activeTurnNumber} accepted turns · ${campaign.worldTitle} v${campaign.worldVersionNumber}${campaign.selectedCharacterName ? ` · ${campaign.selectedCharacterName}` : ""}${campaign.worldUpdateAvailable ? " · update available" : ""}${campaign.status === "archived" ? " · archived" : ""}`;
-    button.append(title, details);
-    button.addEventListener("click", () => selectCampaign(campaign));
-    elements.campaignList.append(button);
+  const target = campaigns.find((campaign) => campaign.id === preselectId)
+    || (!explicitPreselect && selectedCampaign && campaigns.find((campaign) => campaign.id === selectedCampaign.id));
+  if (target) {
+    const preservesExplicitSelection = selectedCampaignIsExplicit && selectedCampaign?.id === target.id;
+    await selectCampaign(target, {
+      explicit: explicitPreselect || preservesExplicitSelection,
+      preserveWorkflowFeedbackForCampaignId
+    });
   }
-  const target = campaigns.find((campaign) => campaign.id === preselectId) || (selectedCampaign && campaigns.find((campaign) => campaign.id === selectedCampaign.id));
-  if (target) await selectCampaign(target);
   else {
+    if (!(await canLeaveCampaignEditor(null))) return;
     campaignSelectionRequest += 1;
     selectedCampaign = null;
+    selectedCampaignIsExplicit = false;
     updateStoryViewLink();
     clearCampaignEditorSelection({ focus: focusNoSelection });
   }
 }
 
-async function selectCampaign(campaign) {
+async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedbackForCampaignId = "" } = {}) {
+  if (!(await canLeaveCampaignEditor(campaign.id))) return;
+  const previousCampaignId = selectedCampaign?.id;
   elements.embeddingProgress.classList.add("hidden");
   const selectionRequest = ++campaignSelectionRequest;
-  const runtimeState = await api(`/api/v1/campaigns/${campaign.id}/state`);
+  const previousPanel = activeCampaignSettingsPanel;
+  campaignCoreReady = false;
+  elements.migrateCampaign.disabled = true;
+  elements.campaignSettingsRail.querySelectorAll("[role=tab]").forEach((tab) => { tab.disabled = true; });
+  CAMPAIGN_SETTINGS_SELECTION_CONTROLS.forEach((id) => { if (elements[id]) elements[id].disabled = true; });
+  setCampaignSettingsSectionControls("illustrations", true);
+  setCampaignSettingsSectionControls("chronicle", true);
+  elements.budgetTokens.disabled = true;
+  elements.compression.disabled = true;
+  elements.memoryQuery.disabled = true;
+  elements.previewContext.disabled = true;
+  document.querySelectorAll("[data-campaign-section-feedback]").forEach((feedback) => {
+    feedback.replaceChildren();
+    feedback.className = "status hidden";
+  });
+  campaignSectionLoader.setSelection(campaign.id, selectionRequest);
+  let runtimeState;
+  try {
+    runtimeState = await api(`/api/v1/campaigns/${campaign.id}/state`);
+  } catch (error) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign) {
+      campaignSectionLoader.setSelection(selectedCampaign.id, selectionRequest);
+      CAMPAIGN_SETTINGS_SELECTION_CONTROLS.forEach((id) => { if (elements[id]) elements[id].disabled = false; });
+      updateCampaignMigrationAvailability();
+      setCampaignSettingsSectionControls("illustrations", true);
+      setCampaignSettingsSectionControls("chronicle", true);
+      elements.budgetTokens.disabled = true;
+      elements.compression.disabled = true;
+      elements.memoryQuery.disabled = true;
+      campaignCoreReady = true;
+      setCampaignSettingsAvailability(true);
+      setCampaignSettingsPanel(previousPanel);
+    }
+    throw error;
+  }
   if (selectionRequest !== campaignSelectionRequest) return;
   selectedCampaign = {
     ...campaign,
     activeTurnNumber: runtimeState.activeTurnNumber,
     stateRevision: runtimeState.revision
   };
+  selectedCampaignIsExplicit = explicit;
   campaign = selectedCampaign;
-  void loadCampaignStoryMemory(campaign.id, selectionRequest);
+  if (previousCampaignId !== campaign.id) clearContextPreviewPresentation();
+  if (previousCampaignId && previousCampaignId !== campaign.id) {
+    for (const panelId of CAMPAIGN_SETTINGS_PANEL_IDS) {
+      if (panelId !== "overview") setCampaignSettingsSectionContentVisibility(panelId, false);
+    }
+  }
+  campaignStoryMemorySettings = null;
+  renderCampaignStoryMemorySettings(null, { message: "Open Story Behavior to load the saved Story Memory level for this campaign." });
   updateStoryViewLink();
-  document.querySelectorAll(".campaign-button").forEach((button) => button.classList.toggle("active", button.dataset.campaignId === campaign.id));
+  elements.campaignList.querySelectorAll(".campaign-button").forEach((button) => {
+    const active = button.dataset.campaignId === campaign.id;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
   elements.memoryTitle.textContent = campaign.title;
   elements.campaignEditorSummary.textContent = `${campaign.status} · ${campaign.worldTitle} v${campaign.worldVersionNumber}${campaign.selectedCharacterName ? ` · ${campaign.selectedCharacterName}` : ""}`;
-  setCampaignSettingsAvailability(true);
-  elements.reindexMemory.disabled = false;
-  elements.previewContext.disabled = false;
-  elements.saveEmbeddingConfig.disabled = false;
+  elements.campaignWorldLink.hidden = !UUID_ROUTE_PATTERN.test(String(campaign.worldId || ""));
+  if (!elements.campaignWorldLink.hidden) elements.campaignWorldLink.href = managementSelectionHash("worlds", "world", campaign.worldId);
+  elements.campaignCostSection.classList.add("hidden");
+  elements.saveEmbeddingConfig.disabled = true;
+  elements.reindexMemory.disabled = true;
+  elements.previewContext.disabled = true;
   elements.reindexEmbeddings.disabled = true;
-  elements.saveIllustrationConfig.disabled = false;
+  elements.saveIllustrationConfig.disabled = true;
   elements.campaignTitle.value = campaign.title;
   elements.campaignStatus.value = campaign.status;
-  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.campaignStoryContextBudgetTokens, elements.saveCampaign, elements.transferCampaign, elements.editCampaignCharacter, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor, elements.embeddingEnabled, elements.embeddingRetrievalImplementation, elements.embeddingRetrievalShadowEnabled, elements.embeddingProvider, elements.discoverEmbeddingModels, elements.embeddingModel, elements.embeddingDocumentPrefix, elements.embeddingQueryPrefix, elements.embeddingBatchSize, elements.budgetTokens, elements.compression, elements.memoryQuery].forEach((element) => { element.disabled = false; });
   elements.campaignTextProvider.value = campaign.textProviderProfileId || "";
   elements.campaignImageProvider.value = campaign.imageProviderProfileId || "";
   elements.campaignTurnControlStyle.value = normalizedTurnControlStyle(campaign.turnControlStyle);
   elements.campaignStoryLengthProfile.value = campaign.storyLengthProfile || "standard";
   elements.campaignStoryContextBudgetTokens.value = String(campaign.storyContextBudgetTokens || 32_000);
+  campaignEditGuard.reset(campaign.id, selectionRequest, campaignSettingsSnapshot());
+  renderCampaignSaveFeedback("saved");
   applyStoryProviderContextBudget();
   populateEmbeddingProviderSelect();
-  const world = await api(`/api/v1/worlds/${campaign.worldId}`);
   if (selectionRequest !== campaignSelectionRequest) return;
+  CAMPAIGN_SETTINGS_SELECTION_CONTROLS.forEach((id) => { if (elements[id]) elements[id].disabled = false; });
+  setCampaignSettingsSectionControls("illustrations", true);
+  setCampaignSettingsSectionControls("chronicle", true);
+  elements.budgetTokens.disabled = true;
+  elements.compression.disabled = true;
+  elements.memoryQuery.disabled = true;
   elements.campaignWorldVersion.replaceChildren();
-  for (const version of [...world.versions].reverse()) {
-    elements.campaignWorldVersion.append(new Option(`Version ${version.versionNumber}`, version.id));
+  elements.campaignWorldVersion.disabled = true;
+  let world = null;
+  let worldDetailsError = null;
+  try {
+    world = await api(`/api/v1/worlds/${campaign.worldId}`);
+  } catch (error) {
+    worldDetailsError = error;
   }
-  elements.campaignWorldVersion.value = campaign.worldVersionId;
-  setCampaignSettingsPanel(activeCampaignSettingsPanel);
-  elements.migrateCampaign.disabled = !world.versions.some((version) => version.versionNumber > campaign.worldVersionNumber);
-  if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
-  else elements.campaignStatusMessage.classList.add("hidden");
-  const metrics = await refreshCampaignMemoryMetrics();
   if (selectionRequest !== campaignSelectionRequest) return;
-  await refreshCampaignCostSummary();
-  if (selectionRequest !== campaignSelectionRequest) return;
-  await loadEmbeddingConfig();
-  if (selectionRequest !== campaignSelectionRequest) return;
-  if (["queued", "running"].includes(metrics?.semanticHealth?.jobStatus) && metrics.semanticHealth.jobId) {
-    void resumeEmbeddingJobProgress(metrics.semanticHealth.jobId, campaign.id);
+  if (world) {
+    for (const version of [...world.versions].reverse()) {
+      const option = new Option(`Version ${version.versionNumber}`, version.id);
+      option.dataset.versionNumber = String(version.versionNumber);
+      elements.campaignWorldVersion.append(option);
+    }
+    elements.campaignWorldVersion.value = campaign.worldVersionId;
+    elements.campaignWorldVersion.disabled = false;
+  } else {
+    elements.campaignWorldVersion.append(new Option("World details unavailable", ""));
+    elements.campaignWorldVersion.disabled = true;
   }
-  await loadIllustrationConfig();
-  if (selectionRequest !== campaignSelectionRequest) return;
-  await loadLatestImageJob(false);
-  if (selectionRequest !== campaignSelectionRequest) return;
-  await previewContext();
+  updateCampaignMigrationAvailability();
+  if (!managementSelectionErrorIsCurrent("campaigns") && preserveWorkflowFeedbackForCampaignId !== campaign.id) {
+    if (worldDetailsError) campaignMessage(safeWorkflowFailure("Campaign selected, but its world details could not be loaded.", worldDetailsError), "error");
+    else if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
+    else {
+      const hasPendingListReadFailure = dashboardWorkflowErrors.has("campaigns");
+      campaignMessage("");
+      if (!hasPendingListReadFailure) elements.campaignStatusMessage.classList.add("hidden");
+    }
+  }
+  campaignSectionLoader.setSelection(campaign.id, selectionRequest);
+  campaignCoreReady = true;
+  setCampaignSettingsAvailability(true);
+  setCampaignSettingsPanel(previousPanel);
 }
 
-async function saveSelectedCampaign(event) {
-  event.preventDefault();
-  if (!selectedCampaign) return;
+async function saveSelectedCampaign(event = null, { snapshot = campaignSettingsSnapshot() } = {}) {
+  event?.preventDefault();
+  if (!selectedCampaign || campaignSaveInProgress) return false;
+  const campaignId = selectedCampaign.id;
+  const selectionRequest = campaignSelectionRequest;
+  const campaign = selectedCampaign;
+  campaignSaveInProgress = true;
   elements.saveCampaign.disabled = true;
+  renderCampaignSaveFeedback("saving");
   try {
-    await api(`/api/v1/campaigns/${selectedCampaign.id}`, {
+    const updatedCampaign = await api(`/api/v1/campaigns/${campaignId}`, {
       method: "PATCH",
       body: JSON.stringify({
-        title: elements.campaignTitle.value,
-        status: elements.campaignStatus.value,
-        textProviderProfileId: elements.campaignTextProvider.value || null,
-        turnControlStyle: savedTurnControlStyle(elements.campaignTurnControlStyle.value, selectedCampaign.turnControlStyle),
-        expectedTurnControlStyle: selectedCampaign.turnControlStyle,
-        expectedActiveTurnNumber: selectedCampaign.activeTurnNumber,
-        expectedStateRevision: selectedCampaign.stateRevision,
-        storyLengthProfile: elements.campaignStoryLengthProfile.value,
-        storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)
+        ...snapshot,
+        turnControlStyle: savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle),
+        expectedTurnControlStyle: campaign.turnControlStyle,
+        expectedActiveTurnNumber: campaign.activeTurnNumber,
+        expectedStateRevision: campaign.stateRevision
       })
     });
-    await loadCampaigns(selectedCampaign.id);
-    campaignMessage("Campaign metadata and Story Engine defaults saved. Accepted turns and Chronicle memory were unchanged.", "success");
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return false;
+    selectedCampaign = { ...campaign, ...updatedCampaign };
+    campaigns = campaigns.map((item) => item.id === campaignId ? selectedCampaign : item);
+    renderManagementCampaigns();
+    elements.memoryTitle.textContent = selectedCampaign.title;
+    elements.campaignEditorSummary.textContent = `${selectedCampaign.status} · ${selectedCampaign.worldTitle} v${selectedCampaign.worldVersionNumber}${selectedCampaign.selectedCharacterName ? ` · ${selectedCampaign.selectedCharacterName}` : ""}`;
+    const campaignButton = elements.campaignList.querySelector(`[data-campaign-id="${campaignId}"]`);
+    if (campaignButton) {
+      campaignButton.querySelector("strong").textContent = selectedCampaign.title;
+      const details = campaignButton.querySelector("span");
+      if (details) details.textContent = `${selectedCampaign.activeTurnNumber} accepted turns · ${selectedCampaign.worldTitle} v${selectedCampaign.worldVersionNumber}${selectedCampaign.selectedCharacterName ? ` · ${selectedCampaign.selectedCharacterName}` : ""}${selectedCampaign.worldUpdateAvailable ? " · update available" : ""}${selectedCampaign.status === "archived" ? " · archived" : ""}`;
+    }
+    renderDashboardCampaigns();
+    campaignEditGuard.markSaved(campaignId, selectionRequest, snapshot);
+    const editsRemain = campaignEditGuard.isDirty(campaignSettingsSnapshot());
+    renderCampaignSaveFeedback(editsRemain ? "unsaved" : "saved");
+    campaignMessage(editsRemain
+      ? "Submitted campaign settings saved. Newer edits remain unsaved. Story Memory, illustrations, and Semantic Retrieval save independently."
+      : "Campaign settings saved. Story Memory, illustrations, and Semantic Retrieval save independently.", "success");
+    return true;
   } catch (error) {
-    campaignMessage(error.message || String(error), "error");
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
+      renderCampaignSaveFeedback("error");
+      const message = error?.statusCode === 409 && error?.details?.code === "active_turn_changed"
+        ? "Campaign changed. Your edits are still here. Reload the campaign before saving again."
+        : "Campaign settings could not be saved.";
+      campaignMessage(safeWorkflowFailure(message, error), "error");
+    }
+    return false;
   } finally {
+    campaignSaveInProgress = false;
     elements.saveCampaign.disabled = !selectedCampaign;
   }
 }
 
+function renderCampaignSaveFeedback(state) {
+  const labels = {
+    saved: "Campaign settings saved",
+    unsaved: "Campaign settings unsaved",
+    saving: "Saving campaign settings…",
+    error: "Campaign settings were not saved"
+  };
+  elements.campaignSaveStatus.dataset.state = state;
+  elements.campaignSaveStatus.textContent = labels[state] || labels.unsaved;
+}
+
+async function canLeaveCampaignEditor(nextCampaignId) {
+  const allowed = await campaignEditGuard.canLeave(nextCampaignId, {
+    getCurrentCampaignId: () => selectedCampaign?.id ?? null,
+    getCurrentEpoch: () => campaignSelectionRequest,
+    getSnapshot: campaignSettingsSnapshot,
+    confirm: confirmCampaignEditDisposition,
+    save: (snapshot) => saveSelectedCampaign(null, { snapshot }),
+    discard: restoreCampaignSettings
+  });
+  if (allowed && !campaignEditGuard.isDirty(campaignSettingsSnapshot())) renderCampaignSaveFeedback("saved");
+  return allowed;
+}
+
+function restoreCampaignSettings() {
+  if (!selectedCampaign) return;
+  elements.campaignTitle.value = selectedCampaign.title;
+  elements.campaignStatus.value = selectedCampaign.status;
+  elements.campaignTextProvider.value = selectedCampaign.textProviderProfileId || "";
+  elements.campaignTurnControlStyle.value = normalizedTurnControlStyle(selectedCampaign.turnControlStyle);
+  elements.campaignStoryLengthProfile.value = selectedCampaign.storyLengthProfile || "standard";
+  elements.campaignStoryContextBudgetTokens.value = String(selectedCampaign.storyContextBudgetTokens || 32_000);
+}
+
+function confirmCampaignEditDisposition() {
+  if (campaignLeavePromptOpen) return campaignLeavePrompt;
+  campaignLeavePromptOpen = true;
+  elements.discardChangesTitle.textContent = "Campaign settings have changed";
+  elements.discardChangesDialog.querySelector('button[value="keep"]').textContent = "Stay";
+  elements.discardChangesMessage.textContent = "Save these settings before leaving, discard the edits, or stay here and keep editing.";
+  setCampaignSaveDecisionVisible(true);
+  elements.discardChangesDialog.returnValue = "";
+  openManagedModal(elements.discardChangesDialog);
+  campaignLeavePrompt = new Promise((resolve) => {
+    elements.discardChangesDialog.addEventListener("close", () => {
+      setCampaignSaveDecisionVisible(false);
+      campaignLeavePromptOpen = false;
+      campaignLeavePrompt = null;
+      resolve(elements.discardChangesDialog.returnValue === "save" ? "save" : elements.discardChangesDialog.returnValue === "discard" ? "discard" : "stay");
+elements.discardChangesTitle.textContent = "Discard unsaved changes?";
+      elements.discardChangesDialog.querySelector('button[value="keep"]').textContent = "Keep editing";
+      elements.discardChangesMessage.textContent = "Your edits have not been saved. Keep editing or discard them and close this window.";
+    }, { once: true });
+  });
+  return campaignLeavePrompt;
+}
+
 async function migrateSelectedCampaign() {
   if (!selectedCampaign) return;
-  const world = await api(`/api/v1/worlds/${selectedCampaign.worldId}`);
+  const campaign = selectedCampaign;
+  const campaignId = campaign.id;
+  const worldId = campaign.worldId;
+  const selectionRequest = campaignSelectionRequest;
+  const campaignWorldVersionId = campaign.worldVersionId;
+  const campaignWorldVersionNumber = campaign.worldVersionNumber;
   const targetId = elements.campaignWorldVersion.value;
+  const detailRequest = getDashboardWorldDetails(worldId);
+  const requestEpoch = dashboardWorldDetailRequestEpochs.get(worldId);
+  const isCurrentCampaign = () => selectionRequest === campaignSelectionRequest
+    && selectedCampaign?.id === campaignId
+    && selectedCampaign?.worldId === worldId
+    && selectedCampaign?.worldVersionId === campaignWorldVersionId
+    && selectedCampaign?.worldVersionNumber === campaignWorldVersionNumber;
+  const isCurrentIntent = () => isCurrentCampaign()
+    && elements.campaignWorldVersion.value === targetId
+    && isDashboardWorldDetailRequestCurrent(worldId, requestEpoch);
+  const world = await detailRequest;
+  if (!isCurrentIntent()) return;
   const target = world.versions.find((version) => version.id === targetId);
-  if (!target || target.versionNumber <= selectedCampaign.worldVersionNumber) {
+  if (!target || target.versionNumber <= campaignWorldVersionNumber) {
     campaignMessage("Select a newer published version before migrating.", "error");
     return;
   }
-  if (!window.confirm(`Migrate this campaign from world version ${selectedCampaign.worldVersionNumber} to version ${target.versionNumber}? Accepted turns will remain append-only.`)) return;
+  if (!window.confirm(`Migrate this campaign from world version ${campaignWorldVersionNumber} to version ${target.versionNumber}? Accepted turns will remain append-only.`)) return;
+  if (!isCurrentIntent()) return;
   elements.migrateCampaign.disabled = true;
   try {
-    await api(`/api/v1/campaigns/${selectedCampaign.id}/migrate-world`, {
+    await api(`/api/v1/campaigns/${campaignId}/migrate-world`, {
       method: "POST",
       body: JSON.stringify({ worldVersionId: target.id, note: "Explicit migration from the World Library interface." })
     });
-    await loadCampaigns(selectedCampaign.id);
+    if (!isCurrentCampaign()) return;
+    await loadCampaigns(campaignId, { selectionRequest });
+    if (selectedCampaign?.id !== campaignId || selectedCampaign?.worldId !== worldId) return;
     campaignMessage(`Campaign migrated to world version ${target.versionNumber}. The next generation will bootstrap a fresh model chain from database state.`, "success");
   } catch (error) {
-    campaignMessage(error.message || String(error), "error");
+    if (isCurrentIntent()) campaignMessage(error.message || String(error), "error");
   }
 }
-
 function transferRequest() {
   return {
     targetWorldVersionId: elements.transferTargetVersion.value,
@@ -3640,13 +5543,20 @@ async function previewCampaignTransfer() {
 }
 
 async function loadTransferTargetVersions() {
+  const sequence = ++transferTargetVersionsRequestEpoch;
   const worldId = elements.transferTargetWorld.value;
   resetTransferPreview(worldId ? "Loading published versions…" : undefined);
   elements.transferTargetVersion.replaceChildren(new Option(worldId ? "Loading published versions…" : "Select a target world first", ""));
   elements.transferTargetVersion.disabled = true;
   if (!worldId) return;
+  const detailRequest = getDashboardWorldDetails(worldId);
+  const requestEpoch = dashboardWorldDetailRequestEpochs.get(worldId);
+  const isCurrentRequest = () => sequence === transferTargetVersionsRequestEpoch
+    && worldId === elements.transferTargetWorld.value
+    && isDashboardWorldDetailRequestCurrent(worldId, requestEpoch);
   try {
-    const world = await api(`/api/v1/worlds/${worldId}`);
+    const world = await detailRequest;
+    if (!isCurrentRequest()) return;
     elements.transferTargetVersion.replaceChildren(new Option("Select a published version", ""));
     for (const version of [...(world.versions || [])].reverse()) {
       elements.transferTargetVersion.append(new Option(`Version ${version.versionNumber}${version.releaseNotes ? ` · ${version.releaseNotes}` : ""}`, version.id));
@@ -3654,11 +5564,11 @@ async function loadTransferTargetVersions() {
     elements.transferTargetVersion.disabled = !(world.versions || []).length;
     resetTransferPreview((world.versions || []).length ? undefined : "This world has no published version available for transfer.");
   } catch (error) {
+    if (!isCurrentRequest()) return;
     resetTransferPreview(error.message || String(error));
     elements.transferPreviewSummary.className = "status error";
   }
 }
-
 async function openCampaignTransfer() {
   if (!selectedCampaign) return;
   transferIdempotencyKey = crypto.randomUUID();
@@ -3685,6 +5595,7 @@ async function commitCampaignTransfer(event) {
   event.preventDefault();
   if (!selectedCampaign || !transferPreview) return;
   const sourceCampaignId = selectedCampaign.id;
+  const worldSelectionIntentEpochAtStart = worldSelectionIntentEpoch;
   elements.confirmTransferCampaign.disabled = true;
   elements.cancelTransferCampaign.disabled = true;
   elements.transferPreviewSummary.textContent = "Creating the transferred campaign and rebuilding Chronicle…";
@@ -3702,7 +5613,10 @@ async function commitCampaignTransfer(event) {
       })
     });
     elements.transferCampaignDialog.close();
-    await Promise.all([loadWorlds(), loadCampaigns(result.targetCampaignId)]);
+    await Promise.all([
+      loadWorlds("", { selectionIntentEpoch: worldSelectionIntentEpochAtStart }),
+      loadCampaigns(result.targetCampaignId, { explicitPreselect: true })
+    ]);
     campaignMessage("Transferred campaign created and selected. Review it before separately archiving the original campaign; the original remains unchanged.", "success");
   } catch (error) {
     elements.transferPreviewSummary.textContent = error.statusCode === 409
@@ -3727,7 +5641,7 @@ async function exportSelectedCampaign() {
 }
 
 async function loadSelectedCampaign() {
-  if (!selectedCampaign) return;
+  if (!selectedCampaign || !(await canLeaveCampaignEditor(null))) return;
   window.location.assign("/story/" + encodeURIComponent(selectedCampaign.id));
 }
 
@@ -3735,6 +5649,7 @@ async function deleteSelectedCampaign() {
   if (!selectedCampaign) return;
   const campaignId = selectedCampaign.id;
   const expectedTitle = selectedCampaign.title;
+  const worldSelectionIntentEpochAtStart = worldSelectionIntentEpoch;
   const confirmed = await requestTypedDelete(expectedTitle, `This permanently deletes “${expectedTitle}”, its accepted turns, Chronicle memory, and generated asset records. This cannot be undone.`);
   if (!confirmed) return;
   elements.deleteCampaign.disabled = true;
@@ -3745,9 +5660,10 @@ async function deleteSelectedCampaign() {
     });
     campaignSelectionRequest += 1;
     selectedCampaign = null;
+    selectedCampaignIsExplicit = false;
     updateStoryViewLink();
     await loadCampaigns("", { focusNoSelection: true });
-    await loadWorlds(selectedWorld?.id || "");
+    await loadWorlds("", { selectionIntentEpoch: worldSelectionIntentEpochAtStart });
   } catch (error) {
     campaignMessage(error.message || String(error), "error");
     elements.deleteCampaign.disabled = !selectedCampaign;
@@ -3839,11 +5755,11 @@ function renderSemanticMemoryHealth(health) {
   }));
 }
 
-async function refreshCampaignMemoryMetrics() {
+async function refreshCampaignMemoryMetrics(selectionRequest = campaignSelectionRequest, signal) {
   if (!selectedCampaign) return null;
   const campaignId = selectedCampaign.id;
-  const metrics = await api(`/api/v1/campaigns/${campaignId}/memory/metrics`);
-  if (selectedCampaign?.id !== campaignId) return null;
+  const metrics = await api(`/api/v1/campaigns/${campaignId}/memory/metrics`, { signal });
+  if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return null;
   elements.memoryMetrics.innerHTML = [
     [number(metrics.turns), "accepted turns"],
     [number(metrics.estimatedCompleteHistoryTokens), "complete-history tokens"],
@@ -3865,14 +5781,14 @@ function appendCostMetric(value, label) {
   elements.campaignCostMetrics.append(metric);
 }
 
-async function refreshCampaignCostSummary() {
+async function refreshCampaignCostSummary(selectionRequest = campaignSelectionRequest, signal) {
   if (!selectedCampaign) {
     elements.campaignCostSection.classList.add("hidden");
     return null;
   }
   const campaignId = selectedCampaign.id;
-  const summary = await api(`/api/v1/campaigns/${campaignId}/cost-summary`);
-  if (selectedCampaign?.id !== campaignId) return null;
+  const summary = await api(`/api/v1/campaigns/${campaignId}/cost-summary`, { signal });
+  if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return null;
   elements.campaignCostSection.classList.remove("hidden");
   elements.campaignCostMetrics.replaceChildren();
   if (!summary.hasReportedCosts || !Array.isArray(summary.totals) || !summary.totals.length) {
@@ -3891,12 +5807,11 @@ async function refreshCampaignCostSummary() {
   return summary;
 }
 
-async function loadEmbeddingConfig() {
+async function loadEmbeddingConfig(selectionRequest = campaignSelectionRequest, signal) {
   if (!selectedCampaign) return;
   const campaignId = selectedCampaign.id;
-  const selectionRequest = campaignSelectionRequest;
-  const config = await api(`/api/v1/campaigns/${campaignId}/memory/embedding-config`);
-  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+  const config = await api(`/api/v1/campaigns/${campaignId}/memory/embedding-config`, { signal });
+  if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
   embeddingConfig = config;
   discoveredEmbeddingModels = [];
   elements.embeddingEnabled.checked = embeddingConfig.enabled;
@@ -3916,14 +5831,14 @@ async function loadEmbeddingConfig() {
   elements.embeddingStatus.textContent = embeddingConfig.enabled
     ? `Semantic Retrieval is enabled with ${fallbackLabel || "the selected provider"} and ${embeddingConfig.model}. Effective task prefixes: document “${embeddingConfig.effectiveDocumentPrefix || "none"}”, query “${embeddingConfig.effectiveQueryPrefix || "none"}”. New accepted memories are indexed by a durable worker job.`
     : `Semantic Retrieval is off for this campaign. Chronicle local memory remains available when semantic retrieval is off.`;
+  return embeddingConfig;
 }
 
-async function loadIllustrationConfig() {
+async function loadIllustrationConfig(selectionRequest = campaignSelectionRequest, signal) {
   if (!selectedCampaign) return;
   const campaignId = selectedCampaign.id;
-  const selectionRequest = campaignSelectionRequest;
-  const config = await api(`/api/v1/campaigns/${campaignId}/illustration-config`);
-  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+  const config = await api(`/api/v1/campaigns/${campaignId}/illustration-config`, { signal });
+  if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
   illustrationConfig = config;
   elements.illustrationSourcePolicy.value = illustrationConfig.sourcePolicy || (illustrationConfig.enabled ? "generate_only" : "off");
   elements.illustrationMatchingScope.value = illustrationConfig.matchingScope || "world";
@@ -3958,6 +5873,7 @@ async function loadIllustrationConfig() {
       : provider
         ? `${policy === "library_then_generate" ? "Try the library first, then generate" : "Generate"} with ${illustrationConfig.model}. Endpoint health: ${providers.find((item) => item.id === illustrationConfig.providerProfileId)?.healthStatus || "unknown"}.`
         : "The saved policy requires fallback generation, but no enabled image provider is currently available. Story generation remains unaffected.";
+  return illustrationConfig;
 }
 
 function illustrationPolicyUsesLibrary(policy = elements.illustrationSourcePolicy.value) {
@@ -4008,8 +5924,12 @@ function syncIllustrationProviderAvailability(restoreSavedState = false) {
 }
 
 function providerMessage(message, type = "") {
+  const pendingReadFailure = dashboardWorkflowErrors.get("providers");
+  delete elements.providerStatus.dataset.workflowReadFailure;
+  elements.providerStatus.querySelector("#workflowRetryProviders")?.remove();
   elements.providerStatus.textContent = message;
   elements.providerStatus.className = `status ${type}`.trim();
+  if (pendingReadFailure) setWorkflowReadFailure(elements.providerStatus, "providers", pendingReadFailure.message, "workflowRetryProviders", "Retry provider profiles", () => retryProviderWorkflowRead());
 }
 
 function providerTypeLabel(providerType) {
@@ -4121,7 +6041,82 @@ function populateEmbeddingProviderSelect() {
   }
 }
 
+function providerReadinessCapabilityLabel(status) {
+  const labels = {
+    "not-applicable": "Not applicable",
+    unknown: "Unknown",
+    advertised: "Advertised, not verified",
+    expired: "Expired",
+    malformed: "Malformed evidence",
+    "identity-mismatch": "Does not match current model/schema",
+    unsupported: "Not supported",
+    verified: "Verified for current schema"
+  };
+  return labels[status] || "Unknown";
+}
+
+function renderProviderReadiness() {
+  for (const role of ["text", "image", "embedding"]) {
+    const card = elements.providers.querySelector(`[data-provider-readiness="${role}"]`);
+    if (!card) continue;
+    const readiness = providerReadinessForRole(role, providers, providerInventoryObservations, Date.now(), Date.parse);
+    card.dataset.readinessState = readiness.state;
+    card.querySelector("[data-readiness-health]").textContent = readiness.health.replaceAll("-", " ");
+    card.querySelector("[data-readiness-inventory]").textContent = readiness.inventory.replaceAll("-", " ");
+    card.querySelector("[data-readiness-capability]").textContent = providerReadinessCapabilityLabel(readiness.capability);
+    card.querySelector("[data-readiness-state]").textContent = readiness.state === "ready"
+      ? "Ready · current observed evidence"
+      : readiness.state === "checking"
+        ? "Checking model inventory…"
+        : readiness.state === "not-configured"
+          ? "Not configured"
+          : "Not ready · see evidence above";
+    const check = card.querySelector("[data-readiness-check]");
+    check.hidden = !readiness.profileId;
+    check.classList.toggle("hidden", !readiness.profileId);
+    check.disabled = readiness.inventory === "checking";
+    check.textContent = check.disabled ? "Checking inventory…" : "Check model inventory";
+  }
+}
+
+async function refreshProviderReadinessInventory(role) {
+  const card = elements.providers.querySelector(`[data-provider-readiness="${role}"]`);
+  const readiness = providerReadinessForRole(role, providers, providerInventoryObservations, Date.now(), Date.parse);
+  const profile = providers.find((item) => item.id === readiness.profileId);
+  if (!card || !profile) return;
+  const identity = {
+    profileId: profile.id,
+    role,
+    providerType: profile.providerType,
+    baseUrl: profile.baseUrl,
+    modelId: profile.defaultModel
+  };
+  const requestEpoch = ++providerInventoryRequestSequence;
+  providerInventoryRequestEpochs.set(profile.id, requestEpoch);
+  providerInventoryObservations = providerInventoryObservations.filter((item) => item.profileId !== profile.id);
+  providerInventoryObservations.push({ ...identity, status: "checking", modelIds: [], checkedAt: null });
+  renderProviderReadiness();
+  try {
+    const result = await api(`/api/v1/providers/${profile.id}/models?refresh=true`);
+    if (providerInventoryRequestEpochs.get(profile.id) !== requestEpoch) return;
+    const currentProfile = providers.find((item) => item.id === profile.id);
+    if (!currentProfile || currentProfile.providerRole !== identity.role || currentProfile.providerType !== identity.providerType || currentProfile.baseUrl !== identity.baseUrl || currentProfile.defaultModel !== identity.modelId) return;
+    const modelIds = Array.isArray(result.models) ? result.models.map(profileModelValue).filter((modelId) => typeof modelId === "string" && modelId.length > 0) : [];
+    providerInventoryObservations = providerInventoryObservations.filter((item) => item.profileId !== profile.id);
+    providerInventoryObservations.push({ ...identity, status: modelIds.length ? "available" : "unavailable", modelIds, checkedAt: new Date().toISOString() });
+  } catch {
+    if (providerInventoryRequestEpochs.get(profile.id) !== requestEpoch) return;
+    providerInventoryObservations = providerInventoryObservations.filter((item) => item.profileId !== profile.id);
+    providerInventoryObservations.push({ ...identity, status: "unavailable", modelIds: [], checkedAt: new Date().toISOString() });
+  } finally {
+    if (providerInventoryRequestEpochs.get(profile.id) === requestEpoch) {
+      providerInventoryRequestEpochs.delete(profile.id);
+      renderProviderReadiness();
+    }
+  }
+}
 function renderProviderProfiles() {
+  renderProviderReadiness();
   elements.providerProfileList.replaceChildren();
   if (!providers.length) {
     elements.providerProfileList.innerHTML = '<p class="muted">No provider profiles have been added.</p>';
@@ -4340,8 +6335,8 @@ function renderProviderSelectionEditor() {
   const presetMode = providerSelectionEditor.mode === "preset";
   elements.providerSelectionModel.checked = !presetMode;
   elements.providerSelectionPreset.checked = presetMode;
-  elements.providerModelSelectionField.classList.toggle("hidden", illustration || presetMode);
-  elements.providerModelSelectionField.hidden = illustration || presetMode;
+  elements.providerModelSelectionField.classList.toggle("hidden", presetMode);
+  elements.providerModelSelectionField.hidden = presetMode;
   elements.providerPresetSelectionPanel.classList.toggle("hidden", !eligible || !presetMode);
   elements.providerPresetSelectionPanel.hidden = !eligible || !presetMode;
   elements.providerResponseFormatPolicyField.classList.toggle("hidden", illustration || presetMode);
@@ -4492,7 +6487,7 @@ function resetProviderForm() {
   elements.providerType.disabled = false;
   elements.providerRole.disabled = false;
   elements.saveProvider.textContent = "Save provider";
-  elements.cancelProviderEdit.classList.add("hidden");
+  elements.cancelProviderEdit.classList.remove("hidden");
   discoveredProfileModels = [];
   elements.providerModelPickerList.replaceChildren();
   elements.providerContextTokens.readOnly = false;
@@ -4649,7 +6644,11 @@ function providerConfigurationFromForm(existingConfig = {}) {
   const configuration = { ...existingConfig, streaming: elements.providerStreaming.checked };
   if (nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter" && providerSelectionEditor) {
     const patch = serializeSelectionEditorPatch(providerSelectionEditor);
-    configuration.textResponseFormatPolicy = patch.configuration.textResponseFormatPolicy;
+    const presetMode = providerSelectionEditor.mode === "preset";
+    const hasSavedFormatPolicy = Object.prototype.hasOwnProperty.call(existingConfig, "textResponseFormatPolicy");
+    configuration.textResponseFormatPolicy = presetMode && hasSavedFormatPolicy
+      ? existingConfig.textResponseFormatPolicy
+      : patch.configuration.textResponseFormatPolicy;
     if (Object.prototype.hasOwnProperty.call(patch.configuration, "textExecutionOverrides")) {
       configuration.textExecutionOverrides = patch.configuration.textExecutionOverrides;
     }
@@ -4700,6 +6699,7 @@ function providerConfigurationFromForm(existingConfig = {}) {
 }
 
 function beginProviderEdit(provider) {
+  const returnFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
   clearResponseFormatCapability();
   editingProviderId = provider.id;
   elements.providerName.value = provider.name;
@@ -4725,8 +6725,9 @@ function beginProviderEdit(provider) {
   responseFormatCapabilityProfile = provider.responseFormatCapability || null;
   elements.providerModelPickerList.replaceChildren();
   initializeProviderSelectionEditor(provider);
+  elements.providerAdvancedSettings.open = false;
+  openEditDialog(elements.providerDialog, returnFocusTo);
   elements.providerName.focus();
-  openManagedModal(elements.providerDialog);
   providerMessage(`Editing ${provider.name}. Leave the API key blank to keep the stored credential.`);
   syncProviderRoleSettings();
   renderResponseFormatCapability(responseFormatCapabilityProfile);
@@ -4735,8 +6736,10 @@ function beginProviderEdit(provider) {
   }
 }
 
-async function loadProviders(preselectId = "") {
+async function loadProviders(preselectId = "", { preserveWorkflowFeedback = false } = {}) {
   ({ providers } = await api("/api/v1/providers"));
+  clearDashboardWorkflowError("providers");
+  clearWorkflowReadFailure(elements.providerStatus, "providers", "workflowRetryProviders");
   renderProviderProfiles();
   updateCharacterGeneratorAvailability();
   const currentImportProviderId = elements.providerSelect.value;
@@ -4753,7 +6756,9 @@ async function loadProviders(preselectId = "") {
   elements.providerSelect.value = target && target.id !== defaultProvider("text")?.id ? target.id : "";
   selectedProvider = target;
   elements.discoverModels.disabled = !target;
-  if (target) providerMessage(`${target.name} selected. Profile context is ${number(target.contextWindowTokens)} tokens; maximum output is ${number(target.maxOutputTokens)} tokens.`);
+  if (target && !preserveWorkflowFeedback) {
+    providerMessage(`${target.name} selected. Profile context is ${number(target.contextWindowTokens)} tokens; maximum output is ${number(target.maxOutputTokens)} tokens.`);
+  }
   if (selectedCampaign) {
     elements.campaignTextProvider.value = selectedCampaign.textProviderProfileId || "";
     elements.campaignImageProvider.value = selectedCampaign.imageProviderProfileId || "";
@@ -4764,14 +6769,21 @@ async function loadProviders(preselectId = "") {
 
 async function saveProvider(event) {
   event.preventDefault();
+  if (providerSaveBusy) return;
+  providerSaveBusy = true;
+  const providerControls = [...elements.providerForm.querySelectorAll("input, select, textarea, button")];
+  const disabledBeforeSave = providerControls.map((control) => control.disabled);
+  providerControls.forEach((control) => { control.disabled = true; });
   providerMessage("Saving provider profile…");
+  let provider;
+  const wasEditing = Boolean(editingProviderId);
   try {
     const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
     const preservedSelection = providerSelectionEditor ? serializeSelectionEditorPatch(providerSelectionEditor) : null;
     const nativeSelection = nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter" && providerSelectionEditor
       ? serializeSelectionEditorPatch(providerSelectionEditor)
       : null;
-    const provider = await api(editingProviderId ? `/api/v1/providers/${editingProviderId}` : "/api/v1/providers", {
+    provider = await api(editingProviderId ? `/api/v1/providers/${editingProviderId}` : "/api/v1/providers", {
       method: editingProviderId ? "PATCH" : "POST",
       body: JSON.stringify({
         name: elements.providerName.value,
@@ -4791,8 +6803,17 @@ async function saveProvider(event) {
         configuration: providerConfigurationFromForm(existingConfig)
       })
     });
-    const wasEditing = Boolean(editingProviderId);
-    resetProviderForm();
+  } catch (error) {
+    providerMessage(safeWorkflowFailure("Provider profile could not be saved.", error), "error");
+    providerControls.forEach((control, index) => { control.disabled = disabledBeforeSave[index] ?? false; });
+    providerSaveBusy = false;
+    return;
+  }
+
+  providerInventoryRequestEpochs.set(provider.id, ++providerInventoryRequestSequence);
+  providerInventoryObservations = providerInventoryObservations.filter((item) => item.profileId !== provider.id);
+  resetProviderForm();
+  try {
     await loadProviders(provider.providerRole === "text" ? provider.id : "");
     if (provider.providerRole === "embedding") {
       elements.embeddingProvider.value = provider.id;
@@ -4806,13 +6827,20 @@ async function saveProvider(event) {
       elements.illustrationModel.value = provider.defaultModel || "";
       elements.discoverIllustrationModels.disabled = false;
     }
-    providerMessage(`${provider.name} ${wasEditing ? "updated" : "saved"}. Credentials, if supplied, were encrypted before database storage.`, "success");
-    if (elements.providerDialog) elements.providerDialog.close();
   } catch (error) {
-    providerMessage(error.message || String(error), "error");
+    providerMessage(`${provider.name} was ${wasEditing ? "updated" : "saved"}.`, "success");
+    reportProviderListReadFailure("The provider list could not be refreshed. Retry provider profiles to confirm the saved profile.");
+    if (elements.providerDialog) elements.providerDialog.close();
+    providerControls.forEach((control, index) => { control.disabled = disabledBeforeSave[index] ?? false; });
+    providerSaveBusy = false;
+    return;
   }
-}
 
+  providerMessage(`${provider.name} ${wasEditing ? "updated" : "saved"}. Credentials, if supplied, were encrypted before database storage.`, "success");
+  if (elements.providerDialog) elements.providerDialog.close();
+  providerControls.forEach((control, index) => { control.disabled = disabledBeforeSave[index] ?? false; });
+  providerSaveBusy = false;
+}
 async function refreshProviderModelsFromForm() {
   const sequence = ++responseFormatCapabilitySequence;
   const identity = responseFormatCapabilityIdentity();
@@ -5378,21 +7406,22 @@ function embeddingPollDelay(milliseconds) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
-async function monitorEmbeddingJob(jobId, campaignId, monitorState) {
+async function monitorEmbeddingJob(jobId, campaignId, monitorState, selectionRequest) {
+  const monitorKey = `${campaignId}:${selectionRequest}`;
+  const isCurrent = () => selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId;
   for (let poll = 0; poll < 1200; poll += 1) {
-    if (embeddingJobMonitors.get(campaignId) !== monitorState) return null;
+    if (embeddingJobMonitors.get(monitorKey) !== monitorState || !isCurrent()) return null;
     const job = await api(`/api/v1/jobs/${jobId}`);
+    if (embeddingJobMonitors.get(monitorKey) !== monitorState || !isCurrent()) return null;
     monitorState.latestJob = job;
-    if (selectedCampaign?.id === campaignId) renderEmbeddingJobProgress(job);
+    renderEmbeddingJobProgress(job);
     if (["completed", "failed"].includes(job.status)) {
-      if (selectedCampaign?.id === campaignId) {
-        await refreshCampaignMemoryMetrics();
-        if (selectedCampaign?.id !== campaignId) return job;
-        elements.embeddingStatus.className = `status ${job.status === "completed" ? "success" : "error"}`;
-        elements.embeddingStatus.textContent = job.status === "completed"
-          ? "Semantic Retrieval indexing completed. Current compatible vector coverage is shown above."
-          : `${job.errorMessage || "Semantic Retrieval indexing failed."} Chronicle local memory remains available when semantic retrieval is off or unavailable.`;
-      }
+      await refreshCampaignMemoryMetrics(selectionRequest);
+      if (!isCurrent()) return job;
+      elements.embeddingStatus.className = `status ${job.status === "completed" ? "success" : "error"}`;
+      elements.embeddingStatus.textContent = job.status === "completed"
+        ? "Semantic Retrieval indexing completed. Current compatible vector coverage is shown above."
+        : `${job.errorMessage || "Semantic Retrieval indexing failed."} Chronicle local memory remains available when semantic retrieval is off or unavailable.`;
       return job;
     }
     await embeddingPollDelay(1000);
@@ -5400,35 +7429,36 @@ async function monitorEmbeddingJob(jobId, campaignId, monitorState) {
   throw new Error("Semantic indexing is still running, but live progress monitoring timed out. Refresh the campaign to resume monitoring.");
 }
 
-function ensureEmbeddingJobProgress(jobId, campaignId) {
-  const existing = embeddingJobMonitors.get(campaignId);
+function ensureEmbeddingJobProgress(jobId, campaignId, selectionRequest = campaignSelectionRequest) {
+  const monitorKey = `${campaignId}:${selectionRequest}`;
+  const existing = embeddingJobMonitors.get(monitorKey);
   if (existing?.jobId === jobId) {
-    if (selectedCampaign?.id === campaignId && existing.latestJob) renderEmbeddingJobProgress(existing.latestJob);
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId && existing.latestJob) renderEmbeddingJobProgress(existing.latestJob);
     return existing.promise;
   }
   const monitorState = { jobId, latestJob: null, promise: null };
   monitorState.promise = Promise.resolve()
-    .then(() => monitorEmbeddingJob(jobId, campaignId, monitorState))
+    .then(() => monitorEmbeddingJob(jobId, campaignId, monitorState, selectionRequest))
     .finally(() => {
-      if (embeddingJobMonitors.get(campaignId) === monitorState) embeddingJobMonitors.delete(campaignId);
+      if (embeddingJobMonitors.get(monitorKey) === monitorState) embeddingJobMonitors.delete(monitorKey);
     });
-  embeddingJobMonitors.set(campaignId, monitorState);
+  embeddingJobMonitors.set(monitorKey, monitorState);
   return monitorState.promise;
 }
 
-async function resumeEmbeddingJobProgress(jobId, campaignId) {
+async function resumeEmbeddingJobProgress(jobId, campaignId, selectionRequest = campaignSelectionRequest) {
   elements.saveEmbeddingConfig.disabled = true;
   elements.reindexEmbeddings.disabled = true;
   elements.saveEmbeddingConfig.classList.add("busy");
   try {
-    await ensureEmbeddingJobProgress(jobId, campaignId);
+    await ensureEmbeddingJobProgress(jobId, campaignId, selectionRequest);
   } catch (error) {
-    if (selectedCampaign?.id === campaignId) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       elements.embeddingStatus.className = "status error";
       elements.embeddingStatus.textContent = error.message || String(error);
     }
   } finally {
-    if (selectedCampaign?.id === campaignId) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       elements.saveEmbeddingConfig.disabled = false;
       elements.reindexEmbeddings.disabled = !embeddingConfig?.enabled;
       elements.saveEmbeddingConfig.classList.remove("busy");
@@ -5441,6 +7471,7 @@ async function saveEmbeddingConfig(event) {
   event.preventDefault();
   if (!selectedCampaign) return;
   const campaignId = selectedCampaign.id;
+  const selectionRequest = campaignSelectionRequest;
   elements.saveEmbeddingConfig.disabled = true;
   elements.saveEmbeddingConfig.classList.add("busy");
   elements.saveEmbeddingConfig.textContent = "Saving…";
@@ -5451,7 +7482,7 @@ async function saveEmbeddingConfig(event) {
     if (elements.embeddingEnabled.checked && !elements.embeddingProvider.value) {
       throw new Error("Choose an eligible embedding provider before enabling Semantic Retrieval.");
     }
-    const saved = await api(`/api/v1/campaigns/${selectedCampaign.id}/memory/embedding-config`, {
+    const saved = await api(`/api/v1/campaigns/${campaignId}/memory/embedding-config`, {
       method: "PUT",
       body: JSON.stringify(embeddingConfigPayload({
         enabled: elements.embeddingEnabled.checked,
@@ -5464,26 +7495,30 @@ async function saveEmbeddingConfig(event) {
         retrievalShadowEnabled: elements.embeddingRetrievalShadowEnabled.checked
       }))
     });
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     embeddingConfig = saved;
+    campaignSectionLoader.invalidate("chronicle");
+    setCampaignSettingsSectionFeedback("chronicle", "success", "", selectionRequest, campaignId);
     elements.embeddingRetrievalImplementation.value = saved.retrievalImplementation;
     elements.embeddingRetrievalShadowEnabled.checked = saved.retrievalShadowEnabled;
     if (saved.enabled && !saved.jobId) throw new Error("Semantic Retrieval was enabled, but the indexing job was not created.");
     if (saved.enabled && saved.jobId) {
       elements.embeddingStatus.textContent = `Semantic Retrieval indexing queued as durable job ${saved.jobId}. Live progress will remain here until it completes or fails.`;
-      await ensureEmbeddingJobProgress(saved.jobId, campaignId);
+      await ensureEmbeddingJobProgress(saved.jobId, campaignId, selectionRequest);
     } else {
       elements.embeddingProgress.classList.add("hidden");
-      await refreshCampaignMemoryMetrics();
+      await refreshCampaignMemoryMetrics(selectionRequest);
+      if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
       elements.embeddingStatus.className = "status success";
       elements.embeddingStatus.textContent = "Semantic Retrieval disabled. Chronicle local lexical retrieval remains available; retained legacy embeddings remain available for rollback.";
     }
   } catch (error) {
-    if (selectedCampaign?.id === campaignId) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       elements.embeddingStatus.className = "status error";
       elements.embeddingStatus.textContent = error.message || String(error);
     }
   } finally {
-    if (selectedCampaign?.id === campaignId) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       elements.saveEmbeddingConfig.disabled = false;
       elements.saveEmbeddingConfig.classList.remove("busy");
       elements.saveEmbeddingConfig.textContent = "Save & index";
@@ -5495,6 +7530,7 @@ async function saveEmbeddingConfig(event) {
 async function reindexSemanticRetrieval() {
   if (!selectedCampaign || !embeddingConfig?.enabled) return;
   const campaignId = selectedCampaign.id;
+  const selectionRequest = campaignSelectionRequest;
   elements.reindexEmbeddings.disabled = true;
   elements.saveEmbeddingConfig.disabled = true;
   elements.embeddingStatus.className = "status";
@@ -5504,16 +7540,17 @@ async function reindexSemanticRetrieval() {
       method: "POST",
       body: "{}"
     });
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     if (!queued.jobId) throw new Error("The Semantic Retrieval reindex did not return a job identifier.");
     elements.embeddingStatus.textContent = `Semantic Retrieval reindex job ${queued.jobId} queued.`;
-    await ensureEmbeddingJobProgress(queued.jobId, campaignId);
+    await ensureEmbeddingJobProgress(queued.jobId, campaignId, selectionRequest);
   } catch (error) {
-    if (selectedCampaign?.id === campaignId) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       elements.embeddingStatus.className = "status error";
       elements.embeddingStatus.textContent = error.message || String(error);
     }
   } finally {
-    if (selectedCampaign?.id === campaignId) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       elements.reindexEmbeddings.disabled = !embeddingConfig?.enabled;
       elements.saveEmbeddingConfig.disabled = false;
     }
@@ -5564,6 +7601,8 @@ async function discoverIllustrationModels() {
 async function saveIllustrationConfig(event) {
   event.preventDefault();
   if (!selectedCampaign) return;
+  const campaignId = selectedCampaign.id;
+  const selectionRequest = campaignSelectionRequest;
   const provider = effectiveCampaignProvider("image");
   const sourcePolicy = elements.illustrationSourcePolicy.value;
   if (illustrationPolicyUsesProvider(sourcePolicy) && !provider) {
@@ -5585,13 +7624,14 @@ async function saveIllustrationConfig(event) {
   elements.illustrationStatus.textContent = "Saving independent illustration configuration…";
   try {
     if (illustrationPolicyUsesProvider(sourcePolicy)) {
-      const updatedCampaign = await api(`/api/v1/campaigns/${selectedCampaign.id}`, {
+      const updatedCampaign = await api(`/api/v1/campaigns/${campaignId}`, {
         method: "PATCH",
         body: JSON.stringify({ imageProviderProfileId: elements.campaignImageProvider.value || null })
       });
+      if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
       selectedCampaign = { ...selectedCampaign, ...updatedCampaign };
     }
-    illustrationConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/illustration-config`, {
+    const savedConfig = await api(`/api/v1/campaigns/${campaignId}/illustration-config`, {
       method: "PUT",
       body: JSON.stringify({
         sourcePolicy,
@@ -5611,6 +7651,10 @@ async function saveIllustrationConfig(event) {
         refinementPrompt: illustrationRefinementPromptValue
       })
     });
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+    illustrationConfig = savedConfig;
+    campaignSectionLoader.invalidate("illustrations");
+    setCampaignSettingsSectionFeedback("illustrations", "success", "", selectionRequest, campaignId);
     defaultIllustrationRefinementPrompt = illustrationConfig.defaultRefinementPrompt || defaultIllustrationRefinementPrompt;
     illustrationRefinementPromptValue = illustrationConfig.refinementPrompt || defaultIllustrationRefinementPrompt;
     elements.illustrationStatus.className = "status success";
@@ -5622,10 +7666,14 @@ async function saveIllustrationConfig(event) {
           ? "Library-first matching enabled with provider fallback after a durable no-match."
           : "Generate-only illustration jobs enabled.";
   } catch (error) {
-    elements.illustrationStatus.className = "status error";
-    elements.illustrationStatus.textContent = error.message || String(error);
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
+      elements.illustrationStatus.className = "status error";
+      elements.illustrationStatus.textContent = error.message || String(error);
+    }
   } finally {
-    elements.saveIllustrationConfig.disabled = !selectedCampaign;
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
+      elements.saveIllustrationConfig.disabled = !selectedCampaign;
+    }
   }
 }
 
@@ -5735,12 +7783,11 @@ async function monitorImageJob(jobId) {
   }
 }
 
-async function loadLatestImageJob(monitor = false) {
+async function loadLatestImageJob(monitor = false, selectionRequest = campaignSelectionRequest, signal) {
   if (!selectedCampaign) return;
   const campaignId = selectedCampaign.id;
-  const selectionRequest = campaignSelectionRequest;
-  const { jobs } = await api(`/api/v1/campaigns/${campaignId}/image-jobs`);
-  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+  const { jobs } = await api(`/api/v1/campaigns/${campaignId}/image-jobs`, { signal });
+  if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
   const job = jobs[0];
   if (!job) return;
   renderImageJobStatus(job);
@@ -5748,6 +7795,7 @@ async function loadLatestImageJob(monitor = false) {
 }
 
 async function importStoryObject(story, sourceName, requestOverrides = {}) {
+  const selectionIntentEpoch = ++worldSelectionIntentEpoch;
   const request = { sourceName, story, ...requestOverrides };
   const preview = await api("/api/v1/imports/legacy-story/preview", {
     method: "POST",
@@ -5784,8 +7832,8 @@ async function importStoryObject(story, sourceName, requestOverrides = {}) {
 
   const duplicate = result.duplicate ? "The story was already imported; the existing campaign was selected." : "Import completed.";
   setStatus(`${duplicate} ${result.stats.turnCount} turns and ${result.stats.memoryCount} memories are available. Complete history is approximately ${number(result.stats.estimatedHistoryTokens)} tokens. Use “Load story” in Campaigns to open the database-backed story.`, "success");
-  await loadWorlds(result.worldId);
-  await loadCampaigns(result.campaignId);
+  await loadWorldResult(result.worldId, selectionIntentEpoch);
+  await loadCampaigns(result.campaignId, { explicitPreselect: true });
 }
 
 function parseImportJson(sourceText) {
@@ -6037,7 +8085,7 @@ async function refreshPortableCampaignPreview() {
   await previewPortableCampaign(selectedImportSource.sourceName, story);
 }
 
-async function loadCampaignImportVersions(refreshSequence) {
+async function loadCampaignImportVersions(refreshSequence, detailRetryCount = 0) {
   if (campaignArchiveImportActive()) elements.importStory.disabled = true;
   elements.campaignImportVersion.replaceChildren(new Option("Loading published versions…", ""));
   const worldId = elements.campaignImportWorld.value;
@@ -6047,15 +8095,35 @@ async function loadCampaignImportVersions(refreshSequence) {
     await refreshCampaignImportPreview();
     return;
   }
-  const world = await api(`/api/v1/worlds/${worldId}`);
+  const detailRequest = getDashboardWorldDetails(worldId);
+  const detailRequestEpoch = dashboardWorldDetailRequestEpochs.get(worldId);
+  let world;
+  try {
+    world = await detailRequest;
+  } catch (error) {
+    if (!isCampaignImportRefreshCurrent(refreshSequence) || worldId !== elements.campaignImportWorld.value) return;
+    if (!isDashboardWorldDetailRequestCurrent(worldId, detailRequestEpoch)) {
+      if (detailRetryCount < 1) return loadCampaignImportVersions(refreshSequence, detailRetryCount + 1);
+      elements.campaignImportVersion.replaceChildren(new Option("Destination changed while loading. Select it again to retry.", ""));
+      return;
+    }
+    elements.campaignImportVersion.replaceChildren(new Option("Could not load versions. Select the destination again to retry.", ""));
+    throw error;
+  }
   if (!isCampaignImportRefreshCurrent(refreshSequence) || worldId !== elements.campaignImportWorld.value) return;
+  if (!isDashboardWorldDetailRequestCurrent(worldId, detailRequestEpoch)) {
+    if (detailRetryCount < 1) return loadCampaignImportVersions(refreshSequence, detailRetryCount + 1);
+    elements.campaignImportVersion.replaceChildren(new Option("Destination changed while loading. Select it again to retry.", ""));
+    return;
+  }
   const versions = [...(world.versions || [])].sort((a, b) => b.versionNumber - a.versionNumber);
   elements.campaignImportVersion.replaceChildren(
     new Option(versions.length ? "Choose a published version" : "No published versions", ""),
     ...versions.map((version) => new Option(`Version ${version.versionNumber}${version.releaseNotes ? ` · ${version.releaseNotes}` : ""}`, version.id))
   );
   if (versions.length === 1) elements.campaignImportVersion.value = versions[0].id;
-  if (!isCampaignImportRefreshCurrent(refreshSequence) || worldId !== elements.campaignImportWorld.value) return;
+  if (!isCampaignImportRefreshCurrent(refreshSequence) || worldId !== elements.campaignImportWorld.value
+    || !isDashboardWorldDetailRequestCurrent(worldId, detailRequestEpoch)) return;
   await refreshCampaignImportPreview();
 }
 
@@ -6241,6 +8309,9 @@ async function validateClipboardImport(event) {
 
 async function importStory() {
   if (!selectedImport) return;
+  const selectionIntentEpoch = ["infinite_worlds", "world", "campaign_archive"].includes(selectedImport.kind)
+    ? ++worldSelectionIntentEpoch
+    : null;
   elements.importStory.disabled = true;
   let progressTimer = null;
   try {
@@ -6271,15 +8342,15 @@ async function importStory() {
         elements.importProgressBar.value = 100;
         elements.importProgressPercent.textContent = "100%";
         elements.importProgressLabel.textContent = "World and character generation completed.";
-        await loadWorlds(result.worldId);
+        await loadWorldResult(result.worldId, selectionIntentEpoch);
         setStatus(result.duplicate
           ? "The Choose Your Own Adventure world was already imported; the existing record was loaded into the World Editor below."
           : "Choose Your Own Adventure story imported and converted into a new Story World with 3-4 playable characters. Review and edit any fields below before publishing or saving.", "success");
         return;
       }
-      await loadWorlds(result.worldId);
+      await loadWorldResult(result.worldId, selectionIntentEpoch);
       if (result.kind === "campaign") {
-        await loadCampaigns(result.campaignId);
+        await loadCampaigns(result.campaignId, { explicitPreselect: true });
         let imageMessage = "";
         if (elements.infiniteWorldsFinalImage.checked) {
           try {
@@ -6305,7 +8376,7 @@ async function importStory() {
     } else if (selectedImport.kind === "world") {
       setStatus("Importing the validated portable world…");
       const result = await api("/api/v1/imports/world", { method: "POST", body: JSON.stringify(selectedImport.request) });
-      await loadWorlds(result.worldId);
+      await loadWorldResult(result.worldId, selectionIntentEpoch);
       setStatus(result.duplicate ? "The world was already imported; the existing World Library record was selected." : "World imported with an immutable version and editable draft.", "success");
     } else if (selectedImport.kind === "campaign_archive") {
       setStatus("Importing the validated Campaign Archive…");
@@ -6316,8 +8387,8 @@ async function importStory() {
           destination: selectedImport.destination
         })
       });
-      await loadWorlds(result.worldId);
-      await loadCampaigns(result.campaignId);
+      await loadWorldResult(result.worldId, selectionIntentEpoch);
+      await loadCampaigns(result.campaignId, { explicitPreselect: true });
       const outcome = result.duplicate ? "The Campaign Archive was already imported; the existing campaign was selected." : "Campaign Archive imported.";
       setStatus(`${outcome} ${number(result.stats.turnCount)} turns, ${number(result.stats.memoryCount)} Chronicle memories, and ${number(result.stats.assetCount)} original images are available.`, "success");
       selectedImport = null;
@@ -6396,7 +8467,7 @@ async function previewContext(event) {
     if (sequence !== contextPreviewSequence || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     elements.contextSummary.classList.remove("hidden");
     elements.contextSummary.classList.add("error");
-    elements.contextSummary.textContent = error.message || String(error);
+    elements.contextSummary.textContent = safeWorkflowFailure("Context preview unavailable.", error);
     elements.contextPreview.textContent = "Context preview unavailable.";
   } finally {
     if (sequence === contextPreviewSequence && selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) elements.previewContext.disabled = false;
@@ -6507,18 +8578,18 @@ elements.previewCampaignArchiveAgain.addEventListener("click", () => {
     setStatus(error.message || String(error), "error");
   });
 });
-elements.worldSearch?.addEventListener("input", renderDashboardWorlds);
-elements.campaignSearch?.addEventListener("input", renderDashboardCampaigns);
+elements.worldSearch?.addEventListener("input", () => {
+  window.clearTimeout(dashboardWorldSearchTimer);
+  dashboardWorldSearchTimer = window.setTimeout(renderDashboardWorlds, 250);
+});
 elements.worldCarouselPrev?.addEventListener("click", () => scrollCarousel(elements.dashboardWorlds, -1));
 elements.worldCarouselNext?.addEventListener("click", () => scrollCarousel(elements.dashboardWorlds, 1));
-elements.campaignCarouselPrev?.addEventListener("click", () => scrollCarousel(elements.dashboardCampaigns, -1));
-elements.campaignCarouselNext?.addEventListener("click", () => scrollCarousel(elements.dashboardCampaigns, 1));
 elements.closeWorldDetails?.addEventListener("click", () => elements.worldDetailsDialog.close());
-elements.editWorldDetails?.addEventListener("click", () => elements.worldDetailsDialog.close());
+elements.editWorldDetails?.addEventListener("click", (event) => {
+  event.preventDefault();
+  void openWorldManagement(dashboardWorld?.id).catch((error) => worldMessage(error.message || String(error), "error"));
+});
 elements.beginCampaignFromWorld?.addEventListener("click", openQuickCampaign);
-elements.cancelQuickCampaign?.addEventListener("click", () => elements.quickCampaignDialog.close());
-elements.quickCampaignForm?.addEventListener("submit", createQuickCampaign);
-elements.advancedCampaignCreation?.addEventListener("click", () => elements.quickCampaignDialog.close());
 elements.openNexusAbout?.addEventListener("click", () => openManagedModal(elements.nexusAboutDialog));
 elements.closeNexusAbout?.addEventListener("click", () => elements.nexusAboutDialog.close());
 elements.openNexusUserProfile?.addEventListener("click", openNexusUserProfile);
@@ -6580,7 +8651,26 @@ elements.generateWorldPreview.addEventListener("click", generateWorldFromPrompt)
 elements.cancelWorldAuthor.addEventListener("click", () => requestModalDismissal(elements.worldAuthorDialog));
 elements.chooseWorldCover.addEventListener("click", chooseWorldCoverFromLibrary);
 document.querySelectorAll('input[name="worldCoverMode"]').forEach((control) => control.addEventListener("change", updateWorldCoverChoice));
-elements.managementWorldSearch.addEventListener("input", renderManagementWorlds);
+elements.managementCampaignSearch.addEventListener("input", () => {
+  window.clearTimeout(managementCampaignSearchTimer);
+  managementCampaignSearchTimer = window.setTimeout(renderManagementCampaigns, 250);
+});
+elements.managementCampaignStatus.addEventListener("change", () => {
+  managementCampaignStatus = elements.managementCampaignStatus.value;
+  renderManagementCampaigns();
+});
+elements.managementCampaignSort.addEventListener("change", () => {
+  managementCampaignSort = elements.managementCampaignSort.value;
+  renderManagementCampaigns();
+});
+elements.managementWorldSearch.addEventListener("input", () => {
+  window.clearTimeout(managementWorldSearchTimer);
+  managementWorldSearchTimer = window.setTimeout(renderManagementWorlds, 250);
+});
+elements.managementWorldSort.addEventListener("change", () => {
+  managementWorldSort = elements.managementWorldSort.value;
+  renderManagementWorlds();
+});
 elements.managementWorldFilters.addEventListener("click", (event) => {
   const button = event.target.closest("[data-world-filter]");
   if (!button) return;
@@ -6594,11 +8684,22 @@ elements.managementWorldFilters.addEventListener("click", (event) => {
 });
 elements.managementWorldPrev.addEventListener("click", () => scrollCarousel(elements.worldManagementCarousel, -1));
 elements.managementWorldNext.addEventListener("click", () => scrollCarousel(elements.worldManagementCarousel, 1));
-elements.refreshWorlds.addEventListener("click", () => loadWorlds().catch((error) => worldMessage(error.message || String(error), "error")));
+elements.refreshWorlds.addEventListener("click", () => loadWorlds("", { selectionIntentEpoch: worldSelectionIntentEpoch, preserveWorkflowFeedbackForWorldId: selectedWorld?.id || "" }).catch((error) => reportWorldListReadFailure(safeWorkflowFailure("Worlds could not be refreshed.", error))));
 elements.worldForm.addEventListener("submit", saveWorldDraft);
+elements.worldAuthorNextStep.addEventListener("click", () => {
+  const step = worldAuthorStep(worldAuthorActiveStep);
+  setWorldAuthorStep(step.next);
+});
+for (const control of [elements.worldTitle, elements.worldGenre, elements.worldTone, elements.worldPremise, elements.worldBackground, elements.worldFirstAction, elements.worldRules]) {
+  control.addEventListener("input", renderWorldAuthorChecklist);
+  control.addEventListener("change", renderWorldAuthorChecklist);
+}
+elements.worldForm.addEventListener("click", (event) => {
+  if (worldAuthorBusy && event.target instanceof Element && event.target.closest("summary")) event.preventDefault();
+}, true);
 elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());
 elements.characterForm.addEventListener("submit", saveCharacterFromModal);
-elements.cancelCharacter.addEventListener("click", () => elements.characterDialog.close());
+elements.cancelCharacter.addEventListener("click", () => dismissEditDialog(elements.characterDialog));
 elements.deleteCharacter.addEventListener("click", deleteCharacterFromModal);
 elements.generateCharacter.addEventListener("click", generateCharacterFromPrompt);
 elements.organizeCharacterProfile.addEventListener("click", organizeCharacterProfile);
@@ -6625,13 +8726,6 @@ elements.characterDialog.addEventListener("close", () => {
   elements.characterTrackers.replaceChildren();
   setCharacterStatus();
 });
-elements.characterDialog.addEventListener("cancel", (event) => {
-  if (characterModalBusy) event.preventDefault();
-});
-elements.worldAuthorDialog.addEventListener("cancel", (event) => {
-  event.preventDefault();
-  requestModalDismissal(elements.worldAuthorDialog);
-});
 elements.worldVersionSelect.addEventListener("change", () => {
   updateWorldVersionDeleteAvailability();
   loadWorldVersionPlayableCharacters().catch((error) => worldMessage(error.message || String(error), "error"));
@@ -6650,8 +8744,30 @@ if (elements.forkWorldModalBtn) {
 }
 if (elements.createCampaignModalBtn) {
   elements.createCampaignModalBtn.addEventListener("click", openCreateCampaignDialog);
-  elements.cancelCreateCampaign.addEventListener("click", () => elements.createCampaignDialog.close());
-  elements.createCampaignForm.addEventListener("submit", (e) => { e.preventDefault(); createCampaignFromWorld(); });
+  elements.cancelCreateCampaign.addEventListener("click", () => requestModalDismissal(elements.createCampaignDialog));
+  elements.createCampaignDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    requestModalDismissal(elements.createCampaignDialog);
+  });
+  elements.createCampaignDialog.addEventListener("close", () => {
+    if (createCampaignSubmitting) return;
+    campaignCreationSessionEpoch += 1;
+    campaignCreationDialogSession = null;
+    createCampaignCommitted = false;
+  });
+  elements.openCommittedCampaign.addEventListener("click", openCommittedCampaignStory);
+  elements.newCampaignTitle.addEventListener("input", updateCampaignCreationDialogAvailability);
+  elements.newCampaignCharacter.addEventListener("change", () => {
+    if (campaignCreationDialogSession?.draft) campaignCreationDialogSession.draft.selectedCharacterId = elements.newCampaignCharacter.value || null;
+    updateCampaignCreationDialogAvailability();
+  });
+  elements.newCampaignTurnControlStyle.addEventListener("change", () => {
+    if (campaignCreationDialogSession?.draft) campaignCreationDialogSession.draft.turnControlStyle = normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value);
+  });
+  elements.createCampaignAdvanced.querySelector("summary").addEventListener("click", (event) => {
+    if (createCampaignSubmitting || createCampaignCommitted) event.preventDefault();
+  });
+  elements.createCampaignForm.addEventListener("submit", (event) => { event.preventDefault(); void createCampaignFromWorld(event); });
 }
 elements.exportWorld.addEventListener("click", exportSelectedWorld);
 elements.createWorldShare.addEventListener("click", createSelectedWorldShare);
@@ -6659,8 +8775,13 @@ elements.revokeWorldShare.addEventListener("click", revokeSelectedWorldShare);
 elements.deleteWorldVersion.addEventListener("click", deleteSelectedWorldVersion);
 elements.archiveWorld.addEventListener("click", toggleWorldArchive);
 elements.deleteWorld.addEventListener("click", deleteSelectedWorld);
-elements.refreshCampaigns.addEventListener("click", () => loadCampaigns("", { focusNoSelection: true }).catch((error) => setStatus(error.message, "error")));
+elements.refreshCampaigns.addEventListener("click", () => loadCampaigns(selectedCampaign?.id || "", { focusNoSelection: true, preserveWorkflowFeedbackForCampaignId: selectedCampaign?.id || "" }).catch((error) => reportCampaignListReadFailure(safeWorkflowFailure("Campaigns could not be refreshed.", error))));
 elements.campaignForm.addEventListener("submit", saveSelectedCampaign);
+for (const control of [elements.campaignTitle, elements.campaignStatus, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.campaignStoryContextBudgetTokens]) {
+  control.addEventListener("input", () => renderCampaignSaveFeedback(campaignEditGuard.isDirty(campaignSettingsSnapshot()) ? "unsaved" : "saved"));
+  control.addEventListener("change", () => renderCampaignSaveFeedback(campaignEditGuard.isDirty(campaignSettingsSnapshot()) ? "unsaved" : "saved"));
+}
+elements.saveCampaignEditsDecision.addEventListener("click", () => elements.discardChangesDialog.close("save"));
 elements.campaignContinuityReviewEnabled.addEventListener("change", () => { void saveCampaignStoryMemory(); });
 elements.campaignStoryMemoryLevel.addEventListener("change", () => { void saveCampaignStoryMemory(); });
 const campaignSettingsRailMediaQuery = window.matchMedia("(max-width: 820px)");
@@ -6690,7 +8811,7 @@ elements.exportCampaign.addEventListener("click", exportSelectedCampaign);
 elements.loadCampaign.addEventListener("click", loadSelectedCampaign);
 elements.deleteCampaign.addEventListener("click", deleteSelectedCampaign);
 elements.campaignWorldVersion.addEventListener("change", () => {
-  elements.migrateCampaign.disabled = !selectedCampaign || elements.campaignWorldVersion.value === selectedCampaign.worldVersionId;
+  updateCampaignMigrationAvailability();
 });
 elements.contextForm.addEventListener("submit", previewContext);
 elements.reindexMemory.addEventListener("click", rebuildMemory);
@@ -6698,21 +8819,41 @@ elements.reindexEmbeddings.addEventListener("click", reindexSemanticRetrieval);
 if (elements.newProviderButton) {
   elements.newProviderButton.addEventListener("click", () => {
     resetProviderForm();
-    openManagedModal(elements.providerDialog);
+    openEditDialog(elements.providerDialog);
   });
 }
 elements.providerForm.addEventListener("submit", saveProvider);
+for (const check of elements.providers.querySelectorAll("[data-readiness-check]")) check.addEventListener("click", () => { void refreshProviderReadinessInventory(check.dataset.readinessCheck); });
 elements.cancelProviderEdit.addEventListener("click", () => {
-  resetProviderForm();
-  if (elements.providerDialog) elements.providerDialog.close();
+  if (elements.providerDialog) dismissEditDialog(elements.providerDialog);
 });
 elements.providerDialog.addEventListener("close", abortProviderPresetRequests);
 window.addEventListener("pagehide", abortProviderPresetRequests);
+window.addEventListener("beforeunload", (event) => {
+  if (!campaignEditGuard.isDirty(campaignSettingsSnapshot())) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+document.addEventListener("click", (event) => {
+  const link = event.target.closest("a[href]");
+  if (!link || link.target === "_blank" || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const destination = new URL(link.href, window.location.href);
+  if (destination.href === window.location.href || destination.origin !== window.location.origin) return;
+  if (!campaignEditGuard.isDirty(campaignSettingsSnapshot())) return;
+  event.preventDefault();
+  void canLeaveCampaignEditor(null).then((allowed) => {
+    if (allowed) window.location.assign(destination.href);
+  });
+});
 
 // Setup tab behavior for world editor
 document.querySelectorAll(".tab-button").forEach(button => {
   button.addEventListener("click", () => {
     const group = button.closest(".world-tabs").dataset.tabGroup;
+    if (group === "world-author") {
+      setWorldAuthorStep(button.dataset.worldAuthorStep);
+      return;
+    }
     const target = button.dataset.tabTarget;
     // Un-highlight all tabs in this group
     document.querySelectorAll(`.world-tabs[data-tab-group="${group}"] .tab-button`).forEach(btn => btn.classList.remove("active"));
@@ -6801,8 +8942,8 @@ elements.promptLibraryDiscard?.addEventListener("click", () => {
   renderPromptLibraryDirtyState();
   schedulePromptLibraryPreview();
 });
-elements.promptLibraryPrevious?.addEventListener("click", () => elements.promptLibraryList.scrollBy({ left: -Math.max(260, elements.promptLibraryList.clientWidth * .8), behavior: "smooth" }));
-elements.promptLibraryNext?.addEventListener("click", () => elements.promptLibraryList.scrollBy({ left: Math.max(260, elements.promptLibraryList.clientWidth * .8), behavior: "smooth" }));
+elements.promptLibraryPrevious?.addEventListener("click", () => scrollPromptLibrary(-1));
+elements.promptLibraryNext?.addEventListener("click", () => scrollPromptLibrary(1));
 window.addEventListener("beforeunload", (event) => {
   if (!promptLibraryIsDirty()) return;
   event.preventDefault();
@@ -6860,6 +9001,32 @@ async function saveNexusUserProfile(event) {
 
 detectBrowserStory();
 loadSessionPreferences().catch(() => undefined);
-loadProviders().catch((error) => providerMessage(error.message || String(error), "error"));
-loadWorlds().catch((error) => worldMessage(error.message || String(error), "error"));
-loadCampaigns().catch((error) => setStatus(error.message || String(error), "error"));
+loadProviders().catch((error) => {
+  const message = safeWorkflowFailure("Provider profiles could not be loaded.", error);
+  reportProviderListReadFailure(message);
+});
+void loadWorlds().then(() => {
+  initialWorldListReady = true;
+  return applyExplicitManagementSelection(acceptedManagementRoute, managementNavigationIntent);
+}).catch((error) => {
+  initialWorldListReady = true;
+  const route = acceptedManagementRoute;
+  const message = safeWorkflowFailure("Worlds could not be loaded.", error);
+  if (route?.selection?.kind === "world") {
+    managementSelectionError(route, `Worlds could not be loaded to resolve this link. ${message}`);
+    reportDashboardWorkflowError("worlds", message, () => retryWorldWorkflowRead());
+  } else reportWorldListReadFailure(message);
+});
+const initialCampaignId = acceptedManagementRoute?.selection?.kind === "campaign" ? acceptedManagementRoute.selection.id : "";
+void loadCampaigns(initialCampaignId, { explicitPreselect: Boolean(initialCampaignId) }).then(() => {
+  initialCampaignListReady = true;
+  return applyExplicitManagementSelection(acceptedManagementRoute, managementNavigationIntent);
+}).catch((error) => {
+  initialCampaignListReady = true;
+  const route = acceptedManagementRoute;
+  const message = safeWorkflowFailure("Campaigns could not be loaded.", error);
+  if (route?.selection?.kind === "campaign") {
+    managementSelectionError(route, `Campaigns could not be loaded to resolve this link. ${message}`);
+    reportDashboardWorkflowError("campaigns", message, () => retryCampaignWorkflowRead());
+  } else reportCampaignListReadFailure(message);
+});

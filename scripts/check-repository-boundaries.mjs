@@ -61,7 +61,7 @@ const historicalRuntimeReference = /\blegacyIndex(?:Path|Cache)?\b|\bLEGACY_INDE
 
 const browserNetworkAllowlist = new Map([
   ["apps/web/public/image-library-browser.js", new Set(["fetch(path,"])],
-  ["apps/web/public/nexus.js", new Set(["fetch(path,"])],
+  ["apps/web/src/nexus.js", new Set(["fetch(path,"])],
 ]);
 
 function normalizedText(file) {
@@ -77,7 +77,9 @@ function lineNumber(text, offset) {
 }
 
 function checkBrowserNetworkCalls(file, text) {
-  if (!file.startsWith("apps/web/public/") || !file.endsWith(".js")) return;
+  const isPublicBrowserScript = file.startsWith("apps/web/public/") && file.endsWith(".js");
+  const isAuthoritativeNexusController = file === "apps/web/src/nexus.js";
+  if (!isPublicBrowserScript && !isAuthoritativeNexusController) return;
 
   const allowedCalls = browserNetworkAllowlist.get(file) ?? new Set();
   for (const match of text.matchAll(/\bfetch\s*\(([^\n]{0,120})/gu)) {

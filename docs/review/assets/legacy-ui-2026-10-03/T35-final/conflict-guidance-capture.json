@@ -1,0 +1,12 @@
+{
+  "file": "campaign-active-turn-conflict.png",
+  "sha256": "8F1EB788AD192AE9C9ED771412E998974F409AF7856164B102F5240E6E0527C9",
+  "source": ".superpowers\\sdd\\legacy-ui-2026-10-03\\evidence\\T35-conflict-guidance-native-green-artifacts\\test-results\\legacy-ui-campaign-edits.e-5dd1e-ls-or-losing-campaign-edits\\campaign-active-turn-conflict.png",
+  "run": "T35-conflict-guidance-native-green",
+  "exitCode": 0,
+  "productNexusSha256": "309383FCE620A2F3EEB34B079CB7DD00CF197EA99715BAA4C1364EAC389533A8",
+  "testSha256": "D5BC9B95ED5D3C389E94D49BC6294A7E4C299DD99213EC81C62E20FDA69FED7E",
+  "productCommit": "37998802",
+  "captureState": "After safe guidance, retained draft, rejected-write and canary exclusion assertions",
+  "visualReview": "Coordinator inspected actual PNG pixels: safe reload guidance and retained campaign selection/settings visible; no private canary. Full-page sticky header capture is not geometry proof."
+}

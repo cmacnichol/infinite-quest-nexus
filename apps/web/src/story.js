@@ -33,7 +33,9 @@ import {
   resumeActiveGenerationConflict
 } from "./story-generation-monitor.js";
 import { handleStoryEscape } from "./story-keyboard.js";
+import { bindLegacyTabGroup } from "./legacy-tabs.js";
 import { createLegacyCastPanel } from "./campaign-cast-panel.js";
+import { createStoryStreamRenderer } from "./story-stream-renderer.js";
 import {
   createChoiceDraftSelection,
   resetChoiceDraftSelection,
@@ -43,11 +45,33 @@ import {
 import {
   createCampaignContinuityDraft,
   formatChronicleRetrievalAudit,
+  STORY_HISTORY_PAGE_LIMIT,
+  createStoryHistoryWindow,
+  installStoryHistoryWindowPage,
+  selectStoryHistoryPreview,
+  storyHistoryPageRequest,
+  storyHistoryVisibleTurns,
   generationDiagnosticPresentation,
   generationRecoveryGuidance,
   generationResponseFormatPresentation,
   generationReviewPresentation,
-  generationReviewTechnicalDiagnosticMessage
+  generationReviewTechnicalDiagnosticMessage,
+  beginStoryHistorySearch,
+  beginStoryHistorySearchPage,
+  createStoryHistorySearchState,
+  settleStoryHistorySearch,
+  validateStoryHistoryJumpTarget,
+  STORY_CONTINUOUS_READER_WINDOW_LIMIT,
+  createStoryContinuousReaderState,
+  beginStoryContinuousReaderGroup,
+  settleStoryContinuousReaderResponse,
+  settleStoryContinuousReaderFailure,
+  beginStoryContinuousReaderRetry,
+  settleStoryContinuousReaderAnchorRefresh,
+  settleStoryContinuousReaderAnchorRefreshFailure,
+  reconcileStoryAcceptedSceneReplacement,
+  DEFAULT_READER_PREFERENCES,
+  normalizeReaderPreferences
 } from "@infinite-quest/client-core";
 
 "use strict";
@@ -76,8 +100,43 @@ export function chronicleRetrievalHistoryMarkup(audit) {
 
 export function startStoryPlayer(composition) {
 
+let actionDraftLocalGeneration = 0;
+let actionDraftPersistedGeneration = -1;
+let actionDraftPersistedRevision = null;
+let actionDraftCurrent = null;
+let actionDraftSubmitted = null;
+let actionDraftConflict = null;
+let actionDraftSaving = false;
+let actionDraftScheduled = false;
+let actionDraftSaveFailed = false;
+let actionDraftClearPending = false;
+let actionDraftSaveTimer = null;
+let actionDraftSaveQueue = Promise.resolve();
+let actionDraftNavigationTarget = null;
+let actionDraftCurrentScopeKey = null;
+let actionDraftSessionEpoch = 0;
+let actionDraftSubmissionNonce = 0;
+let actionDraftConflictRemoval = null;
+let actionSubmissionIntent = null;
+
 let resolveInitialization;
 let rejectInitialization;
+let campaignLoadSequence = 0;
+let campaignStartupReconciliation = null;
+let storyLoadRetryPromise = null;
+let readerPositionInteractionEpoch = 0;
+let readerPositionLoadEpoch = 0;
+let readerPositionChoicePending = false;
+let readerPositionRestoreEpoch = 0;
+let readerPositionWriteTimer = null;
+let readerPositionWriteQueue = Promise.resolve();
+let continuousReaderAbortController = null;
+const continuousSceneSignatures = new WeakMap();
+let activeImagePoll = null;
+const illustrationRenderSignatures = new WeakMap();
+const inlineIllustrationRenderSignatures = new WeakMap();
+const imageJobRenderSignatures = new WeakMap();
+
 const initialization = new Promise((resolve, reject) => {
   resolveInitialization = resolve;
   rejectInitialization = reject;
@@ -85,6 +144,8 @@ const initialization = new Promise((resolve, reject) => {
 
 const apiClient = composition.api;
 const illustrationApi = composition.illustrations;
+const readerHistoryApi = composition.readerHistory;
+const readerPositionStore = composition.readerPositions;
 const castPanel = composition.cast ? createLegacyCastPanel({ api: composition.cast,
   campaignId: () => state.campaignId, generationActive: () => responseGenerationIsActive(),
   openProtagonist: () => { void openEditCharacterProfile(); },
@@ -107,9 +168,280 @@ const sanitizeNarration = (text) => {
     .join("");
 };
 
+function ensureContinuousReaderControls() {
+  const toolbar = document.querySelector("[data-story-reader-toolbar]");
+  if (!toolbar) return null;
+  let controls = $("continuousReaderControls");
+  if (!controls) {
+    controls = document.createElement("div");
+    controls.id = "continuousReaderControls";
+    controls.className = "continuous-reader-controls";
+    controls.hidden = true;
+    const older = document.createElement("button");
+    older.type = "button";
+    older.className = "small ghost";
+    older.dataset.continuousReaderDirection = "older";
+    older.textContent = "Load older scenes";
+    const newer = document.createElement("button");
+    newer.type = "button";
+    newer.className = "small ghost";
+    newer.dataset.continuousReaderDirection = "newer";
+    newer.textContent = "Load newer scenes";
+    const status = document.createElement("span");
+    status.id = "continuousReaderStatus";
+    status.className = "continuous-reader-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    status.hidden = true;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "small ghost";
+    retry.dataset.continuousReaderRetry = "true";
+    retry.textContent = "Retry scene group";
+    retry.hidden = true;
+    controls.append(older, newer, status, retry);
+    toolbar.appendChild(controls);
+  }
+  return controls;
+}
+
+function initializeContinuousReader(options = {}) {
+  if (!state.campaignId) {
+    state.continuousReader = null;
+    return null;
+  }
+  const bootstrap = {
+    scope: { campaignId: state.campaignId, loadEpoch: campaignLoadSequence },
+    residentTurns: state.turns,
+    ...(options.selectedReadIdentity !== undefined
+      ? { selectedReadIdentity: options.selectedReadIdentity }
+      : {}),
+    ...(options.selectedTurn ? {
+      selectedTurn: { campaignId: state.campaignId, turn: options.selectedTurn }
+    } : {})
+  };
+  const initialized = createStoryContinuousReaderState(bootstrap);
+  state.continuousReader = initialized.status === "ready" ? initialized.state : null;
+  return state.continuousReader;
+}
+
+function continuousReaderStatusText(readerState = state.continuousReader) {
+  if (!readerState) return "";
+  if (readerState.status === "loading") return "Loading scene group…";
+  if (readerState.status === "error") {
+    return CONTINUOUS_READER_FAILURE_COPY[readerState.failureKind] || CONTINUOUS_READER_FAILURE_COPY.request;
+  }
+  return "";
+}
+
+function syncContinuousReaderControls() {
+  const controls = ensureContinuousReaderControls();
+  if (!controls) return;
+  const readerState = state.continuousReader;
+  const isVisible = Boolean(state.user?.settings?.continuousReading && state.campaignLoaded && state.turns.length);
+  controls.hidden = !isVisible;
+  controls.classList.toggle("hidden", !isVisible);
+  const pending = readerState?.status === "loading";
+  for (const button of controls.querySelectorAll("[data-continuous-reader-direction]")) {
+    const direction = button.dataset.continuousReaderDirection;
+    button.disabled = !isVisible || pending || readerState?.status === "error"
+      || readerState?.edgeAvailability?.[direction] === false;
+  }
+  const status = $("continuousReaderStatus");
+  const statusText = continuousReaderStatusText(readerState);
+  if (status) {
+    status.textContent = statusText;
+    status.hidden = !statusText;
+  }
+  const retry = controls.querySelector("[data-continuous-reader-retry]");
+  if (retry) retry.hidden = !isVisible || readerState?.status !== "error";
+}
+
+function continuousReaderFailureKind(error) {
+  const statusCode = Number(error?.statusCode ?? error?.status);
+  const domainCode = error?.domainCode ?? error?.code;
+  if (statusCode === 409 && domainCode === "reader_history_changed") return "history-changed";
+  if (statusCode === 409 && domainCode === "reader_anchor_changed") return "anchor-changed";
+  if (error?.name === "ApiContractError" || error?.name === "ZodError") return "protocol";
+  return "request";
+}
+
+function captureContinuousReaderAnchor(request) {
+  const turnNumber = request.apiRequest.anchorTurnNumber;
+  const turnId = request.apiRequest.anchorTurnId;
+  const scene = $(`scene-${turnNumber}`);
+  if (!scene || scene.dataset.turnId !== turnId) return null;
+  return { turnNumber, turnId, top: scene.getBoundingClientRect().top };
+}
+
+function restoreContinuousReaderAnchor(anchor, expectedState, interactionEpoch) {
+  if (!anchor) return;
+  window.requestAnimationFrame(() => {
+    if (state.continuousReader !== expectedState
+      || state.campaignId !== expectedState.scope.campaignId
+      || campaignLoadSequence !== expectedState.scope.loadEpoch
+      || !state.user?.settings?.continuousReading
+      || readerPositionInteractionEpoch !== interactionEpoch) return;
+    const scene = $(`scene-${anchor.turnNumber}`);
+    if (!scene || scene.dataset.turnId !== anchor.turnId) return;
+    const difference = scene.getBoundingClientRect().top - anchor.top;
+    if (Math.abs(difference) > 0.5) {
+      window.scrollTo({ top: window.scrollY + difference, behavior: "auto" });
+    }
+  });
+}
+
+function continuousReaderRequestIsCurrent(request, interactionEpoch) {
+  return state.continuousReader?.pendingRequest === request
+    && state.continuousReader.scope.campaignId === request.campaignId
+    && state.continuousReader.scope.loadEpoch === request.loadEpoch
+    && state.campaignId === request.campaignId
+    && campaignLoadSequence === request.loadEpoch
+    && state.user?.settings?.continuousReading
+    && readerPositionInteractionEpoch === interactionEpoch;
+}
+
+function continuousReaderKeyboardFocusWasActive() {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLButtonElement)) return false;
+  try {
+    return active.matches(":focus-visible")
+      && (active.hasAttribute("data-continuous-reader-direction")
+        || active.hasAttribute("data-continuous-reader-retry"));
+  } catch {
+    return false;
+  }
+}
+
+function restoreContinuousReaderKeyboardFocus(shouldRestore) {
+  if (!shouldRestore) return;
+  const controls = ensureContinuousReaderControls();
+  if (!controls) return;
+  const active = document.activeElement;
+  if (active instanceof HTMLButtonElement && !active.disabled && controls.contains(active)) return;
+  const retry = controls.querySelector('[data-continuous-reader-retry]:not([hidden])');
+  const nextDirection = [...controls.querySelectorAll("[data-continuous-reader-direction]")]
+    .find((button) => button instanceof HTMLButtonElement && !button.disabled);
+  const target = state.continuousReader?.status === "error" ? retry : nextDirection || retry;
+  if (target instanceof HTMLButtonElement) target.focus({ preventScroll: true });
+}
+
+async function executeContinuousReaderRequest(request, anchor, interactionEpoch, restoreKeyboardFocus) {
+  const controller = new AbortController();
+  continuousReaderAbortController?.abort();
+  continuousReaderAbortController = controller;
+  try {
+    const response = await readerHistoryApi.getSceneWindow(request.campaignId, request.apiRequest, controller.signal);
+    if (!continuousReaderRequestIsCurrent(request, interactionEpoch)) return false;
+    state.continuousReader = settleStoryContinuousReaderResponse(state.continuousReader, request, response);
+    if (state.continuousReader.status === "idle") {
+      const installedState = state.continuousReader;
+      renderAllScenes({ autoScroll: false });
+      restoreContinuousReaderKeyboardFocus(restoreKeyboardFocus);
+      restoreContinuousReaderAnchor(anchor, installedState, interactionEpoch);
+      updateStatusBar();
+      return true;
+    }
+    syncContinuousReaderControls();
+    restoreContinuousReaderKeyboardFocus(restoreKeyboardFocus);
+    return false;
+  } catch (error) {
+    if (!continuousReaderRequestIsCurrent(request, interactionEpoch)) return false;
+    state.continuousReader = settleStoryContinuousReaderFailure(
+      state.continuousReader,
+      request,
+      continuousReaderFailureKind(error)
+    );
+    syncContinuousReaderControls();
+    restoreContinuousReaderKeyboardFocus(restoreKeyboardFocus);
+    return false;
+  } finally {
+    if (continuousReaderAbortController === controller) continuousReaderAbortController = null;
+  }
+}
+
+function retirePendingContinuousReaderRequest() {
+  const readerState = state.continuousReader;
+  if (!readerState?.pendingRequest) return;
+  continuousReaderAbortController?.abort();
+  continuousReaderAbortController = null;
+  state.continuousReader = {
+    ...readerState,
+    requestEpoch: readerState.requestEpoch + 1,
+    pendingRequest: null,
+    status: "idle",
+    failureKind: null,
+    retryPlan: null
+  };
+  syncContinuousReaderControls();
+}
+
+async function loadContinuousReaderGroup(direction) {
+  const readerState = state.continuousReader;
+  if (!state.user?.settings?.continuousReading || !readerState) return false;
+  const restoreKeyboardFocus = continuousReaderKeyboardFocusWasActive();
+  const started = beginStoryContinuousReaderGroup(readerState, direction);
+  if (!started.request) return false;
+  const interactionEpoch = readerPositionInteractionEpoch;
+  const anchor = captureContinuousReaderAnchor(started.request);
+  state.continuousReader = started.state;
+  syncContinuousReaderControls();
+  return executeContinuousReaderRequest(started.request, anchor, interactionEpoch, restoreKeyboardFocus);
+}
+
+async function retryContinuousReaderGroup() {
+  const readerState = state.continuousReader;
+  if (!readerState) return false;
+  const started = beginStoryContinuousReaderRetry(readerState);
+  if (!started.request && !started.anchorRefreshRequest) return false;
+  const failedRequest = started.request || started.anchorRefreshRequest.failedRequest;
+  let anchor = captureContinuousReaderAnchor(failedRequest);
+  const interactionEpoch = readerPositionInteractionEpoch;
+  const restoreKeyboardFocus = continuousReaderKeyboardFocusWasActive();
+  state.continuousReader = started.state;
+  syncContinuousReaderControls();
+  if (started.request) return executeContinuousReaderRequest(started.request, anchor, interactionEpoch, restoreKeyboardFocus);
+
+  const refresh = started.anchorRefreshRequest;
+  const controller = new AbortController();
+  continuousReaderAbortController?.abort();
+  continuousReaderAbortController = controller;
+  try {
+    const response = await readerHistoryApi.getTurn(refresh.campaignId, refresh.turnNumber, controller.signal);
+    if (state.continuousReader?.pendingRequest !== refresh || state.campaignId !== refresh.campaignId
+      || campaignLoadSequence !== refresh.loadEpoch || !state.user?.settings?.continuousReading
+      || readerPositionInteractionEpoch !== interactionEpoch) return false;
+    const refreshed = settleStoryContinuousReaderAnchorRefresh(state.continuousReader, refresh, response);
+    state.continuousReader = refreshed.state;
+    if (refreshed.request) {
+      if (anchor) anchor = { ...anchor, turnId: refreshed.request.apiRequest.anchorTurnId };
+      return executeContinuousReaderRequest(refreshed.request, anchor, interactionEpoch, restoreKeyboardFocus);
+    }
+    syncContinuousReaderControls();
+    restoreContinuousReaderKeyboardFocus(restoreKeyboardFocus);
+    return false;
+  } catch {
+    if (state.continuousReader?.pendingRequest !== refresh || readerPositionInteractionEpoch !== interactionEpoch
+      || !state.user?.settings?.continuousReading) return false;
+    state.continuousReader = settleStoryContinuousReaderAnchorRefreshFailure(state.continuousReader, refresh);
+    syncContinuousReaderControls();
+    restoreContinuousReaderKeyboardFocus(restoreKeyboardFocus);
+    return false;
+  } finally {
+    if (continuousReaderAbortController === controller) continuousReaderAbortController = null;
+  }
+}
+
 // ── Constants ──────────────────────────────────────────────────
 const IMAGE_POLL_MS = 5000;
 const TOAST_DURATION = 3500;
+const STORY_HISTORY_SEARCH_DEBOUNCE_MS = 250;
+const CONTINUOUS_READER_FAILURE_COPY = Object.freeze({
+  request: "Couldn't load this scene group. Try again.",
+  "history-changed": "Story history changed. Retry this scene group.",
+  "anchor-changed": "This scene was replaced. Refresh the scene group to continue.",
+  protocol: "Couldn't use this scene group. Try again."
+});
 
 // ── State ──────────────────────────────────────────────────────
 const state = {
@@ -144,6 +476,10 @@ const state = {
   illustrationConfig: null,
   illustrationSegments: [],
   illustrationError: null,
+  illustrationLoading: false,
+  readerPinnedTurn: null,
+  continuousReader: null,
+  readerResumePosition: null,
   imagePollEpoch: 0,
   illustrationVariantIndexes: new Map(),
   imagePollTimer: null,
@@ -156,7 +492,17 @@ const state = {
   choiceDraftOwnerKey: null,
   choiceDraftSelection: createChoiceDraftSelection(),
   historySelectedTurnNumber: null,
+  historyWindow: null,
+  historyWindowCampaignId: null,
+  historyWindowEpoch: null,
+  historySelectedPreview: null,
+  historyResidentRows: null,
+  historyLocalCompleteRows: null,
+  historyLocalEnd: null,
+  historyPageRequestId: 0,
   historyInspectionRequestId: 0,
+  historySearch: createStoryHistorySearchState(),
+  historySearchJumpRequestId: 0,
   user: {
     id: null,
     systemKey: null,
@@ -164,21 +510,36 @@ const state = {
     settings: {
       autoSubmitTurnChoices: true,
       continuousReading: false,
-      defaultTurnControlStyle: "flexible_action"
+      defaultTurnControlStyle: "flexible_action",
+      readerPreferences: DEFAULT_READER_PREFERENCES
     }
   }
 };
+
+let storyStreamRenderer = null;
+let storyStreamEpoch = 0;
+let storyStreamRunIdentity = null;
+let storyStreamIdentityToken = 0;
 
 const modalBaselines = new WeakMap();
 let discardModalTarget = null;
 let discardModalAction = null;
 let completeHistoryLoad = null;
+let historyPageLoad = null;
+let historySearchDebounceTimer = null;
+let historySearchAbortController = null;
+let historySearchJumpAbortController = null;
+let historySearchJumpSearchIdentity = null;
 let storyTurnWindowEpoch = 0;
 let activityActivationEpoch = 0;
 let nextEditStateSessionId = 0;
 let nextCharacterProfileEditSessionId = 0;
 let characterProfileEditRequestToken = 0;
+let editStateTabBinding = null;
 let nextResponseEditSessionId = 0;
+let userProfileSaving = false;
+let userProfilePersistedTurnControlStyle = null;
+let userProfileTurnControlStyleChanged = false;
 let generationReviewLoadEpoch = 0;
 let generationReviewLoadedKey = null;
 const COMPLETE_HISTORY_SUPERSEDED = "complete_history_superseded";
@@ -197,6 +558,7 @@ function publishStoryTurnWindow(turns, nextCursor, options = {}) {
   state.turns = turns;
   state.historyNextCursor = nextCursor || null;
   storyTurnWindowEpoch += 1;
+  resetStoryHistorySearchForCurrentScope();
   if (completeHistoryLoad !== options.completeHistoryRequest) {
     completeHistoryLoad = null;
     setTurnHistoryLoadStatus("");
@@ -209,13 +571,339 @@ function storyTurnWindowIsCurrent(campaignId, epoch, cursor) {
     && state.historyNextCursor === cursor;
 }
 
-function modalFormSnapshot(dialog) {
-  return [...dialog.querySelectorAll("input, select, textarea")].map((control) => {
-    if (control instanceof HTMLInputElement && ["checkbox", "radio"].includes(control.type)) {
-      return `${control.id}:${control.checked}`;
+function readerPositionScope() {
+  const userId = state.user?.id;
+  const campaignId = state.campaignId;
+  if (typeof userId !== "string" || typeof campaignId !== "string") return null;
+  return { userId, campaignId };
+}
+
+function showReaderResumePrompt(position) {
+  const prompt = $("readerResumePrompt");
+  const message = $("readerResumeMessage");
+  if (!prompt || !message) return;
+  message.textContent = `Resume at Turn ${position.turnNumber}.`;
+  prompt.hidden = false;
+  prompt.classList.remove("hidden");
+}
+
+function hideReaderResumePrompt() {
+  const prompt = $("readerResumePrompt");
+  if (!prompt) return;
+  prompt.hidden = true;
+  prompt.classList.add("hidden");
+}
+
+function readerPositionWorkflowOwnsScene() {
+  const recoveryPanel = $("generationRecoveryPanel");
+  return Boolean(state.pendingGeneration)
+    || Boolean(state.generationRecovery)
+    || Boolean(state.generationReview?.summary)
+    || Boolean(state.generationRecoveryKind)
+    || state.generationDisplayActive
+    || Boolean(recoveryPanel && !recoveryPanel.classList.contains("hidden"));
+}
+
+function syncReaderResumePrompt() {
+  const position = state.readerResumePosition;
+  if (!readerPositionWorkflowOwnsScene()
+    && position && Number(position.turnNumber) !== currentViewTurnNumber()) showReaderResumePrompt(position);
+  else hideReaderResumePrompt();
+}
+
+function showReaderPositionNotice(text) {
+  const notice = $("readerPositionNotice");
+  if (!notice) return;
+  notice.textContent = text;
+  notice.hidden = !text;
+}
+
+function readerLoadIsCurrent(campaignId, userId, loadSequence, positionLoadEpoch, interactionEpoch) {
+  return readerScopeIsCurrent(campaignId, userId, loadSequence, positionLoadEpoch)
+    && readerPositionInteractionEpoch === interactionEpoch;
+}
+
+function readerScopeIsCurrent(campaignId, userId, loadSequence, positionLoadEpoch) {
+  return state.campaignId === campaignId
+    && state.user?.id === userId
+    && campaignLoadSequence === loadSequence
+    && readerPositionLoadEpoch === positionLoadEpoch;
+}
+
+async function offerSavedReaderPosition(campaignId, loadSequence, interactionEpoch) {
+  const scope = readerPositionScope();
+  if (!scope || scope.campaignId !== campaignId) {
+    readerPositionChoicePending = false;
+    return;
+  }
+  const positionLoadEpoch = ++readerPositionLoadEpoch;
+  readerPositionChoicePending = true;
+  try {
+    const position = await readerPositionStore.read(scope);
+    if (!readerScopeIsCurrent(campaignId, scope.userId, loadSequence, positionLoadEpoch)) return;
+    if (!position) {
+      readerPositionChoicePending = false;
+      return;
     }
-    return `${control.id}:${control.value}`;
-  }).join("\u001f");
+    if (readerPositionInteractionEpoch !== interactionEpoch) {
+      readerPositionChoicePending = false;
+      syncReaderResumePrompt();
+      return;
+    }
+    state.readerResumePosition = position;
+    if (readerPositionWorkflowOwnsScene()) {
+      readerPositionChoicePending = false;
+      showReaderPositionNotice("Saved reading position is available after generation or recovery is resolved.");
+      return;
+    }
+    const loadedTurn = state.turns.find((turn) => Number(turn.turnNumber) === position.turnNumber);
+    if (loadedTurn && (loadedTurn.id || loadedTurn.turnId) !== position.turnId) {
+      fallBackFromReaderPosition("That saved turn has been replaced. Showing the latest accepted turn.");
+      return;
+    }
+    if (position.turnNumber > latestTurnNumber(state.turns)) {
+      fallBackFromReaderPosition("That saved turn is no longer available. Showing the latest accepted turn.");
+      return;
+    }
+    await restoreSavedReaderPosition(position, scope, loadSequence, positionLoadEpoch, interactionEpoch);
+  } catch {
+    // Reader-position storage is optional and must never block campaign loading.
+    if (readerScopeIsCurrent(campaignId, scope.userId, loadSequence, positionLoadEpoch)) {
+      readerPositionChoicePending = false;
+    }
+  }
+}
+
+function fallBackFromReaderPosition(message) {
+  state.readerPinnedTurn = null;
+  state.readerResumePosition = null;
+  state.viewTurnNumber = null;
+  readerPositionChoicePending = false;
+  if (state.user?.settings?.continuousReading) initializeContinuousReader();
+  hideReaderResumePrompt();
+  showReaderPositionNotice(message);
+  renderAllScenes();
+  updateStatusBar();
+  scheduleReaderPositionSave();
+}
+
+async function resumeSavedReaderPosition() {
+  const position = state.readerResumePosition;
+  const scope = readerPositionScope();
+  if (!position || !scope) return;
+  const loadSequence = campaignLoadSequence;
+  const positionLoadEpoch = readerPositionLoadEpoch;
+  const interactionEpoch = readerPositionInteractionEpoch;
+  readerPositionChoicePending = true;
+  await restoreSavedReaderPosition(position, scope, loadSequence, positionLoadEpoch, interactionEpoch);
+}
+
+async function restoreSavedReaderPosition(position, scope, loadSequence, positionLoadEpoch, interactionEpoch) {
+  const restoreEpoch = ++readerPositionRestoreEpoch;
+  const turnWindowEpoch = storyTurnWindowEpoch;
+  const isCurrent = () => readerPositionRestoreEpoch === restoreEpoch
+    && readerLoadIsCurrent(scope.campaignId, scope.userId, loadSequence, positionLoadEpoch, interactionEpoch)
+    && storyTurnWindowEpoch === turnWindowEpoch
+    && !readerPositionWorkflowOwnsScene();
+  if (readerPositionWorkflowOwnsScene()) {
+    readerPositionChoicePending = false;
+    showReaderPositionNotice("Saved reading position is available after generation or recovery is resolved.");
+    return;
+  }
+  showReaderPositionNotice("");
+  const resumeButton = $("btnResumeReading");
+  if (resumeButton) resumeButton.disabled = true;
+  try {
+    let turn = state.turns.find((item) => Number(item.turnNumber) === position.turnNumber) || null;
+    if (turn && (turn.id || turn.turnId) !== position.turnId) {
+      fallBackFromReaderPosition("That saved turn has been replaced. Showing the latest accepted turn.");
+      return;
+    }
+    if (!turn) {
+      const response = await readerHistoryApi.getTurn(scope.campaignId, position.turnNumber);
+      if (!isCurrent()) {
+        if (readerScopeIsCurrent(scope.campaignId, scope.userId, loadSequence, positionLoadEpoch)) {
+          readerPositionChoicePending = false;
+          syncReaderResumePrompt();
+        }
+        return;
+      }
+      if (response.campaignId !== scope.campaignId
+        || Number(response.turn.turnNumber) !== position.turnNumber
+        || response.turn.id !== position.turnId) {
+        fallBackFromReaderPosition("That saved turn is no longer available. Showing the latest accepted turn.");
+        return;
+      }
+      turn = response.turn;
+    }
+    if (!isCurrent()) {
+      if (readerScopeIsCurrent(scope.campaignId, scope.userId, loadSequence, positionLoadEpoch)) {
+        readerPositionChoicePending = false;
+        syncReaderResumePrompt();
+      }
+      return;
+    }
+    const currentTurn = state.turns.find((item) => Number(item.turnNumber) === position.turnNumber);
+    if (currentTurn && (currentTurn.id || currentTurn.turnId) !== position.turnId) {
+      fallBackFromReaderPosition("That saved turn has been replaced. Showing the latest accepted turn.");
+      return;
+    }
+    if (document.fonts?.ready) await document.fonts.ready;
+    const acceptedTurnAfterLayout = state.turns.find((item) => Number(item.turnNumber) === position.turnNumber);
+    if (acceptedTurnAfterLayout && (acceptedTurnAfterLayout.id || acceptedTurnAfterLayout.turnId) !== position.turnId) {
+      readerPositionChoicePending = false;
+      syncReaderResumePrompt();
+      return;
+    }
+    if (!isCurrent()) {
+      if (readerScopeIsCurrent(scope.campaignId, scope.userId, loadSequence, positionLoadEpoch)) {
+        readerPositionChoicePending = false;
+        syncReaderResumePrompt();
+      }
+      return;
+    }
+    state.readerPinnedTurn = currentTurn ? null : turn;
+    state.viewTurnNumber = position.turnNumber === latestTurnNumber(state.turns) ? null : position.turnNumber;
+    if (state.user?.settings?.continuousReading) {
+      initializeContinuousReader({
+        selectedReadIdentity: { turnNumber: position.turnNumber, id: position.turnId },
+        selectedTurn: currentTurn || turn
+      });
+    }
+    hideReaderResumePrompt();
+    renderAllScenes({ autoScroll: false });
+    updateStatusBar();
+    readerPositionChoicePending = false;
+    showReaderPositionNotice(`Resumed reading at Turn ${position.turnNumber}. Use Jump to latest to catch up.`);
+    restoreReaderSceneOffset(position.turnNumber, position.offsetRatio);
+    scheduleReaderPositionSave();
+  } catch {
+    if (isCurrent()) fallBackFromReaderPosition("That saved turn could not be opened. Showing the latest accepted turn.");
+  } finally {
+    if (resumeButton && readerPositionRestoreEpoch === restoreEpoch
+      && readerScopeIsCurrent(scope.campaignId, scope.userId, loadSequence, positionLoadEpoch)) {
+      resumeButton.disabled = false;
+    }
+  }
+}
+
+function readerStickyInset() {
+  const headerHeight = document.querySelector(".universal-nav")?.getBoundingClientRect?.().height || 0;
+  const toolbar = document.querySelector("[data-story-reader-toolbar]");
+  const toolbarBottom = toolbar?.getBoundingClientRect?.().bottom || 0;
+  return Math.max(headerHeight, toolbarBottom);
+}
+
+function readerPositionScene() {
+  if (readerPositionWorkflowOwnsScene()) return null;
+  if (!state.user?.settings?.continuousReading) {
+    const number = currentViewTurnNumber();
+    return document.getElementById(`scene-${number}`);
+  }
+  const readingLine = readerStickyInset() + 4;
+  return [...document.querySelectorAll("[id^='scene-']")]
+    .find((scene) => scene.getBoundingClientRect().bottom > readingLine) || null;
+}
+
+function captureReaderPosition() {
+  const scope = readerPositionScope();
+  const scene = readerPositionScene();
+  if (!scope || !scene || readerPositionChoicePending) return null;
+  const turnNumber = Number(scene.dataset.turnNumber);
+  const turn = state.readerPinnedTurn && Number(state.readerPinnedTurn.turnNumber) === turnNumber
+    ? state.readerPinnedTurn
+    : state.turns.find((item) => Number(item.turnNumber) === turnNumber)
+      || state.continuousReader?.turns.find((item) => Number(item.turnNumber) === turnNumber);
+  const turnId = turn?.id || turn?.turnId;
+  if (!turnId || !Number.isInteger(turnNumber) || turnNumber < 1) return null;
+  const inset = readerStickyInset();
+  const documentTop = scene.getBoundingClientRect().top + window.scrollY;
+  const availableScroll = Math.max(0, scene.getBoundingClientRect().height - (window.innerHeight - inset));
+  const offsetRatio = availableScroll === 0
+    ? 0
+    : Math.max(0, Math.min(1, (window.scrollY + inset - documentTop) / availableScroll));
+  return {
+    scope,
+    interactionEpoch: readerPositionInteractionEpoch,
+    turnWindowEpoch: storyTurnWindowEpoch,
+    position: { turnId, turnNumber, offsetRatio }
+  };
+}
+
+function persistReaderPosition() {
+  const sample = captureReaderPosition();
+  if (!sample) return;
+  readerPositionWriteQueue = readerPositionWriteQueue
+    .then(async () => {
+      if (state.campaignId !== sample.scope.campaignId || state.user?.id !== sample.scope.userId
+        || readerPositionInteractionEpoch !== sample.interactionEpoch
+        || storyTurnWindowEpoch !== sample.turnWindowEpoch
+        || readerPositionWorkflowOwnsScene()) return;
+      const result = await readerPositionStore.write(sample.scope, sample.position);
+      if (result === "saved" && state.campaignId === sample.scope.campaignId && state.user?.id === sample.scope.userId
+        && readerPositionInteractionEpoch === sample.interactionEpoch
+        && storyTurnWindowEpoch === sample.turnWindowEpoch
+        && !readerPositionWorkflowOwnsScene()) {
+        state.readerResumePosition = {
+          schemaVersion: 1,
+          ...sample.position,
+          updatedAt: new Date().toISOString()
+        };
+        syncReaderResumePrompt();
+      }
+    })
+    .then(() => undefined, () => undefined);
+}
+
+function scheduleReaderPositionSave() {
+  if (readerPositionWriteTimer !== null) clearTimeout(readerPositionWriteTimer);
+  readerPositionWriteTimer = setTimeout(() => {
+    readerPositionWriteTimer = null;
+    persistReaderPosition();
+  }, 250);
+}
+
+function flushReaderPositionSave() {
+  if (readerPositionWriteTimer !== null) {
+    clearTimeout(readerPositionWriteTimer);
+    readerPositionWriteTimer = null;
+  }
+  persistReaderPosition();
+}
+
+function noteReaderPositionIntent(event) {
+  if (!event.isTrusted) return;
+  if (event.target instanceof Element && event.target.closest("#btnResumeReading")) return;
+  readerPositionInteractionEpoch += 1;
+  retirePendingContinuousReaderRequest();
+  if (readerPositionChoicePending) readerPositionChoicePending = false;
+
+}
+
+function restoreReaderSceneOffset(turnNumber, offsetRatio) {
+  const scene = document.getElementById(`scene-${turnNumber}`);
+  if (!scene) return;
+  const ratio = Math.max(0, Math.min(1, offsetRatio));
+  // Scrolling can move the toolbar from its normal position to its sticky inset.
+  // Recalculate synchronously so later reader intent cannot be overwritten.
+  for (let pass = 0; pass < 2; pass += 1) {
+    const inset = readerStickyInset();
+    const rect = scene.getBoundingClientRect();
+    const availableScroll = Math.max(0, rect.height - (window.innerHeight - inset));
+    const top = rect.top + window.scrollY + ratio * availableScroll - inset;
+    window.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+  }
+}
+
+function modalFormSnapshot(dialog) {
+  return [...dialog.querySelectorAll("input, select, textarea")]
+    .filter((control) => !control.closest(".turn-history-tools"))
+    .map((control) => {
+      if (control instanceof HTMLInputElement && ["checkbox", "radio"].includes(control.type)) {
+        return `${control.id}:${control.checked}`;
+      }
+      return `${control.id}:${control.value}`;
+    }).join("\u001f");
 }
 
 function openManagedModal(dialog) {
@@ -232,6 +920,10 @@ function clickedDialogBackdrop(dialog, event) {
 
 function requestModalDismissal(dialog) {
   if (dialog.id === "campaignCastDialog") { castPanel?.requestClose(); return; }
+  if (dialog.id === "userProfileDialog") {
+    if (!userProfileSaving) dialog.close();
+    return;
+  }
   requestDiscardChanges(dialog, () => dialog.close());
 }
 
@@ -281,6 +973,37 @@ function setTurnHistoryLoadStatus(message, kind = "") {
   status.classList.toggle("error", kind === "error");
 }
 
+function showStoryLoadRecovery(error) {
+  const panel = $("storyLoadRecovery");
+  const title = $("storyLoadRecoveryTitle");
+  const message = $("storyLoadRecoveryMessage");
+  const retry = $("storyLoadRetry");
+  if (!panel || !title || !message || !retry) return;
+  const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : null;
+  if (statusCode === 404) {
+    title.textContent = "Campaign not found";
+    message.textContent = "This campaign could not be found. Return to Campaigns to choose an available story.";
+    retry.hidden = true;
+    retry.classList.add("hidden");
+  } else if (statusCode === 403) {
+    title.textContent = "Campaign access unavailable";
+    message.textContent = "You don't have access to this campaign. Return to Campaigns to choose a story available to you.";
+    retry.hidden = true;
+    retry.classList.add("hidden");
+  } else {
+    title.textContent = "Story unavailable";
+    message.textContent = "The story could not be loaded. Check your connection and try again.";
+    const retryable = statusCode === null || statusCode === 408 || statusCode === 425 || statusCode === 429 || statusCode >= 500;
+    retry.hidden = !retryable;
+    retry.classList.toggle("hidden", !retryable);
+  }
+  panel.classList.remove("hidden");
+}
+
+function clearStoryLoadRecovery() {
+  $("storyLoadRecovery")?.classList.add("hidden");
+}
+
 function ensureCompleteTurnHistory() {
   if (!state.historyNextCursor) return Promise.resolve(state.turns);
   if (completeHistoryLoad?.campaignId === state.campaignId
@@ -325,19 +1048,26 @@ function showBusy(msg) {
   state.busy = true;
   const el = $("llmWaitIndicator");
   const text = $("llmWaitIndicatorText");
-  if (text) text.textContent = msg || "Working…";
-  if (el) el.classList.add("show");
+  const message = msg || "Working…";
+  if (text && text.textContent !== message) text.textContent = message;
+  if (el && !el.classList.contains("show")) el.classList.add("show");
   const pill = $("busyPill");
-  if (pill) { pill.textContent = "Busy"; pill.classList.add("busy"); }
+  if (pill) {
+    if (pill.textContent !== "Busy") pill.textContent = "Busy";
+    if (!pill.classList.contains("busy")) pill.classList.add("busy");
+  }
   syncInputState();
 }
 
 function hideBusy() {
   state.busy = false;
   const el = $("llmWaitIndicator");
-  if (el) el.classList.remove("show");
+  if (el && el.classList.contains("show")) el.classList.remove("show");
   const pill = $("busyPill");
-  if (pill) { pill.textContent = "Ready"; pill.classList.remove("busy"); }
+  if (pill) {
+    if (pill.textContent !== "Ready") pill.textContent = "Ready";
+    if (pill.classList.contains("busy")) pill.classList.remove("busy");
+  }
   syncInputState();
 }
 
@@ -387,13 +1117,32 @@ function syncInputState() {
 
   const btnPrev = $("btnPrev");
   const btnNext = $("btnNext");
+  const btnReaderJumpLatest = $("btnReaderJumpLatest");
   const btnUndo = $("btnUndo");
   const btnRetry = $("btnRetry");
 
   const lastTurnHasAction = turnCount > 0 && Boolean(state.turns[turnCount - 1] && state.turns[turnCount - 1].action);
 
-  if (btnPrev) btnPrev.disabled = generationLocked || turnCount === 0 || (curr <= 0 && !state.historyNextCursor);
-  if (btnNext) btnNext.disabled = generationLocked || turnCount === 0 || isLatest;
+  const previousDisabled = generationLocked || turnCount === 0 || Boolean(state.readerPinnedTurn) || (curr <= 0 && !state.historyNextCursor);
+  const nextDisabled = generationLocked || turnCount === 0 || isLatest;
+  if (btnPrev) {
+    btnPrev.disabled = previousDisabled;
+    btnPrev.title = generationLocked ? "Turn navigation is unavailable while generation is active."
+      : turnCount === 0 ? "There are no accepted turns yet."
+        : previousDisabled ? "You are at the earliest available turn." : "Previous turn";
+  }
+  if (btnNext) {
+    btnNext.disabled = nextDisabled;
+    btnNext.title = generationLocked ? "Turn navigation is unavailable while generation is active."
+      : turnCount === 0 ? "There are no accepted turns yet."
+        : isLatest ? "You are already at the latest turn." : "Next turn";
+  }
+  if (btnReaderJumpLatest) {
+    btnReaderJumpLatest.disabled = generationLocked || turnCount === 0 || isLatest;
+    btnReaderJumpLatest.title = generationLocked ? "Turn navigation is unavailable while generation is active."
+      : turnCount === 0 ? "There are no accepted turns yet."
+        : isLatest ? "You are already at the latest turn." : "Jump to the latest turn";
+  }
   if (btnUndo) btnUndo.disabled = generationLocked || turnCount === 0 || !isLatest;
   if (btnRetry) btnRetry.disabled = generationLocked || turnCount === 0 || !isLatest || !lastTurnHasAction;
   syncResponseEditorControls();
@@ -481,22 +1230,94 @@ async function checkOnboarding() {
 }
 
 // ── Campaign Loading ──────────────────────────────────────────
+let readerIllustrationRequestSequence = 0;
+
+async function loadReaderIllustrations(campaignId, loadEpoch) {
+  const observationScope = activityScope();
+  const windowEpoch = storyTurnWindowEpoch;
+  const requestSequence = ++readerIllustrationRequestSequence;
+  const current = () => state.campaignId === campaignId
+    && campaignLoadSequence === loadEpoch
+    && storyTurnWindowEpoch === windowEpoch
+    && readerIllustrationRequestSequence === requestSequence
+    && activityScopeCurrent(observationScope);
+  if (!current()) return false;
+  state.illustrationLoading = true;
+  renderStoryIllustration();
+  let loaded = false;
+  try {
+    const [config, segmentData] = await Promise.all([
+      illustrationApi.config(campaignId), illustrationApi.segments(campaignId)
+    ]);
+    if (!current()) return false;
+    state.illustrationConfig = config;
+    state.illustrationSegments = segmentData.segments || [];
+    state.illustrationError = null;
+    endActivityEpisode("browser.illustration_command_failed", observationScope);
+    loaded = true;
+  } catch (error) {
+    if (!current()) return false;
+    observeActivity("browser.illustration_command_failed", error, { severity: "warning", dedupe: true }, observationScope);
+    state.illustrationError = illustrationLoadError(error);
+  } finally {
+    if (current()) {
+      state.illustrationLoading = false;
+      renderStoryIllustration();
+    }
+  }
+  if (loaded && current() && illustrationsEnabled()) void pollImageJobs({ initialSegments: state.illustrationSegments });
+  return loaded;
+}
+
 async function loadCampaign(campaignId, options = {}) {
+  const loadSequence = ++campaignLoadSequence;
+  retireActionSubmissionIntent();
+  const loadEpoch = ++storyTurnWindowEpoch;
+  invalidateStoryStreamRenderer();
+  const positionInteractionEpoch = readerPositionInteractionEpoch;
+  readerIllustrationRequestSequence += 1;
+  state.illustrationLoading = false;
+  state.imagePollEpoch += 1;
+  if (activeImagePoll) activeImagePoll.stopped = true;
+  activeImagePoll = null;
+  if (state.imagePollTimer) clearTimeout(state.imagePollTimer);
+  state.imagePollTimer = null;
+
+  continuousReaderAbortController?.abort();
+  continuousReaderAbortController = null;
+  state.continuousReader = null;
+
+  readerPositionLoadEpoch += 1;
+  readerPositionChoicePending = true;
+  state.readerPinnedTurn = null;
+  state.readerResumePosition = null;
+  hideReaderResumePrompt();
+  showReaderPositionNotice("");
   activity?.close();
   activity?.setJobActive(false);
   observedEpisodes.clear();
-  ++storyTurnWindowEpoch;
-  const loadEpoch = ++activityActivationEpoch;
+  const activityEpoch = ++activityActivationEpoch;
   if (state.campaignId !== campaignId) {
     state.retainedAppendDraft = null;
     state.illustrationConfig = null;
     state.illustrationSegments = [];
     state.illustrationError = null;
+    state.campaign = null;
+    state.world = null;
+    state.playerConfig = null;
+    state.runtimeState = null;
+    state.campaignLoaded = false;
+    state.turns = [];
+    const storyArea = $("storyArea");
+    if (storyArea) storyArea.replaceChildren();
   }
   clearResponseEditSession();
   resetGenerationStateForCampaignLoad();
   state.campaignId = campaignId;
+  resetStoryHistorySearchForCurrentScope();
   state.campaignLoaded = false;
+  clearStoryLoadRecovery();
+  setStorySyncStatus("Story loading");
   state.storyMemorySettings = null;
   renderStoryMemorySettings(null, "Loading the saved Story Memory level for this campaign.");
   completeHistoryLoad = null;
@@ -505,13 +1326,13 @@ async function loadCampaign(campaignId, options = {}) {
   try {
     if (activity) {
       const currentSession = await apiClient.session.get();
-      if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
+      if (state.campaignId !== campaignId || activityActivationEpoch !== activityEpoch) return;
       state.user = currentSession.user;
       void activity.open({ apiBase: composition.activityApiBase, ownerUserId: currentSession.user.id, campaignId });
     }
     const syncData = await apiClient.generation.syncStatus(campaignId);
     const turnData = syncData.turns || await apiClient.campaigns.turns(campaignId);
-    if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
+    if (campaignLoadSequence !== loadSequence || state.campaignId !== campaignId || storyTurnWindowEpoch !== loadEpoch) return;
 
     setTurnHistoryLoadStatus("");
     state.campaign = syncData.campaign || syncData;
@@ -524,25 +1345,15 @@ async function loadCampaign(campaignId, options = {}) {
 
     publishStoryTurnWindow(turnData.turns || [], turnData.nextCursor || null);
     void loadStoryMemorySettings(campaignId, storyTurnWindowEpoch);
+    const coreWindowEpoch = storyTurnWindowEpoch;
+    const current = () => campaignLoadSequence === loadSequence && state.campaignId === campaignId
+      && storyTurnWindowEpoch === coreWindowEpoch && activityActivationEpoch === activityEpoch;
     const runtimeState = await apiClient.campaigns.state(campaignId);
-    if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
+    if (!current()) return false;
     state.runtimeState = runtimeState;
-    markEditStateStaleForCurrentRuntimeState(state.runtimeState);
-    try {
-      const config = await illustrationApi.config(campaignId);
-      if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
-      const segmentData = await illustrationApi.segments(campaignId);
-      if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
-      state.illustrationConfig = config;
-      state.illustrationSegments = segmentData.segments || [];
-      state.illustrationError = null;
-    } catch (error) {
-      if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
-      observeActivity("browser.illustration_command_failed", error, { severity: "warning", dedupe: true }, { campaignId, epoch: loadEpoch });
-      state.illustrationError = illustrationLoadError(error);
-    }
+    markEditStateStaleForCurrentRuntimeState(runtimeState);
 
-    if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
+    if (state.campaignId !== campaignId || activityActivationEpoch !== activityEpoch) return;
     // Set title
     const titleEl = $("storyTitle");
     const name = state.campaign.title || state.world?.title || "Untitled Campaign";
@@ -550,23 +1361,17 @@ async function loadCampaign(campaignId, options = {}) {
     document.title = `${name} — Infinite Quest`;
 
     state.viewTurnNumber = null;
-    if (state.user?.settings?.continuousReading && state.historyNextCursor) {
-      try {
-        await ensureCompleteTurnHistory();
-      } catch (error) {
-        if (!isCompleteHistorySuperseded(error)) {
-          toast(`Continuous reading is showing the loaded window: ${error.message}`);
-        }
-      }
-    }
-    if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
+    if (state.user?.settings?.continuousReading) initializeContinuousReader();
     renderAllScenes({ autoScroll: options.autoScroll });
     updateStatusBar();
 
     renderTurnInput();
 
-    observeActivity("browser.campaign_load", null, { success: true }, { campaignId, epoch: loadEpoch });
+    observeActivity("browser.campaign_load", null, { success: true }, { campaignId, epoch: activityEpoch });
     state.campaignLoaded = true;
+    setStorySyncStatus("Story synced");
+    syncContinuousReaderControls();
+    void offerSavedReaderPosition(campaignId, loadSequence, positionInteractionEpoch);
     if (!state.pendingGeneration && (state.generationRecovery?.status === "recoverable" || state.generationRecovery?.status === "failed")) {
       const guidance = generationRecoveryGuidance(state.generationRecovery.diagnostic);
       const presentation = generationDiagnosticPresentation(state.generationRecovery.diagnostic);
@@ -578,7 +1383,7 @@ async function loadCampaign(campaignId, options = {}) {
         presentation
       );
       await loadGenerationReview();
-      if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch || !state.generationRecovery) return;
+      if (!current() || !state.generationRecovery) return false;
       showGenerationRecovery(
         state.generationRecovery.id,
         state.generationReview?.summary ? "This turn needs your review" : (guidance?.message || "This durable generation needs your direction."),
@@ -588,15 +1393,41 @@ async function loadCampaign(campaignId, options = {}) {
       );
       if (state.generationRecovery.status === "failed") restoreRetainedAppendDraft();
     }
+    await restoreActionDraftForCampaign(campaignId, loadSequence);
+    if (!current()) return false;
+    void loadReaderIllustrations(campaignId, loadSequence);
+    try {
+      localStorage.setItem("infiniteQuestLastCampaignId", campaignId);
+    } catch {
+      // The campaign remains usable when browser preference storage is unavailable.
+    }
     return true;
   } catch (err) {
-    if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return false;
+    if (campaignLoadSequence !== loadSequence || state.campaignId !== campaignId) return false;
     if ([401, 403, 404].includes(err.statusCode)) activity?.close();
-    toast(`Error loading campaign: ${err.message}`);
-    observeActivity("browser.campaign_load", err, { route: "/api/v1/campaigns/:campaignId" }, { campaignId, epoch: loadEpoch });
+    state.campaign = null;
+    state.world = null;
+    state.playerConfig = null;
+    state.runtimeState = null;
+    state.campaignLoaded = false;
+    state.turns = [];
+    state.continuousReader = null;
+    state.pendingGeneration = null;
+    state.generationRecovery = null;
+    state.generationReview = null;
+    state.illustrationConfig = null;
+    state.illustrationSegments = [];
+    state.illustrationError = null;
+    setStorySyncStatus("Story sync unavailable");
+    const title = $("storyTitle");
+    if (title) title.textContent = "Story unavailable";
+    document.title = "Story unavailable — Infinite Quest";
+    renderAllScenes({ autoScroll: false });
+    showStoryLoadRecovery(err);
+    observeActivity("browser.campaign_load", err, { route: "/api/v1/campaigns/:campaignId" }, { campaignId, epoch: activityEpoch });
     return false;
   } finally {
-    if (state.campaignId === campaignId && activityActivationEpoch === loadEpoch) hideBusy();
+    if (campaignLoadSequence === loadSequence && state.campaignId === campaignId) hideBusy();
   }
 }
 
@@ -634,14 +1465,21 @@ async function showBackgroundStoryBeforeStart() {
 }
 
 async function startAdventure(options = {}) {
-  if (state.busy || !state.campaignLoaded) return;
-  await showBackgroundStoryBeforeStart();
-  const inputMode = defaultTurnInputMode();
-  await runGeneration(firstActionForNewAdventure(), {
-    requestedInputMode: inputMode,
-    resolvedInputMode: inputMode,
-    inputModeSource: "opening_action"
-  });
+  const intent = acquireActionSubmissionIntent();
+  if (!intent) return;
+  try {
+    await showBackgroundStoryBeforeStart();
+    if (!isCurrentActionSubmissionIntent(intent)) return;
+    const inputMode = defaultTurnInputMode();
+    await runGeneration(firstActionForNewAdventure(), {
+      requestedInputMode: inputMode,
+      resolvedInputMode: inputMode,
+      inputModeSource: "opening_action",
+      actionSubmissionIntent: intent
+    });
+  } finally {
+    releaseActionSubmissionIntent(intent);
+  }
 }
 
 
@@ -674,6 +1512,7 @@ function renderScene(turn, index) {
   sceneDiv.className = "scene";
   sceneDiv.id = `scene-${turn.turnNumber}`;
   sceneDiv.dataset.turnNumber = turn.turnNumber;
+  sceneDiv.dataset.turnId = turn.id || turn.turnId || "";
 
   // Narration column
   let narrationHtml = "";
@@ -695,7 +1534,10 @@ function renderScene(turn, index) {
       : "";
 
     narrationHtml += `<div class="turn-meta">
-      <div class="action-tag">➜ ${escapeHtml(turn.action)}</div>
+      <details class="previous-action-disclosure">
+        <summary>Previous action · Turn ${escapeHtml(turn.turnNumber)}</summary>
+        <div class="action-tag">➜ ${escapeHtml(turn.action)}</div>
+      </details>
       <span class="pill">Turn ${turn.turnNumber}</span>
       ${reportedCostHtml}
     </div>`;
@@ -759,6 +1601,7 @@ function renderScene(turn, index) {
   }
 
   sceneDiv.innerHTML = `<div class="scene-narration">${narrationHtml}</div>`;
+  continuousSceneSignatures.set(sceneDiv, JSON.stringify(turn));
   return sceneDiv;
 }
 
@@ -916,6 +1759,9 @@ async function saveCurrentResponseCorrection() {
     const turn = latestCompletedResponseTurn();
     if (!turn) return;
     turn.narration = correction.effectiveNarration;
+    if (state.continuousReader) {
+      state.continuousReader = reconcileStoryAcceptedSceneReplacement(state.continuousReader, turn);
+    }
     renderAllScenes();
     if (dialog.close) dialog.close();
     clearResponseEditSession();
@@ -969,10 +1815,11 @@ function segmentIllustrationMarkup(turn, turnIndex, segment, segmentCount) {
   const status = segmentStatusLabel(segment);
   const isCurrentTurn = Number(turn.turnNumber) === Number(state.campaign?.activeTurnNumber);
   return `<div class="segment-illustration-card">
-    <div class="image-wrap${selected ? "" : " image-job-placeholder"}">
+    <div class="image-wrap${selected ? "" : " image-job-placeholder"}${isCurrentTurn ? " image-wrap-has-controls" : ""}">
     ${selected
       ? `<img src="${escapeHtml(selected.url)}" alt="Illustration ${selectedIndex + 1} for turn ${turn.turnNumber}, segment ${segment.ordinal + 1}" loading="lazy" />`
       : `<div class="image-placeholder">${escapeHtml(status || "No illustration is available for this segment yet.")}</div>`}
+    <div class="segment-image-footer">
     ${variants.length > 1 ? `<div class="illustration-carousel" aria-label="Illustration variants">
       <button class="small ghost" type="button" data-action="previous-segment-image" data-segment-id="${escapeHtml(segment.id)}" aria-label="Previous illustration">←</button>
       <span>${selectedIndex + 1} / ${variants.length}</span>
@@ -983,6 +1830,7 @@ function segmentIllustrationMarkup(turn, turnIndex, segment, segmentCount) {
       <span>Segment ${segment.ordinal + 1} of ${segmentCount}</span>
       <span>${segment.endWord - segment.startWord} words</span>
       ${segment.promptSource === "ai_fallback" ? "<span>Direct fallback</span>" : ""}
+    </div>
     </div>
     </div>
     ${isCurrentTurn ? `<div class="segment-image-controls" aria-label="Controls for this current-turn illustration">
@@ -1002,7 +1850,7 @@ function segmentIllustrationMarkup(turn, turnIndex, segment, segmentCount) {
   </div>`;
 }
 
-function renderStoryIllustration() {
+function renderStoryIllustration({ skipIfUnchanged = false } = {}) {
   const layout = $("appLayout");
   const panel = $("storyIllustrationPanel");
   const content = $("storyIllustrationContent");
@@ -1011,6 +1859,7 @@ function renderStoryIllustration() {
   const turn = state.turns[turnIndex];
   const visible = (illustrationsEnabled() || state.illustrationError) && !state.generationDisplayActive && Boolean(turn);
   if (!layout || !panel || !content) return;
+  panel.setAttribute("aria-busy", String(state.illustrationLoading));
 
   const inlineContents = [...document.querySelectorAll(".segment-illustration-content[data-segment-id]")];
   inlineContents.forEach((segmentContent) => {
@@ -1019,59 +1868,129 @@ function renderStoryIllustration() {
     const segmentTurnIndex = state.turns.findIndex((item) => (item.id || item.turnId) === segment.turnId);
     const segmentTurn = state.turns[segmentTurnIndex];
     if (!segmentTurn) return;
+    const signature = JSON.stringify([
+      segmentTurn,
+      segment,
+      illustrationSegmentsForTurn(segment.turnId).length,
+      state.illustrationVariantIndexes.get(segment.id) || 0
+    ]);
+    if (skipIfUnchanged && inlineIllustrationRenderSignatures.get(segmentContent) === signature) return;
     segmentContent.innerHTML = segmentIllustrationMarkup(
       segmentTurn,
       segmentTurnIndex,
       segment,
       illustrationSegmentsForTurn(segment.turnId).length
     );
+    inlineIllustrationRenderSignatures.set(segmentContent, signature);
   });
 
   const inlineVisible = visible && inlineContents.length > 0 && !state.illustrationError;
   const panelVisible = visible && !inlineVisible;
+  const signature = JSON.stringify([
+    state.campaignId,
+    turn?.id || turn?.turnId || null,
+    turn?.turnNumber ?? null,
+    turn?.narration ?? null,
+    state.illustrationConfig,
+    state.illustrationSegments,
+    [...state.illustrationVariantIndexes],
+    state.illustrationLoading,
+    state.illustrationError,
+    state.generationDisplayActive
+  ]);
   layout.classList.toggle("has-illustration", panelVisible);
   layout.classList.toggle("has-segmented-illustrations", inlineVisible);
   panel.classList.toggle("hidden", !panelVisible);
+  if (skipIfUnchanged && illustrationRenderSignatures.get(content) === signature) return;
   if (!visible) {
     content.replaceChildren();
+    illustrationRenderSignatures.set(content, signature);
     return;
   }
   if (inlineVisible) {
     content.replaceChildren();
+    illustrationRenderSignatures.set(content, signature);
     return;
   }
 
   if (turnLabel) turnLabel.textContent = `Turn ${turn.turnNumber}`;
   const turnId = turn.id || turn.turnId || "";
   const segments = illustrationSegmentsForTurn(turnId);
-  const statusMarkup = `${state.illustrationError ? `<p role="status">${escapeHtml(state.illustrationError)}</p>` : ""}
-    <button class="small ghost" type="button" data-action="refresh-illustrations">Refresh illustrations</button>`;
+  const statusMarkup = `${state.illustrationLoading ? `<p role="status">Loading optional illustrations…</p>` : state.illustrationError ? `<p role="status">${escapeHtml(state.illustrationError)}</p>` : ""}
+    <button class="small ghost" type="button" data-action="refresh-illustrations"${state.illustrationLoading ? " disabled" : ""}>Refresh illustrations</button>`;
   if (segments.length) {
     const narrationIsStale = !segmentProseMatchesNarration(segments, turn.narration);
     content.innerHTML = `${statusMarkup}${narrationIsStale
       ? `<p class="mini dim">The narration was corrected; existing illustrations may no longer match.</p>`
       : ""}${segments.map((segment) => segmentIllustrationMarkup(turn, turnIndex, segment, segments.length)).join("")}`;
+    illustrationRenderSignatures.set(content, signature);
     return;
   }
   content.innerHTML = `${statusMarkup}<div class="image-wrap image-job-placeholder">
     <div class="image-placeholder">This accepted turn has no illustration segments yet.</div>
     <button class="small primary" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="generate-turn-segments">Generate illustrations for this turn</button>
   </div>`;
+  illustrationRenderSignatures.set(content, signature);
+}
+
+function renderContinuousSceneWindow(container, turns) {
+  for (const child of [...container.children]) {
+    if (!child.classList.contains("scene")) child.remove();
+  }
+  const existing = new Map([...container.querySelectorAll(":scope > .scene")].map((scene) => [
+    `${scene.dataset.turnNumber}:${scene.dataset.turnId}`,
+    scene
+  ]));
+  const focusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const focusedScene = focusedElement?.closest(".scene") || null;
+  let focusMustMove = false;
+  const retained = new Set();
+  for (let index = 0; index < turns.length; index += 1) {
+    const turn = turns[index];
+    const turnId = turn.id || turn.turnId || "";
+    const key = `${turn.turnNumber}:${turnId}`;
+    let scene = existing.get(key);
+    const nextScene = renderScene(turn, index);
+    if (scene) {
+      retained.add(scene);
+      if (continuousSceneSignatures.get(scene) !== continuousSceneSignatures.get(nextScene)) {
+        if (focusedScene === scene) focusMustMove = true;
+        for (const attribute of [...scene.attributes]) scene.removeAttribute(attribute.name);
+        for (const attribute of [...nextScene.attributes]) scene.setAttribute(attribute.name, attribute.value);
+        scene.replaceChildren(...nextScene.childNodes);
+        continuousSceneSignatures.set(scene, JSON.stringify(turn));
+      }
+    } else {
+      scene = nextScene;
+      retained.add(scene);
+    }
+    container.appendChild(scene);
+  }
+  for (const scene of existing.values()) {
+    if (!retained.has(scene)) {
+      if (focusedScene === scene) focusMustMove = true;
+      scene.remove();
+    }
+  }
+  if (focusMustMove) {
+    const older = document.querySelector('[data-continuous-reader-direction="older"]');
+    if (older instanceof HTMLButtonElement) older.focus({ preventScroll: true });
+  }
 }
 
 function renderAllScenes(options = {}) {
   const container = $("storyArea");
   if (!container) return;
 
-  container.innerHTML = "";
-
   if (state.generationDisplayActive) {
+    container.replaceChildren();
     renderStreamingPreview("", state.pendingGeneration?.action || state.generationDisplayAction);
     renderStoryIllustration();
     return;
   }
 
   if (state.turns.length === 0) {
+    container.replaceChildren();
     const worldName = state.world?.title || state.campaign?.title || "";
     const character = state.world?.character || state.campaign?.character || "";
     const premise = state.world?.premise || state.campaign?.premise || "";
@@ -1090,17 +2009,26 @@ function renderAllScenes(options = {}) {
 
   const isContinuous = Boolean(state.user?.settings?.continuousReading);
   if (isContinuous) {
-    for (let i = 0; i < state.turns.length; i++) {
-      container.appendChild(renderScene(state.turns[i], i));
-    }
+    if (!state.continuousReader) initializeContinuousReader();
+    const visibleTurns = state.continuousReader?.turns?.length
+      ? state.continuousReader.turns
+      : state.readerPinnedTurn
+        ? [state.readerPinnedTurn]
+        : state.turns.slice(-STORY_CONTINUOUS_READER_WINDOW_LIMIT);
+    renderContinuousSceneWindow(container, visibleTurns);
   } else {
+    container.replaceChildren();
     const targetIndex = viewedTurnIndex();
     if (state.turns[targetIndex]) {
       container.appendChild(renderScene(state.turns[targetIndex], targetIndex));
+    } else if (state.readerPinnedTurn
+      && Number(state.readerPinnedTurn.turnNumber) === currentViewTurnNumber()) {
+      container.appendChild(renderScene(state.readerPinnedTurn, -1));
     }
   }
 
   renderStoryIllustration();
+  syncContinuousReaderControls();
   if (options.autoScroll !== false) scrollToView();
 }
 
@@ -1111,21 +2039,43 @@ function scrollToView() {
   const isContinuous = Boolean(state.user?.settings?.continuousReading);
   if (isContinuous) {
     const target = $(`scene-${currentViewTurnNumber()}`);
-    if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (target) scrollSceneIntoView(target);
     return;
   }
   if (isLatest) {
     const last = container.lastElementChild;
-    if (last) last.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (last) scrollSceneIntoView(last);
   } else {
     const target = $(`scene-${currentViewTurnNumber()}`);
     if (target) {
-      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      scrollSceneIntoView(target);
     } else if (!isContinuous) {
       const first = container.firstElementChild;
-      if (first) first.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (first) scrollSceneIntoView(first);
     }
   }
+}
+
+function scrollSceneIntoView(scene) {
+
+  const header = document.querySelector(".universal-nav");
+  const toolbar = document.querySelector("[data-story-reader-toolbar]");
+  const headerHeight = header?.getBoundingClientRect?.().height;
+  const toolbarHeight = toolbar?.getBoundingClientRect?.().height;
+  const stickyTop = toolbar && typeof document.defaultView?.getComputedStyle === "function"
+    ? Number.parseFloat(document.defaultView.getComputedStyle(toolbar).top)
+    : Number.NaN;
+
+  if (Number.isFinite(headerHeight) && headerHeight > 0
+    && Number.isFinite(toolbarHeight) && toolbarHeight > 0
+    && Number.isFinite(stickyTop) && stickyTop >= 0
+    && scene?.style) {
+    scene.style.scrollMarginTop = `${Math.ceil(Math.max(headerHeight, stickyTop) + toolbarHeight + 12)}px`;
+  }
+  scene.scrollIntoView({
+    behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    block: "start"
+  });
 }
 
 // ── Player Input ──────────────────────────────────────────────
@@ -1170,6 +2120,578 @@ function resetStoryLengthOverrideControls() {
     setStoryLengthOverride(controlId, "");
   });
   syncStoryLengthOverrideControls();
+}
+
+function actionDraftScope(campaignId = state.campaignId) {
+  const userId = state.user?.id;
+  if (typeof userId !== "string" || !campaignId) return null;
+  return { userId, campaignId };
+}
+
+function actionDraftScopeKey(scope) {
+  return scope ? `${scope.userId}:${scope.campaignId}` : null;
+}
+
+function isCurrentActionSubmissionIntent(intent) {
+  return Boolean(intent)
+    && actionSubmissionIntent === intent
+    && intent.campaignId === state.campaignId
+    && intent.loadSequence === campaignLoadSequence
+    && intent.sessionEpoch === actionDraftSessionEpoch
+    && intent.scopeKey === actionDraftCurrentScopeKey;
+}
+
+function acquireActionSubmissionIntent() {
+  if (!state.campaignLoaded || state.busy) return null;
+  if (actionSubmissionIntent && isCurrentActionSubmissionIntent(actionSubmissionIntent)) return null;
+  actionSubmissionIntent = null;
+  const intent = {
+    campaignId: state.campaignId,
+    loadSequence: campaignLoadSequence,
+    sessionEpoch: actionDraftSessionEpoch,
+    scopeKey: actionDraftCurrentScopeKey
+  };
+  actionSubmissionIntent = intent;
+  return intent;
+}
+
+function releaseActionSubmissionIntent(intent) {
+  if (actionSubmissionIntent === intent) actionSubmissionIntent = null;
+}
+
+function retireActionSubmissionIntent() {
+  actionSubmissionIntent = null;
+}
+
+function actionDraftStatusText() {
+  if (actionDraftSaving || actionDraftScheduled) return "Draft saving";
+  if (actionDraftSaveFailed) return "Draft not saved";
+  if (actionDraftConflict) return "Draft not saved";
+  if (actionDraftCurrent && actionDraftPersistedRevision
+    && actionDraftPersistedGeneration === actionDraftLocalGeneration) return "Draft saved";
+  return "No draft";
+}
+
+function updateActionDraftStatus() {
+  const status = $("autosaveStatus");
+  if (status) status.textContent = actionDraftStatusText();
+}
+
+function setStorySyncStatus(value) {
+  const status = $("storySyncStatus");
+  if (status) status.textContent = value;
+}
+
+function actionDraftBase() {
+  const baseTurnNumber = Number(state.campaign?.activeTurnNumber || 0);
+  const baseTurn = state.turns.find((turn) => Number(turn.turnNumber) === baseTurnNumber);
+  return { baseTurnId: baseTurn?.id || null, baseTurnNumber };
+}
+
+function setActionDraftValue(text, options = {}) {
+  actionDraftLocalGeneration += 1;
+  actionDraftCurrent = {
+    text: String(text ?? ""),
+    inputMode: options.inputMode || state.turnInputMode,
+    ...actionDraftBase()
+  };
+  actionDraftClearPending = Boolean(options.clear);
+  actionDraftSaveFailed = false;
+  if (actionDraftConflict && !options.preserveConflict) actionDraftConflict = null;
+  if (actionDraftSaveTimer !== null) clearTimeout(actionDraftSaveTimer);
+  if (options.clear) {
+    actionDraftSaveTimer = null;
+    actionDraftScheduled = false;
+    updateActionDraftConflict();
+    updateActionDraftStatus();
+    void flushActionDraftWrites();
+    return;
+  }
+  actionDraftScheduled = true;
+  actionDraftSaveTimer = setTimeout(() => {
+    actionDraftSaveTimer = null;
+    actionDraftScheduled = false;
+    void flushActionDraftWrites();
+  }, 250);
+  updateActionDraftStatus();
+}
+
+function actionDraftRecord(snapshot, editGeneration, scope = actionDraftScope()) {
+  if (!scope) return null;
+  return {
+    scope,
+    editGeneration,
+    draft: {
+      schemaVersion: 1,
+      draftRevision: composition.idFactory.create(),
+      text: snapshot.text,
+      inputMode: snapshot.inputMode,
+      baseTurnId: snapshot.baseTurnId,
+      baseTurnNumber: snapshot.baseTurnNumber,
+      updatedAt: new Date(composition.clock.now()).toISOString()
+    }
+  };
+}
+
+function updateActionDraftConflict() {
+  const panel = $("actionDraftConflict");
+  const message = $("actionDraftConflictMessage");
+  const restore = $("restoreActionDraft");
+  const keep = $("keepActionDraft");
+  const discard = $("discardActionDraft");
+  if (!panel) return;
+  panel.classList.toggle("hidden", !actionDraftConflict);
+  if (!actionDraftConflict) return;
+  if (message) message.textContent = actionDraftConflict.message;
+  if (restore) restore.classList.toggle("hidden", !actionDraftConflict.draft);
+  if (keep) keep.classList.toggle("hidden", actionDraftConflict.kind !== "revision");
+  if (discard) discard.classList.toggle("hidden", actionDraftConflict.kind !== "base");
+}
+
+function presentActionDraftConflict(draft, kind, message) {
+  actionDraftConflict = { draft: draft || null, kind, message };
+  updateActionDraftConflict();
+  updateActionDraftStatus();
+}
+
+async function writeActionDraftGeneration(snapshot, editGeneration, expectedRevision = actionDraftPersistedRevision, scopeOverride = actionDraftScope()) {
+  const record = actionDraftRecord(snapshot, editGeneration, scopeOverride);
+  if (!record) return { outcome: "unavailable" };
+  const scopeKey = actionDraftScopeKey(record.scope);
+  const sessionEpoch = actionDraftSessionEpoch;
+  const result = await composition.actionDrafts.write(record.scope, record.draft, { expectedRevision });
+  if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return { outcome: "superseded" };
+  if (result.outcome === "saved") {
+    actionDraftPersistedRevision = result.currentRevision;
+    actionDraftPersistedGeneration = editGeneration;
+    actionDraftSaveFailed = false;
+    if (actionDraftLocalGeneration === editGeneration) actionDraftClearPending = false;
+    actionDraftCurrentScopeKey = actionDraftScopeKey(record.scope);
+    if (actionDraftCurrent && actionDraftLocalGeneration === editGeneration) {
+      actionDraftCurrent = { ...snapshot };
+    }
+  } else if (result.outcome === "conflict") {
+    const pendingRemoval = actionDraftConflictRemoval;
+    if (pendingRemoval?.promise) {
+      await pendingRemoval.promise;
+      if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return { outcome: "superseded" };
+    }
+    const currentDraft = await composition.actionDrafts.read(record.scope);
+    if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return { outcome: "superseded" };
+    if (!currentDraft && expectedRevision && actionDraftPersistedRevision === null && !actionDraftConflict) {
+      return { outcome: "retry" };
+    }
+    if (actionDraftSaveFailed && actionDraftConflict) return { outcome: "unavailable" };
+    if (currentDraft) {
+      presentActionDraftConflict(currentDraft, "revision", "This action draft changed in another tab. Choose which version to keep.");
+    } else {
+      presentActionDraftConflict(null, "revision", "This action draft changed in another tab. Keep editing and retry your save.");
+    }
+  } else {
+    actionDraftSaveFailed = true;
+  }
+  updateActionDraftStatus();
+  return result;
+}
+
+async function drainActionDraftWrites() {
+  let allSaved = true;
+  while (actionDraftPersistedGeneration < actionDraftLocalGeneration || actionDraftClearPending) {
+    const editGeneration = actionDraftLocalGeneration;
+    const scope = actionDraftScope();
+    const scopeKey = actionDraftScopeKey(scope);
+    const sessionEpoch = actionDraftSessionEpoch;
+    if (!scope) {
+      actionDraftSaveFailed = true;
+      updateActionDraftStatus();
+      return false;
+    }
+    if (actionDraftClearPending) {
+      const expectedRevision = actionDraftPersistedRevision;
+      if (!expectedRevision) {
+        actionDraftPersistedGeneration = editGeneration;
+        actionDraftClearPending = false;
+        actionDraftCurrent = null;
+        updateActionDraftStatus();
+        continue;
+      }
+      const removal = await composition.actionDrafts.removeIfRevision(scope, expectedRevision);
+      if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+      if (removal.outcome === "removed" || removal.outcome === "absent") {
+        const stillOwnsAcknowledgedRevision = actionDraftPersistedRevision === expectedRevision;
+        if (stillOwnsAcknowledgedRevision) actionDraftPersistedRevision = null;
+        actionDraftClearPending = false;
+        if (stillOwnsAcknowledgedRevision && actionDraftLocalGeneration === editGeneration) {
+          actionDraftPersistedGeneration = editGeneration;
+          actionDraftCurrent = null;
+          actionDraftConflict = null;
+        } else {
+          actionDraftPersistedGeneration = -1;
+        }
+      } else if (removal.outcome === "conflict") {
+        const currentDraft = await composition.actionDrafts.read(scope);
+        if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+        presentActionDraftConflict(currentDraft, "revision", "This action draft changed in another tab. Choose which version to keep.");
+        allSaved = false;
+        break;
+      } else {
+        actionDraftSaveFailed = true;
+        allSaved = false;
+        break;
+      }
+      updateActionDraftStatus();
+      continue;
+    }
+    const snapshot = actionDraftCurrent;
+    if (!snapshot) {
+      actionDraftPersistedGeneration = editGeneration;
+      continue;
+    }
+    const result = await writeActionDraftGeneration(snapshot, editGeneration, actionDraftPersistedRevision, scope);
+    if (result.outcome === "retry") continue;
+    if (result.outcome !== "saved") {
+      allSaved = false;
+      break;
+    }
+  }
+  return allSaved && !actionDraftSaveFailed && !actionDraftConflict;
+}
+
+function flushActionDraftWrites() {
+  if (actionDraftSaveTimer !== null) clearTimeout(actionDraftSaveTimer);
+  actionDraftSaveTimer = null;
+  actionDraftScheduled = false;
+  actionDraftSaving = true;
+  updateActionDraftStatus();
+  const write = actionDraftSaveQueue.then(() => drainActionDraftWrites(), () => drainActionDraftWrites());
+  actionDraftSaveQueue = write.catch(() => false);
+  return write.finally(() => {
+    actionDraftSaving = false;
+    updateActionDraftStatus();
+  });
+}
+
+function isActionDraftBaseCurrent(draft) {
+  const base = actionDraftBase();
+  return draft.baseTurnNumber === base.baseTurnNumber && draft.baseTurnId === base.baseTurnId;
+}
+
+async function restoreActionDraftForCampaign(campaignId, loadSequence) {
+  const scope = actionDraftScope(campaignId);
+  if (!scope) {
+    updateActionDraftStatus();
+    return;
+  }
+  const scopeKey = actionDraftScopeKey(scope);
+  if (actionDraftCurrentScopeKey !== scopeKey) {
+    retireActionSubmissionIntent();
+    actionDraftSessionEpoch += 1;
+    actionDraftLocalGeneration = 0;
+    actionDraftPersistedGeneration = -1;
+    actionDraftPersistedRevision = null;
+    actionDraftCurrent = null;
+    actionDraftSubmitted = null;
+    actionDraftConflict = null;
+    actionDraftSaveFailed = false;
+    actionDraftClearPending = false;
+    actionDraftCurrentScopeKey = scopeKey;
+  }
+  const startingGeneration = actionDraftLocalGeneration;
+  const sessionEpoch = actionDraftSessionEpoch;
+  const draft = await composition.actionDrafts.read(scope);
+  if (campaignLoadSequence !== loadSequence || state.campaignId !== campaignId
+    || sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return;
+  if (!draft) {
+    const hasExpiryNotice = await composition.actionDrafts.readExpiryNotice(scope);
+    if (campaignLoadSequence !== loadSequence || state.campaignId !== campaignId
+      || sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return;
+    if (hasExpiryNotice) {
+      toast("An older action draft expired after the local retention period.");
+    }
+    if (actionDraftLocalGeneration === startingGeneration) updateActionDraftStatus();
+    return;
+  }
+  if (actionDraftLocalGeneration !== startingGeneration) {
+    updateActionDraftStatus();
+    return;
+  }
+  actionDraftPersistedRevision = draft.draftRevision;
+  if (state.pendingGeneration || state.generationRecovery) {
+    actionDraftCurrent = { text: draft.text, inputMode: draft.inputMode, baseTurnId: draft.baseTurnId, baseTurnNumber: draft.baseTurnNumber };
+    actionDraftPersistedGeneration = actionDraftLocalGeneration;
+    updateActionDraftStatus();
+    return;
+  }
+  if (actionDraftLocalGeneration !== startingGeneration) {
+    updateActionDraftStatus();
+    return;
+  }
+  actionDraftCurrent = { text: draft.text, inputMode: draft.inputMode, baseTurnId: draft.baseTurnId, baseTurnNumber: draft.baseTurnNumber };
+  actionDraftPersistedGeneration = actionDraftLocalGeneration;
+  const input = $("freeAction");
+  if (input?.value.trim() && input.value.trim() !== draft.text.trim()) {
+    presentActionDraftConflict(draft, "base", "Another action is in the input. Restore this saved draft or discard it.");
+    return;
+  }
+  if (!isActionDraftBaseCurrent(draft)) {
+    presentActionDraftConflict(draft, "base", "The story has moved on since this action draft was saved. Restore it or discard it.");
+    return;
+  }
+  if (input && !input.value) input.value = draft.text;
+  setTurnInputMode(draft.inputMode, { refreshPlaceholder: true });
+  resetChoiceSelectionFromDraft(draft.text);
+  updateTurnInputCharacterCount();
+  updateActionDraftStatus();
+}
+
+async function captureSubmittedActionDraft(action, details) {
+  const input = $("freeAction");
+  if (!details.actionDraftEligible || details.operationKind === "replace_latest" || !input || input.value.trim() !== action) return null;
+  const campaignId = state.campaignId;
+  const editGeneration = actionDraftLocalGeneration;
+  const sessionEpoch = actionDraftSessionEpoch;
+  const scopeKey = actionDraftCurrentScopeKey;
+  const intentNonce = ++actionDraftSubmissionNonce;
+  const operationKind = details.operationKind || "append";
+  const expectedTurnNumber = appendExpectedTurnNumber(state.campaign);
+  const saved = await flushActionDraftWrites();
+  if (!saved || intentNonce !== actionDraftSubmissionNonce || campaignId !== state.campaignId || sessionEpoch !== actionDraftSessionEpoch
+    || scopeKey !== actionDraftCurrentScopeKey || editGeneration !== actionDraftLocalGeneration
+    || actionDraftPersistedGeneration !== editGeneration || !actionDraftPersistedRevision
+    || actionDraftCurrent?.text.trim() !== action) return null;
+  return { intentNonce, campaignId, editGeneration, persistedRevision: actionDraftPersistedRevision, scopeKey, sessionEpoch, action, operationKind, expectedTurnNumber };
+}
+
+async function clearAcceptedActionDraft(result) {
+  const submitted = actionDraftSubmitted;
+  if (!submitted || submitted.jobId !== result.id || submitted.action !== result.action
+    || submitted.operationKind !== "append"
+    || (result.operationKind && submitted.operationKind !== result.operationKind)
+    || submitted.expectedTurnNumber !== Number(result.expectedTurnNumber)
+    || submitted.campaignId !== result.campaignId
+    || submitted.sessionEpoch !== actionDraftSessionEpoch
+    || submitted.scopeKey !== actionDraftCurrentScopeKey
+    || submitted.editGeneration !== actionDraftLocalGeneration
+    || submitted.editGeneration !== actionDraftPersistedGeneration
+    || submitted.persistedRevision !== actionDraftPersistedRevision) return;
+  const scope = actionDraftScope(result.campaignId);
+  if (!scope) return;
+  const removal = await composition.actionDrafts.removeIfRevision(scope, submitted.persistedRevision);
+  if (submitted.sessionEpoch !== actionDraftSessionEpoch || submitted.scopeKey !== actionDraftCurrentScopeKey) return;
+  if (removal.outcome === "removed" || removal.outcome === "absent") {
+    const stillOwnsAcknowledgedRevision = submitted.persistedRevision === actionDraftPersistedRevision;
+    if (!stillOwnsAcknowledgedRevision) {
+      updateActionDraftStatus();
+      return;
+    }
+    actionDraftPersistedRevision = null;
+    if (submitted.editGeneration !== actionDraftLocalGeneration) {
+      actionDraftPersistedGeneration = -1;
+      updateActionDraftStatus();
+      return;
+    }
+    actionDraftPersistedGeneration = actionDraftLocalGeneration;
+    actionDraftCurrent = null;
+    actionDraftSubmitted = null;
+    updateActionDraftStatus();
+  } else if (removal.outcome === "conflict") {
+    const currentDraft = await composition.actionDrafts.read(scope);
+    if (submitted.sessionEpoch !== actionDraftSessionEpoch || submitted.scopeKey !== actionDraftCurrentScopeKey) return;
+    presentActionDraftConflict(currentDraft, "revision", "This action draft changed in another tab. Choose which version to keep.");
+  } else {
+    actionDraftSaveFailed = true;
+    updateActionDraftStatus();
+  }
+}
+
+async function reconcileActionDraftConflict(choice) {
+  const conflict = actionDraftConflict;
+  if (!conflict) return false;
+  const scope = actionDraftScope();
+  if (!scope) return false;
+  const scopeKey = actionDraftScopeKey(scope);
+  const sessionEpoch = actionDraftSessionEpoch;
+  const editGeneration = actionDraftLocalGeneration;
+  if (choice === "restore" && conflict.draft) {
+    const draft = await composition.actionDrafts.read(scope);
+    if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+    if (actionDraftConflict !== conflict || actionDraftLocalGeneration !== editGeneration) {
+      if (actionDraftConflict === null && actionDraftLocalGeneration !== editGeneration) {
+        presentActionDraftConflict(draft, "revision", "A newer local edit was made while restoring. Choose which version to keep.");
+      }
+      return false;
+    }
+    if (!draft || draft.draftRevision !== conflict.draft.draftRevision) {
+      presentActionDraftConflict(draft, "revision", "This action draft changed in another tab. Choose which version to keep.");
+      return false;
+    }
+    actionDraftLocalGeneration += 1;
+    actionDraftCurrent = { text: draft.text, inputMode: draft.inputMode, baseTurnId: draft.baseTurnId, baseTurnNumber: draft.baseTurnNumber };
+    actionDraftPersistedGeneration = actionDraftLocalGeneration;
+    actionDraftPersistedRevision = draft.draftRevision;
+    actionDraftConflict = null;
+    setTurnInputMode(draft.inputMode, { refreshPlaceholder: true });
+    const input = $("freeAction");
+    if (input) input.value = draft.text;
+    resetChoiceSelectionFromDraft(draft.text);
+    updateTurnInputCharacterCount();
+    updateActionDraftConflict();
+    updateActionDraftStatus();
+    return true;
+  }
+  if (choice === "keep") {
+    const remote = await composition.actionDrafts.read(scope);
+    if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey
+      || actionDraftConflict !== conflict || actionDraftLocalGeneration !== editGeneration) return false;
+    const snapshot = actionDraftCurrent;
+    if (!snapshot) return false;
+    actionDraftConflict = null;
+    actionDraftPersistedRevision = remote?.draftRevision ?? null;
+    actionDraftPersistedGeneration = -1;
+    const result = await flushActionDraftWrites();
+    if (result) {
+      updateActionDraftConflict();
+      return true;
+    }
+    return false;
+  }
+  if (choice === "discard" && conflict.kind === "base" && conflict.draft) {
+    return discardStaleBaseActionDraft(conflict, scope, scopeKey, sessionEpoch, editGeneration);
+  }
+  return false;
+}
+
+async function discardStaleBaseActionDraft(conflict, scope, scopeKey, sessionEpoch, editGeneration) {
+  const discardedRevision = conflict.draft.draftRevision;
+  const removalOperation = { promise: null };
+  const promise = (async () => {
+    let result;
+    try {
+      result = await composition.actionDrafts.removeIfRevision(scope, discardedRevision);
+    } catch {
+      result = { outcome: "unavailable" };
+    }
+    if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+    if (actionDraftConflict && actionDraftConflict !== conflict) return false;
+
+    if (result.outcome === "removed" || result.outcome === "absent") {
+      const editChanged = actionDraftLocalGeneration !== editGeneration;
+      const stillOwnsDiscardedRevision = actionDraftPersistedRevision === discardedRevision;
+      if (stillOwnsDiscardedRevision) actionDraftPersistedRevision = null;
+      if (actionDraftConflict === conflict) actionDraftConflict = null;
+
+      if (!editChanged && (stillOwnsDiscardedRevision || actionDraftPersistedRevision === null)) {
+        actionDraftCurrent = null;
+        actionDraftPersistedGeneration = actionDraftLocalGeneration;
+        actionDraftSaveFailed = false;
+        actionDraftClearPending = false;
+      } else if (stillOwnsDiscardedRevision) {
+        actionDraftPersistedGeneration = -1;
+      }
+      updateActionDraftConflict();
+      updateActionDraftStatus();
+      return true;
+    }
+
+    if (result.outcome === "conflict") {
+      let latest;
+      try {
+        latest = await composition.actionDrafts.read(scope);
+      } catch {
+        if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey
+          || (actionDraftConflict && actionDraftConflict !== conflict)) return false;
+        actionDraftSaveFailed = true;
+        updateActionDraftStatus();
+        return false;
+      }
+      if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+      if (actionDraftConflict && actionDraftConflict !== conflict) return false;
+
+      const editChanged = actionDraftLocalGeneration !== editGeneration;
+      const latestIsAcknowledged = Boolean(latest?.draftRevision)
+        && latest.draftRevision === actionDraftPersistedRevision;
+      if (latestIsAcknowledged) {
+        if (actionDraftConflict === conflict) actionDraftConflict = null;
+        updateActionDraftConflict();
+        updateActionDraftStatus();
+        return true;
+      }
+
+      if (!latest) {
+        if (actionDraftPersistedRevision === discardedRevision) actionDraftPersistedRevision = null;
+        if (actionDraftConflict === conflict) actionDraftConflict = null;
+        if (editChanged && actionDraftPersistedRevision === null) actionDraftPersistedGeneration = -1;
+        else if (!editChanged) {
+          actionDraftCurrent = null;
+          actionDraftPersistedGeneration = actionDraftLocalGeneration;
+        }
+        updateActionDraftConflict();
+        updateActionDraftStatus();
+        return true;
+      }
+
+      if (editChanged && latest.draftRevision === discardedRevision) {
+        if (actionDraftConflict === conflict) actionDraftConflict = null;
+        updateActionDraftConflict();
+        updateActionDraftStatus();
+        return true;
+      }
+
+      presentActionDraftConflict(latest, "revision", "This action draft changed in another tab. Choose which version to keep.");
+      return false;
+    }
+
+    const newerWriteIsAcknowledged = actionDraftPersistedRevision !== discardedRevision
+      && actionDraftPersistedGeneration === actionDraftLocalGeneration;
+    if (newerWriteIsAcknowledged) {
+      if (actionDraftConflict === conflict) actionDraftConflict = null;
+      actionDraftSaveFailed = false;
+    } else {
+      actionDraftSaveFailed = true;
+    }
+    updateActionDraftStatus();
+    return false;
+  })();
+  removalOperation.promise = promise;
+  actionDraftConflictRemoval = removalOperation;
+  try {
+    return await promise;
+  } finally {
+    if (actionDraftConflictRemoval === removalOperation) actionDraftConflictRemoval = null;
+  }
+}
+
+function actionDraftNeedsNavigationGuard() {
+  return Boolean(actionDraftCurrent && (
+    actionDraftSaving
+    || actionDraftSaveFailed
+    || actionDraftConflict
+    || actionDraftPersistedGeneration !== actionDraftLocalGeneration
+  ));
+}
+
+function openActionDraftNavigationDialog(target) {
+  actionDraftNavigationTarget = target;
+  const dialog = $("actionDraftNavigationDialog");
+  if (dialog && !dialog.open && typeof dialog.showModal === "function") dialog.showModal();
+}
+
+async function discardActionDraftBeforeNavigation() {
+  const scope = actionDraftScope();
+  if (scope && actionDraftPersistedRevision && !actionDraftConflict) {
+    await composition.actionDrafts.removeIfRevision(scope, actionDraftPersistedRevision);
+  }
+  actionDraftLocalGeneration += 1;
+  actionDraftPersistedGeneration = actionDraftLocalGeneration;
+  actionDraftPersistedRevision = null;
+  actionDraftCurrent = null;
+  actionDraftSubmitted = null;
+  actionDraftSaveFailed = false;
+  actionDraftClearPending = false;
+  updateActionDraftStatus();
+  const target = actionDraftNavigationTarget;
+  actionDraftNavigationTarget = null;
+  if (target) window.location.assign(target);
 }
 
 function defaultTurnInputMode() {
@@ -1232,6 +2754,7 @@ function setTurnInputMode(mode, options = {}) {
     lock.classList.toggle("hidden", canChoose || controlStyle === "flexible_scene");
     lock.textContent = controlStyle === "action_only" ? "This campaign accepts player actions." : "";
   }
+  if (options.persistDraft) setActionDraftValue(freeAction?.value || "", { inputMode: state.turnInputMode });
 }
 
 function syncTurnInputModeFromCampaign() {
@@ -1267,7 +2790,15 @@ function renderChoices(choices, customSuggestion, ownerKey) {
       const btn = document.createElement("button");
       btn.className = "choice";
       btn.type = "button";
-      btn.textContent = text;
+      const choiceModeLabel = state.user?.settings?.autoSubmitTurnChoices === false ? "Add to draft" : "Choose and continue";
+      const choiceCopy = document.createElement("span");
+      choiceCopy.className = "choice-copy";
+      choiceCopy.textContent = text;
+      const choiceModeHint = document.createElement("span");
+      choiceModeHint.className = "choice-mode-hint";
+      choiceModeHint.textContent = choiceModeLabel;
+      btn.append(choiceCopy, choiceModeHint);
+      btn.setAttribute("aria-label", `${text}. ${choiceModeLabel}`);
       btn.dataset.choiceIndex = String(choiceIndex);
       btn.setAttribute("aria-pressed", "false");
       btn.addEventListener("click", () => {
@@ -1282,6 +2813,7 @@ function renderChoices(choices, customSuggestion, ownerKey) {
             }
             resetChoiceSelectionFromDraft(text);
             freeAction.value = text;
+            setActionDraftValue(text, { inputMode: state.turnInputMode });
             updateTurnInputCharacterCount();
           }
           state.nextTurnInputModeSource = "generated_choice";
@@ -1302,6 +2834,7 @@ function renderChoices(choices, customSuggestion, ownerKey) {
             state.choiceDraftSelection = result.selection;
             state.nextTurnInputModeSource = result.selection.selectedIndexes.length ? "generated_choice" : null;
             freeAction.value = result.text;
+            setActionDraftValue(result.text, { inputMode: state.turnInputMode });
             freeAction.focus();
             updateTurnInputCharacterCount();
             syncChoiceSelectionButtons(container);
@@ -1341,31 +2874,55 @@ function renderTurnInput() {
   }
 }
 
-async function submitResolvedTurn(action, details) {
+async function submitResolvedTurn(action, details, intent) {
+  if (!isCurrentActionSubmissionIntent(intent)) return;
   if (details.operationKind !== "replace_latest") {
     // Keep this in-memory only until enqueue returns an authoritative job ID.
     // An enqueue failure must not erase what the player just typed.
-    state.retainedAppendDraft = { campaignId: state.campaignId, expectedTurnNumber: appendExpectedTurnNumber(state.campaign), action, requestedInputMode: details.requestedInputMode };
+    state.retainedAppendDraft = { campaignId: intent.campaignId, expectedTurnNumber: appendExpectedTurnNumber(state.campaign), action, requestedInputMode: details.requestedInputMode };
   }
   const freeAction = $("freeAction");
-  if (freeAction) freeAction.value = "";
-  resetChoiceSelectionFromDraft("");
+  const submittedDraft = await captureSubmittedActionDraft(action, details);
+  if (!isCurrentActionSubmissionIntent(intent)) return;
+  const canClearSubmittedInput = submittedDraft
+    && freeAction?.value.trim() === action
+    && submittedDraft.editGeneration === actionDraftLocalGeneration
+    && submittedDraft.sessionEpoch === actionDraftSessionEpoch
+    && submittedDraft.scopeKey === actionDraftCurrentScopeKey;
+  if (freeAction && canClearSubmittedInput) freeAction.value = "";
+  if (canClearSubmittedInput) resetChoiceSelectionFromDraft("");
   updateTurnInputCharacterCount();
-  await runGeneration(action, details);
+  await runGeneration(action, {
+    ...details,
+    actionDraftSubmissionCandidate: canClearSubmittedInput ? submittedDraft : null,
+    actionSubmissionIntent: intent
+  });
 }
 
 async function submitAction(actionText, options = {}) {
   if (state.busy || !state.campaignLoaded) return;
-  let action = (actionText || "").trim();
-  if (!action && state.turns.length === 0) {
-    action = firstActionForNewAdventure();
+  const intent = acquireActionSubmissionIntent();
+  if (!intent) return;
+  try {
+    let action = (actionText || "").trim();
+    if (!action && state.turns.length === 0) {
+      action = firstActionForNewAdventure();
+    }
+    if (!action) { toast("Enter an action first."); return; }
+    const storyLengthProfileOverride = selectedStoryLengthOverride("turnStoryLengthProfileOverride");
+    const requestedInputMode = campaignTurnControlStyle() === "flexible_action" ? state.turnInputMode : defaultTurnInputMode();
+    const inputModeSource = options.inputModeSource || state.nextTurnInputModeSource || "explicit";
+    state.nextTurnInputModeSource = null;
+    await submitResolvedTurn(action, {
+      requestedInputMode,
+      resolvedInputMode: requestedInputMode,
+      inputModeSource,
+      storyLengthProfileOverride,
+      actionDraftEligible: true
+    }, intent);
+  } finally {
+    releaseActionSubmissionIntent(intent);
   }
-  if (!action) { toast("Enter an action first."); return; }
-  const storyLengthProfileOverride = selectedStoryLengthOverride("turnStoryLengthProfileOverride");
-  const requestedInputMode = campaignTurnControlStyle() === "flexible_action" ? state.turnInputMode : defaultTurnInputMode();
-  const inputModeSource = options.inputModeSource || state.nextTurnInputModeSource || "explicit";
-  state.nextTurnInputModeSource = null;
-  await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource, storyLengthProfileOverride });
 }
 
 // ── Generation Pipeline ───────────────────────────────────────
@@ -1420,8 +2977,13 @@ function captureHydratedAppendDraft(syncData) {
 
 async function runGeneration(action, options = {}) {
   const submissionScope = activityScope();
-  if (!state.campaignLoaded) return;
-  const submissionCampaignId = state.campaignId;
+  const intent = options.actionSubmissionIntent || acquireActionSubmissionIntent();
+  const ownsIntent = !options.actionSubmissionIntent;
+  if (!isCurrentActionSubmissionIntent(intent)) {
+    if (ownsIntent && intent) releaseActionSubmissionIntent(intent);
+    return;
+  }
+  const submissionCampaignId = intent.campaignId;
   showBusy("Queueing turn with the Story Engine…");
   state.abortController = new AbortController();
   const progressEl = $("generationProgress");
@@ -1466,15 +3028,16 @@ async function runGeneration(action, options = {}) {
     let run;
     let attachedConflict = false;
     let conflictPendingGeneration = null;
+    if (!isCurrentActionSubmissionIntent(intent)) return;
     try {
       run = await composition.workflow.submit(
         submissionCampaignId,
         generationSubmissionInput(submission, request)
       );
     } catch (error) {
-      if (!activityScopeCurrent(submissionScope)) return;
+      if (!isCurrentActionSubmissionIntent(intent)) return;
       const conflict = await resumeActiveGenerationConflict(error, submissionCampaignId, composition.workflow);
-      if (!activityScopeCurrent(submissionScope)) return;
+      if (!isCurrentActionSubmissionIntent(intent)) return;
       if (!conflict) throw error;
       toast(conflict.message);
       void activity?.refresh();
@@ -1482,8 +3045,26 @@ async function runGeneration(action, options = {}) {
       attachedConflict = true;
       conflictPendingGeneration = conflict.pendingGeneration;
     }
-    if (!activityScopeCurrent(submissionScope) || state.campaignId !== submissionCampaignId
+    if (!isCurrentActionSubmissionIntent(intent)
+      || state.campaignId !== submissionCampaignId
       || (operationKind === "append" && appendExpectedTurnNumber(state.campaign) !== expectedTurnNumber)) return;
+    const actionDraftCandidate = options.actionDraftSubmissionCandidate;
+    if (actionDraftCandidate && !attachedConflict
+      && actionDraftCandidate.intentNonce === actionDraftSubmissionNonce
+      && actionDraftCandidate.campaignId === submissionCampaignId
+      && actionDraftCandidate.sessionEpoch === actionDraftSessionEpoch
+      && actionDraftCandidate.scopeKey === actionDraftCurrentScopeKey
+      && actionDraftCandidate.action === submission.action
+      && actionDraftCandidate.operationKind === operationKind
+      && actionDraftCandidate.expectedTurnNumber === expectedTurnNumber) {
+      actionDraftSubmitted = {
+        ...actionDraftCandidate,
+        jobId: run.jobId,
+        action: submission.action,
+        operationKind,
+        expectedTurnNumber
+      };
+    }
     submissionAccepted = true;
     resetStoryLengthOverrideControls();
     options.onAttached?.();
@@ -1502,7 +3083,7 @@ async function runGeneration(action, options = {}) {
       : { id: run.jobId, action, operationKind, expectedTurnNumber };
     completeButLoading = await observeGenerationRun(run, attachedConflict ? (conflictPendingGeneration?.action || "") : action) === "result_unavailable";
   } catch (err) {
-    if (!activityScopeCurrent(submissionScope)) return;
+    if (!isCurrentActionSubmissionIntent(intent)) return;
     if (err.pendingGeneration) state.pendingGeneration = err.pendingGeneration;
     restoreGenerationDisplay();
     if (options.operationKind !== "replace_latest") restoreRetainedAppendDraft();
@@ -1518,16 +3099,91 @@ async function runGeneration(action, options = {}) {
       if (!submissionAccepted) observeActivity("browser.submission_failed", err, { route: "/api/v1/campaigns/:campaignId/generations" }, submissionScope);
     }
   } finally {
-    if (activityScopeCurrent(submissionScope)) {
+    if (isCurrentActionSubmissionIntent(intent)) {
       if (!completeButLoading) clearStreamingPreview();
       if (progressEl) progressEl.classList.add("hidden");
       hideBusy();
       state.abortController = null;
     }
+    if (ownsIntent) releaseActionSubmissionIntent(intent);
   }
 }
 
-function renderStreamingPreview(narrationText, action) {
+function createStoryStreamRenderIdentity() {
+  storyStreamEpoch += 1;
+  storyStreamIdentityToken += 1;
+  storyStreamRunIdentity = {
+    epoch: storyStreamEpoch,
+    token: storyStreamIdentityToken,
+    campaignId: state.campaignId,
+    loadSequence: campaignLoadSequence,
+    run: state.generationRun,
+    jobId: state.generationJobId
+  };
+  getStoryStreamRenderer().reset(storyStreamEpoch);
+  return storyStreamRunIdentity;
+}
+
+function isCurrentStoryStreamIdentity(identity) {
+  return Boolean(identity)
+    && storyStreamRunIdentity === identity
+    && identity.epoch === storyStreamEpoch
+    && identity.campaignId === state.campaignId
+    && identity.loadSequence === campaignLoadSequence
+    && identity.run === state.generationRun
+    && identity.jobId === state.generationJobId
+    && state.generationDisplayActive;
+}
+
+function bindStoryStreamRun(run) {
+  const identity = storyStreamRunIdentity;
+  if (!identity || identity.campaignId !== state.campaignId || identity.loadSequence !== campaignLoadSequence) return identity;
+  identity.run = run;
+  identity.jobId = run.jobId;
+  return identity;
+}
+
+function invalidateStoryStreamRenderer(expectedIdentity = null) {
+  if (expectedIdentity && storyStreamRunIdentity !== expectedIdentity) return;
+  storyStreamEpoch += 1;
+  storyStreamRunIdentity = null;
+  storyStreamRenderer?.reset(storyStreamEpoch);
+}
+
+function flushStoryStreamNarration(expectedIdentity = storyStreamRunIdentity) {
+  if (expectedIdentity && storyStreamRunIdentity === expectedIdentity) storyStreamRenderer?.flush();
+}
+
+function renderSafeStreamingNarration(text) {
+  const identity = storyStreamRunIdentity;
+  if (!isCurrentStoryStreamIdentity(identity)) return;
+  const narration = $("streamingPreviewCard")?.querySelector(".streaming-narration");
+  if (!narration) return;
+  narration.innerHTML = `${sanitizeNarration(text)}<span class="streaming-cursor" title="Receiving live tokens..."></span>`;
+}
+
+function getStoryStreamRenderer() {
+  if (!storyStreamRenderer) {
+    storyStreamRenderer = createStoryStreamRenderer({
+      scheduleFrame: (callback) => typeof window.requestAnimationFrame === "function"
+        ? window.requestAnimationFrame(() => callback())
+        : setTimeout(callback, 0),
+      cancelFrame: (frameId) => {
+        if (typeof window.cancelAnimationFrame === "function") window.cancelAnimationFrame(frameId);
+        else clearTimeout(frameId);
+      },
+      renderSafe: renderSafeStreamingNarration,
+      onFollow: () => {
+        const identity = storyStreamRunIdentity;
+        if (state.streamingAutoFollow && isCurrentStoryStreamIdentity(identity)) followStreamingPreview();
+      }
+    });
+  }
+  return storyStreamRenderer;
+}
+
+function renderStreamingPreview(narrationText, action, expectedIdentity = storyStreamRunIdentity) {
+  if (!isCurrentStoryStreamIdentity(expectedIdentity)) return;
   const container = $("storyArea");
   if (!container) return;
 
@@ -1560,18 +3216,12 @@ function renderStreamingPreview(narrationText, action) {
   const header = card.querySelector(".turn-streaming-header");
   if (header) syncCancelGenerationButton(header, state);
 
-  const narration = card.querySelector(".streaming-narration");
-  if (narration) {
-    narration.innerHTML = `${sanitizeNarration(narrationText)}<span class="streaming-cursor" title="Receiving live tokens..."></span>`;
-  }
-
   if (isNewPreview) {
     state.streamingAutoFollow = true;
     card.scrollIntoView({ behavior: "auto", block: "start" });
     state.streamingExpectedScrollY = window.scrollY;
-  } else if (state.streamingAutoFollow) {
-    followStreamingPreview();
   }
+  getStoryStreamRenderer().push(narrationText, expectedIdentity.epoch);
 }
 
 function followStreamingPreview() {
@@ -1598,25 +3248,28 @@ function pauseStreamingAutoFollow() {
 }
 
 function clearStreamingPreview() {
+  invalidateStoryStreamRenderer();
   const card = $("streamingPreviewCard");
   if (card) card.remove();
   state.streamingAutoFollow = true;
   state.streamingExpectedScrollY = null;
 }
 
-function beginGenerationDisplay(action) {
+function beginGenerationDisplay(action, { preserveAcceptedScene = false } = {}) {
   clearResponseEditSession();
   state.cancellationConfirmed = false;
   state.generationDisplayActive = true;
   state.generationDisplayAction = action || "";
+  createStoryStreamRenderIdentity();
   renderTurnInput();
   const container = $("storyArea");
-  if (container) container.replaceChildren();
+  if (container && !preserveAcceptedScene) container.replaceChildren();
   renderStoryIllustration();
   renderStreamingPreview("", state.generationDisplayAction);
 }
 
 function restoreGenerationDisplay() {
+  flushStoryStreamNarration();
   state.generationDisplayActive = false;
   state.generationDisplayAction = "";
   state.generationJobId = null;
@@ -1626,9 +3279,11 @@ function restoreGenerationDisplay() {
 }
 
 function commitGenerationDisplay(removeStreamingPreview = true) {
+  flushStoryStreamNarration();
   state.generationDisplayActive = false;
   state.generationDisplayAction = "";
   state.generationJobId = null;
+  invalidateStoryStreamRenderer();
   if (removeStreamingPreview) $("streamingPreviewCard")?.remove();
 }
 
@@ -1861,6 +3516,7 @@ function resetGenerationStateForCampaignLoad() {
   state.cancellationConfirmed = false;
   state.characterProfileEditSession = null;
   characterProfileEditRequestToken += 1;
+  $("generationProgress")?.classList.add("hidden");
   clearStreamingPreview();
   hideGenerationRecovery();
 }
@@ -1957,6 +3613,14 @@ async function retryCompletedGenerationResult() {
 }
 
 async function finalizeCompletedGeneration(result) {
+  const finalizationScope = activityScope();
+  const finalizationLoadSequence = campaignLoadSequence;
+  const currentFinalization = () => activityScopeCurrent(finalizationScope)
+    && campaignLoadSequence === finalizationLoadSequence;
+  if (result.campaignId && result.campaignId !== state.campaignId) return;
+  await clearAcceptedActionDraft(result);
+  if (!currentFinalization()) return;
+  if (state.campaignId === result.campaignId) setStorySyncStatus("Story syncing");
   if (result.campaignId && result.campaignId !== state.campaignId) return;
   activity?.setJobActive(false);
   void activity?.refresh();
@@ -1976,11 +3640,17 @@ async function finalizeCompletedGeneration(result) {
   commitGenerationDisplay(false);
   if (!replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)) {
     clearStreamingPreview();
-    await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });
+    const loading = loadCampaign(state.campaignId, { autoScroll: !preserveViewport });
+    const reloadScope = activityScope();
+    const reloadSequence = campaignLoadSequence;
+    if (!await loading || !activityScopeCurrent(reloadScope) || campaignLoadSequence !== reloadSequence) return;
     restoreViewportAfterRender(viewport);
     return;
   }
-  void reconcileCompletedGeneration(result);
+  await reconcileCompletedGeneration(result);
+  if (!currentFinalization()) return;
+  await restoreActionDraftForCampaign(result.campaignId, finalizationLoadSequence);
+  if (!currentFinalization()) return;
 
   restoreViewportAfterRender(viewport);
 
@@ -1999,7 +3669,8 @@ function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {
   const preview = $("streamingPreviewCard");
   if (!preview || !result.resultTurnId) return false;
 
-  const completedTurn = { ...result, id: result.resultTurnId };
+  const completedTurn = { ...result, id: result.resultTurnId, imageUrl: result.imageUrl ?? null };
+  const wasContinuous = Boolean(state.user?.settings?.continuousReading);
   const acceptedTurns = state.turns
     .filter((turn) => turn.id !== result.resultTurnId && Number(turn.turnNumber) !== Number(result.turnNumber))
     .concat(completedTurn)
@@ -2008,47 +3679,64 @@ function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {
   const completedTurnIndex = state.turns.findIndex((turn) => turn.id === result.resultTurnId);
   if (completedTurnIndex < 0) return false;
 
-  state.viewTurnNumber = null;
-  preview.replaceWith(renderScene(completedTurn, completedTurnIndex));
+  if (!preserveViewport) state.viewTurnNumber = null;
+  if (wasContinuous) {
+    if (state.continuousReader) {
+      state.continuousReader = reconcileStoryAcceptedSceneReplacement(state.continuousReader, completedTurn);
+    }
+    if (!preserveViewport) {
+      initializeContinuousReader({
+        selectedReadIdentity: { turnNumber: Number(completedTurn.turnNumber), id: completedTurn.id },
+        selectedTurn: completedTurn
+      });
+    }
+    preview.remove();
+    renderAllScenes({ autoScroll: false });
+  } else {
+    for (const scene of $("storyArea")?.querySelectorAll(".scene[data-turn-number]") || []) scene.remove();
+    preview.replaceWith(renderScene(completedTurn, completedTurnIndex));
+  }
   state.streamingAutoFollow = true;
   state.streamingExpectedScrollY = null;
   renderStoryIllustration();
   renderTurnInput();
-  if (!preserveViewport) $("scene-" + completedTurn.turnNumber)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  updateStatusBar();
+  if (!preserveViewport) {
+    const acceptedScene = $("scene-" + completedTurn.turnNumber);
+    if (acceptedScene) scrollSceneIntoView(acceptedScene);
+  }
   return true;
 }
 
 async function reconcileCompletedGeneration(result) {
   const reconciliationScope = activityScope();
   const campaignId = result.campaignId || reconciliationScope.campaignId;
-  const current = () => campaignId === state.campaignId && reconciliationScope.epoch === activityActivationEpoch;
+  const loadSequence = campaignLoadSequence;
+  const sessionEpoch = actionDraftSessionEpoch;
+  const windowEpoch = storyTurnWindowEpoch;
+  const userId = state.user?.id;
+  const isCurrent = () => state.campaignId === campaignId
+    && activityScopeCurrent(reconciliationScope)
+    && campaignLoadSequence === loadSequence
+    && actionDraftSessionEpoch === sessionEpoch
+    && storyTurnWindowEpoch === windowEpoch
+    && state.user?.id === userId;
+  if (!isCurrent()) return;
   try {
     const syncData = await apiClient.generation.syncStatus(campaignId);
-    if (!current()) return;
+    if (!isCurrent()) return;
     state.campaign = syncData.campaign || syncData;
     state.world = syncData.world || state.campaign.world || null;
     state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
     state.pendingGeneration = syncData.pendingGeneration || null;
+    state.generationRecovery = syncData.generationRecovery || null;
     syncTurnInputModeFromCampaign();
     const runtimeState = await apiClient.campaigns.state(campaignId);
-    if (!current()) return;
+    if (!isCurrent()) return;
     state.runtimeState = runtimeState;
-    markEditStateStaleForCurrentRuntimeState(state.runtimeState);
-    try {
-      const config = await illustrationApi.config(campaignId);
-      if (!current()) return;
-      const segmentData = await illustrationApi.segments(campaignId);
-      if (!current()) return;
-      state.illustrationConfig = config;
-      state.illustrationSegments = segmentData.segments || [];
-      state.illustrationError = null;
-    } catch (error) {
-      if (!current()) return;
-      observeActivity("browser.illustration_command_failed", error, { severity: "warning", dedupe: true }, reconciliationScope);
-      state.illustrationError = illustrationLoadError(error);
-    }
+    markEditStateStaleForCurrentRuntimeState(runtimeState);
 
-    if (!current()) return;
+    if (!isCurrent()) return;
     const titleEl = $("storyTitle");
     const name = state.campaign.title || state.world?.title || "Untitled Campaign";
     if (titleEl) titleEl.textContent = name;
@@ -2056,7 +3744,11 @@ async function reconcileCompletedGeneration(result) {
     renderStoryIllustration();
     updateStatusBar();
     renderTurnInput();
+    setStorySyncStatus("Story synced");
+    void loadReaderIllustrations(campaignId, loadSequence);
   } catch (error) {
+    if (!isCurrent()) return;
+    setStorySyncStatus("Story sync delayed");
     observeActivity("browser.result_unavailable", error, { code: "result_unavailable" }, reconciliationScope);
   }
 }
@@ -2068,7 +3760,8 @@ async function observeGenerationRun(run, action, retryFirst = false) {
   activity?.setJobActive(true);
   state.generationJobId = run.jobId;
   if (!state.generationDisplayActive) beginGenerationDisplay(action);
-  else renderStreamingPreview("", action || state.generationDisplayAction);
+  const streamIdentity = bindStoryStreamRun(run);
+  if (state.generationDisplayActive) renderStreamingPreview("", action || state.generationDisplayAction, streamIdentity);
   pollImageJobs();
   let terminalError = null;
   let resultUnavailable = false;
@@ -2098,11 +3791,13 @@ async function observeGenerationRun(run, action, retryFirst = false) {
         });
       }
     },
-    onNarration: (text) => { if (currentMonitor()) renderStreamingPreview(text, action || state.generationDisplayAction); },
+    onNarration: (text) => { if (currentMonitor()) renderStreamingPreview(text, action || state.generationDisplayAction, streamIdentity); },
     onDegraded: () => { monitoringDegraded = true; observeActivity("browser.monitoring_degraded", null, { code: "monitoring_degraded", severity: "warning", jobId: run.jobId, dedupe: true }, monitorScope); },
     onDetached: () => observeActivity("browser.monitoring_detached", null, { code: "monitoring_degraded", severity: "warning", jobId: run.jobId, dedupe: true }, monitorScope),
     onResultUnavailable: (jobId, error) => {
       if (!currentMonitor()) return;
+      flushStoryStreamNarration(streamIdentity);
+      invalidateStoryStreamRenderer(streamIdentity);
       showGenerationRecovery(
         jobId,
         "The turn completed, but its result is temporarily unavailable. Retry loading it.",
@@ -2112,9 +3807,14 @@ async function observeGenerationRun(run, action, retryFirst = false) {
       observeActivity("browser.result_unavailable", error, { code: "result_unavailable", jobId }, monitorScope);
       resultUnavailable = true;
     },
-    onCompleted: (result) => currentMonitor() ? finalizeCompletedGeneration(result) : undefined,
+    onCompleted: (result) => {
+      if (!currentMonitor()) return;
+      flushStoryStreamNarration(streamIdentity);
+      return finalizeCompletedGeneration(result);
+    },
     onCancelled: async () => {
       if (!currentMonitor()) return;
+      flushStoryStreamNarration(streamIdentity);
       terminalError = await reconcileRemoteGenerationCancellation({
         state,
         clearPendingSubmission,
@@ -2126,6 +3826,7 @@ async function observeGenerationRun(run, action, retryFirst = false) {
     },
     onTerminalFailure: (error, outcome) => {
       if (!currentMonitor()) return;
+      flushStoryStreamNarration(streamIdentity);
       clearPendingSubmission();
       state.pendingGeneration = null;
       if (lastSnapshot) state.generationRecovery = lastSnapshot;
@@ -2165,8 +3866,8 @@ function updateGenerationProgress(job) {
   if (continuityReviewMessage !== "Retrying continuity review") showBusy(`Story Engine: ${stage}…`);
   const progressEl = $("generationProgress");
   if (progressEl) {
-    progressEl.classList.add("turn-progress");
-    progressEl.classList.remove("generation-progress");
+    if (!progressEl.classList.contains("turn-progress")) progressEl.classList.add("turn-progress");
+    if (progressEl.classList.contains("generation-progress")) progressEl.classList.remove("generation-progress");
 
     const steps = [
       { id: "queued", label: "Queued" },
@@ -2185,6 +3886,15 @@ function updateGenerationProgress(job) {
     const currentStep = steps[currentIndex];
     const percent = Math.round(((currentIndex + 1) / steps.length) * 100);
     const detailText = continuityReviewMessage || `Story Engine: ${stage}`;
+    const renderedStep = progressEl.querySelector(".turn-progress-head strong");
+    const renderedStepNumber = progressEl.querySelector(".turn-progress-step");
+    const renderedMeter = progressEl.querySelector(".turn-progress-meter");
+    const renderedDetail = progressEl.querySelector(".turn-progress-detail");
+    if (renderedStep?.textContent === currentStep.label
+      && renderedStepNumber?.textContent === `Step ${currentIndex + 1} of ${steps.length}`
+      && renderedMeter?.getAttribute("value") === String(percent)
+      && renderedMeter.getAttribute("aria-label") === currentStep.label
+      && renderedDetail?.textContent === detailText) return;
 
     progressEl.innerHTML = `
       <div class="turn-progress-head">
@@ -2210,10 +3920,10 @@ async function resumePendingGeneration() {
     if (!activityScopeCurrent(resumeScope)) return false;
     if (run) {
       state.generationRun = run;
-      state.pendingGeneration = { id: run.jobId };
+      state.pendingGeneration = { ...state.pendingGeneration, id: run.jobId };
       showBusy("Resuming pending generation…");
       void activity?.refresh();
-      beginGenerationDisplay(state.pendingGeneration.action || "");
+      beginGenerationDisplay(state.pendingGeneration.action || "", { preserveAcceptedScene: true });
       const progressEl = $("generationProgress");
       if (progressEl) progressEl.classList.remove("hidden");
       try {
@@ -2246,7 +3956,14 @@ function updateStatusBar() {
       ? "Viewing Latest Turn"
       : `Viewing turn ${currentViewTurnNumber()}`;
   }
+  const readerTurnCount = $("readerTurnCount");
+  if (readerTurnCount) {
+    const total = Math.max(Number(state.campaign?.activeTurnNumber || 0), latestTurnNumber(state.turns));
+    readerTurnCount.textContent = total > 0 ? `Turn ${currentViewTurnNumber()} of ${total}` : "No turns yet";
+  }
+  syncContinuousReaderControls();
   syncInputState();
+  syncReaderResumePrompt();
 }
 
 // ── History Navigation ────────────────────────────────────────
@@ -2254,16 +3971,38 @@ function navigateToTurn(turnNumber) {
   const latest = latestTurnNumber(state.turns);
   const target = turnNumber === null ? latest : Number(turnNumber);
   if (!target || turnIndexForNumber(state.turns, target) < 0) return;
+  readerPositionInteractionEpoch += 1;
+  retirePendingContinuousReaderRequest();
+  readerPositionChoicePending = false;
+  state.readerPinnedTurn = null;
+  hideReaderResumePrompt();
   clearResponseEditSession();
   state.viewTurnNumber = target === latest ? null : target;
+  syncReaderResumePrompt();
   const isContinuous = Boolean(state.user?.settings?.continuousReading);
   if (!isContinuous) {
     renderAllScenes();
   } else {
-    renderStoryIllustration();
+    const targetTurn = state.turns.find((turn) => Number(turn.turnNumber) === target) || null;
+    const turnId = targetTurn?.id || targetTurn?.turnId;
+    const resident = turnId && state.continuousReader?.turns?.some((turn) => turn.turnNumber === target && turn.id === turnId);
+    if (target === latest || !resident) {
+      initializeContinuousReader(targetTurn ? {
+        selectedReadIdentity: { turnNumber: Number(targetTurn.turnNumber), id: turnId },
+        selectedTurn: targetTurn
+      } : {});
+      renderAllScenes({ autoScroll: false });
+    } else if (state.continuousReader) {
+      initializeContinuousReader({
+        selectedReadIdentity: { turnNumber: target, id: turnId },
+        selectedTurn: targetTurn
+      });
+      renderAllScenes({ autoScroll: false });
+    }
   }
   updateStatusBar();
   scrollToView();
+  scheduleReaderPositionSave();
 }
 
 async function loadOlderTurnPage() {
@@ -2299,6 +4038,7 @@ async function loadOlderTurnPage() {
 async function goToPrevious() {
   const curr = viewedTurnIndex();
   if (state.busy || state.turns.length === 0) return;
+  if (state.readerPinnedTurn) return;
   if (curr <= 0) {
     if (!await loadOlderTurnPage()) return;
     const viewedIndex = viewedTurnIndex();
@@ -2312,6 +4052,7 @@ function goToNext() {
   const curr = viewedTurnIndex();
   const isLatest = isViewingLatestTurn();
   if (state.busy || state.turns.length === 0 || isLatest) return;
+  if (state.readerPinnedTurn) return navigateToTurn(null);
   if (curr < state.turns.length - 1) navigateToTurn(state.turns[curr + 1]?.turnNumber ?? null);
   else navigateToTurn(null);
 }
@@ -2386,22 +4127,30 @@ async function executeRetryWithPrompt(submittedPromptText) {
   const originalTurn = state.turns.at(-1) || {};
   const resolvedInputMode = originalTurn.resolvedInputMode || originalTurn.inputMode || "action";
   const storyLengthProfileOverride = selectedStoryLengthOverride("retryStoryLengthProfileOverride");
-  await runGeneration(action, {
-    operationKind: "replace_latest",
-    expectedCurrentTurnNumber: currentTurnNumber,
-    requestedInputMode: originalTurn.requestedInputMode || resolvedInputMode,
-    resolvedInputMode,
-    inputModeSource: originalTurn.inputModeSource || "explicit",
-    storyLengthProfileOverride,
-    onAttached: closeRetryPromptDialog
-  });
+  const intent = acquireActionSubmissionIntent();
+  if (!intent) return;
+  try {
+    await runGeneration(action, {
+      operationKind: "replace_latest",
+      expectedCurrentTurnNumber: currentTurnNumber,
+      requestedInputMode: originalTurn.requestedInputMode || resolvedInputMode,
+      resolvedInputMode,
+      inputModeSource: originalTurn.inputModeSource || "explicit",
+      storyLengthProfileOverride,
+      onAttached: closeRetryPromptDialog,
+      actionSubmissionIntent: intent
+    });
+  } finally {
+    releaseActionSubmissionIntent(intent);
+  }
 }
 
 function promptBranchOrReset(turnNumber) {
   const dlg = $("branchStoryDialog");
   if (!dlg) return;
   const targetTurnNumber = Number(turnNumber);
-  if (!targetTurnNumber || turnIndexForNumber(state.turns, targetTurnNumber) < 0) return;
+  const isSelectedPreview = Number(state.historyWindow?.selectedPreview?.turnNumber) === targetTurnNumber;
+  if (!targetTurnNumber || (turnIndexForNumber(state.turns, targetTurnNumber) < 0 && !isSelectedPreview)) return;
   const msg = $("branchStoryMessage");
   if (msg) msg.textContent = `You selected Turn ${targetTurnNumber} (of ${state.campaign?.activeTurnNumber || 0}). Choose what should happen to later turns before continuing.`;
   dlg._targetTurnNumber = targetTurnNumber;
@@ -2416,74 +4165,125 @@ function illustrationLoadError(error) {
 }
 
 async function refreshIllustrations() {
-  const observationScope = activityScope();
-  const campaignId = state.campaignId;
-  try {
-    const config = await illustrationApi.config(campaignId);
-    if (!activityScopeCurrent(observationScope)) return;
-    state.illustrationConfig = config;
-    await pollImageJobs();
-  } catch (error) {
-    if (!activityScopeCurrent(observationScope)) return;
-    if (!activityScopeCurrent(observationScope)) return;
-    observeActivity("browser.illustration_command_failed", error, { severity: "warning", dedupe: true }, observationScope);
-    state.illustrationError = illustrationLoadError(error);
-    renderStoryIllustration();
-  }
+  if (!state.campaignId) return;
+  await loadReaderIllustrations(state.campaignId, campaignLoadSequence);
 }
 
-function pollImageJobs() {
-  if (state.imagePollTimer) clearTimeout(state.imagePollTimer);
+function pollImageJobs({ initialSegments = null } = {}) {
   if (!state.campaignId) return;
   const campaignId = state.campaignId;
   const observationScope = activityScope();
-  const epoch = ++state.imagePollEpoch;
-  let failures = 0;
-  const current = () => state.campaignId === campaignId && state.imagePollEpoch === epoch;
-
-  const poll = async () => {
-    if (!current()) return;
-    try {
-      if (!state.illustrationConfig) {
-        const config = await illustrationApi.config(campaignId);
-        if (!current()) return;
-        state.illustrationConfig = config;
-      }
-      const data = await illustrationApi.imageJobs(campaignId);
-      const jobs = data.jobs || data || [];
-      const segmentData = await illustrationApi.segments(campaignId);
-      if (!current()) return;
-      failures = 0;
-      endActivityEpisode("browser.illustration_command_failed", observationScope);
-      state.illustrationError = null;
-      const segments = segmentData.segments || [];
-      let anyPending = false;
-      state.illustrationSegments = segments;
-      renderStoryIllustration();
-      for (const job of jobs) {
-        renderSceneImageJob(job);
-        if (["queued", "generating", "provider_pending", "downloading"].includes(job.status)) anyPending = true;
-      }
-      for (const segment of segments) {
-        if (["queued", "refining", "generating"].includes(segment.status)
-          || ["queued", "refining", "recoverable"].includes(segment.promptJobStatus)) anyPending = true;
-      }
-      activity?.setJobActive(state.generationDisplayActive || Boolean(state.pendingGeneration) || anyPending);
-      void activity?.refresh();
-      if (anyPending) {
-        state.imagePollTimer = setTimeout(poll, IMAGE_POLL_MS);
-      }
-    } catch (error) {
-      if (!current()) return;
-      observeActivity("browser.illustration_command_failed", error, { severity: "warning", dedupe: true }, observationScope);
-      state.illustrationError = illustrationLoadError(error);
-      renderStoryIllustration();
-      if (error?.name !== "ApiContractError" && ++failures < 3) {
-        state.imagePollTimer = setTimeout(poll, IMAGE_POLL_MS * failures);
-      }
+  const loadSequence = campaignLoadSequence;
+  let poll = activeImagePoll;
+  if (!poll || poll.stopped || poll.campaignId !== campaignId || poll.loadSequence !== loadSequence) {
+    if (poll?.timer) {
+      clearTimeout(poll.timer);
+      if (state.imagePollTimer === poll.timer) state.imagePollTimer = null;
     }
+    if (poll) poll.stopped = true;
+    poll = {
+      campaignId,
+      loadSequence,
+      epoch: ++state.imagePollEpoch,
+      failures: 0,
+      initialSegments,
+      seedRevision: initialSegments === null ? 0 : 1,
+      timer: null,
+      inFlight: null,
+      stopped: false
+    };
+    activeImagePoll = poll;
+  } else if (initialSegments !== null) {
+    poll.initialSegments = initialSegments;
+    poll.seedRevision += 1;
+  }
+
+  const current = () => activeImagePoll === poll && !poll.stopped
+    && state.campaignId === poll.campaignId && state.imagePollEpoch === poll.epoch
+    && campaignLoadSequence === poll.loadSequence;
+  const schedule = (delay) => {
+    if (!current() || poll.timer) return;
+    const timer = setTimeout(() => {
+      if (poll.timer === timer) poll.timer = null;
+      if (state.imagePollTimer === timer) state.imagePollTimer = null;
+      if (current()) void runPoll();
+    }, delay);
+    poll.timer = timer;
+    state.imagePollTimer = timer;
   };
-  return poll();
+  const runPoll = () => {
+    if (!current()) return Promise.resolve();
+    if (poll.inFlight) return poll.inFlight;
+    if (poll.timer) {
+      clearTimeout(poll.timer);
+      if (state.imagePollTimer === poll.timer) state.imagePollTimer = null;
+      poll.timer = null;
+    }
+    const seedRevisionAtStart = poll.seedRevision;
+    const work = (async () => {
+      try {
+        if (!state.illustrationConfig) {
+          const config = await illustrationApi.config(poll.campaignId);
+          if (!current()) return;
+          state.illustrationConfig = config;
+        }
+        const data = await illustrationApi.imageJobs(poll.campaignId);
+        if (!current()) return;
+        const jobs = data.jobs || data || [];
+        let segments;
+        if (poll.initialSegments !== null) {
+          segments = poll.initialSegments;
+          poll.initialSegments = null;
+        } else {
+          const segmentData = await illustrationApi.segments(poll.campaignId);
+          if (!current()) return;
+          if (poll.seedRevision !== seedRevisionAtStart && poll.initialSegments !== null) {
+            segments = poll.initialSegments;
+            poll.initialSegments = null;
+          } else {
+            segments = segmentData.segments || [];
+          }
+        }
+        if (!current()) return;
+        poll.failures = 0;
+        endActivityEpisode("browser.illustration_command_failed", observationScope);
+        state.illustrationError = null;
+        let anyPending = false;
+        state.illustrationSegments = segments;
+        renderStoryIllustration({ skipIfUnchanged: true });
+        for (const job of jobs) {
+          renderSceneImageJob(job);
+          if (["queued", "generating", "provider_pending", "downloading"].includes(job.status)) anyPending = true;
+        }
+        for (const segment of segments) {
+          if (["queued", "refining", "generating"].includes(segment.status)
+            || ["queued", "refining", "recoverable"].includes(segment.promptJobStatus)) anyPending = true;
+        }
+        activity?.setJobActive(state.generationDisplayActive || Boolean(state.pendingGeneration) || anyPending);
+        void activity?.refresh();
+        if (anyPending) {
+          schedule(IMAGE_POLL_MS);
+        } else {
+          poll.stopped = true;
+        }
+      } catch (error) {
+        if (!current()) return;
+        observeActivity("browser.illustration_command_failed", error, { severity: "warning", dedupe: true }, observationScope);
+        state.illustrationError = illustrationLoadError(error);
+        renderStoryIllustration({ skipIfUnchanged: true });
+        if (error?.name !== "ApiContractError" && ++poll.failures < 3) {
+          schedule(IMAGE_POLL_MS * poll.failures);
+        } else {
+          poll.stopped = true;
+        }
+      } finally {
+        poll.inFlight = null;
+      }
+    })();
+    poll.inFlight = work;
+    return work;
+  };
+  return runPoll();
 }
 
 
@@ -2544,21 +4344,57 @@ function renderSceneImageJob(job) {
     imageWrap.className = "image-wrap image-job-placeholder";
     content?.appendChild(imageWrap);
   }
-  let status = imageWrap.querySelector(".image-job-status");
+  let statusContainer = imageWrap.querySelector(".segment-image-footer");
+  if (!statusContainer && job.segmentId) {
+    statusContainer = document.createElement("div");
+    statusContainer.className = "segment-image-footer";
+    imageWrap.appendChild(statusContainer);
+  }
+  statusContainer ??= imageWrap;
+  let status = statusContainer.querySelector(".image-job-status");
   if (!status) {
     status = document.createElement("div");
     status.className = imageWrap.querySelector("img") ? "image-job-status image-job-overlay" : "image-job-status";
-    imageWrap.appendChild(status);
+    const metadata = statusContainer.querySelector(".segment-illustration-meta");
+    statusContainer.insertBefore(status, metadata);
+  }
+  const labelText = terminalFailure
+    ? (job.errorMessage || "Illustration generation did not complete.")
+    : `Creating illustration · ${imageJobStatusText(job)}`;
+  const progressValue = Number(job.providerProgress);
+  const renderedProgress = Number.isFinite(progressValue) ? Math.max(0, Math.min(100, progressValue)) : null;
+  const signature = JSON.stringify({
+    jobId: job.id,
+    status: job.status,
+    providerStatus: job.providerStatus || null,
+    providerProgress: renderedProgress,
+    providerQueuePosition: Number.isInteger(job.providerQueuePosition) ? job.providerQueuePosition : null,
+    errorMessage: terminalFailure ? job.errorMessage || "Illustration generation did not complete." : null,
+    turnNumber: active ? turn?.turnNumber ?? null : null,
+    terminalFailure,
+    active
+  });
+  const existingLabel = status.querySelector("p");
+  const existingProgress = status.querySelector("progress");
+  const existingRetry = status.querySelector('[type="button"]');
+  if (imageJobRenderSignatures.get(status) === signature
+    && existingLabel
+    && (active ? Boolean(existingProgress) : terminalFailure ? Boolean(existingRetry) : !existingProgress && !existingRetry)) {
+    if (existingLabel.textContent !== labelText) existingLabel.textContent = labelText;
+    if (active && existingProgress) {
+      const nextProgressValue = renderedProgress ?? 0;
+      if (existingProgress.value !== nextProgressValue) existingProgress.value = nextProgressValue;
+    }
+    return;
   }
   status.replaceChildren();
   const label = document.createElement("p");
-  label.textContent = terminalFailure ? (job.errorMessage || "Illustration generation did not complete.") : `Creating illustration · ${imageJobStatusText(job)}`;
+  label.textContent = labelText;
   status.append(label);
   if (active) {
     const progress = document.createElement("progress");
     progress.max = 100;
-    const value = Number(job.providerProgress);
-    if (Number.isFinite(value)) progress.value = Math.max(0, Math.min(100, value));
+    if (renderedProgress !== null) progress.value = renderedProgress;
     progress.setAttribute("aria-label", `Illustration generation progress for turn ${turn?.turnNumber ?? "unknown"}`);
     status.append(progress);
   } else if (terminalFailure) {
@@ -2583,6 +4419,7 @@ function renderSceneImageJob(job) {
     });
     status.append(retry);
   }
+  imageJobRenderSignatures.set(status, signature);
 }
 
 function updateSceneImage(turnId, assetUrl, replace = false) {
@@ -2590,8 +4427,9 @@ function updateSceneImage(turnId, assetUrl, replace = false) {
   // Find the turn index
   const turnIdx = state.turns.findIndex(t => (t.id || t.turnId) === turnId);
   if (turnIdx < 0) return;
+  const previousAssetUrl = state.turns[turnIdx].imageAssetUrl || state.turns[turnIdx].imageUrl;
   state.turns[turnIdx].imageAssetUrl = assetUrl;
-  if (turnIdx === viewedTurnIndex()) renderStoryIllustration();
+  if (turnIdx === viewedTurnIndex() && previousAssetUrl !== assetUrl) renderStoryIllustration();
 }
 
 function openImagePromptEditor(turnId) {
@@ -2811,6 +4649,22 @@ function switchEditStateTab(tabName) {
     const el = $(`tab-${sectionTab}`);
     if (el) el.classList.toggle("hidden", sectionTab !== tabName);
   });
+  editStateTabBinding?.sync();
+}
+
+const editStateTabRoot = $("editStateTabs");
+if (editStateTabRoot) {
+  const editStateTabs = [...editStateTabRoot.querySelectorAll(".tab[data-tab]")].flatMap((tab) => {
+    const key = tab.dataset.tab;
+    const panel = $(`tab-${key || ""}`);
+    return key && panel ? [{ key, tab, panel }] : [];
+  });
+  editStateTabBinding = bindLegacyTabGroup({
+    root: editStateTabRoot,
+    tabs: editStateTabs,
+    getSelectedKey: () => document.querySelector("#editStateDialog .tab.active")?.dataset.tab || "overview",
+    onActivate: switchEditStateTab
+  });
 }
 
 function renderTextCollection(containerId, values, emptyText) {
@@ -3004,15 +4858,73 @@ function openUserProfile() {
   const cbSubmit = $("userProfileAutoSubmitChoices");
   const cbContinuous = $("userProfileContinuousReading");
   const defaultTurnStyle = $("userProfileDefaultTurnControlStyle");
+  userProfilePersistedTurnControlStyle = state.user?.settings?.defaultTurnControlStyle ?? null;
+  userProfileTurnControlStyleChanged = false;
   if (nameInput) nameInput.value = state.user?.displayName || "Initial Owner";
   if (cbSubmit) cbSubmit.checked = state.user?.settings?.autoSubmitTurnChoices !== false;
   if (cbContinuous) cbContinuous.checked = Boolean(state.user?.settings?.continuousReading);
   if (defaultTurnStyle) defaultTurnStyle.value = state.user?.settings?.defaultTurnControlStyle === "flexible_scene" ? "flexible_scene" : "flexible_action";
+  const readerPreferences = normalizeReaderPreferences(state.user?.settings?.readerPreferences);
+  setReaderPreferenceControls(readerPreferences);
+  applyReaderPreferences(readerPreferences);
+  const profileStatus = document.querySelector("[data-profile-status]");
+  if (profileStatus) profileStatus.textContent = "";
+  setUserProfileSaving(false);
   renderStoryMemorySettings(state.storyMemorySettings);
   openManagedModal(dlg);
 }
 
+function setReaderPreferenceControls(preferences) {
+  const controls = [
+    ["[data-reader-width]", String(preferences.widthCh)],
+    ["[data-reader-font-size]", String(preferences.fontSizePx)],
+    ["[data-reader-line-height]", String(preferences.lineHeight)],
+    ["select[data-reader-theme]", preferences.theme]
+  ];
+  for (const [selector, value] of controls) {
+    const control = document.querySelector(selector);
+    if (control) control.value = value;
+  }
+}
+
+function readerPreferencesFromControls() {
+  return normalizeReaderPreferences({
+    widthCh: Number(document.querySelector("[data-reader-width]")?.value),
+    fontSizePx: Number(document.querySelector("[data-reader-font-size]")?.value),
+    lineHeight: Number(document.querySelector("[data-reader-line-height]")?.value),
+    theme: document.querySelector("select[data-reader-theme]")?.value
+  });
+}
+
+function applyReaderPreferences(preferences) {
+  const storyContainer = $("storyContainer");
+  if (!storyContainer) return;
+  const normalized = normalizeReaderPreferences(preferences);
+  storyContainer.dataset.readerTheme = normalized.theme;
+  storyContainer.style.setProperty("--reader-width-ch", String(normalized.widthCh));
+  storyContainer.style.setProperty("--reader-font-size", `${normalized.fontSizePx}px`);
+  storyContainer.style.setProperty("--reader-line-height", String(normalized.lineHeight));
+}
+
+function setUserProfileSaving(saving) {
+  userProfileSaving = saving;
+  const dialog = $("userProfileDialog");
+  const controls = dialog?.querySelectorAll("#userProfileDisplayName, #userProfileAutoSubmitChoices, #userProfileContinuousReading, #userProfileDefaultTurnControlStyle, [data-reader-width], [data-reader-font-size], [data-reader-line-height], [data-reader-theme], [data-reader-preview], #btnSaveUserProfile, #btnCancelUserProfile, #btnCloseUserProfile");
+  controls?.forEach((control) => {
+    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLButtonElement) {
+      control.disabled = saving;
+    }
+  });
+  const save = $("btnSaveUserProfile");
+  if (save) save.textContent = saving ? "Saving…" : "Save Profile";
+}
+
+function previewReaderPreferences() {
+  applyReaderPreferences(readerPreferencesFromControls());
+}
+
 async function saveUserProfile() {
+  if (userProfileSaving) return;
   const nameInput = $("userProfileDisplayName");
   const cbSubmit = $("userProfileAutoSubmitChoices");
   const cbContinuous = $("userProfileContinuousReading");
@@ -3020,22 +4932,33 @@ async function saveUserProfile() {
   const displayName = nameInput ? nameInput.value.trim() : "";
   const autoSubmitTurnChoices = cbSubmit ? cbSubmit.checked : true;
   const continuousReading = cbContinuous ? cbContinuous.checked : false;
-  const defaultTurnControlStyle = defaultTurnStyle?.value === "flexible_scene" ? "flexible_scene" : "flexible_action";
+  const defaultTurnControlStyle = !userProfileTurnControlStyleChanged && userProfilePersistedTurnControlStyle === "action_only"
+    ? "action_only"
+    : defaultTurnStyle?.value === "flexible_scene" ? "flexible_scene" : "flexible_action";
+  const readerPreferences = readerPreferencesFromControls();
   const wasContinuousReading = Boolean(state.user?.settings?.continuousReading);
-  let completeHistoryError = null;
+  const readerPositionBeforeSave = wasContinuousReading !== continuousReading ? captureReaderPosition() : null;
+  if (wasContinuousReading !== continuousReading) {
+    readerPositionInteractionEpoch += 1;
+    retirePendingContinuousReaderRequest();
+  }
 
   if (!displayName) {
     toast("Display name is required.", 2600);
     return;
   }
 
+  setUserProfileSaving(true);
+  const profileStatus = document.querySelector("[data-profile-status]");
+  if (profileStatus) profileStatus.textContent = "Saving profile…";
   try {
     const res = await apiClient.session.updateProfile({
       displayName,
       settings: {
         autoSubmitTurnChoices,
         continuousReading,
-        defaultTurnControlStyle
+        defaultTurnControlStyle,
+        readerPreferences
       }
     });
     if (res && res.user) {
@@ -3047,115 +4970,578 @@ async function saveUserProfile() {
         state.user.settings.autoSubmitTurnChoices = autoSubmitTurnChoices;
         state.user.settings.continuousReading = continuousReading;
         state.user.settings.defaultTurnControlStyle = defaultTurnControlStyle;
+        state.user.settings.readerPreferences = readerPreferences;
       }
     }
-    if (!wasContinuousReading && continuousReading && state.historyNextCursor) {
-      try {
-        await ensureCompleteTurnHistory();
-      } catch (error) {
-        if (!isCompleteHistorySuperseded(error)) {
-          completeHistoryError = error;
-          toast(`Continuous reading is showing the loaded window: ${error.message}`);
-        }
+    applyReaderPreferences(state.user?.settings?.readerPreferences ?? readerPreferences);
+    if (wasContinuousReading !== continuousReading) {
+      const position = readerPositionBeforeSave?.position;
+      const selectedTurnNumber = position?.turnNumber ?? currentViewTurnNumber();
+      const selectedTurnId = position?.turnId;
+      const selectedTurn = state.readerPinnedTurn
+        && Number(state.readerPinnedTurn.turnNumber) === selectedTurnNumber
+        && (!selectedTurnId || (state.readerPinnedTurn.id || state.readerPinnedTurn.turnId) === selectedTurnId)
+        ? state.readerPinnedTurn
+        : state.turns.find((turn) => Number(turn.turnNumber) === selectedTurnNumber
+          && (!selectedTurnId || (turn.id || turn.turnId) === selectedTurnId))
+          || state.continuousReader?.turns.find((turn) => Number(turn.turnNumber) === selectedTurnNumber
+            && (!selectedTurnId || (turn.id || turn.turnId) === selectedTurnId))
+          || null;
+      state.viewTurnNumber = selectedTurnNumber === latestTurnNumber(state.turns) ? null : selectedTurnNumber;
+      state.readerPinnedTurn = selectedTurn && !state.turns.some((turn) => (turn.id || turn.turnId) === (selectedTurn.id || selectedTurn.turnId))
+        ? selectedTurn
+        : null;
+      if (continuousReading) {
+        initializeContinuousReader(selectedTurn ? {
+          selectedReadIdentity: { turnNumber: selectedTurnNumber, id: selectedTurn.id || selectedTurn.turnId },
+          selectedTurn
+        } : {});
       }
     }
-    renderAllScenes();
+    renderAllScenes({ autoScroll: wasContinuousReading !== continuousReading ? false : undefined });
+    if (wasContinuousReading !== continuousReading && readerPositionBeforeSave?.position) {
+      restoreReaderSceneOffset(readerPositionBeforeSave.position.turnNumber, readerPositionBeforeSave.position.offsetRatio);
+      scheduleReaderPositionSave();
+    }
     updateStatusBar();
     const dlg = $("userProfileDialog");
     if (dlg && dlg.close) dlg.close();
-    if (!completeHistoryError) toast("Profile saved.", 2600);
+    toast("Profile saved.", 2600);
   } catch (err) {
+    if (profileStatus) profileStatus.textContent = `Profile could not be saved: ${err.message || String(err)}`;
     toast("Failed to save profile: " + err.message, 3500);
+  } finally {
+    setUserProfileSaving(false);
   }
 }
 
 async function openTurnHistoryModal() {
   const dialog = $("turnHistoryDialog");
   openManagedModal(dialog);
-  populateHistoryContainer($("turnHistoryModalList"));
-  if (!state.historyNextCursor) {
-    setTurnHistoryLoadStatus(`All ${state.turns.length} turns loaded.`);
+  if (state.historyWindowCampaignId !== state.campaignId || state.historyWindowEpoch !== storyTurnWindowEpoch) {
+    initializeStoryHistoryWindow();
+  }
+  renderStoryHistoryWindow();
+  renderStoryHistorySearch();
+  revealSelectedHistoryCard();
+}
+
+function storyHistorySearchScope() {
+  return { campaignId: state.campaignId || "", loadEpoch: storyTurnWindowEpoch };
+}
+
+function cancelStoryHistorySearchWork() {
+  if (historySearchDebounceTimer !== null) clearTimeout(historySearchDebounceTimer);
+  historySearchDebounceTimer = null;
+  if (historySearchAbortController) historySearchAbortController.abort();
+  historySearchAbortController = null;
+  if (historySearchJumpAbortController) historySearchJumpAbortController.abort();
+  historySearchJumpAbortController = null;
+  historySearchJumpSearchIdentity = null;
+  state.historySearchJumpRequestId += 1;
+}
+
+function resetStoryHistorySearchForCurrentScope() {
+  cancelStoryHistorySearchWork();
+  state.historySearch = beginStoryHistorySearch(state.historySearch, storyHistorySearchScope(), "").state;
+  const input = $("turnHistorySearch");
+  if (input) input.value = "";
+  const jumpStatus = $("turnHistoryJumpStatus");
+  if (jumpStatus) {
+    jumpStatus.dataset.state = "idle";
+    jumpStatus.textContent = "";
+  }
+  renderStoryHistorySearch();
+}
+
+function storyHistorySearchRequestIsCurrent(request) {
+  return state.historySearch.activeRequest === request
+    && state.campaignId === request.campaignId
+    && storyTurnWindowEpoch === request.loadEpoch;
+}
+
+function storyHistorySearchStatusText(searchState) {
+  if (searchState.status === "invalid") return "Search text must be 200 characters or fewer.";
+  if (searchState.status === "loading") return "Searching accepted history…";
+  if (searchState.status === "empty") return "No matching turns.";
+  if (searchState.status === "results") {
+    const count = searchState.items.length;
+    return `Showing ${count} matching ${count === 1 ? "turn" : "turns"}.`;
+  }
+  if (searchState.status === "error") {
+    if (searchState.errorKind === "conflict") return "History changed while searching. Retry from the newest history.";
+    if (searchState.errorKind === "scope" || searchState.errorKind === "protocol") {
+      return "Search results could not be verified. Please retry.";
+    }
+    return "Search could not be completed. Please retry.";
+  }
+  return "Search accepted turns in this campaign.";
+}
+
+function renderStoryHistorySearch() {
+  const searchState = state.historySearch;
+  const searchInput = $("turnHistorySearch");
+  const status = $("turnHistorySearchStatus");
+  const results = $("turnHistorySearchResults");
+  const moreButton = $("btnTurnHistorySearchMore");
+  const retryButton = $("btnTurnHistorySearchRetry");
+  const clearButton = $("btnTurnHistorySearchClear");
+  const browsePanel = $("turnHistoryBrowsePanel");
+  const selectionActions = document.querySelector(".history-selection-actions");
+  const searching = Boolean(searchState.query);
+
+  if (browsePanel) browsePanel.classList.toggle("hidden", searching);
+  if (selectionActions) selectionActions.classList.toggle("hidden", searching);
+  if (searchInput && searchInput.value.trim() !== searchState.query && searchState.status !== "loading") {
+    searchInput.value = searchState.query;
+  }
+  if (status) {
+    status.dataset.state = searchState.status;
+    status.textContent = storyHistorySearchStatusText(searchState);
+  }
+  if (clearButton) clearButton.disabled = !searchInput?.value;
+  if (results) {
+    results.replaceChildren();
+    results.hidden = searchState.items.length === 0;
+    for (const item of searchState.items) {
+      const row = document.createElement("div");
+      row.setAttribute("role", "listitem");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "small history-search-result";
+      button.dataset.historyTurnNumber = String(item.turnNumber);
+      const title = document.createElement("span");
+      title.className = "history-search-result-title";
+      title.textContent = `Turn ${item.turnNumber}`;
+      const excerpt = document.createElement("span");
+      excerpt.className = "history-search-result-excerpt";
+      excerpt.textContent = item.excerpt;
+      button.append(title, excerpt);
+      const acceptedAtTimestamp = Date.parse(item.acceptedAt);
+      if (Number.isFinite(acceptedAtTimestamp)) {
+        const date = document.createElement("time");
+        date.className = "history-search-result-date";
+        date.dateTime = item.acceptedAt;
+        date.textContent = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" })
+          .format(new Date(acceptedAtTimestamp));
+        button.appendChild(date);
+      }
+      const resultQueryEpoch = searchState.queryEpoch;
+      const resultRequestId = searchState.nextRequestId;
+      button.addEventListener("click", () => {
+        void loadSearchedHistoryTurn(item.turnNumber, item.id, resultQueryEpoch, resultRequestId);
+      });
+      row.appendChild(button);
+      results.appendChild(row);
+    }
+  }
+  if (moreButton) {
+    moreButton.hidden = searchState.status !== "results" || !searchState.nextCursor;
+    moreButton.disabled = searchState.status === "loading";
+  }
+  if (retryButton) retryButton.hidden = searchState.status !== "error";
+}
+
+async function loadStoryHistorySearchPage(request) {
+  if (!storyHistorySearchRequestIsCurrent(request)) return;
+  const controller = new AbortController();
+  historySearchAbortController = controller;
+  try {
+    const response = await readerHistoryApi.searchHistory(request.campaignId, {
+      q: request.query,
+      limit: STORY_HISTORY_PAGE_LIMIT,
+      ...(request.before === null ? {} : { before: request.before })
+    }, controller.signal);
+    if (!storyHistorySearchRequestIsCurrent(request)) return;
+    state.historySearch = settleStoryHistorySearch(state.historySearch, request, { type: "success", response });
+  } catch (error) {
+    if (!storyHistorySearchRequestIsCurrent(request)) return;
+    state.historySearch = settleStoryHistorySearch(state.historySearch, request, {
+      type: historyPageConflict(error) ? "conflict" : "request-error"
+    });
+  } finally {
+    if (historySearchAbortController === controller) historySearchAbortController = null;
+  }
+  renderStoryHistorySearch();
+}
+
+function handleStoryHistorySearchInput() {
+  const searchInput = $("turnHistorySearch");
+  if (!searchInput || !state.campaignId) return;
+  if (historySearchDebounceTimer !== null) clearTimeout(historySearchDebounceTimer);
+  historySearchDebounceTimer = null;
+  if (historySearchAbortController) historySearchAbortController.abort();
+  historySearchAbortController = null;
+  const transition = beginStoryHistorySearch(state.historySearch, storyHistorySearchScope(), searchInput.value);
+  state.historySearch = transition.state;
+  invalidateStaleStoryHistorySearchSelection();
+  renderStoryHistorySearch();
+  if (!transition.request) return;
+  const request = transition.request;
+  historySearchDebounceTimer = setTimeout(() => {
+    historySearchDebounceTimer = null;
+    void loadStoryHistorySearchPage(request);
+  }, STORY_HISTORY_SEARCH_DEBOUNCE_MS);
+}
+
+function requestStoryHistorySearchPage(action) {
+  if (historySearchDebounceTimer !== null) clearTimeout(historySearchDebounceTimer);
+  historySearchDebounceTimer = null;
+  if (historySearchAbortController) historySearchAbortController.abort();
+  historySearchAbortController = null;
+  const transition = beginStoryHistorySearchPage(state.historySearch, action);
+  state.historySearch = transition.state;
+  invalidateStaleStoryHistorySearchSelection();
+  renderStoryHistorySearch();
+  if (transition.request) void loadStoryHistorySearchPage(transition.request);
+}
+
+function invalidateStaleStoryHistorySearchSelection() {
+  const identity = historySearchJumpSearchIdentity;
+  if (!identity || (identity.queryEpoch === state.historySearch.queryEpoch
+    && identity.requestId === state.historySearch.nextRequestId)) return;
+  state.historySearchJumpRequestId += 1;
+  if (historySearchJumpAbortController) historySearchJumpAbortController.abort();
+  historySearchJumpAbortController = null;
+  historySearchJumpSearchIdentity = null;
+  setStoryHistoryJumpStatus("idle", "");
+}
+
+function setStoryHistoryJumpStatus(stateName, message) {
+  const status = $("turnHistoryJumpStatus");
+  if (!status) return;
+  status.dataset.state = stateName;
+  status.textContent = message;
+}
+
+function knownStoryHistoryTurn(turnNumber) {
+  const historyWindowIsCurrent = state.historyWindowCampaignId === state.campaignId
+    && state.historyWindowEpoch === storyTurnWindowEpoch;
+  const candidates = [...state.turns];
+  if (historyWindowIsCurrent) {
+    const cachedTurns = (state.historyWindow?.cachedPages || []).flatMap(page => page.turns);
+    candidates.push(...(state.historyResidentRows || []), ...cachedTurns);
+    if (state.historyWindow?.selectedPreview) candidates.push(state.historyWindow.selectedPreview);
+  }
+  return candidates.find(turn => Number(turn.turnNumber) === turnNumber) || null;
+}
+
+async function loadSearchedHistoryTurn(turnNumber, expectedTurnId, queryEpoch, requestId) {
+  await loadExactHistoryTurn(turnNumber, { expectedTurnId, queryEpoch, expectedSearchRequestId: requestId });
+}
+
+async function jumpToExactHistoryTurn() {
+  const input = $("turnHistoryJumpNumber");
+  if (!input || !state.campaignId) return;
+  const latestTurnNumber = latestTurnNumberFromStory();
+  const target = validateStoryHistoryJumpTarget(input.value, latestTurnNumber);
+  if (!target.valid) {
+    setStoryHistoryJumpStatus("invalid", target.reason === "out-of-range"
+      ? `Enter a turn from 1 to ${latestTurnNumber}.`
+      : "Enter a positive whole turn number.");
     return;
   }
-  setTurnHistoryLoadStatus(`Loading earlier turns… ${state.turns.length} loaded`, "loading");
+  await loadExactHistoryTurn(target.turnNumber, { queryEpoch: state.historySearch.queryEpoch });
+}
+
+function latestTurnNumberFromStory() {
+  const historyWindowIsCurrent = state.historyWindowCampaignId === state.campaignId
+    && state.historyWindowEpoch === storyTurnWindowEpoch;
+  const localAcceptedTurns = [
+    ...(state.turns || []),
+    ...(historyWindowIsCurrent ? state.historyResidentRows || [] : []),
+    ...(historyWindowIsCurrent ? state.historyWindow?.cachedPages || [] : []).flatMap(page => page.turns),
+    ...(historyWindowIsCurrent ? [state.historyWindow?.selectedPreview, state.historySelectedPreview] : [])
+  ].filter(Boolean);
+  const knownTurnNumbers = localAcceptedTurns
+    .map(turn => Number(turn.turnNumber))
+    .filter(turnNumber => Number.isSafeInteger(turnNumber) && turnNumber > 0);
+  const campaignLatest = Number(state.campaign?.activeTurnNumber);
+  if (Number.isSafeInteger(campaignLatest) && campaignLatest > 0) knownTurnNumbers.push(campaignLatest);
+  return Math.max(0, ...knownTurnNumbers);
+}
+
+async function loadExactHistoryTurn(turnNumber, {
+  expectedTurnId = null,
+  queryEpoch = state.historySearch.queryEpoch,
+  expectedSearchRequestId = null
+} = {}) {
+  const campaignId = state.campaignId;
+  if (!campaignId) return;
+  if (historySearchJumpAbortController) historySearchJumpAbortController.abort();
+  const controller = new AbortController();
+  historySearchJumpAbortController = controller;
+  historySearchJumpSearchIdentity = expectedSearchRequestId === null
+    ? null
+    : { queryEpoch, requestId: expectedSearchRequestId };
+  const requestId = ++state.historySearchJumpRequestId;
+  const loadEpoch = storyTurnWindowEpoch;
+  setStoryHistoryJumpStatus("loading", `Loading Turn ${turnNumber}…`);
+  const isCurrent = () => requestId === state.historySearchJumpRequestId
+    && state.campaignId === campaignId
+    && storyTurnWindowEpoch === loadEpoch
+    && (expectedSearchRequestId === null || (state.historySearch.queryEpoch === queryEpoch
+      && state.historySearch.nextRequestId === expectedSearchRequestId));
   try {
-    await ensureCompleteTurnHistory();
-    populateHistoryContainer($("turnHistoryModalList"));
-  } catch (error) {
-    if (isCompleteHistorySuperseded(error)) {
-      populateHistoryContainer($("turnHistoryModalList"));
+    const response = await readerHistoryApi.getTurn(campaignId, turnNumber, controller.signal);
+    if (!isCurrent()) return;
+    const turn = response?.turn;
+    if (response?.campaignId !== campaignId || Number(turn?.turnNumber) !== turnNumber
+      || typeof turn?.id !== "string" || (expectedTurnId && turn.id !== expectedTurnId)) {
+      setStoryHistoryJumpStatus("error", "That turn changed or could not be verified. Your current scene is unchanged.");
       return;
     }
-    setTurnHistoryLoadStatus(`Could not load complete history: ${error.message}`, "error");
-    toast(`Could not load complete history: ${error.message}`);
+    const known = knownStoryHistoryTurn(turnNumber);
+    if (known && (known.id || known.turnId) !== turn.id) {
+      setStoryHistoryJumpStatus("error", "That turn changed or could not be verified. Your current scene is unchanged.");
+      return;
+    }
+    if (!state.historyWindow || state.historyWindowCampaignId !== campaignId || state.historyWindowEpoch !== loadEpoch) {
+      initializeStoryHistoryWindow();
+    }
+    state.historyWindow = selectStoryHistoryPreview(state.historyWindow, turn);
+    state.historySelectedPreview = turn;
+    state.historySelectedTurnNumber = turnNumber;
+    renderStoryHistoryWindow();
+    jumpToSelectedHistoryTurn();
+    setStoryHistoryJumpStatus("success", `Opened Turn ${turnNumber}.`);
+  } catch {
+    if (!isCurrent()) return;
+    setStoryHistoryJumpStatus("error", "Could not open that turn. Your current scene is unchanged. Please retry.");
+  } finally {
+    if (historySearchJumpAbortController === controller) {
+      historySearchJumpAbortController = null;
+      historySearchJumpSearchIdentity = null;
+    }
   }
 }
 
-function populateHistoryContainer(container) {
+function initializeStoryHistoryWindow(options = {}) {
+  const residentRows = options.residentRows || state.turns || [];
+  const recentTurns = options.turns || residentRows.slice(-STORY_HISTORY_PAGE_LIMIT);
+  const selectionNumber = currentViewTurnNumber();
+  const sameCampaignWindow = state.historyWindowCampaignId === state.campaignId;
+  const retainedSelection = sameCampaignWindow
+    ? state.historySelectedPreview
+      || residentRows.find((turn) => Number(turn.turnNumber) === state.historySelectedTurnNumber)
+    : null;
+  const selectedPreview = options.clearPreview ? null : (state.readerPinnedTurn
+    || retainedSelection
+    || residentRows.find((turn) => Number(turn.turnNumber) === selectionNumber)
+    || null);
+  state.historyResidentRows = residentRows;
+  state.historyWindow = createStoryHistoryWindow({
+    page: {
+      source: "server",
+      requestCursor: null,
+      nextCursor: options.nextCursor === undefined ? state.historyNextCursor : options.nextCursor,
+      turns: recentTurns
+    },
+    selectedPreview,
+    residentRange: residentRows.length
+      ? { firstTurnNumber: Number(residentRows[0]?.turnNumber), lastTurnNumber: Number(residentRows.at(-1)?.turnNumber) }
+      : null,
+    residentTurnNumbers: residentRows.map(turn => Number(turn.turnNumber)).filter(Number.isInteger)
+  });
+  state.historyWindowCampaignId = state.campaignId;
+  state.historyWindowEpoch = storyTurnWindowEpoch;
+  state.historySelectedPreview = selectedPreview;
+  const visible = storyHistoryVisibleTurns(state.historyWindow);
+  const initialSelection = selectedPreview?.turnNumber
+    ?? (visible.pageTurns.some((turn) => Number(turn.turnNumber) === currentViewTurnNumber())
+      ? currentViewTurnNumber()
+      : visible.pageTurns.at(-1)?.turnNumber);
+  state.historySelectedTurnNumber = Number.isInteger(initialSelection) ? initialSelection : null;
+}
+
+function historyWindowContainsTurn(turnNumber) {
+  if (!state.historyWindow) return false;
+  const visible = storyHistoryVisibleTurns(state.historyWindow);
+  return visible.pageTurns.some((turn) => Number(turn.turnNumber) === turnNumber)
+    || Number(visible.selectedPreview?.turnNumber) === turnNumber;
+}
+
+function historyCard(turn, { selected = false, preview = false } = {}) {
+  const entry = document.createElement("article");
+  entry.className = "history-entry";
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = `history-card${preview ? " history-preview-turn" : ""}`;
+  card.dataset.turnNumber = String(turn.turnNumber);
+  card.setAttribute("aria-pressed", String(selected));
+  card.classList.toggle("selected", selected);
+  const heading = document.createElement("span");
+  heading.className = "history-card-heading";
+  const title = document.createElement("span");
+  title.className = "history-card-title";
+  title.textContent = `${Number(turn.turnNumber) === currentViewTurnNumber() ? "◆ " : ""}Turn ${turn.turnNumber}`;
+  heading.appendChild(title);
+  const metadata = document.createElement("span");
+  metadata.className = "history-card-meta";
+  const inputMode = turn.inputMode === "scene" ? "scene" : "action";
+  const inputModeLabel = inputMode === "scene" ? "Scene direction" : "Action";
+  const pill = document.createElement("span");
+  pill.className = `turn-input-mode-pill ${inputMode}`;
+  pill.textContent = inputModeLabel;
+  pill.setAttribute("aria-label", `Prompt interpretation: ${inputModeLabel}`);
+  metadata.appendChild(pill);
+  const acceptedAt = typeof turn.acceptedAt === "string" ? turn.acceptedAt : "";
+  const acceptedAtTimestamp = acceptedAt ? Date.parse(acceptedAt) : Number.NaN;
+  if (Number.isFinite(acceptedAtTimestamp)) {
+    const date = document.createElement("time");
+    date.className = "history-card-date";
+    date.dateTime = acceptedAt;
+    date.textContent = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" })
+      .format(new Date(acceptedAtTimestamp));
+    metadata.appendChild(date);
+  }
+  heading.appendChild(metadata);
+  const excerpt = document.createElement("span");
+  const excerptSource = String(turn.action || turn.narration || turn.effectiveNarration || "");
+  excerpt.className = turn.action ? "turn-history-prompt" : "";
+  excerpt.textContent = `${excerptSource.slice(0, 240)}${excerptSource.length > 240 ? "…" : ""}`;
+  card.append(heading, excerpt);
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = "Retrieval details";
+  details.append(summary);
+  const audit = document.createElement("div");
+  audit.innerHTML = chronicleRetrievalHistoryMarkup(turn.chronicleRetrieval);
+  details.appendChild(audit);
+  if (!preview) card.addEventListener("click", () => selectHistoryTurn(Number(turn.turnNumber)));
+  entry.append(card, details);
+  return entry;
+}
+
+function renderStoryHistoryWindow() {
+  const container = $("turnHistoryModalList");
   if (!container) return;
-  container.innerHTML = "";
-  if (state.turns.length === 0) {
-    state.historySelectedTurnNumber = null;
-    container.innerHTML = `<p class="dim mini">No turns recorded yet.</p>`;
-    const panel = $("turnHistoryStatePanel");
-    if (panel) {
-      panel.classList.add("hidden");
-      panel.innerHTML = "";
+  container.replaceChildren();
+  const previewSection = $("turnHistorySelectedPreview");
+  const previewContainer = $("turnHistoryPreviewCard");
+  const statePanel = $("turnHistoryStatePanel");
+  if (state.historyWindowCampaignId !== state.campaignId || state.historyWindowEpoch !== storyTurnWindowEpoch) {
+    initializeStoryHistoryWindow();
+  }
+  if (!state.historyWindow || !state.historyWindowCampaignId) return;
+  const visible = storyHistoryVisibleTurns(state.historyWindow);
+  state.historySelectedPreview = visible.selectedPreview;
+  if (previewSection) previewSection.classList.toggle("hidden", !visible.selectedPreview);
+  if (previewContainer) {
+    previewContainer.replaceChildren();
+    if (visible.selectedPreview) {
+      previewContainer.appendChild(historyCard(visible.selectedPreview, {
+        selected: Number(visible.selectedPreview.turnNumber) === state.historySelectedTurnNumber,
+        preview: true
+      }));
     }
+  }
+  for (const turn of visible.pageTurns) {
+    container.appendChild(historyCard(turn, { selected: Number(turn.turnNumber) === state.historySelectedTurnNumber }));
+  }
+  const older = $("btnTurnHistoryOlder");
+  const newer = $("btnTurnHistoryNewer");
+  if (older) older.disabled = !storyHistoryPageRequest(state.historyWindow, "older") || Boolean(historyPageLoad);
+  if (newer) newer.disabled = !storyHistoryPageRequest(state.historyWindow, "newer") || Boolean(historyPageLoad);
+  const previous = $("btnTurnHistoryPreviousTurn");
+  const next = $("btnTurnHistoryNextTurn");
+  if (previous) previous.disabled = !visible.selectedPreview || Number(visible.selectedPreview.turnNumber) <= 1 || Boolean(historyPageLoad);
+  if (next) next.disabled = !visible.selectedPreview
+    || Number(visible.selectedPreview.turnNumber) >= Number(state.campaign?.activeTurnNumber || latestTurnNumber(state.turns))
+    || Boolean(historyPageLoad);
+  if (visible.pageTurns.length + Number(Boolean(visible.selectedPreview)) > STORY_HISTORY_PAGE_LIMIT) {
+    throw new Error("Story history rendered more than 50 cards.");
+  }
+  if (!visible.pageTurns.length && !visible.selectedPreview) {
+    state.historySelectedTurnNumber = null;
+    const empty = document.createElement("p");
+    empty.className = "dim mini";
+    empty.textContent = "No turns recorded yet.";
+    container.appendChild(empty);
+    if (statePanel) { statePanel.classList.add("hidden"); statePanel.replaceChildren(); }
     updateHistorySelectionActions();
     return;
   }
-  const currentTurnNumber = currentViewTurnNumber();
-  state.turns.forEach((t) => {
-    const card = document.createElement("div");
-    card.className = "history-card";
-    card.dataset.turnNumber = String(t.turnNumber);
-    card.setAttribute("role", "button");
-    card.setAttribute("tabindex", "0");
-    card.setAttribute("aria-pressed", "false");
-    const preview = (t.narration || "").slice(0, 140) + ((t.narration || "").length > 140 ? "…" : "");
-    const inputMode = t.inputMode === "scene" ? "scene" : "action";
-    const inputModeLabel = inputMode === "scene" ? "Scene direction" : "Action";
-    card.innerHTML = `
-      <div class="history-card-heading">
-        <h4>${t.turnNumber === currentTurnNumber ? "◆ " : ""}Turn ${t.turnNumber}${t.action ? `: ${escapeHtml(t.action.slice(0, 60))}` : (t.turnNumber === 1 ? ": Adventure Begin" : "")}</h4>
-        <span class="turn-input-mode-pill ${inputMode}" title="Story Engine interpreted this prompt as ${inputModeLabel}" aria-label="Prompt interpretation: ${inputModeLabel}">${inputModeLabel}</span>
-      </div>
-      ${t.action ? `<div><strong class="turn-history-prompt-label">Prompt</strong><p class="turn-history-prompt">${escapeHtml(t.action)}</p></div>` : ""}
-      <p>${escapeHtml(preview)}</p>
-      ${chronicleRetrievalHistoryMarkup(t.chronicleRetrieval)}
-    `;
-    card.addEventListener("click", () => selectHistoryTurn(t.turnNumber));
-    card.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        selectHistoryTurn(t.turnNumber);
-      }
-    });
-    container.appendChild(card);
-  });
-  const selectedTurnNumber = Number.isInteger(state.historySelectedTurnNumber)
-    && turnIndexForNumber(state.turns, state.historySelectedTurnNumber) >= 0
-    ? state.historySelectedTurnNumber
-    : currentTurnNumber;
-  selectHistoryTurn(selectedTurnNumber);
+  if (!historyWindowContainsTurn(state.historySelectedTurnNumber)) {
+    state.historySelectedTurnNumber = visible.selectedPreview?.turnNumber ?? visible.pageTurns.at(-1)?.turnNumber ?? null;
+    if (state.historySelectedTurnNumber !== null) state.historyWindow = selectStoryHistoryPreview(state.historyWindow, visible.pageTurns.find((turn) => turn.turnNumber === state.historySelectedTurnNumber) ?? visible.selectedPreview);
+  }
+  updateHistorySelectionActions();
+}
+
+function revealSelectedHistoryCard() {
+  const scroller = $("turnHistoryDialog")?.querySelector(".dialog-scroll");
+  const selectedCard = scroller?.querySelector('.history-card[aria-pressed="true"]');
+  const selected = selectedCard?.closest(".history-entry") || selectedCard;
+  if (!scroller || !selected) return;
+  const viewport = scroller.getBoundingClientRect();
+  const card = selected.getBoundingClientRect();
+  const viewportTop = viewport.top + scroller.clientTop;
+  const viewportBottom = viewportTop + scroller.clientHeight;
+  if (card.top < viewportTop) scroller.scrollTop = Math.floor(scroller.scrollTop + card.top - viewportTop);
+  else if (card.bottom > viewportBottom) scroller.scrollTop = Math.ceil(scroller.scrollTop + card.bottom - viewportBottom);
 }
 
 function selectHistoryTurn(turnNumber) {
-  if (!Number.isInteger(turnNumber) || turnIndexForNumber(state.turns, turnNumber) < 0) return;
+  if (!Number.isInteger(turnNumber) || !historyWindowContainsTurn(turnNumber)) return;
+  const historyDialog = $("turnHistoryDialog");
+  const focusedHistoryCard = historyDialog?.open
+    ? document.activeElement?.closest("#turnHistoryModalList .history-card")
+    : null;
+  const focusedTurnNumber = Number(focusedHistoryCard?.dataset.turnNumber);
   state.historySelectedTurnNumber = turnNumber;
-  document.querySelectorAll("#turnHistoryModalList .history-card").forEach(card => {
+  const selectedTurn = [...(state.historyWindow?.cachedPages || []).flatMap((page) => page.turns), state.historyWindow?.selectedPreview]
+    .find((turn) => Number(turn?.turnNumber) === turnNumber) || null;
+  state.historyWindow = selectStoryHistoryPreview(state.historyWindow, selectedTurn);
+  document.querySelectorAll("#turnHistoryModalList .history-card, #turnHistoryPreviewCard .history-card").forEach(card => {
     const selected = Number(card.dataset.turnNumber) === turnNumber;
     card.classList.toggle("selected", selected);
     card.setAttribute("aria-pressed", String(selected));
   });
+  const panel = $("turnHistoryStatePanel");
+  if (panel) { panel.classList.add("hidden"); panel.replaceChildren(); }
+  state.historyInspectionRequestId += 1;
+  renderStoryHistoryWindow();
+  revealSelectedHistoryCard();
+  if (historyDialog?.open && focusedTurnNumber === turnNumber) {
+    const selectedCard = historyDialog.querySelector(`#turnHistoryModalList .history-card[data-turn-number="${turnNumber}"]`);
+    if (selectedCard instanceof HTMLButtonElement) selectedCard.focus({ preventScroll: true });
+  }
   updateHistorySelectionActions();
-  if (state.historySelectedTurnNumber) inspectTurnState(state.historySelectedTurnNumber);
+}
+
+function jumpToSelectedHistoryTurn() {
+  const turnNumber = state.historySelectedTurnNumber;
+  if (!Number.isInteger(turnNumber) || !historyWindowContainsTurn(turnNumber)) return;
+  if (turnIndexForNumber(state.turns, turnNumber) >= 0) {
+    navigateToTurn(turnNumber);
+  } else {
+    const selectedTurn = state.historyWindow?.selectedPreview;
+    if (!selectedTurn || Number(selectedTurn.turnNumber) !== turnNumber) return;
+    readerPositionInteractionEpoch += 1;
+    readerPositionChoicePending = false;
+    state.readerPinnedTurn = selectedTurn;
+    hideReaderResumePrompt();
+    clearResponseEditSession();
+    state.viewTurnNumber = turnNumber;
+    if (state.user?.settings?.continuousReading) {
+      initializeContinuousReader({
+        selectedReadIdentity: { turnNumber, id: selectedTurn.id || selectedTurn.turnId },
+        selectedTurn
+      });
+    }
+    renderAllScenes({ autoScroll: false });
+    updateStatusBar();
+    scrollToView();
+    scheduleReaderPositionSave();
+  }
+  const dialog = $("turnHistoryDialog");
+  if (dialog?.close) dialog.close();
 }
 
 function updateHistorySelectionActions() {
   const hasSelection = Number.isInteger(state.historySelectedTurnNumber)
-    && turnIndexForNumber(state.turns, state.historySelectedTurnNumber) >= 0;
+    && historyWindowContainsTurn(state.historySelectedTurnNumber);
   const inspectBtn = $("btnTurnHistoryInspect");
   const jumpBtn = $("btnTurnHistoryJump");
   const branchBtn = $("btnTurnHistoryBranch");
@@ -3164,6 +5550,210 @@ function updateHistorySelectionActions() {
   if (branchBtn) {
     branchBtn.disabled = !hasSelection;
     branchBtn.classList.toggle("hidden", !hasSelection || state.historySelectedTurnNumber >= state.campaign?.activeTurnNumber);
+  }
+}
+
+function historyPageConflict(error) {
+  return Number(error?.statusCode ?? error?.status) === 409 || error?.code === "cursor_conflict";
+}
+
+async function refreshHistoryAfterCursorConflict(campaignId, epoch) {
+  const page = await apiClient.campaigns.turns(campaignId, { limit: STORY_HISTORY_PAGE_LIMIT });
+  if (state.campaignId !== campaignId || storyTurnWindowEpoch !== epoch) return false;
+  if (page.campaignId !== campaignId) throw new Error(`Story history page belongs to ${page.campaignId}.`);
+  const latestTurns = mergeStoryTurnPages([], page.turns || []);
+  state.historySelectedTurnNumber = null;
+  state.historySelectedPreview = null;
+  initializeStoryHistoryWindow({
+    turns: latestTurns,
+    residentRows: latestTurns,
+    nextCursor: page.nextCursor || null,
+    clearPreview: true
+  });
+  setTurnHistoryLoadStatus("History changed. The latest accepted turns are shown; continue paging from this reset window.", "error");
+  return true;
+}
+
+async function changeStoryHistoryPage(direction) {
+  if (!state.historyWindow || historyPageLoad) return;
+  if (state.historyWindowCampaignId !== state.campaignId || state.historyWindowEpoch !== storyTurnWindowEpoch) {
+    initializeStoryHistoryWindow();
+  }
+  let workingWindow = state.historyWindow;
+  const request = storyHistoryPageRequest(workingWindow, direction);
+  if (!request) return;
+  const campaignId = state.campaignId;
+  const epoch = storyTurnWindowEpoch;
+  const requestId = ++state.historyPageRequestId;
+  const isCurrent = () => requestId === state.historyPageRequestId
+    && state.campaignId === campaignId
+    && storyTurnWindowEpoch === epoch
+    && state.historyWindow === workingWindow;
+
+  if (!request.requiresFetch) {
+    state.historyWindow = installStoryHistoryWindowPage(workingWindow, request, null);
+    const visible = storyHistoryVisibleTurns(state.historyWindow);
+    setTurnHistoryLoadStatus(visible.pageTurns.length
+      ? `Showing turns ${visible.firstTurnNumber}–${visible.lastTurnNumber}.`
+      : "No turns are available in this history window.");
+    renderStoryHistoryWindow();
+    return;
+  }
+
+  if (!workingWindow.pending) {
+    workingWindow = installStoryHistoryWindowPage(workingWindow, request, null);
+    state.historyWindow = workingWindow;
+  }
+  setTurnHistoryLoadStatus(`Loading ${direction} history page…`, "loading");
+  const operation = (async () => {
+    try {
+      const attemptedSources = new Set();
+      const maximumSources = 4;
+      let sourceCount = 0;
+      while (workingWindow.pending && sourceCount < maximumSources) {
+        const sourceRequest = storyHistoryPageRequest(workingWindow, direction);
+        if (!sourceRequest?.requiresFetch) throw new Error("History reconstruction stopped before the requested window was complete.");
+        const sourceKey = sourceRequest.source === "resident"
+          ? `resident:${sourceRequest.targetTurnNumbers.join(",")}`
+          : `server:${sourceRequest.requestCursor}`;
+        if (attemptedSources.has(sourceKey)) throw new Error("History reconstruction repeated a source without progress.");
+        attemptedSources.add(sourceKey);
+
+        const knownTurns = [
+          ...(state.historyResidentRows || []),
+          ...workingWindow.cachedPages.flatMap((cached) => cached.turns)
+        ];
+        let page;
+        if (sourceRequest.source === "resident") {
+          const targetTurnNumbers = new Set(sourceRequest.targetTurnNumbers);
+          const turns = (state.historyResidentRows || []).filter((turn) => targetTurnNumbers.has(Number(turn.turnNumber)));
+          const expected = sourceRequest.targetTurnNumbers.length;
+          if (turns.length !== expected) throw new Error("Loaded history has a missing turn at the page boundary.");
+          mergeStoryTurnPages(knownTurns, turns);
+          page = { source: "resident", requestCursor: null, nextCursor: null, turns };
+        } else {
+          const response = await apiClient.campaigns.turns(campaignId, {
+            before: sourceRequest.requestCursor,
+            limit: STORY_HISTORY_PAGE_LIMIT
+          });
+          if (!isCurrent()) return;
+          if (response.campaignId !== campaignId) throw new Error("Story history response belongs to a different campaign.");
+          mergeStoryTurnPages(knownTurns, response.turns || []);
+          page = {
+            source: "server",
+            requestCursor: sourceRequest.requestCursor,
+            nextCursor: response.nextCursor || null,
+            turns: response.turns || []
+          };
+        }
+        if (!isCurrent()) return;
+        workingWindow = installStoryHistoryWindowPage(workingWindow, sourceRequest, page);
+        state.historyWindow = workingWindow;
+        sourceCount += 1;
+      }
+      if (workingWindow.pending) throw new Error("History reconstruction exceeded its bounded source count.");
+      if (!isCurrent()) return;
+      const visible = storyHistoryVisibleTurns(state.historyWindow);
+      setTurnHistoryLoadStatus(visible.pageTurns.length
+        ? `Showing turns ${visible.firstTurnNumber}–${visible.lastTurnNumber}.`
+        : "No turns are available in this history window.");
+      renderStoryHistoryWindow();
+    } catch (error) {
+      if (!isCurrent()) return;
+      if (historyPageConflict(error)) {
+        try {
+          await refreshHistoryAfterCursorConflict(campaignId, epoch);
+        } catch {
+          setTurnHistoryLoadStatus("History changed, but the latest page could not be loaded. Please retry.", "error");
+        }
+      } else {
+        setTurnHistoryLoadStatus(`Could not load ${direction} history page. Please retry.`, "error");
+      }
+      renderStoryHistoryWindow();
+    }
+  })();
+  historyPageLoad = operation;
+  renderStoryHistoryWindow();
+  try {
+    await operation;
+  } finally {
+    if (historyPageLoad === operation) historyPageLoad = null;
+    renderStoryHistoryWindow();
+  }
+}
+
+async function moveSelectedHistoryPreview(offset) {
+  const preview = state.historyWindow && storyHistoryVisibleTurns(state.historyWindow).selectedPreview;
+  if (!preview || historyPageLoad) return;
+  if (offset !== -1 && offset !== 1) return;
+  const direction = offset < 0 ? "older" : "newer";
+  const campaignId = state.campaignId;
+  const epoch = storyTurnWindowEpoch;
+  const capturedWindow = state.historyWindow;
+  const requestId = ++state.historyPageRequestId;
+  setTurnHistoryLoadStatus(`Loading adjacent accepted turn…`, "loading");
+  const operation = (async () => {
+    try {
+      const response = await readerHistoryApi.getSceneWindow(campaignId, {
+        anchorTurnNumber: Number(preview.turnNumber),
+        anchorTurnId: String(preview.id),
+        direction,
+        neighborLimit: 1,
+        ...(capturedWindow.historyToken ? { historyToken: capturedWindow.historyToken } : {})
+      });
+      if (requestId !== state.historyPageRequestId || state.campaignId !== campaignId
+        || storyTurnWindowEpoch !== epoch || state.historyWindow !== capturedWindow) return;
+      if (response?.campaignId !== campaignId || response.direction !== direction
+        || response.anchor?.id !== preview.id || Number(response.anchor?.turnNumber) !== Number(preview.turnNumber)) {
+        throw new Error("The accepted-history snapshot changed while loading the adjacent turn.");
+      }
+      if (!Array.isArray(response.turns) || typeof response.historyToken !== "string" || !response.historyToken) {
+        throw new Error("The accepted-history response is incomplete.");
+      }
+      const turns = response.turns;
+      const anchorIndex = turns.findIndex(turn => String(turn.id) === String(preview.id)
+        && Number(turn.turnNumber) === Number(preview.turnNumber));
+      if (anchorIndex < 0) throw new Error("The accepted-history response omitted its requested anchor.");
+      const turn = direction === "older" ? turns[anchorIndex - 1] : turns[anchorIndex + 1];
+      if (!turn && turns.length === 1 && response.hasMore === false) {
+        state.historyWindow = { ...capturedWindow, historyToken: response.historyToken };
+        setTurnHistoryLoadStatus(direction === "older"
+          ? "No earlier accepted turn."
+          : "No later accepted turn.");
+        return;
+      }
+      if (!turn?.id || !Number.isInteger(Number(turn.turnNumber))) {
+        throw new Error("The accepted-history response omitted the requested neighboring turn.");
+      }
+      const known = [
+        ...(state.historyResidentRows || []),
+        ...(capturedWindow.cachedPages || []).flatMap((cached) => cached.turns),
+        capturedWindow.selectedPreview
+      ].find(candidate => Number(candidate?.turnNumber) === Number(turn.turnNumber));
+      if (known && String(known.id || known.turnId) !== String(turn.id)) {
+        throw new Error(`Turn ${turn.turnNumber} has changed since this history window was opened.`);
+      }
+      state.historyWindow = {
+        ...selectStoryHistoryPreview(capturedWindow, turn),
+        historyToken: response.historyToken
+      };
+      state.historySelectedTurnNumber = Number(turn.turnNumber);
+      setTurnHistoryLoadStatus(`Selected Turn ${turn.turnNumber}.`);
+      renderStoryHistoryWindow();
+      revealSelectedHistoryCard();
+    } catch (error) {
+      if (requestId !== state.historyPageRequestId || state.campaignId !== campaignId
+        || storyTurnWindowEpoch !== epoch || state.historyWindow !== capturedWindow) return;
+      setTurnHistoryLoadStatus("Could not load adjacent turn. Please retry.", "error");
+    }
+  })();
+  historyPageLoad = operation;
+  renderStoryHistoryWindow();
+  try {
+    await operation;
+  } finally {
+    if (historyPageLoad === operation) historyPageLoad = null;
+    renderStoryHistoryWindow();
   }
 }
 
@@ -3506,6 +6096,51 @@ function initializeNavigationMenus() {
 }
 
 // ── Initialization ────────────────────────────────────────────
+function reconcileCampaignStartup(campaignId) {
+  const loadSequence = campaignLoadSequence;
+  const current = () => campaignLoadSequence === loadSequence && state.campaignId === campaignId;
+  if (campaignStartupReconciliation?.campaignId === campaignId
+    && campaignStartupReconciliation.loadSequence === loadSequence) {
+    return campaignStartupReconciliation.promise;
+  }
+
+  const reconciliation = { campaignId, loadSequence, promise: null };
+  campaignStartupReconciliation = reconciliation;
+  reconciliation.promise = (async () => {
+    if (!current()) return false;
+    const resumed = await resumePendingGeneration();
+    if (!current()) return false;
+    const needsExplicitRecoveryDecision = state.generationRecovery?.status === "recoverable"
+      || state.generationRecovery?.status === "failed";
+    if (!resumed && !needsExplicitRecoveryDecision && state.turns.length === 0 && !state.busy) {
+      await startAdventure();
+    }
+    return current();
+  })();
+  return reconciliation.promise;
+}
+
+async function retryStoryCampaignLoad() {
+  if (storyLoadRetryPromise) return storyLoadRetryPromise;
+  const campaignId = state.campaignId;
+  if (!campaignId) return false;
+  const retryButton = $("storyLoadRetry");
+  if (retryButton) retryButton.disabled = true;
+  const retryPromise = (async () => {
+    const loaded = await loadCampaign(campaignId);
+    if (!loaded) return false;
+    await reconcileCampaignStartup(campaignId);
+    return true;
+  })();
+  storyLoadRetryPromise = retryPromise;
+  try {
+    return await retryPromise;
+  } finally {
+    if (storyLoadRetryPromise === retryPromise) storyLoadRetryPromise = null;
+    if (retryButton) retryButton.disabled = false;
+  }
+}
+
 async function init() {
   try {
     const sessionRes = await apiClient.session.get();
@@ -3517,29 +6152,49 @@ async function init() {
   }
   const match = window.location.pathname.match(/\/story\/([^/]+)/);
   if (match) {
-    state.campaignId = decodeURIComponent(match[1]);
+    const campaignId = decodeURIComponent(match[1]);
     const navStoryLink = $("navStoryLink");
-    if (navStoryLink) navStoryLink.href = `/story/${encodeURIComponent(state.campaignId)}`;
-    localStorage.setItem("infiniteQuestLastCampaignId", state.campaignId);
+    if (navStoryLink) navStoryLink.href = `/story/${encodeURIComponent(campaignId)}`;
+    await checkOnboarding();
+    if (!await loadCampaign(campaignId)) return;
+    await reconcileCampaignStartup(campaignId);
   } else {
-    localStorage.removeItem("infiniteQuestLastCampaignId");
     await checkOnboarding();
     updateStatusBar();
     sessionActivityNotice();
     return;
   }
-  await checkOnboarding();
-  if (!await loadCampaign(state.campaignId)) return;
-  await pollImageJobs();
-  const resumed = await resumePendingGeneration();
-  if (!resumed && state.turns.length === 0 && !state.busy) {
-    await startAdventure();
-  }
-  pollImageJobs();
 }
 
 // ── Boot Sequence ─────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
+  window.addEventListener("beforeunload", (event) => {
+    flushReaderPositionSave();
+    if (!actionDraftNeedsNavigationGuard()) return;
+    event.preventDefault();
+    event.returnValue = "";
+    void flushActionDraftWrites();
+  });
+  window.addEventListener("pagehide", () => {
+    void flushActionDraftWrites();
+    flushReaderPositionSave();
+  });
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    const anchor = event.target.closest("a[href]");
+    if (!anchor || anchor.hasAttribute("download") || anchor.target === "_blank") return;
+    const target = new URL(anchor.href, window.location.href);
+    if (target.origin !== window.location.origin || !actionDraftNeedsNavigationGuard()) return;
+    event.preventDefault();
+    void flushActionDraftWrites().then((saved) => {
+      if (saved) {
+        window.location.assign(target.href);
+      } else {
+        openActionDraftNavigationDialog(target.href);
+      }
+    });
+  }, true);
+
   // Core action buttons
   const btnTakeAction = $("btnTakeAction");
   if (btnTakeAction) btnTakeAction.addEventListener("click", () => {
@@ -3550,13 +6205,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const freeAction = $("freeAction");
   document.querySelectorAll("[data-turn-input-mode]").forEach((input) => {
     input.addEventListener("change", () => {
-      if (input.checked) setTurnInputMode(input.value, { refreshPlaceholder: true });
+      if (input.checked) setTurnInputMode(input.value, { refreshPlaceholder: true, persistDraft: true });
     });
   });
   if (freeAction) {
     freeAction.addEventListener("input", () => {
       forgetRetainedAppendDraft();
       resetChoiceSelectionFromDraft(freeAction.value);
+      setActionDraftValue(freeAction.value, { inputMode: state.turnInputMode });
       updateTurnInputCharacterCount();
     });
     freeAction.addEventListener("keydown", (e) => {
@@ -3568,9 +6224,18 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!freeAction || freeAction.disabled) return;
     forgetRetainedAppendDraft();
     freeAction.value = "";
+    setActionDraftValue("", { inputMode: state.turnInputMode, clear: true });
     resetChoiceSelectionFromDraft("");
     updateTurnInputCharacterCount();
     freeAction.focus();
+  });
+  $("restoreActionDraft")?.addEventListener("click", () => { void reconcileActionDraftConflict("restore"); });
+  $("keepActionDraft")?.addEventListener("click", () => { void reconcileActionDraftConflict("keep"); });
+  $("discardActionDraft")?.addEventListener("click", () => { void reconcileActionDraftConflict("discard"); });
+  const actionDraftNavigationDialog = $("actionDraftNavigationDialog");
+  actionDraftNavigationDialog?.addEventListener("close", () => {
+    if (actionDraftNavigationDialog.returnValue === "discard") void discardActionDraftBeforeNavigation();
+    else actionDraftNavigationTarget = null;
   });
 
   // History navigation
@@ -3578,6 +6243,21 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnPrev) btnPrev.addEventListener("click", goToPrevious);
   const btnNext = $("btnNext");
   if (btnNext) btnNext.addEventListener("click", goToNext);
+  const btnReaderHistory = $("btnReaderHistory");
+  if (btnReaderHistory) btnReaderHistory.addEventListener("click", openTurnHistoryModal);
+  const btnReaderJumpLatest = $("btnReaderJumpLatest");
+  if (btnReaderJumpLatest) btnReaderJumpLatest.addEventListener("click", () => navigateToTurn(null));
+  const continuousReaderControls = ensureContinuousReaderControls();
+  continuousReaderControls?.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("button") : null;
+    if (!button) return;
+    const direction = button.dataset.continuousReaderDirection;
+    if (direction === "older" || direction === "newer") void loadContinuousReaderGroup(direction);
+    else if (button.hasAttribute("data-continuous-reader-retry")) void retryContinuousReaderGroup();
+  });
+  syncContinuousReaderControls();
+  const btnResumeReading = $("btnResumeReading");
+  if (btnResumeReading) btnResumeReading.addEventListener("click", () => { void resumeSavedReaderPosition(); });
   const btnUndo = $("btnUndo");
   if (btnUndo) btnUndo.addEventListener("click", undoLatest);
   const btnRetry = $("btnRetry");
@@ -3634,12 +6314,25 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const btnOpenUserProfile = $("btnOpenUserProfile");
   if (btnOpenUserProfile) btnOpenUserProfile.addEventListener("click", () => { closeNavigationMenus(); openUserProfile(); });
+  const userProfileDialog = $("userProfileDialog");
+  if (userProfileDialog) {
+    userProfileDialog.addEventListener("close", () => {
+      applyReaderPreferences(state.user?.settings?.readerPreferences);
+    });
+    userProfileDialog.addEventListener("cancel", (event) => {
+      if (userProfileSaving) event.preventDefault();
+    });
+  }
+  const readerPreview = document.querySelector("[data-reader-preview]");
+  if (readerPreview) readerPreview.addEventListener("click", previewReaderPreferences);
   const btnCloseUserProfile = $("btnCloseUserProfile");
   if (btnCloseUserProfile) btnCloseUserProfile.addEventListener("click", () => { const d = $("userProfileDialog"); if (d && d.close) d.close(); });
   const btnCancelUserProfile = $("btnCancelUserProfile");
   if (btnCancelUserProfile) btnCancelUserProfile.addEventListener("click", () => { const d = $("userProfileDialog"); if (d && d.close) d.close(); });
   const btnSaveUserProfile = $("btnSaveUserProfile");
   if (btnSaveUserProfile) btnSaveUserProfile.addEventListener("click", saveUserProfile);
+  const defaultTurnControlStyle = $("userProfileDefaultTurnControlStyle");
+  if (defaultTurnControlStyle) defaultTurnControlStyle.addEventListener("change", () => { userProfileTurnControlStyleChanged = true; });
   const storyMemoryLevel = $("storyMemoryLevel");
   $("storyContinuityReviewEnabled")?.addEventListener("change", () => { void saveStoryMemorySettings(); });
   if (storyMemoryLevel) storyMemoryLevel.addEventListener("change", () => { void saveStoryMemorySettings(); });
@@ -3730,20 +6423,49 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnCloseTurnHistory) btnCloseTurnHistory.addEventListener("click", () => { const d = $("turnHistoryDialog"); if (d && d.close) d.close(); });
   const btnTurnHistoryDone = $("btnTurnHistoryDone");
   if (btnTurnHistoryDone) btnTurnHistoryDone.addEventListener("click", () => { const d = $("turnHistoryDialog"); if (d && d.close) d.close(); });
+  const turnHistoryDialog = $("turnHistoryDialog");
+  if (turnHistoryDialog) turnHistoryDialog.addEventListener("close", () => {
+    cancelStoryHistorySearchWork();
+    state.historySearch = beginStoryHistorySearch(state.historySearch, storyHistorySearchScope(), "").state;
+    const searchInput = $("turnHistorySearch");
+    if (searchInput) searchInput.value = "";
+    setStoryHistoryJumpStatus("idle", "");
+    renderStoryHistorySearch();
+  });
+  $("turnHistorySearch")?.addEventListener("input", handleStoryHistorySearchInput);
+  $("btnTurnHistorySearchClear")?.addEventListener("click", () => {
+    const input = $("turnHistorySearch");
+    if (!input) return;
+    input.value = "";
+    handleStoryHistorySearchInput();
+    input.focus();
+  });
+  $("btnTurnHistorySearchMore")?.addEventListener("click", () => requestStoryHistorySearchPage("more"));
+  $("btnTurnHistorySearchRetry")?.addEventListener("click", () => requestStoryHistorySearchPage("retry"));
+  $("btnTurnHistoryJumpExact")?.addEventListener("click", () => { void jumpToExactHistoryTurn(); });
+  $("turnHistoryJumpNumber")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void jumpToExactHistoryTurn();
+    }
+  });
   const btnTurnHistoryInspect = $("btnTurnHistoryInspect");
   if (btnTurnHistoryInspect) btnTurnHistoryInspect.addEventListener("click", () => {
     if (state.historySelectedTurnNumber) inspectTurnState(state.historySelectedTurnNumber);
   });
+  $("btnTurnHistoryOlder")?.addEventListener("click", () => { void changeStoryHistoryPage("older"); });
+  $("btnTurnHistoryNewer")?.addEventListener("click", () => { void changeStoryHistoryPage("newer"); });
+  $("btnTurnHistoryPreviousTurn")?.addEventListener("click", () => { void moveSelectedHistoryPreview(-1); });
+  $("btnTurnHistoryNextTurn")?.addEventListener("click", () => { void moveSelectedHistoryPreview(1); });
   const btnTurnHistoryJump = $("btnTurnHistoryJump");
   if (btnTurnHistoryJump) btnTurnHistoryJump.addEventListener("click", () => {
-    if (!Number.isInteger(state.historySelectedTurnNumber)) return;
-    navigateToTurn(state.historySelectedTurnNumber);
-    const d = $("turnHistoryDialog");
-    if (d && d.close) d.close();
+    jumpToSelectedHistoryTurn();
   });
   const btnTurnHistoryBranch = $("btnTurnHistoryBranch");
   if (btnTurnHistoryBranch) btnTurnHistoryBranch.addEventListener("click", () => {
-    if (!Number.isInteger(state.historySelectedTurnNumber) || state.historySelectedTurnNumber >= state.campaign?.activeTurnNumber) return;
+    if (!Number.isInteger(state.historySelectedTurnNumber)
+      || !historyWindowContainsTurn(state.historySelectedTurnNumber)
+      || state.historySelectedTurnNumber >= state.campaign?.activeTurnNumber) return;
     const d = $("turnHistoryDialog");
     if (d && d.close) d.close();
     promptBranchOrReset(state.historySelectedTurnNumber);
@@ -3855,9 +6577,22 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // A manual scroll means the reader has chosen their own position. Streaming
   // updates must not recapture the viewport until they explicitly resume.
+  document.addEventListener("wheel", noteReaderPositionIntent, { capture: true, passive: true });
+  document.addEventListener("touchmove", noteReaderPositionIntent, { capture: true, passive: true });
+  document.addEventListener("pointerdown", (event) => {
+    if (!event.isTrusted || event.button !== 0) return;
+    const root = document.documentElement;
+    if (window.innerWidth <= root.clientWidth) return;
+    const rootBounds = root.getBoundingClientRect();
+    const pointerOutsideRootGutter = event.clientX < rootBounds.left || event.clientX >= rootBounds.right;
+    if (pointerOutsideRootGutter) noteReaderPositionIntent(event);
+  }, { capture: true });
+
   window.addEventListener("wheel", pauseStreamingAutoFollow, { passive: true });
   window.addEventListener("touchmove", pauseStreamingAutoFollow, { passive: true });
   window.addEventListener("scroll", () => {
+
+    scheduleReaderPositionSave();
     if (!state.streamingAutoFollow || !$("streamingPreviewCard")) return;
     if (state.streamingExpectedScrollY === null || Math.abs(window.scrollY - state.streamingExpectedScrollY) > 1) {
       pauseStreamingAutoFollow();
@@ -3867,6 +6602,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const target = e.target;
     if (target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) return;
     if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) {
+      noteReaderPositionIntent(e);
       pauseStreamingAutoFollow();
     }
   });
@@ -3878,6 +6614,10 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnSkipGettingStartedToStory) btnSkipGettingStartedToStory.addEventListener("click", () => { const d = $("gettingStartedDialog"); if (d && d.close) d.close(); });
   const btnDiscardGenerationRecovery = $("btnDiscardGenerationRecovery");
   if (btnDiscardGenerationRecovery) btnDiscardGenerationRecovery.addEventListener("click", discardRecoveryJob);
+  const btnRetryStoryLoad = $("storyLoadRetry");
+  if (btnRetryStoryLoad) btnRetryStoryLoad.addEventListener("click", () => {
+    void retryStoryCampaignLoad();
+  });
   const btnContinueGeneration = $("btnContinueGeneration");
   if (btnContinueGeneration) btnContinueGeneration.addEventListener("click", () => monitorRecoveryJob(false));
   const btnRetryGeneration = $("btnRetryGeneration");

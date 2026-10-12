@@ -311,3 +311,10 @@ Generation-review changes also require `tests/integration/story-continuity-revie
 ## Persistent Story activity history
 
 The [activity history runbook](../runbooks/activity-history.md) documents additive rollout/rollback, retention, publication health, quarantine and cache coverage. See [acceptance evidence](../review/legacy-activity-verification.md) for the composed PostgreSQL/API/provider workflow, portability checks, browser screenshots and separately reported limitations.
+
+## Owned Story-only runtime PostgreSQL container
+
+
+On Windows, the disposable [Story-only runtime CLI](../../scripts/story-only-ui-runtime.ts) connects its temporary Docker network to an existing PostgreSQL container. Set `STORY_ONLY_RUNTIME_POSTGRES_CONTAINER` to the coordinator-owned container name matching the private database configuration before invoking the CLI directly. An unset value retains `infinitequest-story-only-test`; an empty or unsafe name fails before database allocation, file cleanup, or Docker commands. The same resolved name is used for network connection, the runtime database hostname, and disconnection on both successful close and startup failure. Only the fixture's generated database is dropped.
+
+This option does not change [the signal runner](../../scripts/story-only-runtime-signal-runner.ts), which retains its dedicated-container proxy contract. Use the direct CLI for a separately owned Windows test container. Keep database URLs and credentials in ignored local configuration and out of logs, screenshots, and committed evidence.

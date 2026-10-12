@@ -35,6 +35,8 @@ describe("campaign story-length settings", () => {
     const storyPlayer = readFileSync("apps/web/src/story.js", "utf8");
     expect(storyPlayer).toContain("const sanitizeNarration = (text) => {");
     expect(storyPlayer).toContain('`<div class="narration">${sanitizeNarration(turn.narration)}</div>`');
-    expect(storyPlayer).toContain("sanitizeNarration(narrationText)");
+    expect(storyPlayer).toContain("function renderSafeStreamingNarration(text) {");
+    expect(storyPlayer).toContain("renderSafe: renderSafeStreamingNarration,");
+    expect(storyPlayer).toContain('narration.innerHTML = `${sanitizeNarration(text)}<span class="streaming-cursor"');
   });
 });

@@ -9,6 +9,11 @@
   <link rel="stylesheet" href="/nexus/image-library-browser.css">
 </head>
 <body>
+  <section id="managementBootStatus" class="management-boot-status" role="status" aria-live="polite" aria-atomic="true">
+    <p id="managementBootMessage">Loading management controls…</p>
+    <button id="managementBootReload" class="button secondary" type="button" hidden>Reload page</button>
+  </section>
+  <div id="managementInteractiveRoot" inert aria-busy="true">
   <header class="universal-nav">
     <a class="nexus-brand" href="/nexus/" aria-label="Infinite Quest Nexus dashboard">
       <img src="/nexus/nexus-mark.png" alt="">
@@ -57,6 +62,15 @@
         <a class="button accent dashboard-story-link" href="/story" id="dashboardStoryLink">Continue latest story <span aria-hidden="true">→</span></a>
       </div>
 
+      <div id="dashboardWorkflowStatus" class="status error hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+      <section class="dashboard-collection dashboard-recent-campaigns" aria-labelledby="campaignSelectionTitle">
+        <div class="collection-heading">
+          <div><p class="eyebrow">Continue your story</p><h2 id="campaignSelectionTitle">Recent adventures</h2><p>Your latest active campaigns are ready when you are.</p></div>
+          <a href="#campaigns">View all campaigns <span aria-hidden="true">→</span></a>
+        </div>
+        <div id="dashboardCampaigns" class="card-carousel" tabindex="0" aria-live="polite"><p class="carousel-empty">Loading your campaigns…</p></div>
+      </section>
+
       <section class="dashboard-stats" aria-labelledby="dashboardStatsTitle">
         <div class="stats-heading">
           <div><p class="eyebrow">Nexus at a glance</p><h2 id="dashboardStatsTitle">Your living library</h2></div>
@@ -83,17 +97,6 @@
         <div id="dashboardWorlds" class="card-carousel" tabindex="0" aria-live="polite"><p class="carousel-empty">Loading your worlds…</p></div>
       </section>
 
-      <section class="dashboard-collection" aria-labelledby="campaignSelectionTitle">
-        <div class="collection-heading">
-          <div><p class="eyebrow">Campaigns</p><h2 id="campaignSelectionTitle">Resume an adventure</h2><p>Your accepted turns and current state are waiting exactly where you left them.</p></div>
-          <a href="#campaigns">Manage campaigns <span aria-hidden="true">→</span></a>
-        </div>
-        <div class="carousel-toolbar">
-          <label class="carousel-search"><span class="sr-only">Search campaigns</span><span aria-hidden="true">⌕</span><input id="campaignSearch" type="search" placeholder="Search campaigns, worlds, or characters"></label>
-          <div class="carousel-buttons"><button id="campaignCarouselPrev" type="button" aria-label="Previous campaigns">←</button><button id="campaignCarouselNext" type="button" aria-label="Next campaigns">→</button></div>
-        </div>
-        <div id="dashboardCampaigns" class="card-carousel" tabindex="0" aria-live="polite"><p class="carousel-empty">Loading your campaigns…</p></div>
-      </section>
     </section>
 
     <section id="providers" class="card provider-card anchor-section provider-management" aria-labelledby="provider-title">
@@ -106,6 +109,32 @@
         <div class="button-row">
           <button id="newProviderButton" class="button primary" type="button">New provider profile</button>
         </div>
+      </div>
+      <div class="provider-readiness-grid" aria-label="Provider readiness">
+        <section class="provider-readiness" data-provider-readiness="text" aria-labelledby="textProviderReadinessTitle">
+          <h3 id="textProviderReadinessTitle">Story text</h3>
+          <p><span>Health</span><strong data-readiness-health>Unknown</strong></p>
+          <p><span>Model inventory</span><strong data-readiness-inventory>Not checked</strong></p>
+          <p><span>Structured output</span><strong data-readiness-capability>Not verified</strong></p>
+          <p class="provider-readiness-state" data-readiness-state>Not configured</p>
+          <button id="checkTextProviderInventory" class="button secondary compact-button" type="button" data-readiness-check="text">Check model inventory</button>
+        </section>
+        <section class="provider-readiness" data-provider-readiness="image" aria-labelledby="imageProviderReadinessTitle">
+          <h3 id="imageProviderReadinessTitle">Illustrations</h3>
+          <p><span>Health</span><strong data-readiness-health>Unknown</strong></p>
+          <p><span>Model inventory</span><strong data-readiness-inventory>Not checked</strong></p>
+          <p><span>Structured output</span><strong data-readiness-capability>Not applicable</strong></p>
+          <p class="provider-readiness-state" data-readiness-state>Not configured</p>
+          <button id="checkImageProviderInventory" class="button secondary compact-button" type="button" data-readiness-check="image">Check model inventory</button>
+        </section>
+        <section class="provider-readiness" data-provider-readiness="embedding" aria-labelledby="embeddingProviderReadinessTitle">
+          <h3 id="embeddingProviderReadinessTitle">Chronicle embeddings</h3>
+          <p><span>Health</span><strong data-readiness-health>Unknown</strong></p>
+          <p><span>Model inventory</span><strong data-readiness-inventory>Not checked</strong></p>
+          <p><span>Structured output</span><strong data-readiness-capability>Not applicable</strong></p>
+          <p class="provider-readiness-state" data-readiness-state>Not configured</p>
+          <button id="checkEmbeddingProviderInventory" class="button secondary compact-button" type="button" data-readiness-check="embedding">Check model inventory</button>
+        </section>
       </div>
       <div id="providerProfileList" class="provider-profile-list"><p class="muted">Loading provider profiles…</p></div>
       <div id="providerStatus" class="status" role="status" aria-live="polite">LM Studio and compatible provider calls are server-side, so browser CORS does not apply.</div>
@@ -128,11 +157,13 @@
         <div id="managementWorldFilters" class="world-filter-chips" aria-label="Filter worlds by status">
           <button class="active" type="button" data-world-filter="all" aria-pressed="true">All</button>
           <button type="button" data-world-filter="draft" aria-pressed="false">Draft</button>
-          <button type="button" data-world-filter="published" aria-pressed="false">Published</button>
+          <button type="button" data-world-filter="active" aria-pressed="false">Active</button>
           <button type="button" data-world-filter="archived" aria-pressed="false">Archived</button>
         </div>
         <div class="carousel-buttons"><button id="managementWorldPrev" type="button" aria-label="Previous worlds">←</button><button id="managementWorldNext" type="button" aria-label="Next worlds">→</button></div>
+        <label class="collection-select management-world-sort">Sort worlds<select id="managementWorldSort"><option value="updated-desc">Recently updated</option><option value="title">Title</option></select></label>
       </div>
+      <p id="managementWorldResults" class="collection-results" role="status" aria-live="polite" aria-atomic="true"></p>
       <div id="worldManagementCarousel" class="card-carousel management-world-carousel" tabindex="0" aria-live="polite"><p class="carousel-empty">Loading worlds…</p></div>
       <section id="worldSelectionPanel" class="selected-world-panel hidden" aria-labelledby="worldEditorTitle">
         <div class="selected-world-heading">
@@ -177,6 +208,12 @@
           </div>
           <button id="refreshCampaigns" class="icon-button" type="button" aria-label="Refresh campaigns">↻</button>
         </div>
+        <div class="management-collection-controls" aria-label="Campaign collection controls">
+          <label class="collection-search"><span class="sr-only">Search campaigns</span><input id="managementCampaignSearch" type="search" placeholder="Search campaigns, worlds, or characters"></label>
+          <label class="collection-select">Status<select id="managementCampaignStatus"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All campaigns</option></select></label>
+          <label class="collection-select">Sort<select id="managementCampaignSort"><option value="updated-desc">Recently updated</option><option value="title">Title</option></select></label>
+        </div>
+        <p id="managementCampaignResults" class="collection-results" role="status" aria-live="polite" aria-atomic="true"></p>
         <div id="campaignList" class="campaign-list"><p class="muted">Loading campaigns…</p></div>
       </aside>
 
@@ -186,9 +223,11 @@
             <p class="eyebrow">Campaign workspace</p>
             <h2 id="memoryTitle">Select a campaign</h2>
             <p id="campaignEditorSummary" class="campaign-editor-summary"></p>
+            <a id="campaignWorldLink" class="campaign-world-link" href="#world-library" hidden>Open this campaign's authored world</a>
           </div>
           <div class="campaign-editor-actions">
             <button id="saveCampaign" class="button secondary" type="submit" form="campaignForm" disabled>Save campaign</button>
+            <span id="campaignSaveStatus" class="status" data-state="saved" role="status" aria-live="polite">Campaign settings saved</span>
             <button id="loadCampaign" class="button primary" type="button" disabled>Load story</button>
           </div>
         </div>
@@ -221,6 +260,7 @@
             </section>
 
             <section id="campaignPanelStory" role="tabpanel" aria-labelledby="campaignTabStory" data-campaign-settings-content="story" hidden>
+              <div data-campaign-section-body="story">
               <div class="campaign-panel-fields campaign-controls">
                 <label>Text provider profile<select id="campaignTextProvider" form="campaignForm" disabled><option value="">Use default text provider</option></select></label>
                 <label title="Action preserves RPG mechanics. Story Direction continues the narrative without turn classification.">
@@ -259,18 +299,22 @@
                   </select>
                 </label>
                 <div class="campaign-review-settings"><label><input id="campaignContinuityReviewEnabled" type="checkbox" disabled> Enable continuity review</label>
-                <p class="field-note">Optional with Max memory. Disabled by default.</p></div>
+                <p class="field-note">Optional with Max memory. Disabled by default. Changes save immediately for future turns.</p></div>
         <p id="campaignStoryMemoryStatus" class="field-note" role="status" aria-live="polite">Loading the saved Story Memory level for this campaign.</p>
+        <p class="field-note">Story Memory saves immediately when changed and stays separate from campaign metadata.</p>
+              </div>
               </div>
             </section>
 
             <section id="campaignPanelIllustrations" role="tabpanel" aria-labelledby="campaignTabIllustrations" data-campaign-settings-content="illustrations" hidden>
 
+        <div data-campaign-section-body="illustrations">
         <section id="campaignIllustrationSection" class="campaign-settings-section illustration-settings-section" aria-labelledby="campaignIllustrationTitle">
           <div class="campaign-settings-heading">
             <div>
               <p class="eyebrow">Optional output</p>
               <h3 id="campaignIllustrationTitle">Campaign illustrations</h3>
+              <p class="field-note">Illustration settings save with their own button and status; they do not affect campaign metadata.</p>
               <p>Configure independent image jobs that run only after a story turn is accepted.</p>
             </div>
           </div>
@@ -342,6 +386,7 @@
           </div>
           <div id="illustrationStatus" class="status">Illustrations are optional child jobs. Image failures never roll back or rerun an accepted story turn.</div>
         </section>
+        </div>
             </section>
 
             <section id="campaignPanelChronicle" role="tabpanel" aria-labelledby="campaignTabChronicle" data-campaign-settings-content="chronicle" hidden>
@@ -350,10 +395,11 @@
           <div class="campaign-settings-heading">
             <div>
               <h3 id="campaignContextTitle">Chronicle</h3>
-              <p>Monitor local memory health, preview story context, and manage optional Semantic Retrieval.</p>
+              <p>Monitor local memory health, preview story context, and manage optional Semantic Retrieval. Embedding settings save independently from campaign metadata.</p>
             </div>
           </div>
 
+          <div class="chronicle-section-data-body" data-campaign-section-body="chronicle">
         <section id="chronicleHealthRegion" class="chronicle-health-region" aria-label="Chronicle health">
           <div id="memoryMetrics" class="metrics" aria-live="polite"></div>
 
@@ -368,57 +414,59 @@
           </div>
         </section>
 
-        <section class="chronicle-context-workbench" aria-labelledby="chronicleContextWorkbenchTitle">
-          <header class="chronicle-subheading">
-            <div>
-              <h3 id="chronicleContextWorkbenchTitle">Context preview</h3>
-              <p>Preview only — does not change campaign settings. It does not submit a story turn.</p>
-            </div>
-          </header>
-          <div class="chronicle-context-grid">
-            <div class="chronicle-context-controls">
-              <form id="contextForm" class="context-controls">
-                <label>
-                  Context budget
-                  <input id="budgetTokens" type="number" min="512" max="1000000" step="1024" value="32000" aria-describedby="budgetTokensSource">
-                  <span id="budgetTokensSource" class="field-note">The selected text provider supplies the available input limit.</span>
-                </label>
-                <label>
-                  Compression
-                  <select id="compression" title="Choose how Chronicle fits story history into the context budget.">
-                    <option value="auto" title="Selects the richest level that fits the current context budget.">Automatic</option>
-                    <option value="full" title="Includes complete accepted narration and actions until the budget is exhausted.">Full history</option>
-                    <option value="balanced" title="Keeps important scene detail while shortening older accepted turns.">Balanced</option>
-                    <option value="compact" title="Uses concise per-turn memory so more chronology fits in the same budget.">Compact</option>
-                    <option value="summary" title="Uses campaign summaries plus the most recent verbatim turns.">Summary + recent</option>
-                  </select>
-                </label>
-                <label class="query-field">
-                  Preview retrieval query
-                  <input id="memoryQuery" type="text" maxlength="4000" placeholder="Optional: name, location, event, or intended action">
-                </label>
-                <button class="button primary" type="submit" disabled id="previewContext">Build context preview</button>
-              </form>
-              <details class="field-help">
-                <summary>What do the compression options include?</summary>
-                <dl>
-                  <dt>Automatic</dt><dd>Selects the richest representation that fits.</dd>
-                  <dt>Full history</dt><dd>Prefers complete accepted narration and actions.</dd>
-                  <dt>Balanced</dt><dd>Shortens older turns while preserving important scene detail.</dd>
-                  <dt>Compact</dt><dd>Uses concise per-turn memory to retain more chronology.</dd>
-                  <dt>Summary + recent</dt><dd>Uses campaign summaries with recent verbatim turns.</dd>
-                </dl>
-              </details>
-            </div>
-            <div class="chronicle-context-preview-pane">
-              <div id="contextSummary" class="status hidden" role="status" aria-live="polite"></div>
-              <details class="context-preview-details">
-                <summary>View context preview</summary>
-                <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>
-              </details>
-            </div>
           </div>
-        </section>
+          <section class="chronicle-context-workbench" aria-labelledby="chronicleContextWorkbenchTitle">
+            <header class="chronicle-subheading">
+              <div>
+                <h3 id="chronicleContextWorkbenchTitle">Context preview</h3>
+                <p>Preview only — does not change campaign settings. It does not submit a story turn.</p>
+              </div>
+            </header>
+            <div class="chronicle-context-grid">
+              <div class="chronicle-context-controls">
+                <form id="contextForm" class="context-controls">
+                  <label>
+                    Context budget
+                    <input id="budgetTokens" type="number" min="512" max="1000000" step="1" value="32000" aria-describedby="budgetTokensSource">
+                    <span id="budgetTokensSource" class="field-note">The selected text provider supplies the available input limit.</span>
+                  </label>
+                  <label>
+                    Compression
+                    <select id="compression" title="Choose how Chronicle fits story history into the context budget.">
+                      <option value="auto" title="Selects the richest level that fits the current context budget.">Automatic</option>
+                      <option value="full" title="Includes complete accepted narration and actions until the budget is exhausted.">Full history</option>
+                      <option value="balanced" title="Keeps important scene detail while shortening older accepted turns.">Balanced</option>
+                      <option value="compact" title="Uses concise per-turn memory so more chronology fits in the same budget.">Compact</option>
+                      <option value="summary" title="Uses campaign summaries plus the most recent verbatim turns.">Summary + recent</option>
+                    </select>
+                  </label>
+                  <label class="query-field">
+                    Preview retrieval query
+                    <input id="memoryQuery" type="text" maxlength="4000" placeholder="Optional: name, location, event, or intended action">
+                  </label>
+                  <button class="button primary" type="submit" disabled id="previewContext">Build context preview</button>
+                </form>
+                <details class="field-help">
+                  <summary>What do the compression options include?</summary>
+                  <dl>
+                    <dt>Automatic</dt><dd>Selects the richest representation that fits.</dd>
+                    <dt>Full history</dt><dd>Prefers complete accepted narration and actions.</dd>
+                    <dt>Balanced</dt><dd>Shortens older turns while preserving important scene detail.</dd>
+                    <dt>Compact</dt><dd>Uses concise per-turn memory to retain more chronology.</dd>
+                    <dt>Summary + recent</dt><dd>Uses campaign summaries with recent verbatim turns.</dd>
+                  </dl>
+                </details>
+              </div>
+              <div class="chronicle-context-preview-pane">
+                <div id="contextSummary" class="status hidden" role="status" aria-live="polite"></div>
+                <details class="context-preview-details">
+                  <summary>View context preview</summary>
+                  <pre id="contextPreview" class="context-preview" tabindex="0">The preview deliberately excludes rolls, mechanics records, private scratchpad content, rejected output, and credentials.</pre>
+                </details>
+              </div>
+            </div>
+          </section>
+          <div class="chronicle-section-data-body" data-campaign-section-body="chronicle">
 
         <section class="chronicle-retrieval-config" aria-labelledby="semanticRetrievalTitle">
           <header class="chronicle-subheading">
@@ -469,10 +517,12 @@
             </div>
           </div>
         </section>
+          </div>
         </section>
             </section>
 
             <section id="campaignPanelUsage" role="tabpanel" aria-labelledby="campaignTabUsage" data-campaign-settings-content="usage" hidden>
+              <div data-campaign-section-body="usage">
               <section id="campaignCostSection" class="campaign-settings-section campaign-cost-section hidden" aria-labelledby="campaignCostTitle">
                 <div class="campaign-settings-heading">
                   <div>
@@ -484,6 +534,7 @@
                 <div id="campaignCostMetrics" class="cost-metrics" aria-live="polite"></div>
               </section>
               <button id="deleteCampaign" class="button danger" type="button" disabled>Delete campaign</button>
+              </div>
             </section>
           </div>
         </div>
@@ -527,7 +578,7 @@
         <article><span aria-hidden="true">01</span><h3>System Archive</h3><p>Export or restore the Current Owner's complete portable library and every retained original image.</p></article>
         <article><span aria-hidden="true">02</span><h3>World &amp; Campaign Archives</h3><p>Keep using targeted JSON and Campaign Archive exports where you manage their source.</p><div><a href="#world-library">World Management</a><a href="#campaigns">Campaign Management</a></div></article>
         <article><span aria-hidden="true">03</span><h3>Legacy &amp; External Imports</h3><p>Import legacy stories, Infinite Worlds, CYOA JSON, text, and existing portable backups below.</p><a href="#imports">Open import tools</a></article>
-        <article><span aria-hidden="true">04</span><h3>Readable Story Exports</h3><p>Create Markdown, HTML, or PDF reading copies from Campaign Management.</p><a href="#campaigns">Open campaign exports</a></article>
+        <article><span aria-hidden="true">04</span><h3>Readable Story Exports</h3><p>Open Markdown, HTML, or PDF reading copies from the selected campaign’s Story export menu. This opens the Story; it does not download a file.</p><a id="readingStoryExportLink" href="#campaigns">Choose a campaign to open its Story exports</a></article>
       </div>
     </section>
 
@@ -696,19 +747,6 @@
     </div>
   </dialog>
 
-  <dialog id="quickCampaignDialog" class="confirm-dialog quick-campaign-dialog" aria-labelledby="quickCampaignTitle">
-    <form id="quickCampaignForm">
-      <p class="eyebrow">Begin a new story</p>
-      <h2 id="quickCampaignTitle">Create campaign</h2>
-      <p id="quickCampaignWorld" class="muted"></p>
-      <label>Campaign name<input id="quickCampaignName" maxlength="200" placeholder="Name this adventure" required></label>
-      <label>Play as<select id="quickCampaignCharacter" required><option value="">Loading characters…</option></select><span id="quickCampaignCharacterNote" class="field-note">Your selected character is snapshotted into this campaign.</span></label>
-      <p id="quickCampaignStatus" class="status hidden" role="status" aria-live="polite"></p>
-      <div class="advanced-campaign-link">Need more control? <a id="advancedCampaignCreation" href="#campaigns">Open Campaign Management</a> for provider, input, Chronicle, and illustration options.</div>
-      <div class="button-row confirm-actions"><button id="cancelQuickCampaign" class="button secondary" type="button">Cancel</button><button id="confirmQuickCampaign" class="button accent" type="submit">Create &amp; start story</button></div>
-    </form>
-  </dialog>
-
   <dialog id="nexusAboutDialog" class="confirm-dialog nexus-about-dialog" aria-labelledby="nexusAboutTitle">
     <div class="dialog-heading-row"><div><p class="eyebrow">About</p><h2 id="nexusAboutTitle">Infinite Quest Nexus</h2></div><button id="closeNexusAbout" class="icon-button" type="button" aria-label="Close About">×</button></div>
     <p>Infinite Quest Nexus is the home for reusable story worlds, persistent campaigns, and Chronicle memory. Infinite Quest is the focused player experience where those stories unfold.</p>
@@ -854,97 +892,100 @@
             <div class="button-row"><button id="loadMoreProviderPresets" class="button secondary compact-button hidden" type="button">Load more</button></div>
             <p id="providerPresetStatus" class="field-note" role="status" aria-live="polite">Choose Refresh to load presets.</p>
           </section>
-          <label class="text-model-setting" title="Maximum combined prompt and response capacity. Selecting a discovered model applies the endpoint-advertised value automatically.">Context window
-            <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
-            <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>
-          </label>
-          <label class="text-model-setting" title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
-          <label class="text-model-setting" title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
-          <label id="providerResponseFormatPolicyField" class="text-model-setting" title="Selects the response format for future text jobs. Nexus verifies schema compatibility on the server before dispatch.">Structured output
-            <select id="providerResponseFormatPolicy" aria-describedby="providerResponseFormatPolicyNote">
-              <option value="legacy">Legacy JSON</option>
-              <option value="auto">Use schema when verified</option>
-              <option value="required">Require verified schema</option>
-            </select>
-            <span id="providerResponseFormatPolicyNote" class="field-note">Required blocks a new job before dispatch when server verification is unavailable. Changes apply to future jobs; pending jobs retain their frozen configuration and may require a compatible profile to resume.</span>
-          </label>
-          <div id="providerResponseFormatCapability" class="text-model-setting field-note" aria-live="polite">Schema compatibility is unknown until the server returns a capability summary.</div>
-          <section id="providerPresetDetail" class="provider-preset-detail text-model-setting hidden" aria-live="polite">
-            <h3>Structured Outputs · Trusted preset</h3>
-            <p>Nexus requests the complete operation schema without a local model capability gate. A provider schema rejection is surfaced without a standard-JSON retry.</p>
-            <dl>
-              <div><dt>Standard prompt</dt><dd id="providerPresetPrompt">Choose a preset to inspect its standard prompt.</dd></div>
-              <div><dt>Version</dt><dd id="providerPresetVersion">Unknown</dd></div>
-              <div><dt>Ordered models</dt><dd id="providerPresetModels">Unknown</dd></div>
-              <div><dt>Provider policy</dt><dd id="providerPresetPolicy">Unknown</dd></div>
-              <div><dt>Configured and effective limits</dt><dd id="providerPresetLimits">Unknown</dd></div>
-              <div><dt>Preset parameters</dt><dd id="providerPresetParameters">Inherited</dd></div>
-            </dl>
-          </section>
-          <section id="providerTextOverrides" class="provider-text-overrides text-model-setting hidden" aria-labelledby="providerTextOverridesTitle">
-            <div class="field-label-row"><strong id="providerTextOverridesTitle">Request overrides</strong></div>
-            <label>Override behavior<select id="providerTextOverrideMode"><option value="preserve">Keep saved setting</option><option value="inherit">Inherit selected preset/model</option><option value="explicit">Use explicit overrides</option></select></label>
-            <div id="providerTextOverrideFields" class="provider-text-override-fields hidden">
-              <label>Temperature<input id="providerOverrideTemperature" type="number" min="0" max="2" step="0.01" placeholder="Inherit"></label>
-              <label>Top P<input id="providerOverrideTopP" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
-              <label>Top K<input id="providerOverrideTopK" type="number" min="0" step="1" placeholder="Inherit"></label>
-              <label>Frequency penalty<input id="providerOverrideFrequencyPenalty" type="number" min="-2" max="2" step="0.01" placeholder="Inherit"></label>
-              <label>Presence penalty<input id="providerOverridePresencePenalty" type="number" min="-2" max="2" step="0.01" placeholder="Inherit"></label>
-              <label>Repetition penalty<input id="providerOverrideRepetitionPenalty" type="number" min="0.01" step="0.01" placeholder="Inherit"></label>
-              <label>Min P<input id="providerOverrideMinP" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
-              <label>Top A<input id="providerOverrideTopA" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
-              <label>Seed<input id="providerOverrideSeed" type="number" min="0" step="1" placeholder="Inherit"></label>
-              <label>Max tokens<input id="providerOverrideMaxTokens" type="number" min="1" step="1" placeholder="Inherit"></label>
-              <label>Max completion tokens<input id="providerOverrideMaxCompletionTokens" type="number" min="1" step="1" placeholder="Inherit"></label>
-              <label>Conservative context window<input id="providerOverrideContextTokens" type="number" min="1" max="4000000" step="1" placeholder="Inherit"></label>
-            </div>
-            <p class="field-note">Inheritance uses the selected preset or model profile. Clear restores inheritance; normal profile defaults are kept separate.</p>
-          </section>
+
         </div>
-      </fieldset>
-      <fieldset id="providerSogniSettings" class="hidden" aria-hidden="true">
-        <legend>Sogni illustration defaults</legend>
-        <p class="fieldset-note">These non-secret defaults are stored with this profile. Model discovery may not list every image model, so the model picker also accepts a manual model ID.</p>
-        <div class="fieldset-content">
-          <label>Images per job
-            <select id="providerSogniImageCount"><option value="1">1 image</option><option value="2">2 images</option></select>
-          </label>
-          <label>Default width<input id="providerSogniWidth" type="number" min="256" max="8192" step="8" value="1280"></label>
-          <label>Default height<input id="providerSogniHeight" type="number" min="256" max="8192" step="8" value="720"></label>
-          <label>Aspect ratio<input id="providerSogniAspectRatio" maxlength="10" value="16:9" pattern="[0-9]{1,3}:[0-9]{1,3}"></label>
-          <label>Output format
-            <select id="providerSogniOutputFormat"><option value="png">PNG</option><option value="jpeg">JPEG</option><option id="providerSogniWebpFormat" value="webp">WebP</option></select>
-          </label>
-          <label>Quality
-            <select id="providerSogniQuality"><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
-          </label>
-          <div id="providerSogniSdkSettings" class="fieldset-content hidden" aria-hidden="true">
-            <label title="Fast uses high-end GPU workers for quicker generation at a higher cost. Relaxed uses Mac workers for slower generation at a lower cost.">Worker type
-              <select id="providerSogniNetwork" aria-describedby="providerSogniWorkerTypeNote"><option value="fast" title="High-end GPU workers that generate images faster at a higher cost.">Fast GPU workers</option><option value="relaxed" title="Mac workers that generate images more slowly at a lower cost.">Relaxed Mac workers</option></select>
-              <span id="providerSogniWorkerTypeNote" class="field-note">Fast uses high-end GPU workers for quicker image generation at a higher cost.</span>
-            </label>
-            <label>Token type<select id="providerSogniTokenType"><option value="auto">Automatic</option><option value="sogni">SOGNI</option><option value="spark">Spark</option></select></label>
-            <label>Content filter<select id="providerSogniContentFilter"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
-            <label>Size preset<select id="providerSogniSizePreset"><option value="custom">Custom dimensions</option></select></label>
-            <label>Steps<input id="providerSogniSteps" type="number" min="1" max="500" placeholder="Model default"></label>
-            <label>Guidance<input id="providerSogniGuidance" type="number" min="0" max="100" step="0.1" placeholder="Model default"></label>
-            <label>Fixed seed<input id="providerSogniSeed" type="number" min="0" max="4294967295" placeholder="Random"></label>
-            <label>Sampler<select id="providerSogniSampler"><option value="">Model default</option></select></label>
-            <label>Scheduler<select id="providerSogniScheduler"><option value="">Model default</option></select></label>
-            <label>Preview count<input id="providerSogniPreviewCount" type="number" min="0" max="10" value="0"></label>
-          </div>
-          <label>Initial poll interval (seconds)<input id="providerSogniPollIntervalSeconds" type="number" min="1" max="30" step="1" value="2"></label>
-          <label>Maximum poll interval (seconds)<input id="providerSogniMaximumPollIntervalSeconds" type="number" min="1" max="30" step="1" value="10"></label>
-          <label>Generation timeout (seconds)<input id="providerSogniGenerationTimeoutSeconds" type="number" min="30" max="600" step="5" value="180"></label>
-          <label>Submission attempts<input id="providerSogniMaximumAttempts" type="number" min="1" max="5" step="1" value="3"></label>
-          <label class="toggle-field"><input id="providerSogniModelDiscoveryEnabled" type="checkbox" checked> Attempt model discovery</label>
-        </div>
-        <p id="providerSogniRestNote" class="fieldset-note">This Creative Workflow provider does not support NSFW content or disabling Sogni’s content filtering.</p>
-        <p id="providerSogniSdkNote" class="fieldset-note hidden">The SDK provider defaults content filtering to enabled. Disabling it maps explicitly to Sogni’s <code>disableNSFWFilter</code> project option.</p>
       </fieldset>
       <details id="providerAdvancedSettings" class="provider-advanced-settings">
-        <summary>Advanced request settings</summary>
+        <summary>Advanced model and provider settings</summary>
         <div class="provider-advanced-fields">
+          <div class="provider-advanced-model-fields">
+            <label class="text-model-setting" title="Maximum combined prompt and response capacity. Selecting a discovered model applies the endpoint-advertised value automatically.">Context window
+              <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
+              <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>
+            </label>
+            <label class="text-model-setting" title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
+            <label class="text-model-setting" title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
+            <label id="providerResponseFormatPolicyField" class="text-model-setting" title="Selects the response format for future text jobs. Nexus verifies schema compatibility on the server before dispatch.">Structured output
+              <select id="providerResponseFormatPolicy" aria-describedby="providerResponseFormatPolicyNote">
+                <option value="legacy">Legacy JSON</option>
+                <option value="auto">Use schema when verified</option>
+                <option value="required">Require verified schema</option>
+              </select>
+              <span id="providerResponseFormatPolicyNote" class="field-note">Required blocks a new job before dispatch when server verification is unavailable. Changes apply to future jobs; pending jobs retain their frozen configuration and may require a compatible profile to resume.</span>
+            </label>
+            <div id="providerResponseFormatCapability" class="text-model-setting field-note" aria-live="polite">Schema compatibility is unknown until the server returns a capability summary.</div>
+            <section id="providerPresetDetail" class="provider-preset-detail text-model-setting hidden" aria-live="polite">
+              <h3>Structured Outputs · Trusted preset</h3>
+              <p>Nexus requests the complete operation schema without a local model capability gate. A provider schema rejection is surfaced without a standard-JSON retry.</p>
+              <dl>
+                <div><dt>Standard prompt</dt><dd id="providerPresetPrompt">Choose a preset to inspect its standard prompt.</dd></div>
+                <div><dt>Version</dt><dd id="providerPresetVersion">Unknown</dd></div>
+                <div><dt>Ordered models</dt><dd id="providerPresetModels">Unknown</dd></div>
+                <div><dt>Provider policy</dt><dd id="providerPresetPolicy">Unknown</dd></div>
+                <div><dt>Configured and effective limits</dt><dd id="providerPresetLimits">Unknown</dd></div>
+                <div><dt>Preset parameters</dt><dd id="providerPresetParameters">Inherited</dd></div>
+              </dl>
+            </section>
+            <section id="providerTextOverrides" class="provider-text-overrides text-model-setting hidden" aria-labelledby="providerTextOverridesTitle">
+              <div class="field-label-row"><strong id="providerTextOverridesTitle">Request overrides</strong></div>
+              <label>Override behavior<select id="providerTextOverrideMode"><option value="preserve">Keep saved setting</option><option value="inherit">Inherit selected preset/model</option><option value="explicit">Use explicit overrides</option></select></label>
+              <div id="providerTextOverrideFields" class="provider-text-override-fields hidden">
+                <label>Temperature<input id="providerOverrideTemperature" type="number" min="0" max="2" step="0.01" placeholder="Inherit"></label>
+                <label>Top P<input id="providerOverrideTopP" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
+                <label>Top K<input id="providerOverrideTopK" type="number" min="0" step="1" placeholder="Inherit"></label>
+                <label>Frequency penalty<input id="providerOverrideFrequencyPenalty" type="number" min="-2" max="2" step="0.01" placeholder="Inherit"></label>
+                <label>Presence penalty<input id="providerOverridePresencePenalty" type="number" min="-2" max="2" step="0.01" placeholder="Inherit"></label>
+                <label>Repetition penalty<input id="providerOverrideRepetitionPenalty" type="number" min="0.01" step="0.01" placeholder="Inherit"></label>
+                <label>Min P<input id="providerOverrideMinP" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
+                <label>Top A<input id="providerOverrideTopA" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
+                <label>Seed<input id="providerOverrideSeed" type="number" min="0" step="1" placeholder="Inherit"></label>
+                <label>Max tokens<input id="providerOverrideMaxTokens" type="number" min="1" step="1" placeholder="Inherit"></label>
+                <label>Max completion tokens<input id="providerOverrideMaxCompletionTokens" type="number" min="1" step="1" placeholder="Inherit"></label>
+                <label>Conservative context window<input id="providerOverrideContextTokens" type="number" min="1" max="4000000" step="1" placeholder="Inherit"></label>
+              </div>
+              <p class="field-note">Inheritance uses the selected preset or model profile. Clear restores inheritance; normal profile defaults are kept separate.</p>
+            </section>
+          </div>
+          <fieldset id="providerSogniSettings" class="hidden" aria-hidden="true">
+            <legend>Sogni illustration defaults</legend>
+            <p class="fieldset-note">These non-secret defaults are stored with this profile. Model discovery may not list every image model, so the model picker also accepts a manual model ID.</p>
+            <div class="fieldset-content">
+              <label>Images per job
+                <select id="providerSogniImageCount"><option value="1">1 image</option><option value="2">2 images</option></select>
+              </label>
+              <label>Default width<input id="providerSogniWidth" type="number" min="256" max="8192" step="8" value="1280"></label>
+              <label>Default height<input id="providerSogniHeight" type="number" min="256" max="8192" step="8" value="720"></label>
+              <label>Aspect ratio<input id="providerSogniAspectRatio" maxlength="10" value="16:9" pattern="[0-9]{1,3}:[0-9]{1,3}"></label>
+              <label>Output format
+                <select id="providerSogniOutputFormat"><option value="png">PNG</option><option value="jpeg">JPEG</option><option id="providerSogniWebpFormat" value="webp">WebP</option></select>
+              </label>
+              <label>Quality
+                <select id="providerSogniQuality"><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
+              </label>
+              <div id="providerSogniSdkSettings" class="fieldset-content hidden" aria-hidden="true">
+                <label title="Fast uses high-end GPU workers for quicker generation at a higher cost. Relaxed uses Mac workers for slower generation at a lower cost.">Worker type
+                  <select id="providerSogniNetwork" aria-describedby="providerSogniWorkerTypeNote"><option value="fast" title="High-end GPU workers that generate images faster at a higher cost.">Fast GPU workers</option><option value="relaxed" title="Mac workers that generate images more slowly at a lower cost.">Relaxed Mac workers</option></select>
+                  <span id="providerSogniWorkerTypeNote" class="field-note">Fast uses high-end GPU workers for quicker image generation at a higher cost.</span>
+                </label>
+                <label>Token type<select id="providerSogniTokenType"><option value="auto">Automatic</option><option value="sogni">SOGNI</option><option value="spark">Spark</option></select></label>
+                <label>Content filter<select id="providerSogniContentFilter"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
+                <label>Size preset<select id="providerSogniSizePreset"><option value="custom">Custom dimensions</option></select></label>
+                <label>Steps<input id="providerSogniSteps" type="number" min="1" max="500" placeholder="Model default"></label>
+                <label>Guidance<input id="providerSogniGuidance" type="number" min="0" max="100" step="0.1" placeholder="Model default"></label>
+                <label>Fixed seed<input id="providerSogniSeed" type="number" min="0" max="4294967295" placeholder="Random"></label>
+                <label>Sampler<select id="providerSogniSampler"><option value="">Model default</option></select></label>
+                <label>Scheduler<select id="providerSogniScheduler"><option value="">Model default</option></select></label>
+                <label>Preview count<input id="providerSogniPreviewCount" type="number" min="0" max="10" value="0"></label>
+              </div>
+              <label>Initial poll interval (seconds)<input id="providerSogniPollIntervalSeconds" type="number" min="1" max="30" step="1" value="2"></label>
+              <label>Maximum poll interval (seconds)<input id="providerSogniMaximumPollIntervalSeconds" type="number" min="1" max="30" step="1" value="10"></label>
+              <label>Generation timeout (seconds)<input id="providerSogniGenerationTimeoutSeconds" type="number" min="30" max="600" step="5" value="180"></label>
+              <label>Submission attempts<input id="providerSogniMaximumAttempts" type="number" min="1" max="5" step="1" value="3"></label>
+              <label class="toggle-field"><input id="providerSogniModelDiscoveryEnabled" type="checkbox" checked> Attempt model discovery</label>
+            </div>
+            <p id="providerSogniRestNote" class="fieldset-note">This Creative Workflow provider does not support NSFW content or disabling Sogni’s content filtering.</p>
+            <p id="providerSogniSdkNote" class="fieldset-note hidden">The SDK provider defaults content filtering to enabled. Disabling it maps explicitly to Sogni’s <code>disableNSFWFilter</code> project option.</p>
+          </fieldset>
           <label title="Maximum wall-clock time Nexus waits for one provider HTTP request, including response headers and body. Increase this for slower local generation.">
             Request timeout (minutes)
             <input id="providerRequestTimeoutMinutes" type="number" min="0.1" max="60" step="0.1" value="5" required>
@@ -992,15 +1033,25 @@
         </div>
         <p id="worldGeneratorAvailability" class="field-note"></p>
       </details>
-      <div class="world-tabs" data-tab-group="world-author">
-        <button type="button" class="tab-button active" data-tab-target="world-author-overview">Overview</button>
-        <button type="button" class="tab-button" data-tab-target="world-author-lore">Lore</button>
-        <button type="button" class="tab-button" data-tab-target="world-author-mechanics">Mechanics &amp; Characters</button>
+      <nav id="worldAuthorSteps" class="world-tabs world-author-steps" data-tab-group="world-author" aria-label="World draft steps">
+        <button id="worldAuthorTabBasics" type="button" class="tab-button active" data-world-author-step="basics" data-tab-target="world-author-overview" aria-current="step">Basics</button>
+        <button id="worldAuthorTabLore" type="button" class="tab-button" data-world-author-step="lore" data-tab-target="world-author-lore">Lore</button>
+        <button id="worldAuthorTabCharacter" type="button" class="tab-button" data-world-author-step="character" data-tab-target="world-author-mechanics">Playable character</button>
+        <button id="worldAuthorTabReview" type="button" class="tab-button" data-world-author-step="review" data-tab-target="world-author-review">Review</button>
+      </nav>
+      <div class="world-author-step-guidance">
+        <p id="worldAuthorStepGuidance" role="status" aria-live="polite">Add a required title. Genre and tone are optional author guidance.</p>
+        <button id="worldAuthorNextStep" class="button secondary compact-button" type="button">Continue to Lore</button>
       </div>
       <div class="world-fields tab-content active" id="world-author-overview" data-tab-group="world-author">
         <label>Title<input id="worldTitle" required maxlength="200"></label>
-        <label>Genre<input id="worldGenre" maxlength="2000"></label>
-        <label>Tone<input id="worldTone" maxlength="2000"></label>
+        <details id="worldGenreToneDisclosure" class="author-advanced-disclosure">
+          <summary>Genre and tone (optional)</summary>
+          <div class="world-fields author-disclosure-fields">
+            <label>Genre<input id="worldGenre" maxlength="2000"></label>
+            <label>Tone<input id="worldTone" maxlength="2000"></label>
+          </div>
+        </details>
       </div>
       <div class="world-fields tab-content" id="world-author-lore" data-tab-group="world-author">
         <label class="wide-field">Premise<textarea id="worldPremise" rows="3" maxlength="200000"></textarea></label>
@@ -1019,6 +1070,17 @@
           <input id="worldCharacterRevision" type="hidden" value="0">
         </div>
       </div>
+      <section id="world-author-review" class="world-fields tab-content world-author-review" data-tab-group="world-author" aria-labelledby="worldAuthorReviewTitle">
+        <h3 id="worldAuthorReviewTitle">Review this draft</h3>
+        <p class="field-note">The checklist guides your authoring. It does not replace server validation. You can save a partial draft at any step.</p>
+        <ul class="world-author-checklist">
+          <li><span>Basics</span><strong id="worldAuthorBasicsStatus">Add a title</strong></li>
+          <li><span>Lore</span><strong id="worldAuthorLoreStatus">Optional</strong></li>
+          <li><span>Playable character</span><strong id="worldAuthorCharacterStatus">Add at least one playable character for a campaign-ready published version.</strong></li>
+        </ul>
+        <p class="field-note">Saving updates the editable draft. Publishing creates a new immutable version. Existing campaigns remain on their current version. Creating a campaign is a separate action.</p>
+        <div id="worldAuthorPublishedReadiness" class="status world-author-published-readiness" role="status" aria-live="polite">No published version has been assessed yet.</div>
+      </section>
       <details id="worldCoverOptions" class="world-cover-editor">
         <summary>Cover artwork (optional)</summary>
         <div class="world-cover-option-fields">
@@ -1035,7 +1097,7 @@
           <input id="worldCoverAssetId" type="hidden">
         </div>
       </details>
-      <div id="worldAuthorStatus" class="status" role="status" aria-live="polite"></div>
+      <div id="worldAuthorStatus" class="status" role="status" aria-live="polite" tabindex="-1"></div>
       <div class="button-row character-dialog-actions">
         <button id="cancelWorldAuthor" class="button secondary" type="button">Cancel</button>
         <span class="character-action-spacer"></span>
@@ -1050,34 +1112,16 @@
         <div>
           <p class="eyebrow">World Library</p>
           <h2 id="characterDialogTitle">Add character</h2>
-          <p id="characterDialogDescription">Create a playable character for this world draft.</p>
+          <p id="characterDialogDescription">Playable character · Create a character for this world draft.</p>
         </div>
       </div>
-      <details id="characterGenerator" class="character-generator hidden">
-        <summary>Generate with default text model</summary>
-        <div class="character-generator-fields">
-          <label>Character concept or prompt
-            <textarea id="characterGeneratorPrompt" rows="3" maxlength="10000" placeholder="Describe the role, personality, background, appearance, and place in this world."></textarea>
-          </label>
-          <button id="generateCharacter" class="button secondary" type="button">Generate character</button>
-        </div>
-        <p class="field-note">Generation fills this form only. Review and save the result to change the draft.</p>
-      </details>
       <div class="character-core-fields">
+        <p id="characterPlayableContext" class="field-note character-playable-context">Playable character · This character is part of the world's playable roster.</p>
         <label title="The character's canonical name. This name is used in campaign context and image references.">Character name<input id="characterName" required maxlength="200" autocomplete="off" placeholder="e.g., Mira Vale"></label>
-        <label title="Original free-form guidance retained as read-only source material. Use AI organization to sort supported details into the fields below.">Legacy source guidance
-          <textarea id="characterGuidance" rows="6" maxlength="200000" readonly placeholder="Older general guidance is retained here as source material."></textarea>
-        </label>
-      </div>
-      <div class="button-row character-organization-row">
-        <button id="organizeCharacterProfile" class="button secondary" type="button" title="Uses the current profile, legacy guidance, and world lore, background, and canon to propose evidence-backed field assignments. Nothing is saved until you review and save it.">Organize profile with AI…</button>
-        <span id="organizeCharacterProfileProgress" class="organize-profile-progress hidden" role="status" aria-live="polite" aria-label="Organizing character profile">
-          <span class="organize-profile-spinner" aria-hidden="true"></span>Organizing…
-        </span>
       </div>
       <div id="characterStatus" class="status hidden" role="status" aria-live="polite"></div>
       <fieldset class="character-profile-section">
-        <legend>Identity</legend>
+        <legend>Fiction profile · identity</legend>
         <div class="character-profile-grid">
           <label title="Other names, titles, or nicknames used for this character. Separate aliases with commas.">Aliases<input id="characterAliases" maxlength="4000" placeholder="e.g., The Fox, Lantern Bearer"></label>
           <label title="The pronouns used when referring to this character.">Pronouns<input id="characterPronouns" maxlength="2000" placeholder="e.g., she/her"></label>
@@ -1098,7 +1142,9 @@
           <label title="Other story-relevant guidance that does not fit a more specific story field.">Other guidance<textarea id="characterOtherGuidance" placeholder="e.g., Never knowingly abandons a traveler"></textarea></label>
         </div>
       </fieldset>
-      <fieldset class="character-profile-section">
+      <details id="characterAppearance" class="author-advanced-disclosure character-advanced-disclosure">
+        <summary>Appearance (optional, fiction only)</summary>
+        <fieldset class="character-profile-section">
         <legend>Visual identity</legend>
         <div class="character-profile-grid">
           <label title="Species, ancestry, lineage, or other biological or cultural origin when stated.">Ancestry or species<input id="characterAncestryOrSpecies" maxlength="2000" placeholder="e.g., Human"></label>
@@ -1114,28 +1160,50 @@
           <label title="Visible carried gear, jewelry, tools, weapons, or signature accessories.">Equipment and accessories<textarea id="characterEquipmentAndAccessories" placeholder="e.g., Brass lantern and a worn map case"></textarea></label>
           <label title="Any remaining stable visual details not covered by the fields above.">Other visual details<textarea id="characterOtherVisualDetails" placeholder="e.g., Smells faintly of cedar smoke"></textarea></label>
         </div>
-      </fieldset>
-      <fieldset class="character-profile-section">
+        </fieldset>
+      </details>
+      <details id="characterMechanics" class="author-advanced-disclosure character-advanced-disclosure">
+        <summary>Mechanics (optional, kept separate from fiction)</summary>
+        <div id="characterMechanicsFields">
+          <fieldset class="character-collection">
+            <legend title="Optional game-mechanics values for this character. These are kept separate from story and visual profile details.">RPG statistics</legend>
+            <div id="characterStats" class="character-row-list"></div>
+            <button id="addCharacterStat" class="button secondary compact-button" type="button" title="Add an RPG statistic. Mechanics are never copied into story or visual profile fields.">+ Add statistic</button>
+          </fieldset>
+          <fieldset class="character-collection">
+            <legend title="Optional campaign-state values that can change during play. These are not character story or appearance facts.">Starting trackers</legend>
+            <div id="characterTrackers" class="character-row-list"></div>
+            <button id="addCharacterTracker" class="button secondary compact-button" type="button" title="Add a starting campaign tracker. Its rules remain outside the character profile.">+ Add tracker</button>
+          </fieldset>
+        </div>
+      </details>
+      <details id="characterImportedGuidance" class="author-advanced-disclosure character-advanced-disclosure">
+        <summary>Imported and legacy guidance (optional)</summary>
+        <label title="Original free-form guidance retained as read-only source material. Use AI organization to sort supported details into the fields below.">Imported source guidance
+          <textarea id="characterGuidance" rows="4" maxlength="200000" readonly placeholder="Older general guidance is retained here as source material."></textarea>
+        </label>
+        <fieldset class="character-profile-section">
         <legend>Other notes</legend>
         <label title="Source material that does not yet fit a targeted field. It remains available for later review or AI organization.">Unclassified notes<textarea id="characterUnclassifiedNotes" rows="4" placeholder="e.g., The old road recognizes her voice, but no one knows why"></textarea></label>
-      </fieldset>
-      <div id="characterMechanicsFields">
-        <fieldset class="character-collection">
-          <legend title="Optional game-mechanics values for this character. These are kept separate from story and visual profile details.">RPG statistics</legend>
-          <div id="characterStats" class="character-row-list"></div>
-          <button id="addCharacterStat" class="button secondary compact-button" type="button" title="Add an RPG statistic. Mechanics are never copied into story or visual profile fields.">+ Add statistic</button>
         </fieldset>
-        <fieldset class="character-collection">
-          <legend title="Optional campaign-state values that can change during play. These are not character story or appearance facts.">Starting trackers</legend>
-          <div id="characterTrackers" class="character-row-list"></div>
-          <button id="addCharacterTracker" class="button secondary compact-button" type="button" title="Add a starting campaign tracker. Its rules remain outside the character profile.">+ Add tracker</button>
-        </fieldset>
-      </div>
+        <button id="organizeCharacterProfile" class="button secondary" type="button" title="Manually asks AI to propose evidence-backed field assignments from the current profile, legacy guidance, and world lore. Nothing changes until you review and apply proposals.">Organize profile with AI… (manual)</button>
+        <details id="characterGenerator" class="character-generator hidden">
+          <summary>Generate character with default text model (manual)</summary>
+          <div class="character-generator-fields">
+            <label>Character concept or prompt<textarea id="characterGeneratorPrompt" rows="3" maxlength="10000" placeholder="Describe the role, personality, background, appearance, and place in this world."></textarea></label>
+            <button id="generateCharacter" class="button secondary" type="button">Generate character</button>
+          </div>
+          <p class="field-note">Generation only fills this form. Review and apply it; save the parent world draft to persist changes.</p>
+        </details>
+        <span id="organizeCharacterProfileProgress" class="organize-profile-progress hidden" role="status" aria-live="polite" aria-label="Organizing character profile">
+          <span class="organize-profile-spinner" aria-hidden="true"></span>Organizing…
+        </span>
+      </details>
       <div class="button-row character-dialog-actions">
         <button id="deleteCharacter" class="button danger" type="button">Delete character</button>
         <span class="character-action-spacer"></span>
         <button id="cancelCharacter" class="button secondary" type="button">Cancel</button>
-        <button id="saveCharacter" class="button primary" type="submit">Add character</button>
+        <button id="saveCharacter" class="button primary" type="submit">Apply to world draft</button>
       </div>
     </form>
   </dialog>
@@ -1178,25 +1246,32 @@
     </form>
   </dialog>
 
-  <dialog id="createCampaignDialog" class="confirm-dialog" aria-labelledby="createCampaignTitleLabel">
+  <dialog id="createCampaignDialog" class="confirm-dialog campaign-creation-dialog" aria-labelledby="createCampaignTitleLabel">
     <form id="createCampaignForm">
-      <h2 id="createCampaignTitleLabel">Create Campaign</h2>
+      <p class="eyebrow">New campaign</p>
+      <h2 id="createCampaignTitleLabel">Create campaign</h2>
+      <p id="createCampaignWorldVersion" class="campaign-create-version" aria-live="polite"></p>
       <label>New campaign title<input id="newCampaignTitle" maxlength="200" placeholder="Name a campaign for the selected version" required></label>
       <label>Campaign player character
         <select id="newCampaignCharacter"><option value="">Select a published world version</option></select>
         <span id="newCampaignCharacterNote" class="field-note">The selected character is snapshotted into the new campaign.</span>
       </label>
-      <label>Turn input style
-        <select id="newCampaignTurnControlStyle">
-          <option value="flexible_action" selected>Action</option>
-          <option value="flexible_scene">Story Direction</option>
-        </select>
-        <span class="field-note">Action preserves RPG mechanics. Story Direction continues the narrative from your directions and choices.</span>
-      </label>
+      <details id="createCampaignAdvanced" class="campaign-create-advanced">
+        <summary>Advanced settings</summary>
+        <label>Turn input style
+          <select id="newCampaignTurnControlStyle">
+            <option value="flexible_action">Action</option>
+            <option value="flexible_scene">Story Direction</option>
+          </select>
+          <span class="field-note">Action preserves RPG mechanics. Story Direction continues the narrative from your directions and choices.</span>
+        </label>
+      </details>
       <div id="createCampaignStatus" class="status error" role="alert" hidden></div>
+      <button id="openCommittedCampaign" class="button secondary" type="button" hidden>Open story</button>
       <div class="button-row confirm-actions">
         <button id="cancelCreateCampaign" class="button secondary" type="button">Cancel</button>
-        <button id="confirmCreateCampaign" class="button primary" type="submit">Create campaign</button>
+        <button id="confirmCreateCampaign" class="button primary" type="submit" name="intent" value="create">Create only</button>
+        <button id="createAndStartCampaign" class="button accent" type="submit" name="intent" value="start">Create and start</button>
       </div>
     </form>
   </dialog>
@@ -1244,14 +1319,16 @@
   <dialog id="discardChangesDialog" class="confirm-dialog" aria-labelledby="discardChangesTitle">
     <form method="dialog">
       <h2 id="discardChangesTitle">Discard unsaved changes?</h2>
-      <p>Your edits have not been saved. Keep editing or discard them and close this window.</p>
+      <p id="discardChangesMessage">Your edits have not been saved. Keep editing or discard them and close this window.</p>
       <div class="button-row confirm-actions">
-        <button class="button secondary" type="submit" value="keep" autofocus>Keep editing</button>
-        <button class="button danger" type="submit" value="discard">Discard changes</button>
+        <button class="button secondary" type="submit" value="keep" autofocus>Stay and keep editing</button>
+        <button id="saveCampaignEditsDecision" class="button primary" type="button" value="save" hidden>Save campaign</button>
+        <button class="button danger" type="submit" value="discard">Discard edits</button>
       </div>
     </form>
   </dialog>
 
-  <script type="module" src="/nexus/nexus.js"></script>
+  </div>
+  <script type="module" src="/nexus/legacy-management.js"></script>
 </body>
 </html>

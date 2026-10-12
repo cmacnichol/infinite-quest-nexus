@@ -98,6 +98,33 @@ export function createNoopSessionPort(): SessionPort {
   return noOpSessionPort;
 }
 export * from "./campaign-cast-api.js";
+export {
+  createIndexedDbDraftDatabase,
+  createStoryActionDraftStore
+} from "./storage/story-action-drafts.js";
+export type {
+  ClearResult,
+  Draft,
+  DraftDatabasePort,
+  DraftDatabaseTransaction,
+  DraftScope,
+  StoryActionDraftStore,
+  WriteResult
+} from "./storage/story-action-drafts.js";
+export * from "./reader-history-api.js";
+export {
+  createIndexedDbReaderPositionDatabase,
+  createReaderPositionStore
+} from "./storage/reader-positions.js";
+export type {
+  ReaderPosition,
+  ReaderPositionDatabasePort,
+  ReaderPositionInput,
+  ReaderPositionScope,
+  ReaderPositionStore,
+  ReaderPositionWriteResult
+} from "./storage/reader-positions.js";
+
 export { createActivityApi, type ActivityApi } from "./activity-api.js";
 
 export { createIndexedDbActivityCache, type IndexedDbActivityCacheOptions } from "./activity/indexeddb-cache.js";

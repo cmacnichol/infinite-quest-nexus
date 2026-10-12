@@ -40,5 +40,7 @@ export * from "./campaign-cast.js";
 export * from "./campaign-cast-context.js";
 export * from "./campaign-cast-discovery.js";
 export * from "./campaign-cast-backfill.js";
+export * from "./reader-history.js";
+
 export * from "./provider-failure.js";
 export * from "./activity.js";

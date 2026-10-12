@@ -13,11 +13,28 @@ import {
   createDocumentVisibilitySource,
   createNoopSessionPort,
   createNexusApiClient,
+  createNexusHttpClient,
+  createReaderHistoryApi,
+  createIndexedDbReaderPositionDatabase,
+  createReaderPositionStore,
   createPendingSubmissionStore,
-  createFailedTurnPromptStore
+  createFailedTurnPromptStore,
+  createIndexedDbDraftDatabase,
+  createStoryActionDraftStore
 } from "@infinite-quest/client-web";
 import { createActivityController, createGenerationWorkflow, type AbortSignalLike, type ActivityCacheScope, type Clock, type DelayScheduler, type GenerationWorkflow, type IdFactory, type PendingSubmissionStore, type SessionPort } from "@infinite-quest/client-core";
-import type { EventSourceFactory, FailedTurnPromptStore, NexusApiClient, StoryMemoryApi } from "@infinite-quest/client-web";
+import type {
+  DraftDatabasePort,
+  EventSourceFactory,
+  FailedTurnPromptStore,
+  NexusApiClient,
+  ReaderHistoryApi,
+  ReaderPositionDatabasePort,
+  ReaderPositionStore,
+  StoryActionDraftStore,
+  StoryMemoryApi,
+  NexusHttpClientOptions
+} from "@infinite-quest/client-web";
 import { createLegacyIllustrationApi, type LegacyIllustrationApi } from "./legacy-illustration-api.js";
 
 export interface StoryPlayerComposition {
@@ -27,11 +44,14 @@ export interface StoryPlayerComposition {
   readonly downloadDiagnostics: (text: string, filename: string) => void;
   readonly disposeActivity: () => void;
   readonly api: NexusApiClient;
+  readonly actionDrafts: StoryActionDraftStore;
   readonly clock: Clock;
   readonly delay: DelayScheduler;
   readonly idFactory: IdFactory;
   readonly illustrations: LegacyIllustrationApi;
   readonly pendingSubmissions: PendingSubmissionStore;
+  readonly readerHistory: ReaderHistoryApi;
+  readonly readerPositions: ReaderPositionStore;
   readonly failedTurnPrompts: FailedTurnPromptStore;
   readonly session: SessionPort;
   readonly storyMemory: StoryMemoryApi;
@@ -42,6 +62,8 @@ export interface StoryPlayerComposition {
 export interface StoryPlayerEnvironment {
   readonly document: Document;
   readonly storage: Storage;
+  readonly draftDatabase?: DraftDatabasePort;
+  readonly readerPositionDatabase?: ReaderPositionDatabasePort;
   readonly eventSourceFactory: EventSourceFactory | null;
   readonly random: () => number;
   readonly window?: Window;
@@ -64,10 +86,15 @@ export interface StoryPlayerCompositionFactories {
   readonly createIdFactory: typeof createBrowserIdFactory;
   readonly createApi: typeof createNexusApiClient;
   readonly createPendingSubmissions: typeof createPendingSubmissionStore;
+  readonly createDraftDatabase: typeof createIndexedDbDraftDatabase;
+  readonly createActionDrafts: typeof createStoryActionDraftStore;
   readonly createSource: typeof createBrowserGenerationSource;
   readonly createWorkflow: typeof createGenerationWorkflow;
   readonly createIllustrations: typeof createLegacyIllustrationApi;
   readonly createStoryMemory: typeof createStoryMemoryApi;
+  readonly createReaderHistory: (options: NexusHttpClientOptions) => ReaderHistoryApi;
+  readonly createReaderPositionDatabase: typeof createIndexedDbReaderPositionDatabase;
+  readonly createReaderPositions: typeof createReaderPositionStore;
 }
 
 const defaultFactories: StoryPlayerCompositionFactories = {
@@ -78,10 +105,15 @@ const defaultFactories: StoryPlayerCompositionFactories = {
   createIdFactory: createBrowserIdFactory,
   createApi: createNexusApiClient,
   createPendingSubmissions: createPendingSubmissionStore,
+  createDraftDatabase: createIndexedDbDraftDatabase,
+  createActionDrafts: createStoryActionDraftStore,
   createSource: createBrowserGenerationSource,
   createWorkflow: createGenerationWorkflow,
   createIllustrations: createLegacyIllustrationApi,
-  createStoryMemory: createStoryMemoryApi
+  createStoryMemory: createStoryMemoryApi,
+  createReaderHistory: (options) => createReaderHistoryApi(createNexusHttpClient(options)),
+  createReaderPositionDatabase: createIndexedDbReaderPositionDatabase,
+  createReaderPositions: createReaderPositionStore
 };
 
 function browserEnvironment(): StoryPlayerEnvironment {
@@ -121,7 +153,16 @@ export function createStoryPlayerComposition(
   const delay = factories.createDelay();
   const visibility = factories.createVisibility(environment.document);
   const idFactory = factories.createIdFactory();
+  const actionDraftDatabase = environment.draftDatabase ?? factories.createDraftDatabase();
+  const actionDrafts = factories.createActionDrafts(
+    actionDraftDatabase,
+    () => new Date(clock.now()),
+    () => idFactory.create()
+  );
+  const readerPositionDatabase = environment.readerPositionDatabase ?? factories.createReaderPositionDatabase();
+  const readerPositions = factories.createReaderPositions(readerPositionDatabase, () => new Date(clock.now()));
   const api = factories.createApi({ basePath: "/api/v1", session });
+  const readerHistory = factories.createReaderHistory({ basePath: "/api/v1", session });
   const pendingSubmissions = factories.createPendingSubmissions(environment.storage);
   const failedTurnPrompts = createFailedTurnPromptStore(environment.storage);
   const source = factories.createSource({
@@ -168,11 +209,14 @@ export function createStoryPlayerComposition(
     activity, activityApiBase, copyText, downloadDiagnostics,
     disposeActivity: () => { activity.dispose(); cache.dispose?.(); notifications.dispose(); },
     api,
+    actionDrafts,
     clock,
     delay,
     idFactory,
     illustrations: factories.createIllustrations({ basePath: "/api/v1", session }),
     pendingSubmissions,
+    readerHistory,
+    readerPositions,
     failedTurnPrompts,
     session,
     storyMemory: factories.createStoryMemory({ basePath: "/api/v1", session }),

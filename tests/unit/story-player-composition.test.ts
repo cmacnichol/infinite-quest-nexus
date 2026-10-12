@@ -13,11 +13,16 @@ describe("Story Player composition bootstrap", () => {
     const visibility = { current: vi.fn(), changes: vi.fn() };
     const idFactory = { create: vi.fn(() => "id-1") };
     const pendingSubmissions = { load: vi.fn(), save: vi.fn(), clear: vi.fn() };
+    const draftDatabase = { transaction: vi.fn() };
+    const actionDrafts = { read: vi.fn(), write: vi.fn(), removeIfRevision: vi.fn(), readExpiryNotice: vi.fn() };
     const api = { generation: {}, activity: {} };
     const source = { watch: vi.fn() };
     const workflow = { submit: vi.fn(), resume: vi.fn() };
     const illustrations = { config: vi.fn() };
     const storyMemory = { get: vi.fn(), update: vi.fn() };
+    const readerHistory = { getTurn: vi.fn(), searchHistory: vi.fn() };
+    const readerPositionDatabase = { read: vi.fn(), write: vi.fn() };
+    const readerPositions = { read: vi.fn(), write: vi.fn() };
     const activity = { dispose: vi.fn() };
     const cache = { dispose: vi.fn() };
     const notifications = { dispose: vi.fn() };
@@ -32,16 +37,23 @@ describe("Story Player composition bootstrap", () => {
       createVisibility: vi.fn(() => visibility),
       createIdFactory: vi.fn(() => idFactory),
       createApi: vi.fn(() => api),
+      createDraftDatabase: vi.fn(),
+      createActionDrafts: vi.fn(() => actionDrafts),
       createPendingSubmissions: vi.fn(() => pendingSubmissions),
       createSource: vi.fn(() => source),
       createWorkflow: vi.fn(() => workflow),
       createIllustrations: vi.fn(() => illustrations),
-      createStoryMemory: vi.fn(() => storyMemory)
+      createStoryMemory: vi.fn(() => storyMemory),
+      createReaderHistory: vi.fn(() => readerHistory),
+      createReaderPositionDatabase: vi.fn(),
+      createReaderPositions: vi.fn(() => readerPositions)
     };
 
     const composition = createStoryPlayerComposition({
       document: {} as Document,
       storage: {} as Storage,
+      draftDatabase,
+      readerPositionDatabase,
       eventSourceFactory: null,
       random: () => 0.5
     }, factories as never);
@@ -61,16 +73,22 @@ describe("Story Player composition bootstrap", () => {
       pendingSubmissions,
       source
     });
+    expect(factories.createDraftDatabase).not.toHaveBeenCalled();
+    expect(factories.createActionDrafts).toHaveBeenCalledWith(draftDatabase, expect.any(Function), expect.any(Function));
     expect(factories.createIllustrations).toHaveBeenCalledWith({ basePath: "/api/v1", session });
     expect(factories.createStoryMemory).toHaveBeenCalledWith({ basePath: "/api/v1", session });
+    expect(factories.createReaderHistory).toHaveBeenCalledWith({ basePath: "/api/v1", session });
+    expect(factories.createReaderPositionDatabase).not.toHaveBeenCalled();
+    expect(factories.createReaderPositions).toHaveBeenCalledWith(readerPositionDatabase, expect.any(Function));
     expect(composition.activity).toBe(activity);
     expect(factories.createActivity).toHaveBeenCalledWith(expect.objectContaining({ api: api.activity, cache, scheduler: delay, notifyTabs: notifications }));
     composition.disposeActivity();
     expect(activity.dispose).toHaveBeenCalledOnce();
     expect(cache.dispose).toHaveBeenCalledOnce();
     expect(notifications.dispose).toHaveBeenCalledOnce();
-    expect(composition).toMatchObject({ session, clock, delay, idFactory, pendingSubmissions, api, workflow, illustrations, storyMemory });
-    Object.values(factories).forEach((factory) => expect(factory).toHaveBeenCalledOnce());
+    expect(composition).toMatchObject({ session, clock, delay, idFactory, pendingSubmissions, actionDrafts, api, workflow, illustrations, storyMemory, readerHistory, readerPositions });
+    Object.entries(factories).filter(([name]) => !["createDraftDatabase", "createReaderPositionDatabase"].includes(name))
+      .forEach(([, factory]) => expect(factory).toHaveBeenCalledOnce());
   });
 
   it("creates one composition and invokes the initializer exactly once", () => {

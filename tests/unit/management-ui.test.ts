@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
+import { createLegacySectionLoader } from "../../apps/web/src/legacy-section-loader.js";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/src/story.js", "utf8");
 const managementHtml = readFileSync("apps/web/public/index.html", "utf8");
-const managementScript = readFileSync("apps/web/public/nexus.js", "utf8");
+const managementScript = readFileSync("apps/web/src/nexus.js", "utf8");
 const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
 const { document: managementDocument } = parseHTML(managementHtml);
 const imageLibraryScript = readFileSync("apps/web/public/image-library-browser.js", "utf8");
@@ -17,6 +18,14 @@ function managementFunction<T extends (...args: never[]) => unknown>(name: strin
   return Function(`${managementScript.slice(start, end)}; return ${name};`)() as T;
 }
 
+function managementFunctionWithBindings<T extends (...args: never[]) => unknown>(name: string, bindings: Record<string, unknown>): T {
+  const start = managementScript.indexOf(`function ${name}(`);
+  const end = managementScript.indexOf("\nfunction ", start + 1);
+  if (start < 0 || end < 0) throw new Error(`Unable to locate management function ${name}.`);
+  const bindingNames = Object.keys(bindings);
+  return Function(...bindingNames, `${managementScript.slice(start, end)}; return ${name};`)(...Object.values(bindings)) as T;
+}
+
 function managementFunctions<T extends Record<string, (...args: never[]) => unknown>>(names: string[], bindings: Record<string, unknown>): T {
   const sources = names.map((name) => {
     const start = managementScript.indexOf(`function ${name}(`);
@@ -26,8 +35,41 @@ function managementFunctions<T extends Record<string, (...args: never[]) => unkn
     if (start < 0 || end < 0) throw new Error(`Unable to locate management function ${name}.`);
     return managementScript.slice(definitionStart, end);
   });
-  const bindingNames = Object.keys(bindings);
-  return Function(...bindingNames, `${sources.join("\n")}; return { ${names.join(", ")} };`)(...Object.values(bindings)) as T;
+  const resolvedBindings = {
+    campaignSectionLoader: { setSelection: vi.fn(), invalidate: vi.fn() },
+    loadCampaignSettingsSectionForPanel: vi.fn(),
+    setCampaignSettingsSectionContentVisibility: vi.fn(),
+    setCampaignSettingsSectionControls: vi.fn(),
+    setCampaignSettingsAvailability: vi.fn(),
+    updateCampaignMigrationAvailability: vi.fn(),
+    contextPreviewSequence: 0,
+    setCampaignSettingsPanel: vi.fn(),
+    CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
+    campaignSettingsSectionLoadEpochs: new Map(),
+    CAMPAIGN_SETTINGS_SELECTION_CONTROLS: [
+      "campaignTitle", "campaignStatus", "campaignWorldVersion", "campaignTextProvider", "campaignTurnControlStyle", "campaignStoryLengthProfile",
+      "campaignStoryContextBudgetTokens", "saveCampaign", "transferCampaign", "editCampaignCharacter", "loadCampaign", "exportCampaign", "deleteCampaign",
+      "illustrationSourcePolicy", "campaignImageProvider", "illustrationModel", "illustrationSize", "illustrationAspectRatio", "illustrationQuality",
+      "illustrationOutputFormat", "illustrationMaxAttempts", "illustrationMatchingScope", "illustrationConfidenceProfile", "illustrationRepetitionWindow",
+      "illustrationSegmentWordCount", "illustrationImagesPerSegment", "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "embeddingEnabled",
+      "embeddingRetrievalImplementation", "embeddingRetrievalShadowEnabled", "embeddingProvider", "discoverEmbeddingModels", "embeddingModel",
+      "embeddingDocumentPrefix", "embeddingQueryPrefix", "embeddingBatchSize", "budgetTokens", "compression", "memoryQuery"
+    ],
+    renderCampaignStoryMemorySettings: vi.fn(),
+    ...bindings
+  };
+  const bindingNames = Object.keys(resolvedBindings);
+  return Function(...bindingNames, `${sources.join("\n")}; return { ${names.join(", ")} };`)(...Object.values(resolvedBindings)) as T;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("Nexus management UI contracts", () => {
@@ -40,18 +82,36 @@ describe("Nexus management UI contracts", () => {
   it("ignores an old campaign world response after another campaign is selected", async () => {
     const { document } = parseHTML(managementHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const originalPreviewPlaceholder = (elements.contextPreview as HTMLElement).textContent;
     for (const select of document.querySelectorAll("select")) {
       Object.defineProperty(select, "value", { value: "", writable: true, configurable: true });
     }
     let resolveOldWorld!: (world: unknown) => void;
     const oldWorld = new Promise((resolve) => { resolveOldWorld = resolve; });
+    let resolveCurrentWorld!: (world: unknown) => void;
+    const currentWorld = new Promise((resolve) => { resolveCurrentWorld = resolve; });
+    const worldAId = "11111111-1111-4111-8111-111111111111";
+    const worldBId = "11111111-1111-4111-8111-111111111112";
+    const UUID_ROUTE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+    const managementSelectionHash = managementFunctionWithBindings<(view: string, kind: string, id: string) => string>("managementSelectionHash", { UUID_ROUTE_PATTERN });
+    const managementSelectionErrorIsCurrent = managementFunctionWithBindings<(view: string) => boolean>("managementSelectionErrorIsCurrent", {
+      managementSelectionErrorIntent: null, managementNavigationIntent: 0, acceptedManagementRoute: null
+    });
     const api = vi.fn(async (path: string) => {
       if (path.endsWith("/state")) return { activeTurnNumber: 1, revision: 2 };
-      if (path === "/api/v1/worlds/world-a") return oldWorld;
-      return { versions: [{ id: "version-b", versionNumber: 1 }] };
+      if (path === `/api/v1/worlds/${worldAId}`) return oldWorld;
+      return currentWorld;
     });
-    const functions = managementFunctions<{ selectCampaign: (campaign: Record<string, unknown>) => Promise<void> }>(["selectCampaign", "normalizedTurnControlStyle"], {
+    const functions = managementFunctions<{ selectCampaign: (campaign: Record<string, unknown>) => Promise<void> }>(["selectCampaign", "clearContextPreviewPresentation", "normalizedTurnControlStyle"], {
       elements, document, api, selectedCampaign: null, campaignSelectionRequest: 0,
+      dashboardWorkflowErrors: new Map(),
+      UUID_ROUTE_PATTERN,
+      managementSelectionHash,
+      managementSelectionErrorIsCurrent,
+      canLeaveCampaignEditor: async () => true,
+      campaignSettingsSnapshot: () => ({}),
+      campaignEditGuard: { reset: () => undefined },
+      renderCampaignSaveFeedback: () => undefined,
       activeCampaignSettingsPanel: "story",
       Option: function(label: string, value: string) {
         const option = document.createElement("option");
@@ -73,14 +133,82 @@ describe("Nexus management UI contracts", () => {
       previewContext: async () => undefined,
       loadCampaignStoryMemory: () => undefined
     });
-    const campaign = (suffix: string) => ({ id: `campaign-${suffix}`, title: `Campaign ${suffix}`, status: "active", worldId: `world-${suffix}`, worldVersionId: `version-${suffix}`, worldVersionNumber: 1, turnControlStyle: "flexible_scene" });
+    const campaign = (suffix: string) => ({ id: `campaign-${suffix}`, title: `Campaign ${suffix}`, status: "active", worldId: suffix === "a" ? worldAId : worldBId, worldVersionId: `version-${suffix}`, worldVersionNumber: 1, turnControlStyle: "flexible_scene" });
     const firstSelection = functions.selectCampaign(campaign("a"));
-    await vi.waitFor(() => expect(api).toHaveBeenCalledWith("/api/v1/worlds/world-a"));
-    await functions.selectCampaign(campaign("b"));
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith(`/api/v1/worlds/${worldAId}`));
+    (elements.contextSummary as HTMLElement).textContent = "A_PRIVATE_CONTEXT_CANARY";
+    (elements.contextSummary as HTMLElement).classList.remove("hidden");
+    (elements.contextPreview as HTMLElement).textContent = "A_PRIVATE_CONTEXT_CANARY";
+    const currentSelection = functions.selectCampaign(campaign("b"));
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith(`/api/v1/worlds/${worldBId}`));
+    expect((elements.campaignWorldVersion as HTMLSelectElement).disabled).toBe(true);
+    expect((elements.migrateCampaign as HTMLButtonElement).disabled).toBe(true);
+    expect((elements.contextSummary as HTMLElement).classList.contains("hidden")).toBe(true);
+    expect((elements.contextSummary as HTMLElement).textContent).toBe("");
+    expect((elements.contextPreview as HTMLElement).textContent).toBe(originalPreviewPlaceholder);
     resolveOldWorld({ versions: [{ id: "version-a", versionNumber: 1 }] });
     await firstSelection;
+    expect((elements.campaignWorldVersion as HTMLSelectElement).disabled).toBe(true);
+    resolveCurrentWorld({ versions: [{ id: "version-b", versionNumber: 2 }] });
+    await currentSelection;
     expect((elements.campaignTitle as HTMLInputElement).value).toBe("Campaign b");
+    expect((elements.campaignWorldLink as HTMLAnchorElement).getAttribute("href")).toBe(`#world-library?worldId=${worldBId}`);
     expect([...elements.campaignWorldVersion!.querySelectorAll("option")].map((option) => option.value)).toEqual(["version-b"]);
+  });
+
+  it("restores the current campaign controls when the next campaign core read fails", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const campaignTitle = elements.campaignTitle as HTMLInputElement;
+    campaignTitle.value = "Campaign A remains selected";
+    campaignTitle.disabled = true;
+    const currentCampaign = { id: "campaign-a", title: "Campaign A" };
+    const setAvailability = vi.fn();
+    const selectCampaign = managementFunctions<{ selectCampaign: (campaign: Record<string, unknown>) => Promise<void> }>([
+      "selectCampaign",
+      "clearContextPreviewPresentation",
+      "setCampaignSettingsSectionContentVisibility",
+      "normalizedTurnControlStyle"
+    ], {
+      elements,
+      document,
+      selectedCampaign: currentCampaign,
+      selectedCampaignIsExplicit: true,
+      campaignSelectionRequest: 2,
+      campaignCoreReady: true,
+      activeCampaignSettingsPanel: "chronicle",
+      campaignSectionLoader: { setSelection: vi.fn() },
+      api: async (path: string) => {
+        if (path.endsWith("/state")) throw new Error("Campaign B core state unavailable.");
+        throw new Error(`Unexpected core request: ${path}`);
+      },
+      setCampaignSettingsAvailability: setAvailability,
+      setCampaignSettingsPanel: vi.fn(),
+      managementSelectionErrorIsCurrent: () => false,
+      canLeaveCampaignEditor: async () => true,
+      campaignSettingsSnapshot: () => ({}),
+      campaignEditGuard: { reset: vi.fn() },
+      renderCampaignSaveFeedback: vi.fn(),
+      updateStoryViewLink: vi.fn(),
+      applyStoryProviderContextBudget: vi.fn(),
+      populateEmbeddingProviderSelect: vi.fn(),
+      campaignMessage: vi.fn()
+    });
+
+    await expect(selectCampaign.selectCampaign({
+      id: "campaign-b",
+      title: "Campaign B",
+      status: "active",
+      worldId: "world-b",
+      worldVersionId: "version-b",
+      worldVersionNumber: 1,
+      turnControlStyle: "flexible_scene"
+    })).rejects.toThrow("Campaign B core state unavailable.");
+
+    expect(campaignTitle.value).toBe("Campaign A remains selected");
+    expect(campaignTitle.disabled).toBe(false);
+    expect(setAvailability).toHaveBeenCalledWith(true);
+    expect((elements.memoryTitle as HTMLElement).textContent).not.toBe("Campaign B");
   });
 
   it("unifies portable formats under Data Transfer without breaking legacy import deep links", () => {
@@ -92,7 +220,15 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain("World &amp; Campaign Archives");
     expect(managementHtml).toContain("Legacy &amp; External Imports");
     expect(managementHtml).toContain("Readable Story Exports");
-    expect(managementScript).toContain('hash === "#data-transfer" || hash === "#imports"');
+    const parseManagementRoute = managementFunctionWithBindings<((hash: string) => { view: string; routeName: string; selection: unknown; selectionError: string })>("parseManagementRoute", {
+      UUID_ROUTE_PATTERN: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
+    });
+    const worldId = "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF";
+    expect(parseManagementRoute(`#world-library?worldId=${worldId}`)).toMatchObject({
+      view: "worlds", routeName: "#world-library", selection: { kind: "world", id: worldId.toLowerCase() }, selectionError: ""
+    });
+    expect(parseManagementRoute("#imports")).toMatchObject({ view: "data-transfer", routeName: "#imports", selection: null, selectionError: "" });
+    expect(parseManagementRoute("#world-library?worldId=world-a")).toMatchObject({ view: "worlds", selection: null, selectionError: expect.stringContaining("valid world ID") });
     expect(managementScript).toContain("capabilities?.systemArchive === true");
     expect(managementScript).not.toContain("new JSZip");
     expect(managementHtml).not.toContain('/nexus/jszip.min.js');
@@ -124,7 +260,7 @@ describe("Nexus management UI contracts", () => {
       ["campaignTabIllustrations", "campaignPanelIllustrations"],
       ["campaignTabChronicle", "campaignPanelChronicle"],
       ["campaignTabUsage", "campaignPanelUsage"]
-    ];
+    ] as const;
 
     expect([...rail!.querySelectorAll("[role=tab]")].map((tab) => tab.id)).toEqual(expected.map(([tabId]) => tabId));
     for (const [tabId, panelId] of expected) {
@@ -133,6 +269,16 @@ describe("Nexus management UI contracts", () => {
       expect(tab?.getAttribute("aria-controls")).toBe(panelId);
       expect(panel?.getAttribute("role")).toBe("tabpanel");
       expect(panel?.getAttribute("aria-labelledby")).toBe(tabId);
+      if (panelId !== "campaignPanelOverview") {
+        const sectionBodies = [...panel!.querySelectorAll(`[data-campaign-section-body="${panelId.slice("campaignPanel".length).toLowerCase()}"]`)];
+        expect(sectionBodies.length).toBeGreaterThan(0);
+        expect(sectionBodies.every((body) => panel!.contains(body))).toBe(true);
+        if (panelId === "campaignPanelChronicle") {
+          expect(sectionBodies.every((body) => body.parentElement?.id === "campaignContextSection")).toBe(true);
+        } else {
+          expect(sectionBodies[0]?.parentElement).toBe(panel);
+        }
+      }
     }
 
     expect(managementDocument.querySelector("#campaignTabOverview")?.getAttribute("aria-selected")).toBe("true");
@@ -142,9 +288,369 @@ describe("Nexus management UI contracts", () => {
     }
   });
 
+  it("hides and restores only the owned section body while preserving conditional child visibility", () => {
+    const setSectionContentVisibility = managementFunctionWithBindings<(panelId: string, visible: boolean) => void>("setCampaignSettingsSectionContentVisibility", {
+      document: managementDocument
+    });
+    const body = managementDocument.querySelector<HTMLElement>('[data-campaign-section-body="usage"]')!;
+    const conditionalCostSection = managementDocument.querySelector<HTMLElement>("#campaignCostSection")!;
+    expect(managementCss).toContain(".campaign-settings-content [data-campaign-section-body].hidden { display: none !important; }");
+    expect(conditionalCostSection.classList.contains("hidden")).toBe(true);
+
+    setSectionContentVisibility("usage", false);
+    expect(body.classList.contains("hidden")).toBe(true);
+    setSectionContentVisibility("usage", true);
+
+    expect(body.classList.contains("hidden")).toBe(false);
+    expect(conditionalCostSection.classList.contains("hidden")).toBe(true);
+  });
+
+  it("hides and restores every separately gated Chronicle body together", () => {
+    const setSectionContentVisibility = managementFunctionWithBindings<(panelId: string, visible: boolean) => void>("setCampaignSettingsSectionContentVisibility", {
+      document: managementDocument
+    });
+    const bodies = [...managementDocument.querySelectorAll<HTMLElement>('[data-campaign-section-body="chronicle"]')];
+    expect(bodies).toHaveLength(2);
+
+    setSectionContentVisibility("chronicle", false);
+    expect(bodies.every((body) => body.classList.contains("hidden"))).toBe(true);
+    setSectionContentVisibility("chronicle", true);
+    expect(bodies.every((body) => !body.classList.contains("hidden"))).toBe(true);
+  });
+
+  it("loads only core campaign dependencies during Overview selection", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    for (const select of document.querySelectorAll("select")) {
+      Object.defineProperty(select, "value", { value: "", writable: true, configurable: true });
+    }
+    const campaignId = "11111111-1111-4111-8111-111111111111";
+    const worldId = "22222222-2222-4222-8222-222222222222";
+    const versionId = "33333333-3333-4333-8333-333333333333";
+    const api = vi.fn(async (path: string) => {
+      if (path === `/api/v1/campaigns/${campaignId}/state`) return { activeTurnNumber: 4, revision: 9 };
+      if (path === `/api/v1/worlds/${worldId}`) return { versions: [{ id: versionId, versionNumber: 1 }] };
+      throw new Error(`Unexpected core request: ${path}`);
+    });
+    const loadCampaignStoryMemory = vi.fn();
+    const refreshCampaignMemoryMetrics = vi.fn(async () => ({}));
+    const refreshCampaignCostSummary = vi.fn(async () => undefined);
+    const loadEmbeddingConfig = vi.fn(async () => undefined);
+    const loadIllustrationConfig = vi.fn(async () => undefined);
+    const loadLatestImageJob = vi.fn(async () => undefined);
+    const previewContext = vi.fn(async () => undefined);
+    const managementSelectionErrorIsCurrent = () => false;
+    const functions = managementFunctions<{
+      selectCampaign: (campaign: Record<string, unknown>) => Promise<void>;
+    }>(["selectCampaign", "clearContextPreviewPresentation", "setCampaignSettingsSectionContentVisibility", "normalizedTurnControlStyle"], {
+      elements,
+      document,
+      api,
+      selectedCampaign: null,
+      selectedCampaignIsExplicit: false,
+      campaignSelectionRequest: 0,
+      campaignCoreReady: false,
+      activeCampaignSettingsPanel: "overview",
+      campaignSectionLoader: { setSelection: vi.fn() },
+      dashboardWorkflowErrors: new Map(),
+      UUID_ROUTE_PATTERN: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu,
+      managementSelectionHash: (_view: string, _kind: string, id: string) => `#world-library?worldId=${id}`,
+      managementSelectionErrorIsCurrent,
+      canLeaveCampaignEditor: async () => true,
+      campaignSettingsSnapshot: () => ({}),
+      campaignEditGuard: { reset: () => undefined },
+      renderCampaignSaveFeedback: () => undefined,
+      Option: function(label: string, value: string) {
+        const option = document.createElement("option");
+        option.textContent = label;
+        option.value = value;
+        return option;
+      },
+      loadCampaignStoryMemory,
+      updateStoryViewLink: () => undefined,
+      applyStoryProviderContextBudget: () => undefined,
+      populateEmbeddingProviderSelect: () => undefined,
+      campaignMessage: () => undefined,
+      refreshCampaignMemoryMetrics,
+      refreshCampaignCostSummary,
+      loadEmbeddingConfig,
+      loadIllustrationConfig,
+      loadLatestImageJob,
+      previewContext
+    });
+
+    await functions.selectCampaign({
+      id: campaignId,
+      title: "Core-ready campaign",
+      status: "active",
+      worldId,
+      worldTitle: "Fixture World",
+      worldVersionId: versionId,
+      worldVersionNumber: 1,
+      textProviderProfileId: "44444444-4444-4444-8444-444444444444",
+      turnControlStyle: "flexible_scene",
+      storyLengthProfile: "extended",
+      storyContextBudgetTokens: 64_000
+    });
+
+    expect(api.mock.calls.map(([path]) => path)).toEqual([
+      `/api/v1/campaigns/${campaignId}/state`,
+      `/api/v1/worlds/${worldId}`
+    ]);
+    expect((elements.campaignTitle as HTMLInputElement).value).toBe("Core-ready campaign");
+    expect((elements.campaignTextProvider as HTMLSelectElement).value).toBe("44444444-4444-4444-8444-444444444444");
+    expect((elements.campaignTurnControlStyle as HTMLSelectElement).value).toBe("flexible_scene");
+    expect((elements.campaignStoryLengthProfile as HTMLSelectElement).value).toBe("extended");
+    expect((elements.campaignStoryContextBudgetTokens as HTMLInputElement).value).toBe("64000");
+    expect(loadCampaignStoryMemory).not.toHaveBeenCalled();
+    expect(refreshCampaignMemoryMetrics).not.toHaveBeenCalled();
+    expect(refreshCampaignCostSummary).not.toHaveBeenCalled();
+    expect(loadEmbeddingConfig).not.toHaveBeenCalled();
+    expect(loadIllustrationConfig).not.toHaveBeenCalled();
+    expect(loadLatestImageJob).not.toHaveBeenCalled();
+    expect(previewContext).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["chronicle", "campaignContextSection"],
+    ["illustrations", "campaignIllustrationSection"]
+  ] as const)("hides previously rendered %s data after a new campaign core selection", async (panelId, sectionId) => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    for (const select of document.querySelectorAll("select")) {
+      Object.defineProperty(select, "value", { value: "", writable: true, configurable: true });
+    }
+    const previousCampaignId = "11111111-1111-4111-8111-111111111111";
+    const nextCampaignId = "11111111-1111-4111-8111-111111111112";
+    const worldId = "22222222-2222-4222-8222-222222222222";
+    const versionId = "33333333-3333-4333-8333-333333333333";
+    const previousSection = document.querySelector(`[data-campaign-section-body="${panelId}"]`) as HTMLElement;
+    previousSection.classList.remove("hidden");
+    const api = vi.fn(async (path: string) => {
+      if (path.endsWith("/state")) return { activeTurnNumber: 1, revision: 1 };
+      if (path === `/api/v1/worlds/${worldId}`) return { versions: [{ id: versionId, versionNumber: 1 }] };
+      throw new Error(`Unexpected core request: ${path}`);
+    });
+    const functions = managementFunctions<{
+      selectCampaign: (campaign: Record<string, unknown>) => Promise<void>;
+    }>(["selectCampaign", "clearContextPreviewPresentation", "setCampaignSettingsSectionContentVisibility", "normalizedTurnControlStyle"], {
+      elements,
+      document,
+      api,
+      selectedCampaign: { id: previousCampaignId, title: "Previously loaded campaign" },
+      selectedCampaignIsExplicit: true,
+      campaignSelectionRequest: 4,
+      campaignCoreReady: true,
+      activeCampaignSettingsPanel: panelId,
+      CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
+      campaignSectionLoader: { setSelection: vi.fn() },
+      dashboardWorkflowErrors: new Map(),
+      UUID_ROUTE_PATTERN: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu,
+      managementSelectionHash: (_view: string, _kind: string, id: string) => `#world-library?worldId=${id}`,
+      managementSelectionErrorIsCurrent: () => false,
+      canLeaveCampaignEditor: async () => true,
+      campaignSettingsSnapshot: () => ({}),
+      campaignEditGuard: { reset: () => undefined },
+      renderCampaignSaveFeedback: () => undefined,
+      Option: function(label: string, value: string) {
+        const option = document.createElement("option");
+        option.textContent = label;
+        option.value = value;
+        return option;
+      },
+      updateStoryViewLink: () => undefined,
+      applyStoryProviderContextBudget: () => undefined,
+      populateEmbeddingProviderSelect: () => undefined,
+      campaignMessage: () => undefined,
+      setCampaignSettingsAvailability: () => undefined,
+      setCampaignSettingsPanel: () => undefined
+    });
+
+    await functions.selectCampaign({
+      id: nextCampaignId,
+      title: "New campaign",
+      status: "active",
+      worldId,
+      worldTitle: "Fixture World",
+      worldVersionId: versionId,
+      worldVersionNumber: 1,
+      turnControlStyle: "flexible_scene"
+    });
+
+    expect((elements.campaignTitle as HTMLInputElement).value).toBe("New campaign");
+    expect(previousSection.classList.contains("hidden")).toBe(true);
+  });
+
+  it("does not reveal section content when a completed load belongs to the prior selection", async () => {
+    const pendingLoad = deferred<void>();
+    const selectedCampaign = { id: "campaign-a" };
+    const setContentVisibility = vi.fn();
+    const setFeedback = vi.fn();
+    const elements = Object.fromEntries([...managementDocument.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const loadCampaignSettingsSectionForPanel = managementFunctionWithBindings<(panelId: string) => void>("loadCampaignSettingsSectionForPanel", {
+      CAMPAIGN_SETTINGS_SECTIONS: { chronicle: "chronicle" },
+      CAMPAIGN_SETTINGS_SECTION_LABELS: { chronicle: "Chronicle" },
+      campaignSelectionRequest: 7,
+      selectedCampaign,
+      campaignCoreReady: true,
+      campaignSettingsSectionLoadEpochs: new Map(),
+      elements,
+      campaignSectionLoader: { loadSection: () => pendingLoad.promise },
+      setCampaignSettingsSectionContentVisibility: setContentVisibility,
+      setCampaignSettingsSectionFeedback: setFeedback
+    });
+
+    loadCampaignSettingsSectionForPanel("chronicle");
+    selectedCampaign.id = "campaign-b";
+    pendingLoad.resolve();
+    await Promise.resolve();
+
+    expect(setContentVisibility).not.toHaveBeenCalled();
+    expect(setFeedback).toHaveBeenCalledTimes(1);
+    expect(setFeedback).toHaveBeenCalledWith("chronicle", "loading", "Loading Chronicle…", 7, "campaign-a");
+  });
+
+  it("reveals coalesced section content only for the latest panel-load epoch", async () => {
+    const pendingLoad = deferred<void>();
+    const setContentVisibility = vi.fn();
+    const setFeedback = vi.fn();
+    const loadCampaignSettingsSectionForPanel = managementFunctionWithBindings<(panelId: string) => void>("loadCampaignSettingsSectionForPanel", {
+      CAMPAIGN_SETTINGS_SECTIONS: { chronicle: "chronicle" },
+      CAMPAIGN_SETTINGS_SECTION_LABELS: { chronicle: "Chronicle" },
+      campaignSelectionRequest: 7,
+      selectedCampaign: { id: "campaign-a" },
+      campaignCoreReady: true,
+      campaignSettingsSectionLoadEpochs: new Map(),
+      elements: Object.fromEntries([...managementDocument.querySelectorAll("[id]")].map((element) => [element.id, element])),
+      campaignSectionLoader: { loadSection: () => pendingLoad.promise },
+      setCampaignSettingsSectionContentVisibility: setContentVisibility,
+      setCampaignSettingsSectionFeedback: setFeedback
+    });
+
+    loadCampaignSettingsSectionForPanel("chronicle");
+    loadCampaignSettingsSectionForPanel("chronicle");
+    pendingLoad.resolve();
+    await Promise.resolve();
+
+    expect(setContentVisibility).toHaveBeenCalledTimes(1);
+    expect(setContentVisibility).toHaveBeenCalledWith("chronicle", true);
+    expect(setFeedback).toHaveBeenCalledTimes(3);
+    expect(setFeedback).toHaveBeenLastCalledWith("chronicle", "success", "", 7, "campaign-a");
+  });
+
+  it.each(["late success", "late failure"] as const)("does not apply a %s Story Memory read after a successful save invalidates it", async (lateOutcome) => {
+    const { document } = parseHTML(managementHtml);
+    const campaignId = "11111111-1111-4111-8111-111111111111";
+    const oldSettings = { level: "standard", reviewMode: "observe", availableLevels: ["off", "standard", "enhanced", "max"] };
+    const savedSettings = { level: "enhanced", reviewMode: "observe", availableLevels: ["off", "standard", "enhanced", "max"] };
+    const staleSettings = { level: "max", reviewMode: "enforce", availableLevels: ["off", "standard", "enhanced", "max"] };
+    const oldRead = deferred<typeof staleSettings>();
+    const pendingSave = deferred<typeof savedSettings>();
+    const elements = {
+      campaignStoryMemoryLevel: { value: "enhanced" },
+      campaignContinuityReviewEnabled: { checked: false }
+    };
+    const renderCampaignStoryMemorySettings = vi.fn((settings: typeof oldSettings | null, options?: { draftLevel?: string }) => {
+      if (settings) elements.campaignStoryMemoryLevel.value = options?.draftLevel || settings.level;
+    });
+    const api = vi.fn(async (_path: string, options?: { method?: string }) => options?.method === "PUT" ? pendingSave.promise : oldRead.promise);
+    type Functions = {
+      loadCampaignStoryMemory: (id: string, epoch: number, signal: AbortSignal) => Promise<unknown>;
+      saveCampaignStoryMemory: () => Promise<void>;
+      campaignSettingsSectionFeedback: (panelId: string) => HTMLElement | null;
+      setCampaignSettingsSectionFeedback: (panelId: string, status: string, message: string, epoch: number, id: string) => void;
+    };
+    let functions: Functions;
+    const campaignSectionLoader = createLegacySectionLoader({
+      loadSection: ({ signal }) => functions.loadCampaignStoryMemory(campaignId, 1, signal)
+    });
+    functions = managementFunctions<Functions>(["loadCampaignStoryMemory", "saveCampaignStoryMemory", "campaignSettingsSectionFeedback", "setCampaignSettingsSectionFeedback"], {
+      campaignSelectionRequest: 1,
+      selectedCampaign: { id: campaignId },
+      document,
+      campaignStoryMemorySettings: oldSettings,
+      campaignSectionLoader,
+      STORY_MEMORY_LEVELS: ["off", "standard", "enhanced", "max"],
+      elements,
+      api,
+      readCampaignStoryMemorySettings: (settings: typeof oldSettings) => settings,
+      renderCampaignStoryMemorySettings,
+      campaignMessage: vi.fn()
+    });
+    campaignSectionLoader.setSelection(campaignId, 1);
+
+    functions.setCampaignSettingsSectionFeedback("story", "loading", "Loading Story behavior…", 1, campaignId);
+    const saving = functions.saveCampaignStoryMemory();
+    await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(1));
+    expect(api).toHaveBeenCalledWith(`/api/v1/campaigns/${campaignId}/story-memory`, expect.objectContaining({ method: "PUT" }));
+    const sectionRead = campaignSectionLoader.loadSection("story").catch((error: unknown) => error);
+    await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+    pendingSave.resolve(savedSettings);
+    await saving;
+    expect(renderCampaignStoryMemorySettings).toHaveBeenCalledWith(savedSettings);
+    const sectionFeedback = functions.campaignSettingsSectionFeedback("story");
+    expect(sectionFeedback?.className).toBe("status hidden");
+    expect(sectionFeedback?.textContent).toBe("");
+
+    if (lateOutcome === "late success") oldRead.resolve(staleSettings);
+    else oldRead.reject(new Error("stale read failed after save"));
+    await oldRead.promise.catch(() => undefined);
+    await Promise.resolve();
+    await sectionRead;
+
+    expect(renderCampaignStoryMemorySettings).not.toHaveBeenCalledWith(staleSettings);
+    expect(renderCampaignStoryMemorySettings).toHaveBeenLastCalledWith(savedSettings);
+    expect(elements.campaignStoryMemoryLevel.value).toBe("enhanced");
+    expect(sectionFeedback?.className).toBe("status hidden");
+    expect(sectionFeedback?.textContent).toBe("");
+  });
+
+  it("keeps a failed current Story Memory reload private and disables stale controls until retry", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const savedSettings = { level: "standard", reviewMode: "off", availableLevels: ["off", "standard", "enhanced", "max"] };
+    const privateError = Object.assign(new Error("PRIVATE_STORY_MEMORY_BODY_CANARY"), { correlationId: "story-safe-789" });
+    const api = vi.fn().mockRejectedValueOnce(privateError).mockResolvedValueOnce(savedSettings);
+    const functions = managementFunctions<{
+      loadCampaignStoryMemory: (campaignId: string, selectionEpoch: number, signal?: AbortSignal) => Promise<unknown>;
+    }>([
+      "readCampaignStoryMemorySettings",
+      "campaignStoryMemoryDescription",
+      "renderCampaignStoryMemorySettings",
+      "safeWorkflowFailure",
+      "loadCampaignStoryMemory"
+    ], {
+      elements,
+      selectedCampaign: { id: "campaign-story-current" },
+      campaignSelectionRequest: 12,
+      campaignStoryMemorySettings: savedSettings,
+      STORY_MEMORY_LEVELS: ["off", "standard", "enhanced", "max"],
+      api
+    });
+    const status = elements.campaignStoryMemoryStatus as HTMLElement;
+    const level = elements.campaignStoryMemoryLevel as HTMLSelectElement;
+    const review = elements.campaignContinuityReviewEnabled as HTMLInputElement;
+    Object.defineProperty(level, "value", { value: "standard", writable: true, configurable: true });
+    Object.defineProperty(review, "checked", { value: false, writable: true, configurable: true });
+
+    await expect(functions.loadCampaignStoryMemory("campaign-story-current", 12)).rejects.toBe(privateError);
+    expect(status.textContent).toBe("Story Memory settings are unavailable. Reference: story-safe-789.");
+    expect(status.textContent).not.toContain("PRIVATE_STORY_MEMORY_BODY_CANARY");
+    expect(level.disabled).toBe(true);
+    expect(review.disabled).toBe(true);
+
+    await expect(functions.loadCampaignStoryMemory("campaign-story-current", 12)).resolves.toEqual(savedSettings);
+    expect(status.textContent).toContain("Saved level: standard");
+    expect(level.disabled).toBe(false);
+    expect(api).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps campaign feedback visible when a non-Overview panel is active", () => {
     const { document } = parseHTML(managementHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const managementSelectionErrorIsCurrent = managementFunctionWithBindings<(view: string) => boolean>("managementSelectionErrorIsCurrent", {
+      managementSelectionErrorIntent: null, managementNavigationIntent: 0, acceptedManagementRoute: null
+    });
     const functions = managementFunctions<{
       setCampaignSettingsPanel: (panelId: string) => void;
       campaignMessage: (message: string, type?: string) => void;
@@ -152,6 +658,8 @@ describe("Nexus management UI contracts", () => {
       elements,
       document,
       window: { matchMedia: () => ({ matches: false }) },
+      managementSelectionErrorIsCurrent,
+      dashboardWorkflowErrors: new Map(),
       CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"]
     });
 
@@ -275,11 +783,114 @@ describe("Nexus management UI contracts", () => {
 
   it("keeps context preview inputs separate from saved Semantic Retrieval settings", () => {
     expect(managementDocument.querySelector("#memoryQuery")?.closest("form")?.id).toBe("contextForm");
-    expect(managementDocument.querySelector("#budgetTokens")?.closest("form")?.id).toBe("contextForm");
+    const budgetTokens = managementDocument.querySelector<HTMLInputElement>("#budgetTokens");
+    expect(budgetTokens?.closest("form")?.id).toBe("contextForm");
+    expect(budgetTokens?.getAttribute("min")).toBe("512");
+    expect(budgetTokens?.getAttribute("max")).toBe("1000000");
+    expect(budgetTokens?.getAttribute("step")).toBe("1");
+    const clampBudget = managementFunctionWithBindings<(value: string) => number>("clampedMemoryContextBudget", {
+      MIN_MEMORY_CONTEXT_BUDGET_TOKENS: 512,
+      MAX_MEMORY_CONTEXT_BUDGET_TOKENS: 1_000_000,
+      DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS: 32_000
+    });
+    expect(clampBudget(budgetTokens?.value || "")).toBe(32_000);
+    expect(clampBudget("65536")).toBe(65_536);
     expect(managementDocument.querySelector("#compression")?.closest("form")?.id).toBe("contextForm");
     expect(managementDocument.querySelector("#embeddingProvider")?.closest("form")?.id).toBe("embeddingForm");
     expect(managementDocument.querySelector("#saveEmbeddingConfig")?.closest("form")?.id).toBe("embeddingForm");
     expect(managementDocument.querySelector("#memoryQuery")?.parentElement?.textContent).toContain("Preview retrieval query");
+  });
+
+  it("keeps explicit preview controls and prior-result slots outside optional Chronicle body loading", () => {
+    const chronicleBodies = [...managementDocument.querySelectorAll('[data-campaign-section-body="chronicle"]')];
+    expect(chronicleBodies.length).toBeGreaterThan(0);
+    for (const id of ["contextForm", "contextSummary", "contextPreview"]) {
+      const node = managementDocument.querySelector(`#${id}`);
+      expect(node).not.toBeNull();
+      expect(chronicleBodies.some((body) => body.contains(node))).toBe(false);
+    }
+  });
+
+  it("keeps current Chronicle errors private while preserving explicit retry", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const privateError = Object.assign(new Error("PRIVATE_CHRONICLE_BODY_CANARY"), { correlationId: "chronicle-safe-321" });
+    const loadSection = vi.fn(() => Promise.reject(privateError));
+    const functions = managementFunctions<{ loadCampaignSettingsSectionForPanel: (panelId: string) => void }>([
+      "campaignSettingsSectionFeedback",
+      "setCampaignSettingsSectionFeedback",
+      "safeWorkflowFailure",
+      "loadCampaignSettingsSectionForPanel"
+    ], {
+      document,
+      elements,
+      CAMPAIGN_SETTINGS_SECTIONS: { chronicle: "chronicle" },
+      CAMPAIGN_SETTINGS_SECTION_LABELS: { chronicle: "Chronicle" },
+      campaignSelectionRequest: 8,
+      selectedCampaign: { id: "campaign-current" },
+      campaignCoreReady: true,
+      campaignSettingsSectionLoadEpochs: new Map(),
+      campaignSectionLoader: { loadSection }
+    });
+
+    functions.loadCampaignSettingsSectionForPanel("chronicle");
+    await vi.waitFor(() => expect(document.querySelector("[data-campaign-section-feedback='chronicle']")?.textContent).toContain("Chronicle could not be loaded"));
+    const feedback = document.querySelector<HTMLElement>("[data-campaign-section-feedback='chronicle']");
+    expect(feedback?.textContent).toBe("Chronicle could not be loaded. Reference: chronicle-safe-321.Retry Chronicle");
+    expect(feedback?.textContent).not.toContain("PRIVATE_CHRONICLE_BODY_CANARY");
+    expect(loadSection).toHaveBeenCalledTimes(1);
+
+    feedback?.querySelector<HTMLButtonElement>("[data-action='retry-campaign-section']")?.click();
+    await vi.waitFor(() => expect(loadSection).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(feedback?.textContent).toContain("Chronicle could not be loaded"));
+    expect(feedback?.textContent).not.toContain("PRIVATE_CHRONICLE_BODY_CANARY");
+  });
+
+  it("shows safe preview errors and only retries after another explicit preview request", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const privateBodyError = Object.assign(new Error("PRIVATE_PREVIEW_BODY_CANARY"), { correlationId: "preview-safe-123" });
+    const malformedReferenceError = Object.assign(new Error("PRIVATE_PREVIEW_RETRY_CANARY"), { correlationId: "private/reference" });
+    const result = {
+      selectedCompression: "balanced",
+      retrieval: { mode: "hybrid" },
+      budget: { estimatedSelectedTokens: 120, configuredTokens: 32_000, truncated: false },
+      scopes: { chronicle: [] }
+    };
+    const api = vi.fn()
+      .mockRejectedValueOnce(privateBodyError)
+      .mockRejectedValueOnce(malformedReferenceError)
+      .mockResolvedValueOnce(result);
+    const functions = managementFunctions<{ previewContext: (event?: { preventDefault(): void }) => Promise<void> }>(["safeWorkflowFailure", "previewContext"], {
+      elements,
+      selectedCampaign: { id: "campaign-preview" },
+      campaignSelectionRequest: 5,
+      contextPreviewSequence: 0,
+      clampedMemoryContextBudget: (value: string) => Number(value),
+      api,
+      number: (value: number) => String(value)
+    });
+    const preview = elements.contextPreview as HTMLElement;
+    const summary = elements.contextSummary as HTMLElement;
+    const previewButton = elements.previewContext as HTMLButtonElement;
+    const event = { preventDefault: vi.fn() };
+
+    await functions.previewContext(event);
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(summary.textContent).toBe("Context preview unavailable. Reference: preview-safe-123.");
+    expect(summary.textContent).not.toContain("PRIVATE_PREVIEW_BODY_CANARY");
+    expect(previewButton.disabled).toBe(false);
+
+    await functions.previewContext(event);
+    expect(api).toHaveBeenCalledTimes(2);
+    expect(summary.textContent).toBe("Context preview unavailable.");
+    expect(summary.textContent).not.toContain("PRIVATE_PREVIEW_RETRY_CANARY");
+    expect(summary.textContent).not.toContain("private/reference");
+
+    await functions.previewContext(event);
+    expect(api).toHaveBeenCalledTimes(3);
+    expect(preview.textContent).toContain('"selectedCompression": "balanced"');
+    expect(summary.textContent).toContain("balanced compression selected");
   });
 
   it("keeps campaign persistence separate from migration and panel navigation", () => {
@@ -298,11 +909,19 @@ describe("Nexus management UI contracts", () => {
     const saveStart = managementScript.indexOf("async function saveSelectedCampaign");
     const saveEnd = managementScript.indexOf("\nasync function migrateSelectedCampaign", saveStart);
     const saveSource = managementScript.slice(saveStart, saveEnd);
-    expect(saveSource).toContain("title: elements.campaignTitle.value");
-    expect(saveSource).toContain("status: elements.campaignStatus.value");
-    expect(saveSource).toContain("textProviderProfileId: elements.campaignTextProvider.value || null");
-    expect(saveSource).toContain("turnControlStyle: savedTurnControlStyle(elements.campaignTurnControlStyle.value, selectedCampaign.turnControlStyle)");
-    expect(saveSource).toContain("storyLengthProfile: elements.campaignStoryLengthProfile.value");
+    const snapshotStart = managementScript.indexOf("function campaignSettingsSnapshot()");
+    const snapshotEnd = managementScript.indexOf("\nfunction ", snapshotStart + 1);
+    expect(snapshotStart).toBeGreaterThan(-1);
+    expect(snapshotEnd).toBeGreaterThan(snapshotStart);
+    const snapshotSource = managementScript.slice(snapshotStart, snapshotEnd);
+    expect(snapshotSource).toContain("title: elements.campaignTitle.value");
+    expect(snapshotSource).toContain("status: elements.campaignStatus.value");
+    expect(snapshotSource).toContain("textProviderProfileId: elements.campaignTextProvider.value || null");
+    expect(snapshotSource).toContain("turnControlStyle: elements.campaignTurnControlStyle.value");
+    expect(snapshotSource).toContain("storyLengthProfile: elements.campaignStoryLengthProfile.value");
+    expect(snapshotSource).toContain("storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)");
+    expect(saveSource).toContain("...snapshot");
+    expect(saveSource).toContain("savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle)");
     expect(saveSource).not.toContain("campaignWorldVersion");
   });
 
@@ -320,6 +939,9 @@ describe("Nexus management UI contracts", () => {
   it("clears campaign controls and restores focus when a refresh leaves no selection", async () => {
     const { document } = parseHTML(managementHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const managementSelectionErrorIsCurrent = managementFunctionWithBindings<(view: string) => boolean>("managementSelectionErrorIsCurrent", {
+      managementSelectionErrorIntent: null, managementNavigationIntent: 0, acceptedManagementRoute: null
+    });
     const functions = managementFunctions<{
       setCampaignSettingsPanel: (panelId: string) => void;
       setCampaignSettingsAvailability: (available: boolean) => void;
@@ -328,22 +950,33 @@ describe("Nexus management UI contracts", () => {
     }>([
       "setCampaignSettingsPanel",
       "setCampaignSettingsAvailability",
+      "setCampaignSettingsSectionContentVisibility",
+      "clearContextPreviewPresentation",
       "clearCampaignEditorSelection",
       "loadCampaigns"
     ], {
       elements,
       document,
       window: { matchMedia: () => ({ matches: false }) },
+      localStorage: { getItem: () => null, removeItem: vi.fn() },
       CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
       campaignSelectionRequest: 0,
       activeCampaignSettingsPanel: "overview",
       campaigns: [{ id: "deleted-campaign" }],
       selectedCampaign: { id: "deleted-campaign" },
+      campaignSettingsSnapshot: () => ({}),
+      canLeaveCampaignEditor: async () => true,
+      campaignEditGuard: { reset: () => undefined },
+      renderCampaignSaveFeedback: () => undefined,
+      renderManagementCampaigns: () => undefined,
       api: async () => ({ campaigns: [] }),
       renderDashboardCampaigns: () => undefined,
       loadDashboardStats: async () => undefined,
       updateStoryViewLink: () => undefined,
       renderIllustrationSettingsVisibility: () => undefined,
+      clearDashboardWorkflowError: () => undefined,
+      clearWorkflowReadFailure: () => undefined,
+      managementSelectionErrorIsCurrent,
       campaignStoryMemorySettings: null,
       renderCampaignStoryMemorySettings: () => undefined
     });
@@ -367,6 +1000,8 @@ describe("Nexus management UI contracts", () => {
     const campaignTabOverview = requiredElement<HTMLButtonElement>("campaignTabOverview");
     const campaignPanelOverview = requiredElement<HTMLElement>("campaignPanelOverview");
     const campaignPanelChronicle = requiredElement<HTMLElement>("campaignPanelChronicle");
+    const advancedBodies = [...document.querySelectorAll<HTMLElement>("[data-campaign-section-body]")]
+      .filter((body) => body.dataset.campaignSectionBody !== "overview");
     const campaignStatusMessage = requiredElement<HTMLElement>("campaignStatusMessage");
     const refreshCampaigns = requiredElement<HTMLButtonElement>("refreshCampaigns");
     let focusedControlId = "";
@@ -375,6 +1010,7 @@ describe("Nexus management UI contracts", () => {
     campaignEditorSummary.textContent = "active · Stale World v4 · Mira";
     campaignStatusMessage.textContent = "Stale campaign feedback";
     campaignStatusMessage.classList.remove("hidden");
+    for (const body of advancedBodies) body.classList.remove("hidden");
     functions.setCampaignSettingsPanel("chronicle");
 
     await functions.loadCampaigns("", { focusNoSelection: true });
@@ -387,6 +1023,8 @@ describe("Nexus management UI contracts", () => {
     expect(campaignTabOverview.getAttribute("aria-selected")).toBe("true");
     expect(campaignPanelOverview.hidden).toBe(false);
     expect(campaignPanelChronicle.hidden).toBe(true);
+    expect(advancedBodies.every((body) => body.classList.contains("hidden"))).toBe(true);
+    expect(advancedBodies.every((body) => body.dataset.selectionHidden === "true")).toBe(true);
     expect(campaignStatusMessage.textContent).toBe("");
     expect(campaignStatusMessage.classList.contains("hidden")).toBe(true);
     expect(focusedControlId).toBe("refreshCampaigns");
@@ -401,6 +1039,9 @@ describe("Nexus management UI contracts", () => {
       return element as T;
     };
     const campaignStatusMessage = requiredElement<HTMLElement>("campaignStatusMessage");
+    const managementSelectionErrorIsCurrent = managementFunctionWithBindings<(view: string) => boolean>("managementSelectionErrorIsCurrent", {
+      managementSelectionErrorIntent: null, managementNavigationIntent: 0, acceptedManagementRoute: null
+    });
     requiredElement<HTMLButtonElement>("refreshCampaigns").focus = () => undefined;
     const functions = managementFunctions<{
       setCampaignSettingsPanel: (panelId: string) => void;
@@ -412,6 +1053,7 @@ describe("Nexus management UI contracts", () => {
     }>([
       "setCampaignSettingsPanel",
       "setCampaignSettingsAvailability",
+      "clearContextPreviewPresentation",
       "clearCampaignEditorSelection",
       "loadCampaigns",
       "campaignMessage",
@@ -422,18 +1064,30 @@ describe("Nexus management UI contracts", () => {
       window: { matchMedia: () => ({ matches: false }) },
       CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
       campaignSelectionRequest: 0,
+      worldSelectionIntentEpoch: 0,
       activeCampaignSettingsPanel: "overview",
       campaigns: [{ id: "deleted-campaign" }],
       selectedCampaign: { id: "deleted-campaign", title: "Deleted campaign" },
+      campaignSettingsSnapshot: () => ({}),
       selectedWorld: null,
+      localStorage: { getItem: () => null, removeItem: vi.fn() },
+      canLeaveCampaignEditor: async () => true,
+      campaignEditGuard: { reset: () => undefined },
+      renderCampaignSaveFeedback: () => undefined,
       requestTypedDelete: async () => true,
       campaignStoryMemorySettings: null,
+      managementSelectionErrorIsCurrent,
+      addWorkflowRetry: () => undefined,
+      clearDashboardWorkflowError: () => undefined,
+      clearWorkflowReadFailure: () => undefined,
       renderCampaignStoryMemorySettings: () => undefined,
+      dashboardWorkflowErrors: new Map(),
       api: async (path: string, options?: { method?: string }) => {
         if (options?.method === "DELETE") return {};
         if (path === "/api/v1/campaigns") return { campaigns: [] };
         throw new Error(`Unexpected request: ${path}`);
       },
+      renderManagementCampaigns: () => undefined,
       renderDashboardCampaigns: () => undefined,
       loadDashboardStats: async () => undefined,
       updateStoryViewLink: () => undefined,
@@ -504,7 +1158,7 @@ describe("Nexus management UI contracts", () => {
 
   it("explains every structured character field and the AI organizer on hover", () => {
     expect(managementHtml).toContain('id="organizeCharacterProfile"');
-    expect(managementHtml).toContain("Uses the current profile, legacy guidance, and world lore, background, and canon");
+    expect(managementHtml).toContain("Manually asks AI to propose evidence-backed field assignments from the current profile, legacy guidance, and world lore");
     for (const fieldId of [
       "characterName", "characterGuidance", "characterAliases", "characterPronouns",
       "characterRole", "characterBackground", "characterPersonality", "characterMotivations",
@@ -554,7 +1208,7 @@ describe("Nexus management UI contracts", () => {
 
   it("places character organization status above the profile fields", () => {
     const statusIndex = managementHtml.indexOf('id="characterStatus"');
-    expect(statusIndex).toBeGreaterThan(managementHtml.indexOf('id="organizeCharacterProfile"'));
+    expect(statusIndex).toBeGreaterThan(managementHtml.indexOf('id="characterDialogDescription"'));
     expect(statusIndex).toBeLessThan(managementHtml.indexOf('id="characterAliases"'));
   });
 
@@ -600,6 +1254,7 @@ describe("Nexus management UI contracts", () => {
         { id: "text-1", name: "Story text", providerRole: "text", providerType: "openai_compatible", defaultModel: "story-model", requestTimeoutMs: 300000, enabled: true, isDefault: false }
       ],
       providerTypeLabel: () => "OpenAI compatible",
+      renderProviderReadiness: vi.fn(),
       beginProviderEdit: vi.fn(),
       enabledProviders: (role: string) => role === "text" ? [{ id: "text-1" }] : [],
       api,
@@ -806,7 +1461,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("function renderPlayableCharacterRoster(characters = [])");
     expect(managementScript).toContain("playableCharactersFromContent(worldAuthorWorkingContent)");
     expect(managementScript).not.toContain("Legacy/default character");
-    expect(managementScript).toContain("async function loadWorldVersionPlayableCharacters()");
+    expect(managementScript).toMatch(/async function loadWorldVersionPlayableCharacters\(selection = \{\}\)/);
     expect(managementScript).toContain('/playable-characters`');
     expect(managementScript).toContain("selectedCharacterId");
     expect(managementScript).toContain("const characterCount = Array.isArray(preview.characters) ? preview.characters.length : 0;");
@@ -833,7 +1488,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="characterGenerator" class="character-generator hidden"');
     expect(managementHtml).toContain('id="characterGeneratorPrompt"');
     expect(managementHtml).toContain('id="generateCharacter"');
-    expect(managementHtml).toContain("Generation fills this form only. Review and save the result to change the draft.");
+    expect(managementHtml).toContain("Generation only fills this form. Review and apply it; save the parent world draft to persist changes.");
     expect(managementCss).toContain(".character-dialog-modal");
     expect(managementCss).toContain(".character-edit-row");
     expect(managementCss).toContain(".character-roster-card:hover");
@@ -847,6 +1502,29 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("if (!name) throw new Error(\"Enter a character name.\");");
     expect(managementScript).toContain("if (!profileHasGuidance(profile) && !characterText)");
     expect(managementScript).toContain("must be a whole number from 1 to 99");
+  });
+
+  it("groups optional authoring fields without removing their serialized controls", () => {
+    const characterDialog = managementDocument.querySelector("#characterDialog")!;
+    const appearance = characterDialog.querySelector("#characterAppearance")!;
+    const mechanics = characterDialog.querySelector("#characterMechanics")!;
+    const imported = characterDialog.querySelector("#characterImportedGuidance")!;
+    expect(appearance.querySelector("#characterClothing")).not.toBeNull();
+    expect(mechanics.querySelector("#characterStats")).not.toBeNull();
+    expect(mechanics.querySelector("#characterTrackers")).not.toBeNull();
+    expect(imported.querySelector("#characterGuidance")?.hasAttribute("readonly")).toBe(true);
+    expect(imported.querySelector("#characterUnclassifiedNotes")).not.toBeNull();
+    expect(imported.querySelector("#organizeCharacterProfile")?.textContent).toContain("manual");
+    expect(characterDialog.querySelector(".character-playable-context")?.textContent).toContain("Playable character");
+    expect(managementDocument.querySelector("#world-author-overview #worldTitle")).not.toBeNull();
+    expect(managementDocument.querySelector("#worldGenreToneDisclosure #worldGenre")).not.toBeNull();
+    expect(managementDocument.querySelector("#worldGenreToneDisclosure #worldTone")).not.toBeNull();
+    const ids = [...managementDocument.querySelectorAll("[id]")].map((element) => element.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(managementScript).toContain("const profile = sourceProfile && typeof sourceProfile === \"object\"");
+    expect(managementScript).toContain("error.control = editor.querySelector('[data-character-field=\"value\"]')");
+    expect(managementScript).toContain("if (disclosure) disclosure.open = true;");
+    expect(managementScript).toContain("if (worldAuthorBusy) event.preventDefault();");
   });
 
   it("offers character generation only through an available default text model and never auto-saves it", () => {
@@ -877,12 +1555,18 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("let playableCharacterLoadSequence = 0;");
     expect(managementScript).toContain("let worldVersionCampaignReady = false;");
     expect(managementScript).not.toContain("worldCharacterLoadSequence");
-    expect(managementScript).toContain("sequence !== playableCharacterLoadSequence || worldVersionId !== selectedWorldVersionId()");
+    expect(managementScript).toContain("sequence === playableCharacterLoadSequence");
+    expect(managementScript).toContain("worldVersionId === selectedWorldVersionId()");
+    expect(managementScript).toContain("isCurrentWorldSelection(worldId, selectionEpoch)");
     expect(managementScript).toContain('worldVersionCampaignReady = hasReadinessAssessment ? response.readiness.ready : worldVersionCharacters.length > 0;');
     expect(managementScript).toContain('String(firstReadinessIssue?.message || "").trim()');
     expect(managementScript).toContain("function updateCampaignCreationAvailability()");
     expect(managementScript).toContain("elements.createCampaignModalBtn.disabled = !hasPublishedVersion || !worldVersionCampaignReady;");
-    expect(managementScript).toContain("elements.confirmCreateCampaign.disabled = createCampaignSubmitting || !hasPublishedVersion || !worldVersionCampaignReady || !hasRequiredSelection;");
+    expect(managementScript).toContain("const session = campaignCreationDialogSession;");
+    expect(managementScript).toContain("session?.characters?.some((character) => character.id === selectedCharacterId)");
+    expect(managementScript).toContain("campaignCreationScopeIsCurrent(session) && session.ready && characterIsAvailable");
+    expect(managementScript).toContain("!createCampaignSubmitting && !createCampaignCommitted");
+    expect(managementScript).toContain("elements.confirmCreateCampaign.disabled = !canSubmit;");
     expect(managementScript).toContain("This world version is not campaign-ready; update the draft and publish a new version");
     expect(managementScript).toContain("if (!worldVersionCampaignReady) {");
   });
@@ -921,8 +1605,15 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('value="extended">Extended — 1,200–2,000 words');
     expect(managementScript).toContain('storyLengthProfile: elements.campaignStoryLengthProfile.value');
     expect(managementScript).toContain('turnControlStyle: normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value)');
-    expect(managementScript).toContain('turnControlStyle: savedTurnControlStyle(elements.campaignTurnControlStyle.value, selectedCampaign.turnControlStyle)');
-    expect(managementScript).toContain('dataTransferView ? "data-transfer" : "worlds"');
+    expect(managementScript).toContain("function campaignSettingsSnapshot()");
+    expect(managementScript).toContain("...snapshot");
+    expect(managementScript).toContain("savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle)");
+    const applyViewStart = managementScript.indexOf("function applyManagementView(hash");
+    const applyViewEnd = managementScript.indexOf("\nfunction isManagementRouteHash", applyViewStart);
+    const applyViewSource = managementScript.slice(applyViewStart, applyViewEnd);
+    expect(applyViewSource).toContain("elements.providers.hidden = !providerView;");
+    expect(applyViewSource).toContain('elements["world-library"].hidden = route.view !== "worlds";');
+    expect(applyViewSource).toContain('elements["prompt-library"].hidden = !promptLibraryView;');
     expect(managementCss).toContain('body[data-management-view="dashboard"] .world-management');
     expect(managementCss).toContain('body[data-management-view="providers"] .world-management');
     expect(managementCss).toContain('body[data-management-view="worlds"] .provider-management');
@@ -964,20 +1655,30 @@ describe("Nexus management UI contracts", () => {
   it("saves a stale legacy Auto settings value as Action through the campaign handler", async () => {
     const { document } = parseHTML(managementHtml);
     const api = vi.fn().mockResolvedValue({});
-    const loadCampaigns = vi.fn().mockResolvedValue(undefined);
     const campaignMessage = vi.fn();
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
-    elements.campaignTurnControlStyle = Object.assign(document.createElement("input"), { value: "flexible_auto" });
+    const campaignTurnControlStyle = document.createElement("select");
+    Object.defineProperty(campaignTurnControlStyle, "value", { value: "flexible_auto", writable: true, configurable: true });
+    elements.campaignTurnControlStyle = campaignTurnControlStyle;
+    const savedTurnControlStyle = managementFunction<(value: unknown, existingStyle: unknown) => string>("savedTurnControlStyle");
     const { saveSelectedCampaign } = managementFunctions<{
       normalizedTurnControlStyle: (value: unknown) => string;
       savedTurnControlStyle: (value: unknown, existingStyle: unknown) => string;
       saveSelectedCampaign: (event: { preventDefault: () => void }) => Promise<void>;
-    }>(["normalizedTurnControlStyle", "savedTurnControlStyle", "saveSelectedCampaign"], {
+    }>(["normalizedTurnControlStyle", "saveSelectedCampaign"], {
       elements,
       api,
+      campaignSaveInProgress: false,
+      campaignSelectionRequest: 0,
       selectedCampaign: { id: "campaign-1", turnControlStyle: "flexible_auto", activeTurnNumber: 4, stateRevision: 7 },
-      loadCampaigns,
-      campaignMessage
+      campaigns: [{ id: "campaign-1", turnControlStyle: "flexible_auto" }],
+      savedTurnControlStyle,
+      campaignSettingsSnapshot: () => ({ title: "Campaign", status: "active", textProviderProfileId: null, turnControlStyle: campaignTurnControlStyle.value, storyLengthProfile: "standard", storyContextBudgetTokens: 32000 }),
+      campaignEditGuard: { markSaved: () => undefined, isDirty: () => false },
+      renderCampaignSaveFeedback: () => undefined,
+      campaignMessage,
+      renderManagementCampaigns: () => undefined,
+      renderDashboardCampaigns: () => undefined
     });
 
     await saveSelectedCampaign({ preventDefault: vi.fn() });
@@ -988,7 +1689,7 @@ describe("Nexus management UI contracts", () => {
       expectedActiveTurnNumber: 4,
       expectedStateRevision: 7
     });
-    expect(loadCampaigns).toHaveBeenCalledWith("campaign-1");
+    expect(api).toHaveBeenCalledTimes(1);
   });
 
   it("keeps an action-only campaign locked while saving unrelated metadata", () => {
@@ -1020,7 +1721,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("Use “Load story” in Campaigns");
     expect(storyScript).toContain("async function resumePendingGeneration()");
     expect(storyScript).toContain("const resumed = await resumePendingGeneration();");
-    expect(storyScript).toContain("if (!resumed && state.turns.length === 0 && !state.busy)");
+    expect(storyScript).toContain('const needsExplicitRecoveryDecision = state.generationRecovery?.status === "recoverable"');
+    expect(storyScript).toContain('|| state.generationRecovery?.status === "failed";');
+    expect(storyScript).toContain("if (!resumed && !needsExplicitRecoveryDecision && state.turns.length === 0 && !state.busy)");
     expect(managementScript).toContain("function parseImportJson(sourceText)");
     expect(managementScript).not.toContain("window.prompt");
   });
@@ -1043,7 +1746,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("expectedStateRevision: transferPreview.expectedStateRevision");
     expect(managementScript).toContain("sourceFingerprint: transferPreview.sourceFingerprint");
     expect(managementScript).toContain("idempotencyKey: transferIdempotencyKey");
-    expect(managementScript).toContain("await Promise.all([loadWorlds(), loadCampaigns(result.targetCampaignId)])");
+    expect(managementScript).toContain("const worldSelectionIntentEpochAtStart = worldSelectionIntentEpoch;");
+    expect(managementScript).toContain('loadWorlds("", { selectionIntentEpoch: worldSelectionIntentEpochAtStart })');
+    expect(managementScript).toContain('loadCampaigns(result.targetCampaignId, { explicitPreselect: true })');
     expect(managementScript).toContain("the original remains unchanged");
     expect(managementCss).toContain(".transfer-finding[data-severity=\"blocking\"]");
   });
@@ -1058,7 +1763,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("expectedVersionNumber: version.versionNumber");
     expect(managementScript).toContain("Remaining versions keep their existing numbers; gaps are not renumbered or reused.");
     expect(managementScript).toContain("error.details?.blockers");
-    expect(managementScript).toContain("await loadWorlds(worldId);");
+    expect(managementScript).toContain("await loadWorlds(worldId, { selectionIntentEpoch });");
     expect(managementScript).toContain("await loadCampaigns(selectedCampaignId);");
     expect(managementScript).toContain('elements.deleteWorldVersion.addEventListener("click", deleteSelectedWorldVersion);');
   });
@@ -1105,9 +1810,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="embeddingProgress" class="embedding-progress hidden"');
     expect(managementHtml).toContain('id="embeddingProgressBar"');
     expect(managementHtml).toContain('id="budgetTokensSource"');
-    expect(managementScript).toContain("async function monitorEmbeddingJob(jobId, campaignId, monitorState)");
+    expect(managementScript).toContain("async function monitorEmbeddingJob(jobId, campaignId, monitorState, selectionRequest)");
     expect(managementScript).toContain("renderEmbeddingJobProgress(job)");
-    expect(managementScript).toContain("await refreshCampaignMemoryMetrics()");
+    expect(managementScript).toContain("await refreshCampaignMemoryMetrics(selectionRequest)");
     expect(managementScript).toContain("function applyStoryProviderContextBudget()");
     expect(managementScript).toContain("textProvider?.contextWindowTokens");
     expect(managementScript).toContain("text provider's available input space");
@@ -1115,13 +1820,36 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).not.toContain("modelContextTokens - 512");
   });
 
-  it("keeps semantic indexing monitors campaign-scoped across campaign switches", () => {
-    expect(managementScript).toContain("const embeddingJobMonitors = new Map();");
-    expect(managementScript).toContain("if (embeddingJobMonitors.get(campaignId) !== monitorState) return null;");
-    expect(managementScript).toContain("if (selectedCampaign?.id === campaignId) renderEmbeddingJobProgress(job);");
-    expect(managementScript).toContain("if (selectedCampaign?.id === campaignId && existing.latestJob) renderEmbeddingJobProgress(existing.latestJob);");
-    expect(managementScript).toContain("if (selectedCampaign?.id !== campaignId) return job;");
-    expect(managementScript).not.toContain("sequence !== embeddingJobPollSequence || selectedCampaign?.id !== campaignId");
+  it("keeps semantic indexing monitors isolated across same-campaign selection epochs", async () => {
+    const campaignId = "11111111-1111-4111-8111-111111111111";
+    const api = vi.fn(async () => ({ status: "completed", progress: { totalParents: 4, processedParents: 4 } }));
+    const renderEmbeddingJobProgress = vi.fn();
+    const refreshCampaignMemoryMetrics = vi.fn(async () => null);
+    const embeddingJobMonitors = new Map();
+    const functions = managementFunctions<{
+      ensureEmbeddingJobProgress: (jobId: string, id: string, selectionRequest: number) => Promise<unknown>;
+    }>(["monitorEmbeddingJob", "ensureEmbeddingJobProgress"], {
+      api,
+      embeddingJobMonitors,
+      campaignSelectionRequest: 2,
+      selectedCampaign: { id: campaignId },
+      renderEmbeddingJobProgress,
+      refreshCampaignMemoryMetrics,
+      embeddingPollDelay: async () => undefined,
+      elements: { embeddingStatus: { className: "status", textContent: "" } }
+    });
+
+    const staleEpoch = functions.ensureEmbeddingJobProgress("job-1", campaignId, 1);
+    expect(embeddingJobMonitors.has(`${campaignId}:1`)).toBe(true);
+    const currentEpoch = functions.ensureEmbeddingJobProgress("job-2", campaignId, 2);
+    expect(embeddingJobMonitors.has(`${campaignId}:2`)).toBe(true);
+    await expect(staleEpoch).resolves.toBeNull();
+    await currentEpoch;
+
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(renderEmbeddingJobProgress).toHaveBeenCalledTimes(1);
+    expect(refreshCampaignMemoryMetrics).toHaveBeenCalledWith(2);
+    expect(embeddingJobMonitors.size).toBe(0);
   });
 
   it("exposes the shared Semantic Retrieval contract and safe health projection", () => {
@@ -1278,7 +2006,7 @@ describe("Nexus management UI contracts", () => {
     expect(storyScript).toContain("formatReportedCost(turn.reportedCost)");
     expect(managementHtml).toContain('id="campaignCostSection"');
     expect(managementHtml).toContain('id="campaignCostMetrics"');
-    expect(managementScript).toContain("async function refreshCampaignCostSummary()");
+    expect(managementScript).toContain("async function refreshCampaignCostSummary(");
     expect(managementScript).toContain("/cost-summary");
     expect(managementScript).toContain("No provider-reported cost data");
     expect(managementScript).toContain("text generation");
@@ -1287,14 +2015,55 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).not.toMatch(/cost tracking page/i);
   });
 
+  it("ignores a cost summary that completes after its captured section request is aborted", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const request = deferred<{ hasReportedCosts: boolean; totals: Array<{ amount: string; currency: string }> }>();
+    const campaignId = "11111111-1111-4111-8111-111111111111";
+    const api = vi.fn(() => request.promise);
+    const functions = managementFunctions<{
+      refreshCampaignCostSummary: (selectionEpoch: number, signal: AbortSignal) => Promise<unknown>;
+    }>(["refreshCampaignCostSummary", "appendCostMetric"], {
+      selectedCampaign: { id: campaignId },
+      campaignSelectionRequest: 9,
+      elements,
+      api,
+      document,
+      number: String,
+      money: (amount: string, currency: string) => `${currency} ${amount}`
+    });
+    const signalController = new AbortController();
+    const costSection = elements.campaignCostSection as HTMLElement;
+    const costMetrics = elements.campaignCostMetrics as HTMLElement;
+    costSection.classList.add("hidden");
+    const loading = functions.refreshCampaignCostSummary(9, signalController.signal);
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith(`/api/v1/campaigns/${campaignId}/cost-summary`, { signal: signalController.signal }));
+
+    signalController.abort();
+    request.resolve({ hasReportedCosts: true, totals: [{ amount: "10.00", currency: "USD" }] });
+    await loading;
+
+    expect(costSection.classList.contains("hidden")).toBe(true);
+    expect(costMetrics.childElementCount).toBe(0);
+  });
+
   it("uses one world authoring modal and defers durable covers until the draft is saved", () => {
     expect(managementHtml.match(/id="worldAuthorDialog"/g)).toHaveLength(1);
+    expect(managementHtml).toContain('id="worldAuthorSteps"');
+    expect(managementHtml).toContain('data-world-author-step="review"');
+    expect(managementHtml).toContain('id="worldAuthorPublishedReadiness"');
+    expect(managementHtml).toContain('id="worldAuthorStatus" class="status" role="status" aria-live="polite" tabindex="-1"');
+    expect(managementScript).toContain("function renderWorldAuthorChecklist()");
+    expect(managementScript).toContain("Lore fields are optional guidance.");
+    expect(managementScript).toContain("function setWorldAuthorSaveControlsBusy(session, busy)");
+    expect(managementScript).toContain("Retry server assessment");
+    expect(managementScript).toContain("current draft changes have not been assessed");
     expect(managementHtml).not.toContain('id="newWorldTitle"');
     expect(managementHtml).not.toContain('id="newWorldGenerateCover"');
     expect(managementHtml).toContain('id="worldCoverPreview"');
     expect(managementHtml).toContain('id="worldCoverPrompt"');
     expect(managementHtml).toContain('id="worldCoverLibraryMode"');
-    expect(managementScript).toContain("async function applyWorldCoverChoice(worldId)");
+    expect(managementScript).toMatch(/async function applyWorldCoverChoice\(worldId, selectionIntentEpoch\)/);
     expect(managementScript).toContain("async function monitorWorldCoverJob(jobId, worldId)");
     expect(managementScript).toContain("async function resumeWorldCoverJob(worldId, sequence)");
     expect(managementScript).toContain('/api/v1/worlds/${worldId}/cover-job');
@@ -1313,8 +2082,12 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="editWorldDraft"');
     expect(managementHtml.indexOf('id="worldAuthorDialog"')).toBeGreaterThan(managementHtml.indexOf('id="worldSelectionPanel"'));
     expect(managementScript).toContain("function renderManagementWorlds()");
-    expect(managementScript).toContain("function createManagementWorldCard(world)");
-    expect(managementScript).toContain('card.addEventListener("click", () => void selectWorld(world.id));');
+    expect(managementScript).toContain("function createManagementWorldCard(world, card = null)");
+    const cardStart = managementScript.indexOf("function createManagementWorldCard(world, card = null)");
+    const cardEnd = managementScript.indexOf("\nfunction clearWorldCollectionFilters()", cardStart);
+    const cardSource = managementScript.slice(cardStart, cardEnd);
+    expect(cardSource).toContain('acceptManagementRoute(managementSelectionHash("worlds", "world", world.id)');
+    expect(cardSource).toContain("UUID_ROUTE_PATTERN.test(String(world.id || \"\"))");
     expect(managementScript).toContain('openWorldAuthor("edit")');
   });
 
@@ -1457,7 +2230,17 @@ describe("Nexus management UI contracts", () => {
     expect(sourceChange).toContain("const sourceRefreshSequence = beginCampaignImportRefresh();");
     expect(sourceChange.indexOf("beginCampaignImportRefresh()")).toBeLessThan(sourceChange.indexOf("previewImportFile(selectedFile)"));
     expect(managementScript).toContain("Campaign Archive imports require a .zip backup.");
-    expect(managementScript).toContain("clearCampaignArchivePreview();\n      throw new Error");
+    const importFileStart = managementScript.indexOf("async function previewImportFile(file)");
+    const importFileEnd = managementScript.indexOf("\nfunction clipboardGuidance", importFileStart);
+    expect(importFileStart).toBeGreaterThan(-1);
+    expect(importFileEnd).toBeGreaterThan(importFileStart);
+    const importFileSource = managementScript.slice(importFileStart, importFileEnd);
+    const invalidArchiveCondition = importFileSource.indexOf('if (archiveSource && !lowerName.endsWith(".zip"))');
+    expect(invalidArchiveCondition).toBeGreaterThan(-1);
+    const invalidArchiveClear = importFileSource.indexOf("clearCampaignArchivePreview();", invalidArchiveCondition);
+    const invalidArchiveThrow = importFileSource.indexOf('throw new Error("Campaign Archive imports require a .zip backup.")', invalidArchiveClear);
+    expect(invalidArchiveClear).toBeGreaterThan(-1);
+    expect(invalidArchiveThrow).toBeGreaterThan(invalidArchiveClear);
     expect(managementScript).toContain("handleCampaignImportRefreshError");
     const destinationChangeStart = managementScript.indexOf('elements.campaignImportDestination.addEventListener("change"');
     const destinationChangeEnd = managementScript.indexOf("\nelements.importBrowserState", destinationChangeStart);
@@ -1573,5 +2356,348 @@ describe("Nexus management UI contracts", () => {
     elements.promptLibraryContent.value = "Changed instructions";
     functions.renderPromptLibrary(true);
     expect(elements.promptLibraryContent.value).toBe("Saved instructions");
+  });
+});
+
+function managementAsyncFunctionSource(name: string) {
+  const start = managementScript.indexOf(`function ${name}(`);
+  const definitionStart = managementScript.slice(start - 6, start) === "async " ? start - 6 : start;
+  const next = /\n(?:async )?function /.exec(managementScript.slice(start + 1));
+  const end = next ? start + 1 + next.index : -1;
+  if (start < 0 || end < 0) throw new Error(`Unable to locate management function ${name}.`);
+  return managementScript.slice(definitionStart, end);
+}
+
+function campaignMigrationHarness(initialCampaign: Record<string, unknown>, targetVersionId: string, detail: Promise<Record<string, unknown>>) {
+  const elements = { campaignWorldVersion: { value: targetVersionId }, migrateCampaign: { disabled: false } };
+  const detailEpochs = new Map<string, number>();
+  const getDashboardWorldDetails = vi.fn((worldId: string) => {
+    detailEpochs.set(worldId, (detailEpochs.get(worldId) || 0) + 1);
+    return detail;
+  });
+  const isDashboardWorldDetailRequestCurrent = (worldId: string, requestEpoch: number) => detailEpochs.get(worldId) === requestEpoch;
+  const api = vi.fn(async () => ({}));
+  const loadCampaigns = vi.fn(async () => undefined);
+  const campaignMessage = vi.fn();
+  const source = managementAsyncFunctionSource("migrateSelectedCampaign");
+  const implementation = Function(
+    "elements", "getDashboardWorldDetails", "dashboardWorldDetailRequestEpochs", "isDashboardWorldDetailRequestCurrent",
+    "window", "api", "loadCampaigns", "campaignMessage", "initialCampaign",
+    `let selectedCampaign = initialCampaign; let campaignSelectionRequest = 1; ${source}\nreturn { migrateSelectedCampaign, selectCampaign(campaign) { selectedCampaign = campaign; campaignSelectionRequest += 1; } };`
+  )(
+    elements,
+    getDashboardWorldDetails,
+    detailEpochs,
+    isDashboardWorldDetailRequestCurrent,
+    { confirm: vi.fn(() => true) },
+    api,
+    loadCampaigns,
+    campaignMessage,
+    initialCampaign
+  ) as {
+    migrateSelectedCampaign(): Promise<void>;
+    selectCampaign(campaign: Record<string, unknown>): void;
+  };
+  return { implementation, elements, detailEpochs, getDashboardWorldDetails, api, loadCampaigns, campaignMessage };
+}
+
+function transferVersionsHarness(details: (worldId: string) => Promise<Record<string, unknown>>) {
+  const elements = {
+    transferTargetWorld: { value: "" },
+    transferTargetVersion: {
+      disabled: false,
+      value: "",
+      options: [] as Array<{ label: string; value: string }>,
+      replaceChildren(...options: Array<{ label: string; value: string }>) { this.options = options; },
+      append(option: { label: string; value: string }) { this.options.push(option); }
+    },
+    transferPreviewSummary: { className: "status" }
+  };
+  const detailEpochs = new Map<string, number>();
+  const getDashboardWorldDetails = vi.fn((worldId: string) => {
+    detailEpochs.set(worldId, (detailEpochs.get(worldId) || 0) + 1);
+    return details(worldId);
+  });
+  const isDashboardWorldDetailRequestCurrent = (worldId: string, requestEpoch: number) => detailEpochs.get(worldId) === requestEpoch;
+  const resetTransferPreview = vi.fn((message?: string) => {
+    if (message) elements.transferPreviewSummary.className = "status error";
+    else elements.transferPreviewSummary.className = "status";
+  });
+  const source = managementAsyncFunctionSource("loadTransferTargetVersions");
+  const implementation = Function(
+    "elements", "getDashboardWorldDetails", "dashboardWorldDetailRequestEpochs", "isDashboardWorldDetailRequestCurrent", "resetTransferPreview", "Option",
+    `let transferTargetVersionsRequestEpoch = 0; ${source}\nreturn { loadTransferTargetVersions };`
+  )(
+    elements,
+    getDashboardWorldDetails,
+    detailEpochs,
+    isDashboardWorldDetailRequestCurrent,
+    resetTransferPreview,
+    class { constructor(public label: string, public value: string) {} }
+  ) as { loadTransferTargetVersions(): Promise<void> };
+  return { implementation, elements, detailEpochs, getDashboardWorldDetails, resetTransferPreview };
+}
+
+describe("campaign migration and transfer detail intent", () => {
+  it("enables migration only for a loaded, valid newer world version", () => {
+    const versionSelect = {
+      disabled: false,
+      value: "version-one",
+      options: [{ value: "version-one" }, { value: "version-two" }],
+      selectedOptions: [{ dataset: { versionNumber: "1" } }]
+    };
+    const migrateButton = { disabled: false };
+    const elements = { campaignWorldVersion: versionSelect, migrateCampaign: migrateButton };
+    const updateAvailability = managementFunctionWithBindings<() => void>("updateCampaignMigrationAvailability", {
+      elements,
+      selectedCampaign: { worldVersionId: "version-one", worldVersionNumber: 1 }
+    });
+
+    updateAvailability();
+    expect(migrateButton.disabled).toBe(true);
+    versionSelect.value = "version-two";
+    versionSelect.selectedOptions = [{ dataset: { versionNumber: "2" } }];
+    updateAvailability();
+    expect(migrateButton.disabled).toBe(false);
+    versionSelect.options = [{ value: "version-two" }];
+    updateAvailability();
+    expect(migrateButton.disabled).toBe(true);
+    versionSelect.options = [{ value: "version-one" }, { value: "version-two" }];
+    versionSelect.disabled = true;
+    updateAvailability();
+    expect(migrateButton.disabled).toBe(true);
+  });
+
+  const worldA = { id: "world-a", versions: [
+    { id: "version-one", versionNumber: 1 },
+    { id: "version-two", versionNumber: 2 },
+    { id: "version-three", versionNumber: 3 }
+  ] };
+  const campaignA = { id: "campaign-a", worldId: "world-a", worldVersionId: "version-one", worldVersionNumber: 1 };
+  const campaignB = { id: "campaign-b", worldId: "world-a", worldVersionId: "version-one", worldVersionNumber: 1 };
+
+  it("migrates the captured campaign and version when selection stays current", async () => {
+    const { implementation, api, loadCampaigns, campaignMessage } = campaignMigrationHarness(campaignA, "version-two", Promise.resolve(worldA));
+
+    await implementation.migrateSelectedCampaign();
+
+    expect(api).toHaveBeenCalledWith("/api/v1/campaigns/campaign-a/migrate-world", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ worldVersionId: "version-two", note: "Explicit migration from the World Library interface." })
+    }));
+    expect(loadCampaigns).toHaveBeenCalledWith("campaign-a", { selectionRequest: 1 });
+    expect(campaignMessage).toHaveBeenCalledWith(expect.stringContaining("Campaign migrated to world version 2."), "success");
+  });
+
+  it("does not migrate a newly selected campaign while the original world's details are pending", async () => {
+    let resolveDetail!: (world: Record<string, unknown>) => void;
+    const detail = new Promise<Record<string, unknown>>((resolve) => { resolveDetail = resolve; });
+    const { implementation, api, loadCampaigns } = campaignMigrationHarness(campaignA, "version-two", detail);
+
+    const migration = implementation.migrateSelectedCampaign();
+    implementation.selectCampaign(campaignB);
+    resolveDetail(worldA);
+    await migration;
+
+    expect(api).not.toHaveBeenCalled();
+    expect(loadCampaigns).not.toHaveBeenCalled();
+  });
+
+  it("does not submit a version chosen after migration started", async () => {
+    let resolveDetail!: (world: Record<string, unknown>) => void;
+    const detail = new Promise<Record<string, unknown>>((resolve) => { resolveDetail = resolve; });
+    const { implementation, elements, api } = campaignMigrationHarness(campaignA, "version-two", detail);
+
+    const migration = implementation.migrateSelectedCampaign();
+    elements.campaignWorldVersion.value = "version-three";
+    resolveDetail(worldA);
+    await migration;
+
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  it("keeps only the latest target world's versions when detail responses finish out of order", async () => {
+    let resolveA!: (world: Record<string, unknown>) => void;
+    let resolveB!: (world: Record<string, unknown>) => void;
+    const details = (worldId: string) => new Promise<Record<string, unknown>>((resolve) => {
+      if (worldId === "world-a") resolveA = resolve;
+      else resolveB = resolve;
+    });
+    const { implementation, elements } = transferVersionsHarness(details);
+
+    elements.transferTargetWorld.value = "world-a";
+    const first = implementation.loadTransferTargetVersions();
+    elements.transferTargetWorld.value = "world-b";
+    const second = implementation.loadTransferTargetVersions();
+    resolveB({ versions: [{ id: "version-b", versionNumber: 2 }] });
+    await second;
+    resolveA({ versions: [{ id: "version-a", versionNumber: 1 }] });
+    await first;
+
+    expect(elements.transferTargetVersion.options.map((option) => option.value)).toEqual(["", "version-b"]);
+    expect(elements.transferTargetVersion.disabled).toBe(false);
+  });
+
+  it("does not present a stale target-world detail failure", async () => {
+    let rejectA!: (error: Error) => void;
+    let resolveB!: (world: Record<string, unknown>) => void;
+    const details = (worldId: string) => worldId === "world-a"
+      ? new Promise<Record<string, unknown>>((_resolve, reject) => { rejectA = reject; })
+      : new Promise<Record<string, unknown>>((resolve) => { resolveB = resolve; });
+    const { implementation, elements, resetTransferPreview } = transferVersionsHarness(details);
+
+    elements.transferTargetWorld.value = "world-a";
+    const first = implementation.loadTransferTargetVersions();
+    elements.transferTargetWorld.value = "world-b";
+    const second = implementation.loadTransferTargetVersions();
+    resolveB({ versions: [{ id: "version-b", versionNumber: 2 }] });
+    await second;
+    const resetCount = resetTransferPreview.mock.calls.length;
+    rejectA(new Error("Stale world details failed"));
+    await first;
+
+    expect(resetTransferPreview).toHaveBeenCalledTimes(resetCount);
+    expect(elements.transferPreviewSummary.className).toBe("status");
+    expect(elements.transferTargetVersion.options.map((option) => option.value)).toEqual(["", "version-b"]);
+    expect(elements.transferTargetVersion.disabled).toBe(false);
+  });
+});
+
+describe("transfer target world detail epoch fences", () => {
+  it("does not install a target world's detail invalidated while versions are loading", async () => {
+    let resolveDetail!: (world: Record<string, unknown>) => void;
+    const detail = new Promise<Record<string, unknown>>((resolve) => { resolveDetail = resolve; });
+    const { implementation, elements, detailEpochs } = transferVersionsHarness(() => detail);
+    elements.transferTargetWorld.value = "world-a";
+
+    const loading = implementation.loadTransferTargetVersions();
+    detailEpochs.set("world-a", (detailEpochs.get("world-a") || 0) + 1);
+    resolveDetail({ versions: [{ id: "stale-version", versionNumber: 4 }] });
+    await loading;
+
+    expect(elements.transferTargetVersion.options.map((option) => option.value)).toEqual([""]);
+    expect(elements.transferTargetVersion.disabled).toBe(true);
+  });
+
+  it("does not present a failure from target detail invalidated while versions are loading", async () => {
+    let rejectDetail!: (error: Error) => void;
+    const detail = new Promise<Record<string, unknown>>((_resolve, reject) => { rejectDetail = reject; });
+    const { implementation, elements, detailEpochs, resetTransferPreview } = transferVersionsHarness(() => detail);
+    elements.transferTargetWorld.value = "world-a";
+
+    const loading = implementation.loadTransferTargetVersions();
+    detailEpochs.set("world-a", (detailEpochs.get("world-a") || 0) + 1);
+    const resetCount = resetTransferPreview.mock.calls.length;
+    rejectDetail(new Error("Stale invalidated detail failure"));
+    await loading;
+
+    expect(resetTransferPreview).toHaveBeenCalledTimes(resetCount);
+    expect(elements.transferTargetVersion.options.map((option) => option.value)).toEqual([""]);
+    expect(elements.transferTargetVersion.disabled).toBe(true);
+    expect(elements.transferPreviewSummary.className).toBe("status error");
+  });
+});
+
+function campaignImportVersionHarness(api: (path: string) => Promise<Record<string, unknown>>) {
+  const { document } = parseHTML(managementHtml);
+  const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
+  Object.defineProperty(elements.campaignImportWorld, "value", { value: "world-a", writable: true, configurable: true });
+  const worlds = [{ id: "world-a" }];
+  const detailCache = new Map<string, Record<string, unknown>>();
+  const detailRequests = new Map<string, Promise<Record<string, unknown>>>();
+  const detailEpochs = new Map<string, number>();
+  const statuses: Array<{ message: string; type: string }> = [];
+  const previewCalls = vi.fn(async () => undefined);
+  const clearPreview = vi.fn();
+  const sourceNames = [
+    "getDashboardWorldDetails", "beginDashboardWorldDetailRequest", "isDashboardWorldDetailRequestCurrent",
+    "invalidateDashboardWorldDetails", "isCampaignImportRefreshCurrent", "handleCampaignImportRefreshError", "loadCampaignImportVersions"
+  ];
+  const functions = managementFunctions<Record<string, (...args: never[]) => unknown>>(sourceNames, {
+    elements,
+    api,
+    worlds,
+    dashboardWorldDetails: detailCache,
+    dashboardWorldDetailRequests: detailRequests,
+    dashboardWorldDetailRequestEpochs: detailEpochs,
+    campaignArchiveImportActive: () => false,
+    refreshCampaignImportPreview: previewCalls,
+    clearCampaignArchivePreview: clearPreview,
+    setStatus: (message: string, type = "") => statuses.push({ message, type }),
+    campaignImportRefreshSequence: 1,
+    Option: function Option(label: string, value: string) {
+      const option = document.createElement("option");
+      option.textContent = label;
+      option.value = value;
+      return option;
+    }
+  });
+  return {
+    elements,
+    detailCache,
+    detailEpochs,
+    statuses,
+    previewCalls,
+    clearPreview,
+    load: functions.loadCampaignImportVersions as (sequence: number) => Promise<void>,
+    invalidate: functions.invalidateDashboardWorldDetails as (worldId: string) => void,
+    handleError: functions.handleCampaignImportRefreshError as (error: unknown, sequence: number) => void
+  };
+}
+
+describe("campaign import version detail generations", () => {
+  it("does not install or preview a destination invalidated while its detail read is pending", async () => {
+    let resolveDetail!: (detail: Record<string, unknown>) => void;
+    const pendingDetail = new Promise<Record<string, unknown>>((resolve) => { resolveDetail = resolve; });
+    const api = vi.fn()
+      .mockImplementationOnce(() => pendingDetail)
+      .mockResolvedValueOnce({ id: "world-a", versions: [{ id: "current-version", versionNumber: 2 }] });
+    const harness = campaignImportVersionHarness(api);
+
+    const loading = harness.load(1);
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith("/api/v1/worlds/world-a"));
+    harness.invalidate("world-a");
+    resolveDetail({ id: "world-a", versions: [{ id: "retired-version", versionNumber: 1 }] });
+    await loading;
+
+    expect([...harness.elements.campaignImportVersion.querySelectorAll("option")].map((option: HTMLOptionElement) => option.value)).toEqual(["", "current-version"]);
+    expect(harness.previewCalls).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not present a failure from an invalidated destination detail read", async () => {
+    let rejectDetail!: (error: Error) => void;
+    const pendingDetail = new Promise<Record<string, unknown>>((_resolve, reject) => { rejectDetail = reject; });
+    const api = vi.fn()
+      .mockImplementationOnce(() => pendingDetail)
+      .mockResolvedValueOnce({ id: "world-a", versions: [{ id: "current-version", versionNumber: 2 }] });
+    const harness = campaignImportVersionHarness(api);
+
+    const loading = harness.load(1).catch((error) => harness.handleError(error, 1));
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith("/api/v1/worlds/world-a"));
+    harness.invalidate("world-a");
+    rejectDetail(new Error("Retired destination detail failed"));
+    await loading;
+
+    expect(harness.statuses).toEqual([]);
+    expect([...harness.elements.campaignImportVersion.querySelectorAll("option")].map((option: HTMLOptionElement) => option.value)).toEqual(["", "current-version"]);
+    expect(harness.previewCalls).toHaveBeenCalledTimes(1);
+    expect(harness.clearPreview).not.toHaveBeenCalled();
+  });
+
+  it("keeps a current detail failure visible and lets an explicit retry load fresh versions", async () => {
+    const currentWorld = { id: "world-a", versions: [{ id: "current-version", versionNumber: 2 }] };
+    const api = vi.fn()
+      .mockRejectedValueOnce(new Error("Current destination detail failed"))
+      .mockResolvedValueOnce(currentWorld);
+    const harness = campaignImportVersionHarness(api);
+
+    await harness.load(1).catch((error) => harness.handleError(error, 1));
+    expect(harness.statuses).toHaveLength(1);
+    expect(harness.statuses[0]!.message).toContain("Current destination detail failed");
+    expect(harness.elements.campaignImportVersion.textContent).toContain("Could not load versions. Select the destination again to retry.");
+
+    await harness.load(1);
+    expect(api).toHaveBeenCalledTimes(2);
+    expect([...harness.elements.campaignImportVersion.querySelectorAll("option")].map((option: HTMLOptionElement) => option.value)).toEqual(["", "current-version"]);
+    expect(harness.previewCalls).toHaveBeenCalledTimes(1);
   });
 });

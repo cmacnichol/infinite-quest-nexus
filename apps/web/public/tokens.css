@@ -29,3 +29,55 @@
 body { margin: 0; min-height: 100vh; color: var(--text); }
 body, button, input, select, textarea { font: inherit; }
 a { color: var(--accent2); }
+
+/* Reader tokens stay attached to the Story reading surface, never the Nexus shell. */
+#storyContainer {
+  --reader-width-ch: 72;
+  --reader-font-size: 18px;
+  --reader-line-height: 1.7;
+}
+
+#storyContainer[data-reader-theme="dark"] {
+  --reader-surface: #10131b;
+  --reader-text: #f4f2ed;
+  --reader-muted: #c0c5cf;
+  --reader-link: #6edcff;
+  --reader-control-surface: #202633;
+  --reader-control-text: #f7f4ef;
+  --reader-border: #728097;
+  --reader-focus: #ffd166;
+  --reader-emphasis: #eed5ff;
+  --reader-strong: #ffe08a;
+  --reader-disabled-surface: #272d37;
+  --reader-disabled-text: #a8b0bc;
+}
+
+#storyContainer[data-reader-theme="light"] {
+  --reader-surface: #fffdf7;
+  --reader-text: #24282d;
+  --reader-muted: #555c66;
+  --reader-link: #075b8e;
+  --reader-control-surface: #eff1f4;
+  --reader-control-text: #1f242b;
+  --reader-border: #596273;
+  --reader-focus: #064f6e;
+  --reader-emphasis: #4b3765;
+  --reader-strong: #624600;
+  --reader-disabled-surface: #e8ebef;
+  --reader-disabled-text: #686e78;
+}
+
+#storyContainer[data-reader-theme="sepia"] {
+  --reader-surface: #f4ecd8;
+  --reader-text: #382e22;
+  --reader-muted: #5d4c36;
+  --reader-link: #63461e;
+  --reader-control-surface: #e8dcc3;
+  --reader-control-text: #30271d;
+  --reader-border: #6e5637;
+  --reader-focus: #62411e;
+  --reader-emphasis: #543c55;
+  --reader-strong: #604408;
+  --reader-disabled-surface: #e1d4b9;
+  --reader-disabled-text: #66583f;
+}

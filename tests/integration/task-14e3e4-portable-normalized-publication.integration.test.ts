@@ -451,6 +451,47 @@ integration("Task 14e3e4 portable normalized publication", () => {
     });
   }
 
+  type PreviewExpiryState = Readonly<{
+    operation_status: string;
+    operation_due: boolean;
+    operation_expires_at: Date;
+    work_status: string;
+    work_due: boolean;
+    work_expires_at: Date;
+    publication_state: string;
+    retirement_reason: string | null;
+    request_id: string | null;
+  }>;
+
+  async function waitForPreviewExpiry(operationId: string, timeoutMilliseconds = 5_000) {
+    const deadline = Date.now() + timeoutMilliseconds;
+    let lastState: Readonly<Record<string, unknown>> | null = null;
+    do {
+      const result = await pool.query<PreviewExpiryState>(
+        `SELECT operation.status AS operation_status,
+                operation.expires_at AS operation_expires_at,
+                operation.expires_at <= clock_timestamp() AS operation_due,
+                work.status AS work_status,
+                work.expires_at AS work_expires_at,
+                work.expires_at <= clock_timestamp() AS work_due,
+                mapping.publication_state,mapping.retirement_reason,mapping.request_id
+           FROM portable_import_operations operation
+           JOIN portable_import_work work
+             ON work.operation_id=operation.id AND work.owner_user_id=operation.owner_user_id
+           JOIN portable_import_normalized_asset_publications mapping
+             ON mapping.operation_id=operation.id AND mapping.owner_user_id=operation.owner_user_id
+          WHERE operation.id=$1 AND operation.owner_user_id=$2`,
+        [operationId, ownerUserId],
+      );
+      const state = result.rows[0] ?? null;
+      lastState = state;
+      if (state?.operation_due && state.work_due) return state;
+      if (Date.now() >= deadline) break;
+      await new Promise((resolvePoll) => setTimeout(resolvePoll, 50));
+    } while (true);
+    throw new Error("Timed out waiting for scoped preview operation/work expiry: " + JSON.stringify(lastState));
+  }
+
   async function previewOperation(
     importKind: "campaign_zip" | "legacy_story" = "campaign_zip",
     ttlMilliseconds = 3_600_000,
@@ -512,7 +553,11 @@ integration("Task 14e3e4 portable normalized publication", () => {
     const authorityFingerprint = hash(`authority-${crypto.randomUUID()}`);
     const previewToken = `preview-${crypto.randomUUID()}`;
     const commitIdempotencyKeyHash = hash(`commit-${crypto.randomUUID()}`);
-    const expiresAt = new Date(Date.now() + ttlMilliseconds);
+    const expiry = await pool.query<{ expires_at: Date }>(
+      "SELECT clock_timestamp() + ($1::int * interval '1 millisecond') AS expires_at",
+      [ttlMilliseconds],
+    );
+    const expiresAt = expiry.rows[0]!.expires_at;
     const operation = await pool.query<{ id: string }>(
       `INSERT INTO portable_import_operations (
          owner_user_id,staged_input_id,import_kind,preview_token_hash,content_fingerprint,
@@ -644,7 +689,16 @@ integration("Task 14e3e4 portable normalized publication", () => {
       normalized.coordinator,
     );
 
-    await new Promise((resolveWait) => setTimeout(resolveWait, 1_100));
+    const due = await waitForPreviewExpiry(scope.operationId);
+    expect(due).toMatchObject({
+      operation_due: true,
+      work_due: true,
+      operation_status: "previewed",
+      work_status: "running",
+      publication_state: "reservation_intent",
+      retirement_reason: null,
+      request_id: null
+    });
     await expect(authority.expireDueWork(10)).resolves.toBeGreaterThanOrEqual(1);
     await expect(pool.query(
       `SELECT operation.status AS operation_status,work.status AS work_status,

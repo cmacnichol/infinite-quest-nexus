@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+const legacyOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
+const webNextOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}`;
 const NOW = "2026-08-25T12:00:00.000Z";
 const OWNER_A = "11111111-1111-4111-8111-111111111111";
 const OWNER_B = "22222222-2222-4222-8222-222222222222";
@@ -79,6 +81,11 @@ const report = {
 
 function json(route: Route, value: unknown, status = 200): Promise<void> {
   return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
+}
+
+async function waitForLegacyManagementReady(page: Page, surfaceName: string): Promise<void> {
+  if (surfaceName !== "legacy Nexus") return;
+  await expect(page.locator('#managementInteractiveRoot:not([inert])[aria-busy="false"]')).toBeVisible();
 }
 
 async function installDataTransferApi(
@@ -349,7 +356,7 @@ async function installRecoveryFenceApi(
 const surfaces = [
   {
     name: "replacement",
-    url: "http://127.0.0.1:43174/app/data-transfer",
+    url: `${webNextOrigin}/app/data-transfer`,
     file: "#system-archive-file",
     preview: '[data-system-preview="ready"]',
     commit: '[data-action="commit-system-import"]',
@@ -363,7 +370,7 @@ const surfaces = [
   },
   {
     name: "legacy Nexus",
-    url: "http://127.0.0.1:43173/nexus/index.html#data-transfer",
+    url: `${legacyOrigin}/nexus/index.html#data-transfer`,
     file: "#systemArchiveFile",
     preview: '#systemImportPreview[data-system-preview="ready"]',
     commit: "#commitSystemImport",
@@ -607,6 +614,7 @@ for (const surface of surfaces) {
   test(`${surface.name} recovers a mocked ambiguous import commit after reload`, async ({ page }) => {
     const evidence = await installDataTransferApi(page, true, { disconnectFirstImportCommit: true });
     await page.goto(surface.url);
+    await waitForLegacyManagementReady(page, surface.name);
     await page.locator(surface.file).setInputFiles({
       name: "ambiguous-owner-system.zip",
       mimeType: "application/zip",
@@ -621,6 +629,7 @@ for (const surface of surfaces) {
     expect(operationKeys).toHaveLength(1);
 
     await page.reload();
+    await waitForLegacyManagementReady(page, surface.name);
     await expect(page.locator(surface.report)).toBeVisible();
     expect(evidence.importCommits).toHaveLength(2);
     expect(evidence.importCommits[1]?.idempotencyKey).toBe(evidence.importCommits[0]?.idempotencyKey);
@@ -667,6 +676,7 @@ for (const surface of surfaces) {
       holdFirstUploadChunk: true
     });
     await page.goto(surface.url);
+    await waitForLegacyManagementReady(page, surface.name);
     await page.locator(surface.file).setInputFiles({
       name: "accessible-progress.zip",
       mimeType: "application/zip",
@@ -686,6 +696,7 @@ for (const surface of surfaces) {
   test(`${surface.name} clears a cancelled durable upload so it cannot be cancelled twice`, async ({ page }) => {
     const evidence = await installDataTransferApi(page, true, { holdFirstUploadChunk: true });
     await page.goto(surface.url);
+    await waitForLegacyManagementReady(page, surface.name);
     await page.locator(surface.file).setInputFiles({
       name: "cancel-durable-upload.zip",
       mimeType: "application/zip",
@@ -713,10 +724,12 @@ for (const surface of surfaces) {
       buffer: Buffer.from("system")
     };
     await page.goto(surface.url);
+    await waitForLegacyManagementReady(page, surface.name);
     await page.locator(surface.file).setInputFiles(selectedArchive);
     await expect(page.locator(surface.error)).toBeVisible();
 
     await page.reload();
+    await waitForLegacyManagementReady(page, surface.name);
     await page.locator(surface.file).setInputFiles(selectedArchive);
     await expect(page.locator(surface.preview)).toBeVisible();
     expect(evidence.uploadsCreated).toBe(1);
@@ -726,7 +739,7 @@ for (const surface of surfaces) {
 
 test("legacy #imports deep link opens the unified Data Transfer view", async ({ page }) => {
   await installDataTransferApi(page, false);
-  await page.goto("http://127.0.0.1:43173/nexus/index.html#imports");
+  await page.goto(`${legacyOrigin}/nexus/index.html#imports`);
   await expect(page.locator("body")).toHaveAttribute("data-management-view", "data-transfer");
   await expect(page.locator("#imports")).toBeVisible();
   await expect(page.locator("#navDataTransfer")).toHaveClass(/active/);

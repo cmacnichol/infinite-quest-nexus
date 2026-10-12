@@ -1,0 +1,384 @@
+import { readFileSync } from "node:fs";
+import { parseHTML } from "linkedom";
+import { describe, expect, it, vi } from "vitest";
+
+const managementHtml = readFileSync("apps/web/public/index.html", "utf8");
+const managementScript = readFileSync("apps/web/src/nexus.js", "utf8");
+
+function functionSources(names: string[]) {
+  return names.map((name) => {
+    const match = new RegExp(`(?:async )?function ${name}\\(`, "u").exec(managementScript);
+    if (!match || match.index === undefined) throw new Error(`Unable to locate management function ${name}.`);
+    const next = /\n(?:async )?function /.exec(managementScript.slice(match.index + 1));
+    const end = next ? match.index + 1 + next.index : managementScript.length;
+    return managementScript.slice(match.index, end);
+  });
+}
+
+function selectionHarness({
+  api,
+  initialWorld = null,
+  authorOpen = false,
+  dismiss = async () => "dismissed"
+}: {
+  api: (path: string) => Promise<Record<string, unknown>>;
+  initialWorld?: Record<string, unknown> | null;
+  authorOpen?: boolean;
+  dismiss?: () => Promise<"dismissed" | "stayed">;
+}) {
+  const { document } = parseHTML(managementHtml);
+  const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
+  elements.worldAuthorDialog.open = authorOpen;
+  const messages: string[] = [];
+  const loadCharacters = vi.fn(async () => undefined);
+  const detailCache = new Map<string, Record<string, unknown>>();
+  const detailRequests = new Map<string, Promise<Record<string, unknown>>>();
+  const detailEpochs = new Map<string, number>();
+  const availableWorlds = [world("world-a", "World Alpha"), world("world-b", "World Beta")];
+  const source = functionSources(["selectWorld", "isCurrentWorldSelection", "getDashboardWorldDetails", "beginDashboardWorldDetailRequest", "isDashboardWorldDetailRequestCurrent"]);
+  const names = [
+    "elements", "api", "dismissEditDialog", "worldAuthorBusy", "editDialogSessions", "renderManagementWorlds",
+    "setWorldEditorDisabled", "number", "Option", "updateWorldVersionDeleteAvailability", "updateCharacterGeneratorAvailability",
+    "loadWorldVersionPlayableCharacters", "worldMessage", "resumeWorldCoverJob", "initialWorld", "worlds",
+    "dashboardWorldDetails", "dashboardWorldDetailRequests", "dashboardWorldDetailRequestEpochs", "safeWorkflowFailure"
+  ];
+  const implementation = Function(
+    ...names,
+    `let selectedWorld = initialWorld; let worldSelectionId = ""; let worldSelectionEpoch = 0; let worldSelectionIntentEpoch = 0; let worldCoverJobPollSequence = 0;\n${source.join("\n")}\nreturn { selectWorld, isCurrentWorldSelection, get state() { return { selectedWorld, worldSelectionId, worldSelectionEpoch }; } };`
+  )(
+    elements,
+    api,
+    dismiss,
+    false,
+    new WeakMap(),
+    () => undefined,
+    () => undefined,
+    (value: unknown) => String(value),
+    function Option(label: string, value: string) {
+      const option = document.createElement("option");
+      option.textContent = label;
+      option.value = value;
+      return option;
+    },
+    () => undefined,
+    () => undefined,
+    loadCharacters,
+    (message: string) => messages.push(message),
+    async () => undefined,
+    initialWorld,
+    availableWorlds,
+    detailCache,
+    detailRequests,
+    detailEpochs,
+    (fallback: string, error: unknown) => (error as Error)?.message || fallback
+  ) as {
+    selectWorld(worldId: string): Promise<void>;
+    isCurrentWorldSelection(worldId: string, epoch: number): boolean;
+    state: { selectedWorld: Record<string, unknown> | null; worldSelectionId: string; worldSelectionEpoch: number };
+  };
+  return { implementation, elements, messages, loadCharacters };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function world(id: string, title: string) {
+  return { id, title, status: "active", draftRevision: 1, versions: [], campaigns: [] };
+}
+
+function coverMonitorHarness(api: () => Promise<Record<string, unknown>>, initialWorld: Record<string, unknown>) {
+  const invalidated: string[] = [];
+  const invalidateDashboardWorldDetails = vi.fn((worldId: string) => invalidated.push(worldId));
+  const renderWorldCoverJobStatus = vi.fn();
+  const renderDashboardWorlds = vi.fn();
+  const renderManagementWorlds = vi.fn();
+  const source = functionSources(["monitorWorldCoverJobWithSequence"]);
+  const implementation = Function(
+    "api", "invalidateDashboardWorldDetails", "renderWorldCoverJobStatus", "worlds", "renderDashboardWorlds", "renderManagementWorlds", "imageJobDelay", "initialWorld",
+    `let selectedWorld = initialWorld; let worldCoverJobPollSequence = 1;\n${source.join("\n")}\nreturn { monitorWorldCoverJobWithSequence, setSelection(world, sequence) { selectedWorld = world; worldCoverJobPollSequence = sequence; }, get selectedWorld() { return selectedWorld; } };`
+  )(
+    api,
+    invalidateDashboardWorldDetails,
+    renderWorldCoverJobStatus,
+    [initialWorld],
+    renderDashboardWorlds,
+    renderManagementWorlds,
+    async () => undefined,
+    initialWorld
+  ) as {
+    monitorWorldCoverJobWithSequence(jobId: string, worldId: string, sequence: number): Promise<Record<string, unknown> | null>;
+    setSelection(world: Record<string, unknown>, sequence: number): void;
+    selectedWorld: Record<string, unknown>;
+  };
+  return { implementation, invalidated, renderWorldCoverJobStatus, renderDashboardWorlds, renderManagementWorlds };
+}
+
+describe("legacy world navigation", () => {
+  it("keeps the latest selected world's details after reversed responses", async () => {
+    const pendingA = deferred<Record<string, unknown>>();
+    const api = vi.fn((path: string) => path.endsWith("world-a") ? pendingA.promise : Promise.resolve(world("world-b", "World Beta")));
+    const { implementation, elements, loadCharacters } = selectionHarness({ api });
+
+    const selectA = implementation.selectWorld("world-a");
+    const selectB = implementation.selectWorld("world-b");
+    await selectB;
+    pendingA.resolve(world("world-a", "World Alpha"));
+    await selectA;
+
+    expect(implementation.state.selectedWorld?.id).toBe("world-b");
+    expect(elements.worldEditorTitle.textContent).toBe("World Beta");
+    expect(loadCharacters).toHaveBeenCalledWith({ worldId: "world-b", selectionEpoch: 2 });
+  });
+
+  it("ignores a stale selection error without reporting it over the current world", async () => {
+    const pendingA = deferred<Record<string, unknown>>();
+    const api = vi.fn((path: string) => path.endsWith("world-a") ? pendingA.promise : Promise.resolve(world("world-b", "World Beta")));
+    const { implementation, messages } = selectionHarness({ api });
+
+    const selectA = implementation.selectWorld("world-a");
+    const selectB = implementation.selectWorld("world-b");
+    await selectB;
+    pendingA.reject(new Error("World Alpha request failed"));
+    await selectA;
+
+    expect(implementation.state.selectedWorld?.id).toBe("world-b");
+    expect(messages).not.toContain("World Alpha request failed");
+  });
+
+  it("does not request a new world while the dirty editor decision says Stay", async () => {
+    const api = vi.fn(async () => world("world-b", "World Beta"));
+    const dismiss = vi.fn(async () => "stayed" as const);
+    const { implementation } = selectionHarness({ api, initialWorld: world("world-a", "World Alpha"), authorOpen: true, dismiss });
+
+    await implementation.selectWorld("world-b");
+
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(api).not.toHaveBeenCalled();
+    expect(implementation.state.selectedWorld?.id).toBe("world-a");
+    expect(implementation.state.worldSelectionEpoch).toBe(0);
+  });
+
+  it("invalidates only the changed world's cache and fences its pending detail response", () => {
+    const details = new Map([["world-a", { title: "Old Alpha" }], ["world-b", { title: "Current Beta" }]]);
+    const epochs = new Map<string, number>();
+    const names = ["beginDashboardWorldDetailRequest", "isDashboardWorldDetailRequestCurrent", "invalidateDashboardWorldDetails"];
+    const implementation = Function(
+      "dashboardWorldDetails", "dashboardWorldDetailRequestEpochs",
+      `${functionSources(names).join("\n")}\nreturn { beginDashboardWorldDetailRequest, isDashboardWorldDetailRequestCurrent, invalidateDashboardWorldDetails };`
+    )(details, epochs) as {
+      beginDashboardWorldDetailRequest(worldId: string): number;
+      isDashboardWorldDetailRequestCurrent(worldId: string, requestEpoch: number): boolean;
+      invalidateDashboardWorldDetails(worldId: string): void;
+    };
+    const oldRequest = implementation.beginDashboardWorldDetailRequest("world-a");
+
+    implementation.invalidateDashboardWorldDetails("world-a");
+
+    expect(implementation.isDashboardWorldDetailRequestCurrent("world-a", oldRequest)).toBe(false);
+    expect(details.has("world-a")).toBe(false);
+    expect(details.get("world-b")).toEqual({ title: "Current Beta" });
+  });
+
+  it("invalidates a completed stale cover job's captured world without mutating the newer selection", async () => {
+    const pendingJob = deferred<Record<string, unknown>>();
+    const api = vi.fn(() => pendingJob.promise);
+    const worldA = { ...world("world-a", "World Alpha"), imageUrl: "old-cover" };
+    const worldB = { ...world("world-b", "World Beta"), imageUrl: "beta-cover" };
+    const { implementation, invalidated, renderWorldCoverJobStatus, renderDashboardWorlds, renderManagementWorlds } = coverMonitorHarness(api, worldA);
+
+    const monitoring = implementation.monitorWorldCoverJobWithSequence("cover-job-a", "world-a", 1);
+    implementation.setSelection(worldB, 2);
+    const completedJob = { id: "cover-job-a", status: "completed", assetUrl: "new-cover" };
+    pendingJob.resolve(completedJob);
+
+    await expect(monitoring).resolves.toEqual(completedJob);
+    expect(invalidated).toEqual(["world-a"]);
+    expect(implementation.selectedWorld).toEqual(worldB);
+    expect(renderWorldCoverJobStatus).not.toHaveBeenCalled();
+    expect(renderDashboardWorlds).not.toHaveBeenCalled();
+    expect(renderManagementWorlds).not.toHaveBeenCalled();
+  });
+
+  it("does not invalidate a world cache when its cover job fails", async () => {
+    const worldA = world("world-a", "World Alpha");
+    const api = vi.fn(async () => ({ status: "failed", errorMessage: "Synthetic cover failure" }));
+    const { implementation, invalidated } = coverMonitorHarness(api, worldA);
+
+    await expect(implementation.monitorWorldCoverJobWithSequence("cover-job-a", "world-a", 1)).rejects.toThrow("Synthetic cover failure");
+    expect(invalidated).toEqual([]);
+  });
+});
+
+function retiredCoverSelectionHarness(api: (path: string) => Promise<Record<string, unknown>>) {
+  const { document } = parseHTML(managementHtml);
+  const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
+  const messages: string[] = [];
+  const initialWorld = { ...world("world-a", "World Alpha"), imageUrl: "prior-cover.png" };
+  const availableWorlds = [initialWorld, world("world-b", "World Beta")];
+  const detailCache = new Map<string, Record<string, unknown>>();
+  const detailRequests = new Map<string, Promise<Record<string, unknown>>>();
+  const detailEpochs = new Map<string, number>();
+  const editorDisabled = vi.fn();
+  const source = functionSources([
+    "selectWorld", "isCurrentWorldSelection", "getDashboardWorldDetails", "beginDashboardWorldDetailRequest",
+    "isDashboardWorldDetailRequestCurrent", "invalidateDashboardWorldDetails", "monitorWorldCoverJobWithSequence"
+  ]);
+  const implementation = Function(
+    "elements", "api", "dismissEditDialog", "worldAuthorBusy", "editDialogSessions", "renderManagementWorlds", "setWorldEditorDisabled",
+    "number", "Option", "updateWorldVersionDeleteAvailability", "updateCharacterGeneratorAvailability", "loadWorldVersionPlayableCharacters",
+    "worldMessage", "resumeWorldCoverJob", "initialWorld", "worlds", "dashboardWorldDetails", "dashboardWorldDetailRequests",
+    "dashboardWorldDetailRequestEpochs", "safeWorkflowFailure", "renderWorldCoverJobStatus", "renderDashboardWorlds", "imageJobDelay",
+    `let selectedWorld = initialWorld; let worldSelectionId = ""; let worldSelectionEpoch = 0; let worldSelectionIntentEpoch = 0; let worldCoverJobPollSequence = 1;\n${source.join("\n")}\nreturn {
+      selectWorld,
+      monitorWorldCoverJobWithSequence,
+      get state() { return { selectedWorld, worldSelectionId, worldSelectionEpoch }; },
+      get detailEpoch() { return dashboardWorldDetailRequestEpochs.get("world-a"); },
+      invalidate: invalidateDashboardWorldDetails
+    };`
+  )(
+    elements,
+    api,
+    async () => "dismissed",
+    false,
+    new WeakMap(),
+    () => undefined,
+    editorDisabled,
+    (value: unknown) => String(value),
+    function Option(label: string, value: string) {
+      const option = document.createElement("option");
+      option.textContent = label;
+      option.value = value;
+      return option;
+    },
+    () => undefined,
+    () => undefined,
+    async () => undefined,
+    (message: string) => messages.push(message),
+    async () => undefined,
+    initialWorld,
+    availableWorlds,
+    detailCache,
+    detailRequests,
+    detailEpochs,
+    (fallback: string, error: unknown) => (error as Error)?.message || fallback,
+    () => undefined,
+    () => undefined,
+    async () => undefined
+  ) as {
+    selectWorld(worldId: string): Promise<void>;
+    monitorWorldCoverJobWithSequence(jobId: string, worldId: string, sequence: number): Promise<Record<string, unknown> | null>;
+    state: { selectedWorld: Record<string, unknown> | null; worldSelectionId: string; worldSelectionEpoch: number };
+    detailEpoch: number | undefined;
+    invalidate(worldId: string): void;
+  };
+  return { implementation, elements, messages, editorDisabled };
+}
+
+describe("world selection after a completed cover mutation", () => {
+  it("retries a selected world's detail after a completed retired cover poll invalidates it", async () => {
+    const pendingCover = deferred<Record<string, unknown>>();
+    const pendingRetiredDetail = deferred<Record<string, unknown>>();
+    let detailReads = 0;
+    const api = vi.fn((path: string) => {
+      if (path.startsWith("/api/v1/image-jobs/")) return pendingCover.promise;
+      detailReads += 1;
+      return detailReads === 1 ? pendingRetiredDetail.promise : Promise.resolve({ ...world("world-a", "World Alpha"), imageUrl: "new-cover.png" });
+    });
+    const { implementation, messages, editorDisabled } = retiredCoverSelectionHarness(api);
+
+    const oldCoverPoll = implementation.monitorWorldCoverJobWithSequence("cover-a", "world-a", 1);
+    const selection = implementation.selectWorld("world-a");
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith("/api/v1/worlds/world-a"));
+    pendingCover.resolve({ id: "cover-a", status: "completed", assetUrl: "new-cover.png" });
+    await oldCoverPoll;
+    pendingRetiredDetail.resolve({ ...world("world-a", "World Alpha"), imageUrl: "old-cover.png" });
+    await selection;
+
+    expect(detailReads).toBe(2);
+    expect(implementation.state.selectedWorld?.imageUrl).toBe("new-cover.png");
+    expect(messages.filter((message) => message === "World selected. Draft editing opens in the authoring modal.")).toHaveLength(1);
+    expect(editorDisabled).toHaveBeenLastCalledWith(false);
+  });
+
+  it("retries after a retired detail error without leaving the selected world loading", async () => {
+    const pendingCover = deferred<Record<string, unknown>>();
+    const pendingRetiredDetail = deferred<Record<string, unknown>>();
+    let detailReads = 0;
+    const api = vi.fn((path: string) => {
+      if (path.startsWith("/api/v1/image-jobs/")) return pendingCover.promise;
+      detailReads += 1;
+      return detailReads === 1 ? pendingRetiredDetail.promise : Promise.resolve({ ...world("world-a", "World Alpha"), imageUrl: "new-cover.png" });
+    });
+    const { implementation, messages, editorDisabled } = retiredCoverSelectionHarness(api);
+
+    const oldCoverPoll = implementation.monitorWorldCoverJobWithSequence("cover-a", "world-a", 1);
+    const selection = implementation.selectWorld("world-a");
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith("/api/v1/worlds/world-a"));
+    pendingCover.resolve({ id: "cover-a", status: "completed", assetUrl: "new-cover.png" });
+    await oldCoverPoll;
+    pendingRetiredDetail.reject(new Error("Retired detail request failed"));
+    await selection;
+
+    expect(detailReads).toBe(2);
+    expect(implementation.state.selectedWorld?.imageUrl).toBe("new-cover.png");
+    expect(messages).not.toContain("Retired detail request failed");
+    expect(editorDisabled).toHaveBeenLastCalledWith(false);
+  });
+});
+
+describe("current world detail failure recovery", () => {
+  it("keeps the current selection error visible and restores the editor after an explicit retry", async () => {
+    const api = vi.fn()
+      .mockRejectedValueOnce(new Error("Current world detail failed"))
+      .mockResolvedValueOnce({ ...world("world-a", "World Alpha"), imageUrl: "current-cover.png" });
+    const { implementation, messages, editorDisabled } = retiredCoverSelectionHarness(api);
+
+    await implementation.selectWorld("world-a");
+    expect(messages).toContain("Current world detail failed");
+    expect(editorDisabled).toHaveBeenLastCalledWith(true);
+
+    await implementation.selectWorld("world-a");
+    expect(api).toHaveBeenCalledTimes(2);
+    expect(implementation.state.selectedWorld?.imageUrl).toBe("current-cover.png");
+    expect(editorDisabled).toHaveBeenLastCalledWith(false);
+  });
+});
+
+describe("bounded world detail retirement recovery", () => {
+  it("stops after one retired-read retry and leaves explicit retry guidance", async () => {
+    const firstRetiredRead = deferred<Record<string, unknown>>();
+    const secondRetiredRead = deferred<Record<string, unknown>>();
+    let detailReads = 0;
+    const api = vi.fn((path: string) => {
+      if (path.startsWith("/api/v1/image-jobs/")) return Promise.resolve({ status: "completed" });
+      detailReads += 1;
+      if (detailReads === 1) return firstRetiredRead.promise;
+      if (detailReads === 2) return secondRetiredRead.promise;
+      return Promise.resolve({ ...world("world-a", "Unexpected third-read data"), imageUrl: "third-read.png" });
+    });
+    const { implementation, messages, editorDisabled } = retiredCoverSelectionHarness(api);
+
+    const selection = implementation.selectWorld("world-a");
+    await vi.waitFor(() => expect(detailReads).toBe(1));
+    implementation.invalidate("world-a");
+    firstRetiredRead.resolve({ ...world("world-a", "Retired first read"), imageUrl: "first-retired.png" });
+    await vi.waitFor(() => expect(detailReads).toBe(2));
+    implementation.invalidate("world-a");
+    secondRetiredRead.resolve({ ...world("world-a", "Retired second read"), imageUrl: "second-retired.png" });
+    await selection;
+
+    expect(detailReads).toBe(2);
+    expect(implementation.state.selectedWorld?.title).toBe("World Alpha");
+    expect(implementation.state.selectedWorld?.imageUrl).toBe("prior-cover.png");
+    expect(messages).toContain("World details changed while loading. Select this world again to retry.");
+    expect(messages).not.toContain("World selected. Draft editing opens in the authoring modal.");
+    expect(editorDisabled).toHaveBeenLastCalledWith(true);
+  });
+});
