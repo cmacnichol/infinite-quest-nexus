@@ -101,6 +101,7 @@ async function bootLegacyStory({
   Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", { value: () => undefined, writable: true, configurable: true });
   const profileControlDefaults: Array<[string, string]> = [
     ["#userProfileDefaultTurnControlStyle", "flexible_action"],
+    ["[data-reader-area-width]", "standard"],
     ["[data-reader-width]", "72"],
     ["[data-reader-font-size]", "18"],
     ["[data-reader-line-height]", "1.7"],
@@ -4230,86 +4231,75 @@ it("updates the accepted reader count before required sync reconciliation settle
   }
 });
 
-describe("toolbar reading appearance", () => {
-  it("previews typography, cancels changes, and saves appearance without changing play settings", async () => {
-    const updateProfile = vi.fn(async (profile) => ({ user: { settings: { autoSubmitTurnChoices: false, ...profile.settings } } }));
+describe("profile reading appearance", () => {
+  it("previews and saves area width separately from prose while preserving play settings", async () => {
+    const updateProfile = vi.fn(async (profile) => ({ user: { settings: profile.settings } }));
     try {
       const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 2), updateProfile, continuousReading: true, defaultTurnControlStyle: "action_only" });
-      const open = document.getElementById("btnReaderAppearance");
-      expect(open).not.toBeNull();
-      open!.dispatchEvent(new window.Event("click"));
-      const panel = document.getElementById("readerAppearancePanel")!;
-      expect(panel.hidden).toBe(false);
+      document.getElementById("btnOpenUserProfile")!.dispatchEvent(new window.Event("click"));
+      const dialog = document.getElementById("userProfileDialog")!;
       const change = (selector: string, value: string) => {
-        const control = panel.querySelector(selector)!;
+        const control = dialog.querySelector(selector)!;
         Object.defineProperty(control, "value", { value, writable: true, configurable: true });
-        control.dispatchEvent(new window.Event("change", { bubbles: true }));
       };
-      change("[data-reader-width]", "full");
+      change("[data-reader-area-width]", "full");
       change("[data-reader-font-family]", "serif");
       change("[data-reader-paragraph-spacing]", "1.5");
+      dialog.querySelector("[data-reader-preview]")!.dispatchEvent(new window.Event("click"));
       const reader = document.getElementById("storyContainer")!;
-      expect(reader.style.getPropertyValue("--reader-prose-width")).toBe("100%");
+      const app = reader.closest(".app")!;
+      expect(app.getAttribute("data-reader-area-width")).toBe("full");
+      expect(reader.style.getPropertyValue("--reader-prose-width")).toBe("72ch");
       expect(reader.style.getPropertyValue("--reader-font-family")).toContain("Georgia");
       expect(reader.style.getPropertyValue("--reader-paragraph-spacing")).toBe("1.5em");
-      const collapse = document.getElementById("btnToggleReaderAppearance")!;
-      collapse.dispatchEvent(new window.Event("click"));
-      expect(document.getElementById("readerAppearanceBody")!.hidden).toBe(true);
-      expect(collapse.getAttribute("aria-expanded")).toBe("false");
-      expect(reader.style.getPropertyValue("--reader-paragraph-spacing")).toBe("1.5em");
       expect(updateProfile).not.toHaveBeenCalled();
-      document.getElementById("btnCancelReaderAppearance")!.dispatchEvent(new window.Event("click"));
-      expect(panel.hidden).toBe(true);
-      expect(reader.style.getPropertyValue("--reader-prose-width")).toBe("72ch");
-      expect(updateProfile).not.toHaveBeenCalled();
-      open!.dispatchEvent(new window.Event("click"));
+      document.getElementById("btnCancelUserProfile")!.dispatchEvent(new window.Event("click"));
+      // linkedom's dialog stub does not dispatch the browser's close event.
+      dialog.dispatchEvent(new window.Event("close"));
+      expect(app.getAttribute("data-reader-area-width")).toBe("standard");
+      expect(reader.style.getPropertyValue("--reader-paragraph-spacing")).toBe("1em");
+      document.getElementById("btnOpenUserProfile")!.dispatchEvent(new window.Event("click"));
+      change("[data-reader-area-width]", "wide");
       change("[data-reader-width]", "full");
-      document.getElementById("btnSaveReaderAppearance")!.dispatchEvent(new window.Event("click"));
-      await vi.waitFor(() => expect(panel.hidden).toBe(true));
-      expect(updateProfile).toHaveBeenCalledWith({ settings: { autoSubmitTurnChoices: false, continuousReading: true, defaultTurnControlStyle: "action_only", readerPreferences: expect.objectContaining({ widthCh: "full" }) } });
+      document.getElementById("btnSaveUserProfile")!.dispatchEvent(new window.Event("click"));
+      await vi.waitFor(() => expect(dialog.hasAttribute("open")).toBe(false));
+      expect(updateProfile).toHaveBeenCalledWith({ displayName: "Initial Owner", settings: { autoSubmitTurnChoices: false, continuousReading: true, defaultTurnControlStyle: "action_only", readerPreferences: expect.objectContaining({ areaWidth: "wide", widthCh: "full" }) } });
+      expect(app.getAttribute("data-reader-area-width")).toBe("wide");
+      expect(reader.style.getPropertyValue("--reader-prose-width")).toBe("100%");
     } finally { vi.unstubAllGlobals(); }
   });
-});
 
-
-describe("reading appearance recovery", () => {
-  it("keeps failed previews editable and restores defaults or cancels with Escape", async () => {
+  it("retains a failed profile preview for retry and restores the saved area when cancelled", async () => {
     const updateProfile = vi.fn().mockRejectedValue(new Error("offline"));
     try {
       const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 2), updateProfile });
-      const open = document.getElementById("btnReaderAppearance")!;
-      open.dispatchEvent(new window.Event("click"));
-      const panel = document.getElementById("readerAppearancePanel")!;
-      const width = panel.querySelector("[data-reader-width]") as HTMLSelectElement;
+      document.getElementById("btnOpenUserProfile")!.dispatchEvent(new window.Event("click"));
+      const dialog = document.getElementById("userProfileDialog")!;
+      const width = dialog.querySelector("[data-reader-area-width]") as HTMLSelectElement;
       width.value = "full";
-      width.dispatchEvent(new window.Event("change", { bubbles: true }));
-      document.getElementById("btnSaveReaderAppearance")!.dispatchEvent(new window.Event("click"));
-      await vi.waitFor(() => expect(document.getElementById("readerAppearanceStatus")?.textContent).toContain("offline"));
-      expect(panel.hidden).toBe(false);
+      dialog.querySelector("[data-reader-preview]")!.dispatchEvent(new window.Event("click"));
+      document.getElementById("btnSaveUserProfile")!.dispatchEvent(new window.Event("click"));
+      await vi.waitFor(() => expect(dialog.querySelector("[data-profile-status]")?.textContent).toContain("offline"));
+      expect(dialog.hasAttribute("open")).toBe(true);
       expect(width.disabled).toBe(false);
-      expect(document.getElementById("storyContainer")!.style.getPropertyValue("--reader-prose-width")).toBe("100%");
-      document.getElementById("btnResetReaderAppearance")!.dispatchEvent(new window.Event("click"));
-      expect(width.value).toBe("72");
-      expect(document.getElementById("storyContainer")!.style.getPropertyValue("--reader-paragraph-spacing")).toBe("1em");
-      const escape = new window.Event("keydown", { bubbles: true, cancelable: true });
-      Object.defineProperty(escape, "key", { value: "Escape" });
-      width.dispatchEvent(escape);
-      expect(panel.hidden).toBe(true);
-      expect(open.getAttribute("aria-expanded")).toBe("false");
+      expect(document.querySelector(".app")!.getAttribute("data-reader-area-width")).toBe("full");
+      document.getElementById("btnCancelUserProfile")!.dispatchEvent(new window.Event("click"));
+      dialog.dispatchEvent(new window.Event("close"));
+      expect(document.querySelector(".app")!.getAttribute("data-reader-area-width")).toBe("standard");
       expect(updateProfile).toHaveBeenCalledTimes(1);
     } finally { vi.unstubAllGlobals(); }
   });
 });
 
-
 it("restores saved reading appearance as soon as the story loads", async () => {
   try {
     const { document } = await bootLegacyStory({ turns: makeTurns(1, 2), readerPreferences: {
-      widthCh: "full", fontFamily: "serif", paragraphSpacingEm: 1.5, fontSizePx: 20, lineHeight: 1.9, theme: "sepia"
+      areaWidth: "full", widthCh: "full", fontFamily: "serif", paragraphSpacingEm: 1.5, fontSizePx: 20, lineHeight: 1.9, theme: "sepia"
     } });
     const reader = document.getElementById("storyContainer")!;
     expect(reader.style.getPropertyValue("--reader-prose-width")).toBe("100%");
     expect(reader.dataset.readerTheme).toBe("sepia");
+    expect(reader.closest(".app")!.getAttribute("data-reader-area-width")).toBe("full");
     expect(reader.style.getPropertyValue("--reader-paragraph-spacing")).toBe("1.5em");
   } finally { vi.unstubAllGlobals(); }
 });

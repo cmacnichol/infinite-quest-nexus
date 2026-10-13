@@ -12,6 +12,7 @@ export function normalizeHistoricalDefaultTurnControlStyle(
   return style === "flexible_scene" ? "flexible_scene" : style === "action_only" ? "action_only" : "flexible_action";
 }
 
+export const readerAreaWidthSchema = z.enum(["standard", "wide", "full"]);
 export const readerWidthChSchema = z.union([z.literal(60), z.literal(72), z.literal(84), z.literal("full")]);
 export const readerFontSizePxSchema = z.union([z.literal(16), z.literal(18), z.literal(20), z.literal(22)]);
 export const readerLineHeightSchema = z.union([z.literal(1.5), z.literal(1.7), z.literal(1.9)]);
@@ -21,6 +22,7 @@ export const readerThemeSchema = z.enum(["dark", "light", "sepia"]);
 
 export const readerPreferencesSchema = z.object({
   widthCh: readerWidthChSchema,
+  areaWidth: readerAreaWidthSchema.default("standard"),
   fontSizePx: readerFontSizePxSchema,
   lineHeight: readerLineHeightSchema,
   theme: readerThemeSchema,
@@ -32,6 +34,7 @@ export type ReaderPreferences = z.infer<typeof readerPreferencesSchema>;
 
 export const DEFAULT_READER_PREFERENCES: Readonly<ReaderPreferences> = Object.freeze({
   widthCh: 72,
+  areaWidth: "standard",
   fontSizePx: 18,
   lineHeight: 1.7,
   theme: "dark",
@@ -44,6 +47,7 @@ export function normalizeHistoricalReaderPreferences(value: unknown): ReaderPref
     ? value as Record<string, unknown>
     : {};
   return {
+    areaWidth: readerAreaWidthSchema.catch(DEFAULT_READER_PREFERENCES.areaWidth).parse(preferences.areaWidth),
     widthCh: readerWidthChSchema.catch(DEFAULT_READER_PREFERENCES.widthCh).parse(preferences.widthCh),
     fontSizePx: readerFontSizePxSchema.catch(DEFAULT_READER_PREFERENCES.fontSizePx).parse(preferences.fontSizePx),
     lineHeight: readerLineHeightSchema.catch(DEFAULT_READER_PREFERENCES.lineHeight).parse(preferences.lineHeight),

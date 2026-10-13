@@ -66,6 +66,10 @@ body::before {
   overflow: clip;
 }
 
+.app[data-reader-area-width="wide"] { width: min(1760px, calc(100vw - 28px)); }
+.app[data-reader-area-width="full"] { width: calc(100vw - 28px); }
+.app:is([data-reader-area-width="wide"], [data-reader-area-width="full"]) .layout { max-width: 100%; }
+
 .story-illustration-panel {
   position: sticky;
   top: 76px;
@@ -873,55 +877,3 @@ dialog.getting-started-dialog { width: min(680px, calc(100vw - 28px)); }
 #activityLogDialog .dialog-actions { margin-top: 12px; }
 #activityLogDialog .mini { margin: 4px 0; }
 #activityLogDialog .activity-log-toolbar { margin: 8px 0; }
-
-.reader-appearance-panel[hidden] { display: none; }
-.reader-appearance-panel { position: sticky; top: var(--reader-panel-top, 128px); z-index: 19; max-height: min(52dvh, 420px); overflow-y: auto; padding: 16px; margin-block: 12px; border: 1px solid var(--reader-border); border-radius: 12px; color: var(--reader-text); background: var(--reader-surface); }
-.reader-appearance-panel h2 { margin: 0; font-size: 1.1rem; }
-.reader-appearance-panel .mini { color: var(--reader-muted); }
-.reader-appearance-panel .reader-appearance-fields { grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); }
-.reader-appearance-panel label { display: grid; gap: 6px; min-width: 0; color: var(--reader-muted); }
-.reader-appearance-panel select { width: 100%; min-height: 44px; }
-.reader-appearance-panel button { min-height: 44px; }
-.reader-appearance-panel :is(button, select):focus-visible { outline: 3px solid var(--reader-focus); outline-offset: 2px; }
-
-#storyContainer .reader-appearance-panel :is(button, select) {
-  color: var(--reader-control-text);
-  background: var(--reader-control-surface);
-  border-color: var(--reader-border);
-}
-#storyContainer .reader-appearance-panel button.primary {
-  color: var(--reader-surface);
-  background: var(--reader-link);
-  border-color: var(--reader-link);
-}
-#storyContainer .reader-appearance-panel button:hover:not(:disabled) {
-  color: var(--reader-link);
-  background: var(--reader-surface);
-  border-color: var(--reader-link);
-}
-#storyContainer .reader-appearance-panel :is(button, select):disabled {
-  opacity: 1;
-  color: var(--reader-disabled-text);
-  background: var(--reader-disabled-surface);
-}
-
-.reader-appearance-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.reader-appearance-bar button {
-  flex-shrink: 0;
-}
-
-.reader-appearance-panel.is-collapsed {
-  align-self: start;
-  padding: 8px 12px;
-  overflow: visible;
-}
-
-#readerAppearanceBody[hidden] {
-  display: none;
-}

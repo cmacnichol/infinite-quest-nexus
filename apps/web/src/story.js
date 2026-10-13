@@ -4853,8 +4853,6 @@ async function saveStoryMemorySettings() {
 }
 
 function openUserProfile() {
-  if (readerAppearanceSaving) return;
-  closeReaderAppearance({ focus: false });
   const dlg = $("userProfileDialog");
   if (!dlg) return;
   const nameInput = $("userProfileDisplayName");
@@ -4877,8 +4875,10 @@ function openUserProfile() {
   openManagedModal(dlg);
 }
 
-function setReaderPreferenceControls(preferences, root = $("userProfileDialog")) {
+function setReaderPreferenceControls(preferences) {
+  const root = $("userProfileDialog");
   const controls = [
+    ["[data-reader-area-width]", preferences.areaWidth],
     ["[data-reader-width]", String(preferences.widthCh)],
     ["[data-reader-font-size]", String(preferences.fontSizePx)],
     ["[data-reader-line-height]", String(preferences.lineHeight)],
@@ -4892,9 +4892,11 @@ function setReaderPreferenceControls(preferences, root = $("userProfileDialog"))
   }
 }
 
-function readerPreferencesFromControls(root = $("userProfileDialog")) {
+function readerPreferencesFromControls() {
+  const root = $("userProfileDialog");
   const width = root?.querySelector("[data-reader-width]")?.value;
   return normalizeReaderPreferences({
+    areaWidth: root?.querySelector("[data-reader-area-width]")?.value,
     widthCh: width === "full" ? "full" : Number(width),
     fontSizePx: Number(root?.querySelector("[data-reader-font-size]")?.value),
     lineHeight: Number(root?.querySelector("[data-reader-line-height]")?.value),
@@ -4915,6 +4917,8 @@ function applyReaderPreferences(preferences) {
   const wasReading = before && before.top <= inset && before.bottom > inset;
   const ratio = wasReading ? (inset - before.top) / before.height : 0;
   const normalized = normalizeReaderPreferences(preferences);
+  const app = storyContainer.closest(".app");
+  if (app) app.dataset.readerAreaWidth = normalized.areaWidth;
   storyContainer.dataset.readerTheme = normalized.theme;
   storyContainer.style.setProperty("--reader-width-ch", String(normalized.widthCh));
   storyContainer.style.setProperty("--reader-prose-width", normalized.widthCh === "full" ? "100%" : `${normalized.widthCh}ch`);
@@ -4928,78 +4932,10 @@ function applyReaderPreferences(preferences) {
   }
 }
 
-let readerAppearanceSaving = false;
-
-function closeReaderAppearance({ cancel = true, focus = true } = {}) {
-  if (readerAppearanceSaving) return;
-  const panel = $("readerAppearancePanel");
-  if (!panel || panel.hidden) return;
-  if (cancel) applyReaderPreferences(state.user?.settings?.readerPreferences);
-  panel.hidden = true;
-  $("btnReaderAppearance")?.setAttribute("aria-expanded", "false");
-  if (focus) $("btnReaderAppearance")?.focus({ preventScroll: true });
-}
-
-function setReaderAppearanceCollapsed(collapsed) {
-  $("readerAppearanceBody").hidden = collapsed;
-  $("readerAppearancePanel").classList.toggle("is-collapsed", collapsed);
-  const toggle = $("btnToggleReaderAppearance");
-  toggle.setAttribute("aria-expanded", String(!collapsed));
-  toggle.setAttribute("aria-label", `${collapsed ? "Expand" : "Collapse"} reading appearance`);
-  toggle.textContent = collapsed ? "Expand" : "Collapse";
-}
-
-function openReaderAppearance() {
-  const panel = $("readerAppearancePanel");
-  if (!panel || readerAppearanceSaving) return;
-  if (!panel.hidden) { closeReaderAppearance(); return; }
-  setReaderPreferenceControls(normalizeReaderPreferences(state.user?.settings?.readerPreferences), panel);
-  $("readerAppearanceStatus").textContent = "";
-  panel.style.setProperty("--reader-panel-top", `${readerStickyInset()}px`);
-  setReaderAppearanceCollapsed(false);
-  panel.hidden = false;
-  $("btnReaderAppearance")?.setAttribute("aria-expanded", "true");
-  panel.querySelector("select")?.focus({ preventScroll: true });
-}
-
-async function saveReaderAppearance() {
-  if (readerAppearanceSaving) return;
-  const panel = $("readerAppearancePanel");
-  const preferences = readerPreferencesFromControls(panel);
-  const status = $("readerAppearanceStatus");
-  readerAppearanceSaving = true;
-  panel.querySelectorAll("select, button").forEach((control) => { control.disabled = true; });
-  $("btnReaderAppearance").disabled = true;
-  status.textContent = "Saving reading appearance…";
-  try {
-    // The profile update schema supplies defaults for these fields when omitted.
-    // Send the saved play settings so an appearance-only edit preserves them.
-    const currentSettings = state.user?.settings;
-    const response = await apiClient.session.updateProfile({ settings: {
-      autoSubmitTurnChoices: currentSettings?.autoSubmitTurnChoices ?? true,
-      continuousReading: currentSettings?.continuousReading ?? false,
-      defaultTurnControlStyle: currentSettings?.defaultTurnControlStyle ?? "flexible_action",
-      readerPreferences: preferences
-    } });
-    if (response?.user) state.user = response.user;
-    else if (state.user) state.user.settings = { ...state.user.settings, readerPreferences: preferences };
-    applyReaderPreferences(state.user?.settings?.readerPreferences ?? preferences);
-    readerAppearanceSaving = false;
-    closeReaderAppearance({ cancel: false });
-  } catch (error) {
-    status.textContent = `Reading appearance could not be saved: ${error.message || String(error)}. Try Save again or Cancel to restore your saved appearance.`;
-  } finally {
-    readerAppearanceSaving = false;
-    panel.querySelectorAll("select, button").forEach((control) => { control.disabled = false; });
-    $("btnReaderAppearance").disabled = false;
-    if (panel.hidden) $("btnReaderAppearance").focus({ preventScroll: true });
-  }
-}
-
 function setUserProfileSaving(saving) {
   userProfileSaving = saving;
   const dialog = $("userProfileDialog");
-  const controls = dialog?.querySelectorAll("#userProfileDisplayName, #userProfileAutoSubmitChoices, #userProfileContinuousReading, #userProfileDefaultTurnControlStyle, [data-reader-width], [data-reader-font-size], [data-reader-line-height], [data-reader-theme], [data-reader-font-family], [data-reader-paragraph-spacing], [data-reader-preview], #btnSaveUserProfile, #btnCancelUserProfile, #btnCloseUserProfile");
+  const controls = dialog?.querySelectorAll("#userProfileDisplayName, #userProfileAutoSubmitChoices, #userProfileContinuousReading, #userProfileDefaultTurnControlStyle, [data-reader-area-width], [data-reader-width], [data-reader-font-size], [data-reader-line-height], [data-reader-theme], [data-reader-font-family], [data-reader-paragraph-spacing], [data-reader-preview], #btnSaveUserProfile, #btnCancelUserProfile, #btnCloseUserProfile");
   controls?.forEach((control) => {
     if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLButtonElement) {
       control.disabled = saving;
@@ -6414,29 +6350,6 @@ document.addEventListener("DOMContentLoaded", () => {
       if (userProfileSaving) event.preventDefault();
     });
   }
-  $("btnReaderAppearance")?.addEventListener("click", openReaderAppearance);
-  $("btnToggleReaderAppearance")?.addEventListener("click", () => {
-    if (!readerAppearanceSaving) setReaderAppearanceCollapsed(!$("readerAppearanceBody").hidden);
-  });
-  $("btnCancelReaderAppearance")?.addEventListener("click", () => closeReaderAppearance());
-  $("btnSaveReaderAppearance")?.addEventListener("click", () => { void saveReaderAppearance(); });
-  $("btnResetReaderAppearance")?.addEventListener("click", () => {
-    const defaults = normalizeReaderPreferences();
-    setReaderPreferenceControls(defaults, $("readerAppearancePanel"));
-    applyReaderPreferences(defaults);
-    $("readerAppearanceStatus").textContent = "Defaults previewed. Save to keep them.";
-  });
-  $("readerAppearancePanel")?.addEventListener("change", () => {
-    applyReaderPreferences(readerPreferencesFromControls($("readerAppearancePanel")));
-    $("readerAppearanceStatus").textContent = "Previewing changes. Save to keep them.";
-  });
-  $("readerAppearancePanel")?.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      closeReaderAppearance();
-    }
-  });
   const readerPreview = document.querySelector("[data-reader-preview]");
   if (readerPreview) readerPreview.addEventListener("click", previewReaderPreferences);
   const btnCloseUserProfile = $("btnCloseUserProfile");

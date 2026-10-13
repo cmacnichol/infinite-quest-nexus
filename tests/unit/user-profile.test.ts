@@ -72,7 +72,7 @@ describe("user profile and settings contracts", () => {
     const settings = userSettingsSchema.parse({});
     expect(settings.autoSubmitTurnChoices).toBe(true);
     expect(settings.continuousReading).toBe(false);
-    expect(settings.readerPreferences).toEqual({ widthCh: 72, fontSizePx: 18, lineHeight: 1.7, theme: "dark", fontFamily: "sans", paragraphSpacingEm: 1 });
+    expect(settings.readerPreferences).toEqual({ widthCh: 72, fontSizePx: 18, lineHeight: 1.7, theme: "dark", fontFamily: "sans", paragraphSpacingEm: 1, areaWidth: "standard" });
   });
 
   it("normalizes malformed historical reader preferences field by field without dropping other settings", () => {
@@ -80,7 +80,7 @@ describe("user profile and settings contracts", () => {
       readerPreferences: { widthCh: 60, fontSizePx: 999, lineHeight: 0.4, theme: "neon" },
       customFlag: 123
     });
-    expect(settings.readerPreferences).toEqual({ widthCh: 60, fontSizePx: 18, lineHeight: 1.7, theme: "dark", fontFamily: "sans", paragraphSpacingEm: 1 });
+    expect(settings.readerPreferences).toEqual({ widthCh: 60, fontSizePx: 18, lineHeight: 1.7, theme: "dark", fontFamily: "sans", paragraphSpacingEm: 1, areaWidth: "standard" });
     expect(settings).toMatchObject({ customFlag: 123 });
   });
 
@@ -125,20 +125,27 @@ describe("user profile and settings contracts", () => {
       settings: { readerPreferences: { widthCh: 84, fontSizePx: 20, lineHeight: 1.9, theme: "sepia" } }
     });
     expect(update.settings?.readerPreferences).toEqual({
-      widthCh: 84, fontSizePx: 20, lineHeight: 1.9, theme: "sepia", fontFamily: "sans", paragraphSpacingEm: 1
+      widthCh: 84, fontSizePx: 20, lineHeight: 1.9, theme: "sepia", fontFamily: "sans", paragraphSpacingEm: 1, areaWidth: "standard"
     });
   });
 
   it.each([0.5, 1, 1.5])("accepts full width and serif with paragraph spacing %s", (paragraphSpacingEm) => {
-    const readerPreferences = { widthCh: "full", fontSizePx: 18, lineHeight: 1.7, theme: "light", fontFamily: "serif", paragraphSpacingEm };
+    const readerPreferences = { widthCh: "full", fontSizePx: 18, lineHeight: 1.7, theme: "light", fontFamily: "serif", paragraphSpacingEm, areaWidth: "standard" };
     const update = userProfileUpdateSchema.parse({ settings: { readerPreferences } });
     expect(update.settings?.readerPreferences).toEqual(readerPreferences);
   });
 
-  it.each([{ fontFamily: "script" }, { paragraphSpacingEm: 4 }, { widthCh: "100%" }])("rejects invalid new preference values %o", (invalid) => {
+  it.each([{ fontFamily: "script" }, { paragraphSpacingEm: 4 }, { widthCh: "100%" }, { areaWidth: "100%" }])("rejects invalid new preference values %o", (invalid) => {
     expect(() => userProfileUpdateSchema.parse({
       settings: { readerPreferences: { widthCh: 72, fontSizePx: 18, lineHeight: 1.7, theme: "dark", ...invalid } }
     })).toThrow();
+  });
+
+  it.each(["standard", "wide", "full"])("accepts %s area width independently of the prose measure", (areaWidth) => {
+    const update = userProfileUpdateSchema.parse({
+      settings: { readerPreferences: { widthCh: 60, fontSizePx: 18, lineHeight: 1.7, theme: "dark", areaWidth } }
+    });
+    expect(update.settings?.readerPreferences).toMatchObject({ areaWidth, widthCh: 60 });
   });
 
   it("leaves omitted reader preferences absent from a partial settings update", () => {
@@ -242,7 +249,7 @@ describe("user service and API endpoints", () => {
     });
     expect(legacySettingsPatch.statusCode).toBe(200);
     expect(Object.hasOwn(lastSettingsPatch ?? {}, "readerPreferences")).toBe(false);
-    expect(JSON.parse(legacySettingsPatch.payload).user.settings.readerPreferences).toEqual({ widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia", fontFamily: "sans", paragraphSpacingEm: 1 });
+    expect(JSON.parse(legacySettingsPatch.payload).user.settings.readerPreferences).toEqual({ widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia", fontFamily: "sans", paragraphSpacingEm: 1, areaWidth: "standard" });
     expect(JSON.parse(legacySettingsPatch.payload).user.settings.extensionSetting).toEqual({ retained: true });
     expect(JSON.parse(legacySettingsPatch.payload).user.settings.defaultTurnControlStyle).toBe("flexible_scene");
 
@@ -252,12 +259,12 @@ describe("user service and API endpoints", () => {
       payload: { displayName: "Reader With New Name" }
     });
     expect(displayNamePatch.statusCode).toBe(200);
-    expect(JSON.parse(displayNamePatch.payload).user.settings.readerPreferences).toEqual({ widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia", fontFamily: "sans", paragraphSpacingEm: 1 });
+    expect(JSON.parse(displayNamePatch.payload).user.settings.readerPreferences).toEqual({ widthCh: 84, fontSizePx: 22, lineHeight: 1.9, theme: "sepia", fontFamily: "sans", paragraphSpacingEm: 1, areaWidth: "standard" });
     expect(JSON.parse(displayNamePatch.payload).user.settings.extensionSetting).toEqual({ retained: true });
     expect(JSON.parse(displayNamePatch.payload).user.settings.defaultTurnControlStyle).toBe("flexible_scene");
 
     const readerPreferences = {
-      widthCh: "full", fontSizePx: 20, lineHeight: 1.9, theme: "light", fontFamily: "serif", paragraphSpacingEm: 1.5
+      widthCh: "full", fontSizePx: 20, lineHeight: 1.9, theme: "light", fontFamily: "serif", paragraphSpacingEm: 1.5, areaWidth: "full"
     };
     const readerPatch = await app.inject({
       method: "PATCH",
