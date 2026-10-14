@@ -461,6 +461,11 @@ integration("campaign archive export", () => {
 
       const snapshot = await loadCampaignArchiveExportSnapshot(pool, ownerUserId, campaignId);
       const projected = campaignArchivePayloads(snapshot);
+      // The production export carries the campaign's illustration style settings.
+      expect(projected.campaign.archiveRecords.illustrationConfig).toMatchObject({
+        art_style: "Archive gouache",
+        negative_prompt: "text, archive frame"
+      });
       const emitted = {
         "campaign.json": canonicalArchiveJson(projected.campaign),
         "world.json": canonicalArchiveJson(projected.world),
@@ -599,9 +604,7 @@ integration("campaign archive export", () => {
       segment_word_count: 750,
       images_per_segment: 2,
       segment_prompt_mode: "ai_refined",
-      refinement_prompt: "Archive refinement instructions.",
-      art_style: "Archive gouache",
-      negative_prompt: "text, archive frame"
+      refinement_prompt: "Archive refinement instructions."
     });
     expect(campaign.archiveRecords.illustrationSets).toEqual([
       expect.objectContaining({ turn_id: turnId, source_text_hash: "fixture-hash", images_per_segment: 2, prompt_mode: "direct" })
@@ -927,12 +930,10 @@ integration("campaign archive export", () => {
       images_per_segment: number;
       segment_prompt_mode: string;
       refinement_prompt: string;
-      art_style: string;
-      negative_prompt: string;
     }>(
       `SELECT enabled,source_policy,matching_scope,confidence_profile,repetition_window,
               model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,
-              images_per_segment,segment_prompt_mode,refinement_prompt,art_style,negative_prompt
+              images_per_segment,segment_prompt_mode,refinement_prompt
          FROM campaign_illustration_configs WHERE campaign_id=$1`,
       [imported.campaignId]
     );
@@ -951,9 +952,7 @@ integration("campaign archive export", () => {
       segment_word_count: 750,
       images_per_segment: 2,
       segment_prompt_mode: "ai_refined",
-      refinement_prompt: "Archive refinement instructions.",
-      art_style: "Archive gouache",
-      negative_prompt: "text, archive frame"
+      refinement_prompt: "Archive refinement instructions."
     });
     const importedTurn = await pool.query<{ id: string; image_url: string }>(
       "SELECT id,image_url FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [imported.campaignId]
