@@ -210,10 +210,10 @@ integration("campaign archive export", () => {
       `INSERT INTO campaign_illustration_configs (
          campaign_id,owner_user_id,enabled,source_policy,matching_scope,confidence_profile,repetition_window,
          model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,
-         segment_prompt_mode,refinement_prompt
+         segment_prompt_mode,refinement_prompt,art_style,negative_prompt
        ) VALUES ($1,$2,true,'library_then_generate','shared','broad',37,
                  'flux1-schnell-fp8','1536x1024','3:2','high','webp',7,750,2,
-                 'ai_refined','Archive refinement instructions.')`,
+                 'ai_refined','Archive refinement instructions.','Archive gouache','text, archive frame')`,
       [campaignId, ownerUserId]
     );
     const set = await pool.query<{ id: string }>(
@@ -599,7 +599,9 @@ integration("campaign archive export", () => {
       segment_word_count: 750,
       images_per_segment: 2,
       segment_prompt_mode: "ai_refined",
-      refinement_prompt: "Archive refinement instructions."
+      refinement_prompt: "Archive refinement instructions.",
+      art_style: "Archive gouache",
+      negative_prompt: "text, archive frame"
     });
     expect(campaign.archiveRecords.illustrationSets).toEqual([
       expect.objectContaining({ turn_id: turnId, source_text_hash: "fixture-hash", images_per_segment: 2, prompt_mode: "direct" })
@@ -925,10 +927,12 @@ integration("campaign archive export", () => {
       images_per_segment: number;
       segment_prompt_mode: string;
       refinement_prompt: string;
+      art_style: string;
+      negative_prompt: string;
     }>(
       `SELECT enabled,source_policy,matching_scope,confidence_profile,repetition_window,
               model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,
-              images_per_segment,segment_prompt_mode,refinement_prompt
+              images_per_segment,segment_prompt_mode,refinement_prompt,art_style,negative_prompt
          FROM campaign_illustration_configs WHERE campaign_id=$1`,
       [imported.campaignId]
     );
@@ -947,7 +951,9 @@ integration("campaign archive export", () => {
       segment_word_count: 750,
       images_per_segment: 2,
       segment_prompt_mode: "ai_refined",
-      refinement_prompt: "Archive refinement instructions."
+      refinement_prompt: "Archive refinement instructions.",
+      art_style: "Archive gouache",
+      negative_prompt: "text, archive frame"
     });
     const importedTurn = await pool.query<{ id: string; image_url: string }>(
       "SELECT id,image_url FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [imported.campaignId]

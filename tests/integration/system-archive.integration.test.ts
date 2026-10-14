@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT } from "../../packages/contracts/src/generation.js";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -3371,7 +3372,8 @@ integration("deterministic owner-wide System Archive export", () => {
               fact.superseded_by_fact_id,
               imported.campaign_id AS imported_campaign_id,
               illustration.source_policy,illustration.matching_scope,
-              illustration.confidence_profile,illustration.repetition_window
+              illustration.confidence_profile,illustration.repetition_window,
+              illustration.art_style,illustration.negative_prompt
          FROM campaigns campaign
          JOIN turns turn_row ON turn_row.campaign_id=campaign.id
          JOIN campaign_canonical_facts fact ON fact.campaign_id=campaign.id
@@ -3397,6 +3399,9 @@ integration("deterministic owner-wide System Archive export", () => {
       matching_scope: "campaign",
       confidence_profile: "strict",
       repetition_window: 9,
+      // This archive predates the style settings, so it restores their defaults.
+      art_style: "",
+      negative_prompt: DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT,
     }] });
     await expect(pool.query(
       `SELECT source_turn_id,source_state_edit_id,source_turn_number,source_fact_index,
