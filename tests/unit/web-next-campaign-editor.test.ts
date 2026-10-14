@@ -224,6 +224,39 @@ describe("web-next campaign editor routing", () => {
     mounted.dispose();
   });
 
+  it("edits the art style and exclusions without resetting them on save", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>");
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const illustrationConfig = {
+      enabled: true, sourcePolicy: "generate_only", matchingScope: "campaign", confidenceProfile: "balanced",
+      repetitionWindow: 5, providerProfileId: "provider-1", model: "illustrator", size: "1024x1024", aspectRatio: "1:1",
+      quality: "auto", outputFormat: "png", maxAttempts: 3, segmentWordCount: 500, imagesPerSegment: 1,
+      segmentPromptMode: "direct", refinementPrompt: "Shipped default text.", defaultRefinementPrompt: "Shipped default text.",
+      artStyle: "Ink wash on rice paper", negativePrompt: "text, frame", defaultNegativePrompt: "text", updatedAt: null
+    };
+    let putBody: Record<string, unknown> | null = null;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit = {}) => {
+      if (url === "/api/v1/campaigns") return new Response(JSON.stringify({ campaigns: [overviewCampaign] }), { status: 200 });
+      if (url === "/api/v1/providers") return new Response(JSON.stringify({ providers: [{ id: "provider-1", name: "Illustrator", providerRole: "image", providerType: "openai" }] }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/illustration-config" && init.method === "PUT") {
+        putBody = JSON.parse(String(init.body));
+        return new Response(JSON.stringify(illustrationConfig), { status: 200 });
+      }
+      if (url === "/api/v1/campaigns/campaign-1/illustration-config") return new Response(JSON.stringify(illustrationConfig), { status: 200 });
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    installOverviewFormData();
+    const mounted = mountCampaignEditorPage(root, { campaignId: overviewCampaign.id, section: "illustrations" });
+    await vi.waitFor(() => expect(root.querySelector("#illustrations-form")).toBeTruthy());
+    const form = root.querySelector<HTMLFormElement>("#illustrations-form")!;
+    expect(form.querySelector<HTMLInputElement>("input[name='artStyle']")!.value).toBe("Ink wash on rice paper");
+    form.querySelector<HTMLInputElement>("input[name='negativePrompt']")!.value = "text, frame, signature";
+    form.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(putBody).not.toBeNull());
+    expect(putBody).toMatchObject({ artStyle: "Ink wash on rice paper", negativePrompt: "text, frame, signature" });
+    mounted.dispose();
+  });
+
   it("gives every confirmed editor section its own canonical subpage", () => {
     expect(CAMPAIGN_SECTIONS).toEqual(["overview", "character", "state", "history", "chronicle", "illustrations", "world-transfer", "data"]);
     for (const section of CAMPAIGN_SECTIONS) {

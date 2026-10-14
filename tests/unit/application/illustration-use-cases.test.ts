@@ -57,6 +57,9 @@ describe("illustration application use cases", () => {
       segmentPromptMode: "direct" as const,
       refinementPrompt: "fiction only",
       defaultRefinementPrompt: "fiction only",
+      artStyle: "",
+      negativePrompt: "",
+      defaultNegativePrompt: "",
       updatedAt: null
     });
     const imageJob = Object.freeze({
@@ -375,6 +378,7 @@ describe("illustration application use cases", () => {
       aspectRatio: "1:1",
       quality: "auto" as const,
       outputFormat: "png" as const,
+      negativePrompt: "",
       remoteJobId: null
     });
 
@@ -587,6 +591,7 @@ describe("illustration application use cases", () => {
       aspectRatio: "1:1",
       quality: "auto",
       outputFormat: "png",
+      negativePrompt: "",
       remoteJobId: "remote-image-job"
     };
     const pendingExecution: Awaited<ReturnType<IllustrationImageProviderPort["executeImage"]>> = {

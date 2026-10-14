@@ -116,7 +116,7 @@ const CAMPAIGN_SETTINGS_SECTION_CONTROLS = Object.freeze({
     "illustrationQuality", "illustrationOutputFormat", "illustrationMaxAttempts", "illustrationMatchingScope",
     "illustrationConfidenceProfile", "illustrationRepetitionWindow", "illustrationSegmentWordCount", "illustrationImagesPerSegment",
     "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "previewIllustrationBackfill", "previewIllustrationRebuild",
-    "saveIllustrationConfig", "discoverIllustrationModels"
+    "illustrationArtStyle", "illustrationNegativePrompt", "saveIllustrationConfig", "discoverIllustrationModels"
   ],
   chronicle: [
     "embeddingEnabled", "embeddingRetrievalImplementation", "embeddingRetrievalShadowEnabled", "embeddingProvider",
@@ -129,7 +129,8 @@ const CAMPAIGN_SETTINGS_SELECTION_CONTROLS = Object.freeze([
   "campaignStoryContextBudgetTokens", "saveCampaign", "transferCampaign", "editCampaignCharacter", "loadCampaign", "exportCampaign", "deleteCampaign",
   "illustrationSourcePolicy", "campaignImageProvider", "illustrationModel", "illustrationSize", "illustrationAspectRatio", "illustrationQuality",
   "illustrationOutputFormat", "illustrationMaxAttempts", "illustrationMatchingScope", "illustrationConfidenceProfile", "illustrationRepetitionWindow",
-  "illustrationSegmentWordCount", "illustrationImagesPerSegment", "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "embeddingEnabled",
+  "illustrationSegmentWordCount", "illustrationImagesPerSegment", "illustrationSegmentPromptMode", "openIllustrationPromptEditor",
+  "illustrationArtStyle", "illustrationNegativePrompt", "embeddingEnabled",
   "embeddingRetrievalImplementation", "embeddingRetrievalShadowEnabled", "embeddingProvider", "discoverEmbeddingModels", "embeddingModel",
   "embeddingDocumentPrefix", "embeddingQueryPrefix", "embeddingBatchSize", "budgetTokens", "compression", "memoryQuery"
 ]);
@@ -570,7 +571,7 @@ function clearCampaignEditorSelection({ focus = false } = {}) {
   if (!managementSelectionErrorIsCurrent("campaigns")) elements.campaignStatusMessage.textContent = "";
   if (!managementSelectionErrorIsCurrent("campaigns")) elements.campaignStatusMessage.className = "status hidden";
   renderCampaignStoryMemorySettings(null, { message: "Select a campaign to load its saved Story Memory level." });
-  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.campaignStoryContextBudgetTokens, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.editCampaignCharacter, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor, elements.previewIllustrationBackfill, elements.previewIllustrationRebuild, elements.saveIllustrationConfig, elements.discoverIllustrationModels, elements.reindexMemory, elements.previewContext, elements.saveEmbeddingConfig, elements.reindexEmbeddings, elements.embeddingEnabled, elements.embeddingRetrievalImplementation, elements.embeddingRetrievalShadowEnabled, elements.embeddingProvider, elements.discoverEmbeddingModels, elements.embeddingModel, elements.embeddingDocumentPrefix, elements.embeddingQueryPrefix, elements.embeddingBatchSize, elements.budgetTokens, elements.compression, elements.memoryQuery].forEach((element) => { element.disabled = true; });
+  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.campaignStoryContextBudgetTokens, elements.saveCampaign, elements.migrateCampaign, elements.transferCampaign, elements.editCampaignCharacter, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor, elements.illustrationArtStyle, elements.illustrationNegativePrompt, elements.previewIllustrationBackfill, elements.previewIllustrationRebuild, elements.saveIllustrationConfig, elements.discoverIllustrationModels, elements.reindexMemory, elements.previewContext, elements.saveEmbeddingConfig, elements.reindexEmbeddings, elements.embeddingEnabled, elements.embeddingRetrievalImplementation, elements.embeddingRetrievalShadowEnabled, elements.embeddingProvider, elements.discoverEmbeddingModels, elements.embeddingModel, elements.embeddingDocumentPrefix, elements.embeddingQueryPrefix, elements.embeddingBatchSize, elements.budgetTokens, elements.compression, elements.memoryQuery].forEach((element) => { element.disabled = true; });
   elements.campaignCostSection.classList.add("hidden");
   if (focus) elements.refreshCampaigns.focus();
 }
@@ -5856,6 +5857,8 @@ async function loadIllustrationConfig(selectionRequest = campaignSelectionReques
     illustrationConfig.updatedAt ? illustrationConfig.imagesPerSegment || 1 : defaultImageCount
   );
   elements.illustrationSegmentPromptMode.value = illustrationConfig.segmentPromptMode || "direct";
+  elements.illustrationArtStyle.value = illustrationConfig.artStyle || "";
+  elements.illustrationNegativePrompt.value = illustrationConfig.negativePrompt ?? illustrationConfig.defaultNegativePrompt ?? "";
   defaultIllustrationRefinementPrompt = illustrationConfig.defaultRefinementPrompt || illustrationConfig.refinementPrompt || "";
   illustrationRefinementPromptValue = illustrationConfig.refinementPrompt || defaultIllustrationRefinementPrompt;
   syncIllustrationProviderAvailability(true);
@@ -5900,6 +5903,8 @@ function renderIllustrationSettingsVisibility() {
   elements.illustrationSettings.setAttribute("aria-hidden", String(!settingsVisible));
   elements.illustrationMatchingSettings.classList.toggle("hidden", !automaticIllustrationsActive || !illustrationPolicyUsesLibrary(policy));
   elements.illustrationProviderSettings.classList.toggle("hidden", !automaticIllustrationsActive || !illustrationPolicyUsesProvider(policy));
+  // Style applies only to images this campaign generates, not library matches.
+  elements.illustrationStyleSettings.classList.toggle("hidden", !automaticIllustrationsActive || !illustrationPolicyUsesProvider(policy));
   const useRefinementPrompt = settingsVisible && elements.illustrationSegmentPromptMode.value === "ai_refined";
   elements.illustrationRefinementPromptField.classList.toggle("hidden", !useRefinementPrompt);
   elements.previewIllustrationBackfill.disabled = !selectedCampaign || !automaticIllustrationsActive;
@@ -7648,7 +7653,9 @@ async function saveIllustrationConfig(event) {
         segmentWordCount: elements.illustrationSegmentWordCount.value,
         imagesPerSegment: elements.illustrationImagesPerSegment.value,
         segmentPromptMode: elements.illustrationSegmentPromptMode.value,
-        refinementPrompt: illustrationRefinementPromptValue
+        refinementPrompt: illustrationRefinementPromptValue,
+        artStyle: elements.illustrationArtStyle.value,
+        negativePrompt: elements.illustrationNegativePrompt.value
       })
     });
     if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;

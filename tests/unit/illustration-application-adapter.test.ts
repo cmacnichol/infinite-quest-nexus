@@ -85,7 +85,8 @@ describe("illustration provider adapters", () => {
       size: "1024x1024",
       aspectRatio: "1:1",
       quality: "auto" as const,
-      outputFormat: "png" as const
+      outputFormat: "png" as const,
+      negativePrompt: ""
     };
 
     await expect(adapter.executeImage({ ...baseRequest, remoteJobId: null })).resolves.toEqual({

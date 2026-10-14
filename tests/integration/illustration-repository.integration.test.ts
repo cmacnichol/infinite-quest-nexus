@@ -128,6 +128,9 @@ integration("PostgreSQL illustration repository", () => {
         segmentPromptMode: "direct",
         refinementPrompt: "Fiction only.",
         defaultRefinementPrompt: "Fiction only.",
+        artStyle: "",
+        negativePrompt: "",
+        defaultNegativePrompt: "",
         updatedAt: null
       }
     });

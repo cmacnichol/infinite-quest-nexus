@@ -210,10 +210,10 @@ integration("campaign archive export", () => {
       `INSERT INTO campaign_illustration_configs (
          campaign_id,owner_user_id,enabled,source_policy,matching_scope,confidence_profile,repetition_window,
          model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,
-         segment_prompt_mode,refinement_prompt
+         segment_prompt_mode,refinement_prompt,art_style,negative_prompt
        ) VALUES ($1,$2,true,'library_then_generate','shared','broad',37,
                  'flux1-schnell-fp8','1536x1024','3:2','high','webp',7,750,2,
-                 'ai_refined','Archive refinement instructions.')`,
+                 'ai_refined','Archive refinement instructions.','Archive gouache','text, archive frame')`,
       [campaignId, ownerUserId]
     );
     const set = await pool.query<{ id: string }>(
@@ -461,6 +461,11 @@ integration("campaign archive export", () => {
 
       const snapshot = await loadCampaignArchiveExportSnapshot(pool, ownerUserId, campaignId);
       const projected = campaignArchivePayloads(snapshot);
+      // The production export carries the campaign's illustration style settings.
+      expect(projected.campaign.archiveRecords.illustrationConfig).toMatchObject({
+        art_style: "Archive gouache",
+        negative_prompt: "text, archive frame"
+      });
       const emitted = {
         "campaign.json": canonicalArchiveJson(projected.campaign),
         "world.json": canonicalArchiveJson(projected.world),

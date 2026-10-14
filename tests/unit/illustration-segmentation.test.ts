@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { directIllustrationPrompt, isIllustrationSegmentEligible, segmentIllustrationText } from "../../packages/domain/src/illustrations.js";
+import { DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "../../packages/contracts/src/generation.js";
+import {
+  composeIllustrationProviderPrompt,
+  directIllustrationPrompt,
+  illustrationScenePrompt,
+  isIllustrationSegmentEligible,
+  MAX_ILLUSTRATION_PROVIDER_PROMPT_CHARACTERS,
+  segmentIllustrationText
+} from "../../packages/domain/src/illustrations.js";
 import {
   buildBriefIllustrationStoryContext,
   buildIllustrationRefinementInput,
@@ -48,6 +56,31 @@ describe("illustration segmentation", () => {
     expect(prompt).not.toContain("statistics");
   });
 
+  it("keeps exclusions out of the positive direct prompt", () => {
+    const prompt = directIllustrationPrompt("The lantern swings above the rain-dark bridge.");
+    expect(prompt).not.toMatch(/\b(?:do not|don't|no|without|avoid)\b/i);
+  });
+
+  it("adds the campaign art style ahead of the character reference and strips both when recomposed", () => {
+    const composed = composeIllustrationProviderPrompt(
+      "A rope bridge over a black river", "Name: Mira\nHair: silver braid", undefined, { artStyle: "Ink and watercolor storybook" }
+    );
+    expect(composed.indexOf("ART STYLE:\nInk and watercolor storybook")).toBeGreaterThan(0);
+    expect(composed.indexOf("ART STYLE:")).toBeLessThan(composed.indexOf("CANONICAL CHARACTER REFERENCE:"));
+    expect(illustrationScenePrompt(composed)).toBe("A rope bridge over a black river");
+    expect(composeIllustrationProviderPrompt(composed, "Name: Mira\nHair: silver braid", undefined, { artStyle: "Ink and watercolor storybook" }))
+      .toBe(composed);
+  });
+
+  it("shortens an oversized scene so the provider prompt stays within its budget", () => {
+    const scene = "Rain falls on the long causeway as the procession moves north. ".repeat(200);
+    const composed = composeIllustrationProviderPrompt(scene, "Name: Mira\nHair: silver braid", undefined, { artStyle: "Oil painting" });
+    expect(composed.length).toBeLessThanOrEqual(MAX_ILLUSTRATION_PROVIDER_PROMPT_CHARACTERS);
+    expect(composed).toContain("ART STYLE:\nOil painting");
+    expect(composed).toContain("Hair: silver braid");
+    expect(composed.startsWith("Rain falls on the long causeway")).toBe(true);
+  });
+
   it("builds brief fiction-only context separately from the excerpt", () => {
     const illustrationContext = {
       campaignTitle: "The Lantern Road",
@@ -68,6 +101,39 @@ describe("illustration segmentation", () => {
     expect(context.length).toBeLessThanOrEqual(1_800);
     expect(input).toContain("STORY CONTEXT");
     expect(input).toContain("FICTION EXCERPT TO ILLUSTRATE");
+  });
+
+  it("keeps the end of the previous turn and the preceding excerpt for continuity", () => {
+    const opening = "The caravan left the city at dawn. ".repeat(40);
+    const context = buildBriefIllustrationStoryContext({
+      campaignTitle: "The Lantern Road",
+      worldContent: { world: { title: "Night Roads" } },
+      characterSnapshot: null,
+      previousNarration: `${opening}At dusk they reached the drowned chapel.`,
+      precedingExcerpt: `${"Rain hammered the roof. ".repeat(40)}Mira lit the last candle.`
+    });
+    expect(context).toContain("At dusk they reached the drowned chapel.");
+    expect(context).toContain("Earlier in this turn:");
+    expect(context).toContain("Mira lit the last candle.");
+    expect(context.length).toBeLessThanOrEqual(2_400);
+  });
+
+  it("tells the refiner the campaign's fixed art style", () => {
+    const context = buildBriefIllustrationStoryContext({
+      campaignTitle: "The Lantern Road",
+      worldContent: { world: { title: "Night Roads" } },
+      characterSnapshot: null,
+      previousNarration: "",
+      artStyle: "Ink and watercolor storybook"
+    });
+    expect(context).toContain("Art style (fixed for every illustration): Ink and watercolor storybook");
+  });
+
+  it("asks the refiner for a bounded, positive-only prompt that respects a fixed art style", () => {
+    expect(DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT).toMatch(/art style/i);
+    expect(DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT).toMatch(/\b\d+ words\b/);
+    expect(DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT).toMatch(/negative/i);
+    expect(DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT).toMatch(/composition|framing/i);
   });
 
   it("accepts the default raw prompt output and legacy JSON output", () => {

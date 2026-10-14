@@ -111,17 +111,64 @@ export function directIllustrationPrompt(segmentText: string, template?: string)
   return renderPromptTemplate(template || PROMPT_TEMPLATE_CATALOG.illustration_direct.defaultContent, { segment });
 }
 
-export function composeIllustrationProviderPrompt(scenePrompt: string, characterVisualReference: string, template?: string): string {
-  const scene = stripMechanicsLeakage(
-    stripPromptPart(scenePrompt).split(/\n\s*CANONICAL CHARACTER REFERENCE:\s*\n/i, 1)[0]!.trim()
-  ).text;
+/**
+ * Image endpoints cap prompt length (4,000 characters for some OpenAI models).
+ * The budget leaves room for the exclusions a provider adapter may append.
+ */
+export const MAX_ILLUSTRATION_PROVIDER_PROMPT_CHARACTERS = 3_400;
+
+const COMPOSED_PROMPT_BLOCK = /\n\s*(?:ART STYLE|CANONICAL CHARACTER REFERENCE):\s*\n/i;
+
+/** The scene part of a provider prompt, without the blocks composition appends. */
+export function illustrationScenePrompt(prompt: string): string {
+  return stripPromptPart(prompt).split(COMPOSED_PROMPT_BLOCK, 1)[0]!.trim();
+}
+
+/**
+ * Wording every illustration prompt shares: the template text around its
+ * variables. Library matching ignores it so prompts compare by scene content.
+ */
+export function illustrationTemplateWording(templates: readonly (string | undefined)[] = []): string {
+  return [
+    PROMPT_TEMPLATE_CATALOG.illustration_direct.defaultContent,
+    PROMPT_TEMPLATE_CATALOG.illustration_character_reference.defaultContent,
+    ...templates
+  ].filter((template): template is string => Boolean(template))
+    .map((template) => template.replace(/{{[A-Za-z][A-Za-z0-9_]*}}/g, " "))
+    .join("\n");
+}
+
+export type IllustrationPromptCompositionOptions = Readonly<{
+  /** Campaign-wide medium and style, kept identical across every image. */
+  artStyle?: string;
+  maximumCharacters?: number;
+}>;
+
+export function composeIllustrationProviderPrompt(
+  scenePrompt: string,
+  characterVisualReference: string,
+  template?: string,
+  options: IllustrationPromptCompositionOptions = {},
+): string {
+  const scene = stripMechanicsLeakage(illustrationScenePrompt(scenePrompt)).text;
   const character = stripMechanicsLeakage(stripPromptPart(characterVisualReference)).text;
-  if (!character) return scene;
-  return renderPromptTemplate(template || PROMPT_TEMPLATE_CATALOG.illustration_character_reference.defaultContent, { scene, character });
+  const artStyle = stripMechanicsLeakage(stripPromptPart(options.artStyle ?? "")).text;
+  const maximumCharacters = options.maximumCharacters ?? MAX_ILLUSTRATION_PROVIDER_PROMPT_CHARACTERS;
+  const render = (sceneText: string) => {
+    const styled = artStyle ? `${sceneText}\n\nART STYLE:\n${artStyle}` : sceneText;
+    return character
+      ? renderPromptTemplate(template || PROMPT_TEMPLATE_CATALOG.illustration_character_reference.defaultContent, { scene: styled, character })
+      : styled;
+  };
+  const full = render(scene);
+  if (full.length <= maximumCharacters) return full;
+  // Shorten only the scene so the style and character reference survive.
+  const overhead = full.length - scene.length;
+  return render(truncateAtBoundary(scene, Math.max(200, maximumCharacters - overhead)));
 }
 
 function stripPromptPart(value: string): string {
   return String(value || "").trim();
 }
 import { PROMPT_TEMPLATE_CATALOG, renderPromptTemplate } from "../../contracts/src/prompt-library.js";
-import { stripMechanicsLeakage } from "./text.js";
+import { stripMechanicsLeakage, truncateAtBoundary } from "./text.js";

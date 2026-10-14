@@ -1084,10 +1084,10 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
        campaign_id,owner_user_id,enabled,provider_profile_id,model,size,aspect_ratio,
        quality,output_format,max_attempts,source_policy,matching_scope,confidence_profile,
        repetition_window,segment_word_count,images_per_segment,segment_prompt_mode,
-       refinement_prompt
+       refinement_prompt,art_style,negative_prompt
      ) VALUES ($1,$2,true,$3,'image-model','1536x1024','3:2','high','webp',4,
                'library_then_generate','campaign','strict',9,250,2,'ai_refined',
-               'Preserve the fiction-only release aesthetic.')`,
+               'Preserve the fiction-only release aesthetic.','Release woodcut print','text, release frame')`,
     [campaignIds[0], ownerUserId, providerIds[1]],
   );
   const memory = await pool.query<{ id: string }>(
@@ -1829,6 +1829,8 @@ function assertRoundThreeArchiveRelationships(
     imagesPerSegment: 2,
     segmentPromptMode: "ai_refined",
     refinementPrompt: "Preserve the fiction-only release aesthetic.",
+    artStyle: "Release woodcut print",
+    negativePrompt: "text, release frame",
     createdAt: representativeTimestamp,
     updatedAt: representativeTimestamp,
   });
@@ -2974,13 +2976,15 @@ async function assertImportedAuthority(
       images_per_segment: number;
       segment_prompt_mode: string;
       refinement_prompt: string;
+      art_style: string;
+      negative_prompt: string;
       created_at: Date;
       updated_at: Date;
     }>(
       `SELECT campaign_id,owner_user_id,enabled,provider_profile_id,model,size,aspect_ratio,
               quality,output_format,max_attempts,source_policy,matching_scope,confidence_profile,
               repetition_window,segment_word_count,images_per_segment,segment_prompt_mode,
-              refinement_prompt,created_at,updated_at
+              refinement_prompt,art_style,negative_prompt,created_at,updated_at
          FROM campaign_illustration_configs`,
     );
     expect(illustrationConfigs.rows).toEqual([{
@@ -3002,6 +3006,8 @@ async function assertImportedAuthority(
       images_per_segment: 2,
       segment_prompt_mode: "ai_refined",
       refinement_prompt: "Preserve the fiction-only release aesthetic.",
+      art_style: "Release woodcut print",
+      negative_prompt: "text, release frame",
       created_at: expect.any(Date),
       updated_at: expect.any(Date),
     }]);

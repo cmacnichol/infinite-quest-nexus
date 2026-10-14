@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { ILLUSTRATION_NEGATIVE_PROMPT_DEFAULT } from "../../contracts/src/illustration-refinement-default.js";
 import {
   canonicalPortableImportAuthority,
   safePortableImportProgress,
@@ -1468,8 +1469,8 @@ async function commitRichPortableCampaign(
       `INSERT INTO campaign_illustration_configs (
          campaign_id,owner_user_id,enabled,source_policy,matching_scope,confidence_profile,repetition_window,
          model,size,aspect_ratio,quality,output_format,max_attempts,segment_word_count,images_per_segment,
-         segment_prompt_mode,refinement_prompt
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+         segment_prompt_mode,refinement_prompt,art_style,negative_prompt
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
       [campaignId, input.owner.ownerUserId, sourcePolicy !== "off", sourcePolicy,
         ["campaign", "world", "owner_library", "shared"].includes(String(config.matching_scope)) ? config.matching_scope : "world",
         ["strict", "balanced", "broad"].includes(String(config.confidence_profile)) ? config.confidence_profile : "balanced",
@@ -1478,7 +1479,10 @@ async function commitRichPortableCampaign(
         ["png", "jpeg", "webp"].includes(String(config.output_format)) ? config.output_format : "png",
         Number(config.max_attempts ?? 3), Number(config.segment_word_count ?? 500), Number(config.images_per_segment ?? 1),
         ["direct", "ai_refined"].includes(String(config.segment_prompt_mode)) ? config.segment_prompt_mode : "direct",
-        String(config.refinement_prompt ?? "")]
+        String(config.refinement_prompt ?? ""),
+        // Archives exported before migration 0116 carry neither setting.
+        typeof config.art_style === "string" ? config.art_style.slice(0, 500) : "",
+        typeof config.negative_prompt === "string" ? config.negative_prompt.slice(0, 500) : ILLUSTRATION_NEGATIVE_PROMPT_DEFAULT]
     );
   }
   for (const setValue of unknownArray(archiveRecords.illustrationSets)) {

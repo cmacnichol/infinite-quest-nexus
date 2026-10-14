@@ -14,6 +14,7 @@ import {
   type SystemRecordEnvelope
 } from "@infinite-quest/contracts";
 import { portableAcceptedTurnModelMetadata } from "../../contracts/src/campaign-generation-policy.js";
+import { ILLUSTRATION_NEGATIVE_PROMPT_DEFAULT } from "../../contracts/src/illustration-refinement-default.js";
 import { normalizeHistoricalTurnControlStyle } from "../../domain/src/campaign-generation-policy.js";
 import type { OwnerScope } from "../../application/src/generation/types.js";
 import type {
@@ -1191,8 +1192,8 @@ async function insertLogicalRecord(
                campaign_id,owner_user_id,enabled,provider_profile_id,model,size,aspect_ratio,
                quality,output_format,max_attempts,source_policy,matching_scope,
                confidence_profile,repetition_window,segment_word_count,images_per_segment,
-               segment_prompt_mode,refinement_prompt,created_at,updated_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+               segment_prompt_mode,refinement_prompt,created_at,updated_at,art_style,negative_prompt
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
             [
               record.campaignId,
               ownerUserId,
@@ -1219,7 +1220,10 @@ async function insertLogicalRecord(
               historyEnum(record.eventType, content, "segmentPromptMode", ["direct", "ai_refined"] as const),
               historyString(record.eventType, content, "refinementPrompt"),
               historyString(record.eventType, content, "createdAt"),
-              historyString(record.eventType, content, "updatedAt")
+              historyString(record.eventType, content, "updatedAt"),
+              // Archives exported before migration 0116 carry neither field.
+              historyOptionalString(record.eventType, content, "artStyle") ?? "",
+              historyOptionalString(record.eventType, content, "negativePrompt") ?? ILLUSTRATION_NEGATIVE_PROMPT_DEFAULT
             ]
           ), record.eventType);
           return true;

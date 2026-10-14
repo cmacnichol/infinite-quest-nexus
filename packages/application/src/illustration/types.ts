@@ -58,6 +58,7 @@ export type IllustrationConfigView = Readonly<
   Omit<IllustrationConfig, "sourcePolicy"> & {
     sourcePolicy: "off" | "library_only" | "library_then_generate" | "generate_only";
     defaultRefinementPrompt: string;
+    defaultNegativePrompt: string;
     updatedAt: string | null;
   }
 >;
@@ -337,6 +338,8 @@ export type IllustrationImageExecutionRequest = ImageJobScope & Readonly<{
   aspectRatio: string;
   quality: IllustrationConfig["quality"];
   outputFormat: IllustrationConfig["outputFormat"];
+  /** Exclusions; empty when the job has none. */
+  negativePrompt: string;
   remoteJobId: string | null;
 }>;
 

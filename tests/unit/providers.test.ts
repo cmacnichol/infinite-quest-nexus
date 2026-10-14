@@ -758,6 +758,24 @@ describe("text provider adapters", () => {
     expect(result.reportedCost).toEqual({ amount: "0.04", currency: "USD" });
   });
 
+  it("sends exclusions as a trailing avoid clause to endpoints without a negative-prompt field", async () => {
+    const imageProfile = { ...profile, providerType: "openai_compatible" as const, baseUrl: "http://images.test" };
+    let sentPrompt = "";
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      sentPrompt = JSON.parse(String(init?.body)).prompt;
+      return new Response(JSON.stringify({ id: "image-avoid", data: [{ b64_json: "aW1hZ2U=" }] }), { status: 200 });
+    });
+    await callImageProvider(imageProfile, {
+      prompt: "A fictional lighthouse at dusk.",
+      size: "1024x1024",
+      aspectRatio: "1:1",
+      quality: "high",
+      outputFormat: "png",
+      negativePrompt: "text, watermark"
+    }, createTestProviderTransport(fetcher as typeof fetch));
+    expect(sentPrompt).toBe("A fictional lighthouse at dusk.\n\nAvoid: text, watermark.");
+  });
+
   it("returns both requested OpenAI-compatible image variants", async () => {
     const imageProfile = { ...profile, providerType: "openai_compatible" as const, baseUrl: "http://images.test" };
     const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {

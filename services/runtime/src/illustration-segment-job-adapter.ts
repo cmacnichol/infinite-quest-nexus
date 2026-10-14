@@ -1,11 +1,14 @@
-import { captureSegmentActivity } from "../../../packages/database/src/illustration-activity.js";
+import { captureImageActivity, captureSegmentActivity } from "../../../packages/database/src/illustration-activity.js";
 import type {
   IllustrationBackfillRequest,
   IllustrationConfig,
   IllustrationSegmentImageRequest,
   IllustrationSegmentRequest
 } from "../../../packages/contracts/src/generation.js";
-import { DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "../../../packages/contracts/src/generation.js";
+import {
+  DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT,
+  DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT
+} from "../../../packages/contracts/src/generation.js";
 import type { IllustrationCostPort, IllustrationPromptRefinementPort } from "../../../packages/application/src/index.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
@@ -19,7 +22,8 @@ import {
   sha256,
   stableStringify,
   stripMechanicsLeakage,
-  truncateAtBoundary
+  truncateAtBoundary,
+  truncateTailAtBoundary
 } from "../../../packages/domain/src/index.js";
 import {
   containsMechanicsLanguage,
@@ -87,6 +91,8 @@ export type SegmentConfigRow = {
   images_per_segment: 1 | 2;
   segment_prompt_mode: IllustrationConfig["segmentPromptMode"];
   refinement_prompt: string;
+  art_style: string;
+  negative_prompt: string;
   updated_at: Date;
 };
 
@@ -307,6 +313,7 @@ export async function loadConfig(client: DatabaseClient | DatabasePool, ownerUse
             config.repetition_window, config.provider_profile_id, config.model, config.size,
             config.aspect_ratio, config.quality, config.output_format, config.max_attempts,
             config.segment_word_count, config.images_per_segment, config.segment_prompt_mode, config.refinement_prompt,
+            config.art_style, config.negative_prompt,
             config.updated_at, campaigns.image_provider_profile_id AS campaign_image_provider_id,
             campaigns.text_provider_profile_id AS campaign_text_provider_id
        FROM campaign_illustration_configs config
@@ -341,6 +348,9 @@ function imageConfig(config: SegmentConfigRow, providerProfileId: string | null,
     segmentPromptMode: config.segment_prompt_mode,
     refinementPrompt: config.refinement_prompt.trim() || DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
     defaultRefinementPrompt: DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
+    artStyle: config.art_style,
+    negativePrompt: config.negative_prompt,
+    defaultNegativePrompt: DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT,
     updatedAt: config.updated_at.toISOString()
   };
 }
@@ -406,7 +416,9 @@ async function queueSegmentDelivery(
   if (!prompt.trim() || containsMechanicsLanguage(prompt) || containsMechanicsLanguage(sanitizedReference)) {
     throw Object.assign(new Error("The segment illustration prompt failed the fiction-only boundary."), { statusCode: 409 });
   }
-  const providerPrompt = composeIllustrationProviderPrompt(prompt.trim(), sanitizedReference, characterReferenceTemplate);
+  const providerPrompt = composeIllustrationProviderPrompt(
+    prompt.trim(), sanitizedReference, characterReferenceTemplate, { artStyle: config.art_style }
+  );
   if (!await lockActiveProvisionalGeneration(client, ownerUserId, segment.campaign_id, segment.generation_job_id, segment.turn_id)) return false;
   const segmentChanged = await client.query(
     `UPDATE turn_illustration_segments
@@ -557,7 +569,8 @@ async function createProvisionalSegmentInTransaction(
     const providerPrompt = composeIllustrationProviderPrompt(
       directPrompt.trim(),
       (visualReference || "").trim(),
-      providers.promptTools.content(promptSnapshot, "illustration_character_reference")
+      providers.promptTools.content(promptSnapshot, "illustration_character_reference"),
+      { artStyle: config.art_style }
     );
     await client.query(
       `UPDATE turn_illustration_segments
@@ -668,7 +681,25 @@ export async function promoteProvisionalSet(
   if (stableStringify(frozen) !== stableStringify(child)) {
     throw new Error("Illustration children must copy the generation text execution snapshot.");
   }
-  // Update the set
+  const pieces = segmentIllustrationText(finalNarration, config.segment_word_count);
+  // Streamed segments are cut from narration before validation. A scene
+  // rewrite or retry can replace that text, and rejected narration must never
+  // be illustrated, so a diverged set is superseded and rebuilt from the
+  // accepted narration.
+  const provisional = await client.query<{ id: string }>(
+    `SELECT id FROM turn_illustration_sets
+      WHERE generation_job_id = $1 AND owner_user_id = $2 AND campaign_id = $3
+        AND turn_id IS NULL AND is_active AND status NOT IN ('orphaned', 'superseded')
+      FOR UPDATE`,
+    [generationJobId, ownerUserId, campaignId]
+  );
+  if (!provisional.rows[0]) return;
+  if (!await alignStreamedSegments(client, ownerUserId, provisional.rows[0].id, finalNarration, pieces)) {
+    await supersedeProvisionalSet(client, ownerUserId, provisional.rows[0].id);
+    await createTurnSet(client, ownerUserId, turnId, "missing", providers, textExecutionSnapshot, generationJobId);
+    await bindStreamedChildrenToTurn(client, ownerUserId, generationJobId, turnId);
+    return;
+  }
   const setResult = await client.query<{ id: string, character_visual_reference: string }>(
     `UPDATE turn_illustration_sets
         SET turn_id = $3, status = CASE WHEN status = 'provisional' THEN $4 ELSE status END, source_text_hash = $5
@@ -682,7 +713,6 @@ export async function promoteProvisionalSet(
   const dbVisualReference = setResult.rows[0].character_visual_reference;
 
   // Segment any remaining text
-  const pieces = segmentIllustrationText(finalNarration, config.segment_word_count);
   const existingSegments = await client.query<{ ordinal: number }>(
     `SELECT ordinal FROM turn_illustration_segments
       WHERE illustration_set_id = $1 AND owner_user_id = $2`,
@@ -703,6 +733,104 @@ export async function promoteProvisionalSet(
   // The final segmentation pass may create children after promotion. Bind all
   // streaming children only after that pass so no prompt or segment remains
   // provisional while its set is attached to the accepted turn.
+  await bindStreamedChildrenToTurn(client, ownerUserId, generationJobId, turnId);
+}
+
+function comparableFiction(text: string): string {
+  return text.replace(/\s+/gu, " ").trim();
+}
+
+/**
+ * Returns false when any streamed segment is not accepted narration. Segments
+ * that differ from the accepted text only in whitespace take the accepted
+ * offsets so they still point at the turn's own narration.
+ */
+async function alignStreamedSegments(
+  client: DatabaseClient,
+  ownerUserId: string,
+  setId: string,
+  finalNarration: string,
+  pieces: ReturnType<typeof segmentIllustrationText>,
+): Promise<boolean> {
+  const streamed = await client.query<{ id: string; ordinal: number; start_offset: number; end_offset: number; source_text: string }>(
+    `SELECT id, ordinal, start_offset, end_offset, source_text FROM turn_illustration_segments
+      WHERE illustration_set_id = $1 AND owner_user_id = $2 ORDER BY ordinal FOR UPDATE`,
+    [setId, ownerUserId]
+  );
+  const realigned: Array<{ id: string; piece: (typeof pieces)[number] }> = [];
+  for (const segment of streamed.rows) {
+    if (finalNarration.slice(segment.start_offset, segment.end_offset) === segment.source_text) continue;
+    const piece = pieces[segment.ordinal];
+    if (!piece || comparableFiction(piece.text) !== comparableFiction(segment.source_text)) return false;
+    realigned.push({ id: segment.id, piece });
+  }
+  for (const { id, piece } of realigned) {
+    await client.query(
+      `UPDATE turn_illustration_segments
+          SET start_offset = $3, end_offset = $4, start_word = $5, end_word = $6,
+              source_text = $7, source_text_hash = $8, updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2`,
+      [id, ownerUserId, piece.startOffset, piece.endOffset, piece.startWord, piece.endWord, piece.text, sha256(piece.text)]
+    );
+  }
+  return true;
+}
+
+/** Stops every unfinished child of a set whose source text was not accepted. */
+async function supersedeProvisionalSet(client: DatabaseClient, ownerUserId: string, setId: string) {
+  const cancelledImages = await client.query<{ id: string }>(
+    `UPDATE image_jobs jobs SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
+            error_code = 'narration_superseded', error_message = 'The streamed narration was replaced before acceptance.',
+            completed_at = now(), updated_at = now()
+       FROM turn_illustration_segments segments
+      WHERE jobs.segment_id = segments.id AND jobs.owner_user_id = segments.owner_user_id
+        AND segments.illustration_set_id = $1 AND segments.owner_user_id = $2
+        AND jobs.status IN ('queued', 'generating', 'provider_pending', 'downloading')
+      RETURNING jobs.id`,
+    [setId, ownerUserId]
+  );
+  for (const image of cancelledImages.rows) await captureImageActivity(client, image.id, ownerUserId, "image.cancelled");
+  await client.query(
+    `UPDATE illustration_prompt_jobs prompts SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
+            error_code = 'narration_superseded', error_message = 'The streamed narration was replaced before acceptance.',
+            completed_at = now(), updated_at = now()
+       FROM turn_illustration_segments segments
+      WHERE prompts.segment_id = segments.id AND prompts.owner_user_id = segments.owner_user_id
+        AND segments.illustration_set_id = $1 AND segments.owner_user_id = $2
+        AND prompts.status IN ('queued', 'refining', 'recoverable')`,
+    [setId, ownerUserId]
+  );
+  await client.query(
+    `DELETE FROM asset_references refs USING illustration_resolution_jobs resolutions, turn_illustration_segments segments
+      WHERE resolutions.segment_id = segments.id AND resolutions.owner_user_id = segments.owner_user_id
+        AND segments.illustration_set_id = $1 AND segments.owner_user_id = $2
+        AND refs.owner_user_id = segments.owner_user_id AND refs.campaign_id = segments.campaign_id
+        AND refs.asset_id = resolutions.selected_asset_id AND refs.turn_id IS NULL
+        AND refs.asset_role = 'turn_illustration'`,
+    [setId, ownerUserId]
+  );
+  await client.query(
+    `UPDATE illustration_resolution_jobs resolutions SET status = 'cancelled', reason_code = 'narration_superseded',
+            lease_owner = NULL, lease_expires_at = NULL, completed_at = now(), updated_at = now()
+       FROM turn_illustration_segments segments
+      WHERE resolutions.segment_id = segments.id AND resolutions.owner_user_id = segments.owner_user_id
+        AND segments.illustration_set_id = $1 AND segments.owner_user_id = $2
+        AND resolutions.status IN ('queued', 'matching', 'recoverable', 'generation_queued')`,
+    [setId, ownerUserId]
+  );
+  await client.query(
+    `UPDATE turn_illustration_sets SET is_active = false, status = 'superseded'
+      WHERE id = $1 AND owner_user_id = $2`,
+    [setId, ownerUserId]
+  );
+}
+
+async function bindStreamedChildrenToTurn(
+  client: DatabaseClient,
+  ownerUserId: string,
+  generationJobId: string,
+  turnId: string,
+) {
   await client.query(
     `UPDATE turn_illustration_segments SET turn_id = $3
       WHERE generation_job_id = $1 AND owner_user_id = $2`,
@@ -716,6 +844,31 @@ export async function promoteProvisionalSet(
   await client.query(
     `UPDATE illustration_prompt_jobs SET turn_id = $3
       WHERE generation_job_id = $1 AND owner_user_id = $2`,
+    [generationJobId, ownerUserId, turnId]
+  );
+  // Library reuse counts references by turn. Streamed matches were recorded
+  // before the turn existed and would otherwise escape the repetition window.
+  await client.query(
+    `UPDATE asset_references refs SET turn_id = $3
+       FROM illustration_resolution_jobs resolutions
+       JOIN turn_illustration_segments segments
+         ON segments.id = resolutions.segment_id AND segments.owner_user_id = resolutions.owner_user_id
+      WHERE segments.generation_job_id = $1 AND segments.owner_user_id = $2
+        AND refs.owner_user_id = segments.owner_user_id AND refs.campaign_id = segments.campaign_id
+        AND refs.asset_id = resolutions.selected_asset_id AND refs.turn_id IS NULL
+        AND refs.asset_role = 'turn_illustration'
+        AND NOT EXISTS (
+          SELECT 1 FROM asset_references bound
+           WHERE bound.owner_user_id = refs.owner_user_id AND bound.asset_id = refs.asset_id
+             AND bound.campaign_id = refs.campaign_id AND bound.turn_id = $3 AND bound.asset_role = refs.asset_role
+        )`,
+    [generationJobId, ownerUserId, turnId]
+  );
+  await client.query(
+    `UPDATE illustration_resolution_jobs resolutions SET turn_id = $3
+       FROM turn_illustration_segments segments
+      WHERE resolutions.segment_id = segments.id AND resolutions.owner_user_id = segments.owner_user_id
+        AND segments.generation_job_id = $1 AND segments.owner_user_id = $2 AND resolutions.turn_id IS NULL`,
     [generationJobId, ownerUserId, turnId]
   );
 }
@@ -1167,7 +1320,8 @@ export async function regenerateSegmentIllustration(
       prompt: composeIllustrationProviderPrompt(
         request.prompt,
         stripMechanicsLeakage(segment.character_visual_reference).text,
-        providers.promptTools.content(promptSnapshot, "illustration_character_reference")
+        providers.promptTools.content(promptSnapshot, "illustration_character_reference"),
+        { artStyle: config.art_style }
       ),
       config: { ...imageConfig(config, imageProvider.providerProfileId, imageProvider.model), imagesPerSegment: 1 }
     });
@@ -1254,7 +1408,8 @@ export async function enqueueSegmentProviderImage(
       prompt: composeIllustrationProviderPrompt(
         segment.resolved_prompt || segment.direct_prompt,
         stripMechanicsLeakage(segment.character_visual_reference).text,
-        providers.promptTools.content(promptSnapshot, "illustration_character_reference")
+        providers.promptTools.content(promptSnapshot, "illustration_character_reference"),
+        { artStyle: config.art_style }
       ),
       config: imageConfig(config, imageProvider.providerProfileId, imageProvider.model)
     });
@@ -1286,11 +1441,20 @@ type IllustrationStoryContext = {
   characterProfile?: Record<string, unknown> | null;
   characterVisualReference?: string;
   previousNarration: string;
+  /** The segment immediately before the one being illustrated, within the same turn. */
+  precedingExcerpt?: string;
+  artStyle?: string;
 };
 
 function briefFictionText(value: unknown, maximumCharacters: number): string {
   if (typeof value !== "string") return "";
   return truncateAtBoundary(stripMechanicsLeakage(value).text.trim(), maximumCharacters);
+}
+
+/** Continuity comes from where earlier fiction ended, not where it began. */
+function briefFictionTail(value: unknown, maximumCharacters: number): string {
+  if (typeof value !== "string") return "";
+  return truncateTailAtBoundary(stripMechanicsLeakage(value).text.trim(), maximumCharacters);
 }
 
 export function buildBriefIllustrationStoryContext(context: IllustrationStoryContext): string {
@@ -1309,12 +1473,14 @@ export function buildBriefIllustrationStoryContext(context: IllustrationStoryCon
       ? `Genre and tone: ${[briefFictionText(overview.genre, 100), briefFictionText(overview.tone, 160)].filter(Boolean).join("; ")}`
       : "",
     briefFictionText(overview.premise, 420) ? `Premise: ${briefFictionText(overview.premise, 420)}` : "",
+    briefFictionText(context.artStyle, 500) ? `Art style (fixed for every illustration): ${briefFictionText(context.artStyle, 500)}` : "",
     characterDescription
       ? `Player character appearance:\n${characterDescription}`
       : "",
-    briefFictionText(context.previousNarration, 500) ? `Previous scene: ${briefFictionText(context.previousNarration, 500)}` : ""
+    briefFictionTail(context.previousNarration, 500) ? `Previous scene: ${briefFictionTail(context.previousNarration, 500)}` : "",
+    briefFictionTail(context.precedingExcerpt, 600) ? `Earlier in this turn: ${briefFictionTail(context.precedingExcerpt, 600)}` : ""
   ].filter(Boolean);
-  return truncateAtBoundary(lines.join("\n"), 1_800);
+  return truncateAtBoundary(lines.join("\n"), 2_400);
 }
 
 export function buildIllustrationRefinementInput(sourceText: string, storyContext: string): string {
@@ -1326,11 +1492,14 @@ export function buildIllustrationRefinementInput(sourceText: string, storyContex
   ].filter(Boolean).join("\n\n");
 }
 
+/**
+ * Streamed segments are refined before their turn is accepted, so the turn
+ * position comes from the accepted turn when it exists and otherwise from the
+ * generation that is producing it.
+ */
 async function loadBriefIllustrationStoryContext(
   pool: DatabasePool,
-  ownerUserId: string,
-  campaignId: string,
-  turnId: string,
+  segment: SegmentRow & { ordinal: number },
   visualReference = ""
 ): Promise<string> {
   const result = await pool.query<{
@@ -1339,21 +1508,36 @@ async function loadBriefIllustrationStoryContext(
     character_snapshot: Record<string, unknown> | null;
     character_profile: Record<string, unknown> | null;
     previous_narration: string;
+    preceding_excerpt: string;
+    art_style: string;
   }>(
     `SELECT campaigns.title AS campaign_title, world_versions.content AS world_content,
             campaigns.character_snapshot, campaigns.character_profile,
-            COALESCE(previous.narration, '') AS previous_narration
-       FROM turns target
-       JOIN campaigns ON campaigns.id = target.campaign_id AND campaigns.owner_user_id = target.owner_user_id
+            COALESCE(previous.narration, '') AS previous_narration,
+            COALESCE(preceding.source_text, '') AS preceding_excerpt,
+            COALESCE(config.art_style, '') AS art_style
+       FROM campaigns
        JOIN world_versions ON world_versions.id = campaigns.world_version_id AND world_versions.owner_user_id = campaigns.owner_user_id
+       LEFT JOIN campaign_illustration_configs config
+         ON config.campaign_id = campaigns.id AND config.owner_user_id = campaigns.owner_user_id
+       LEFT JOIN turns target
+         ON target.id = $3 AND target.campaign_id = campaigns.id AND target.owner_user_id = campaigns.owner_user_id
+       LEFT JOIN generation_jobs generation
+         ON generation.id = $4 AND generation.campaign_id = campaigns.id AND generation.owner_user_id = campaigns.owner_user_id
        LEFT JOIN LATERAL (
          SELECT narration FROM turns
-          WHERE campaign_id = target.campaign_id AND owner_user_id = target.owner_user_id
-            AND turn_number < target.turn_number
+          WHERE campaign_id = campaigns.id AND owner_user_id = campaigns.owner_user_id
+            AND turn_number < COALESCE(target.turn_number, generation.expected_turn_number)
           ORDER BY turn_number DESC LIMIT 1
        ) previous ON true
-      WHERE target.id = $1 AND target.campaign_id = $2 AND target.owner_user_id = $3`,
-    [turnId, campaignId, ownerUserId]
+       LEFT JOIN LATERAL (
+         SELECT source_text FROM turn_illustration_segments
+          WHERE illustration_set_id = $5 AND owner_user_id = campaigns.owner_user_id AND ordinal < $6
+          ORDER BY ordinal DESC LIMIT 1
+       ) preceding ON true
+      WHERE campaigns.id = $1 AND campaigns.owner_user_id = $2`,
+    [segment.campaign_id, segment.owner_user_id, segment.turn_id, segment.generation_job_id,
+      segment.illustration_set_id, segment.ordinal]
   );
   const row = result.rows[0];
   return row ? buildBriefIllustrationStoryContext({
@@ -1362,7 +1546,9 @@ async function loadBriefIllustrationStoryContext(
     characterSnapshot: row.character_snapshot,
     characterProfile: row.character_profile,
     characterVisualReference: visualReference,
-    previousNarration: row.previous_narration
+    previousNarration: row.previous_narration,
+    precedingExcerpt: row.preceding_excerpt,
+    artStyle: row.art_style
   }) : "";
 }
 
@@ -1393,9 +1579,9 @@ export async function runIllustrationPromptJob(
     return result.rows[0] || null;
   });
   if (!claimed) return false;
-  const segmentResult = await pool.query<SegmentRow>(
+  const segmentResult = await pool.query<SegmentRow & { ordinal: number }>(
     `SELECT segments.id, segments.owner_user_id, segments.campaign_id, segments.turn_id,
-            segments.generation_job_id,
+            segments.generation_job_id, segments.ordinal,
             segments.illustration_set_id, segments.source_text, segments.direct_prompt,
             segments.resolved_prompt, sets.character_visual_reference
        FROM turn_illustration_segments segments
@@ -1452,13 +1638,7 @@ export async function runIllustrationPromptJob(
         });
       }
     }
-    const storyContext = await loadBriefIllustrationStoryContext(
-      pool,
-      claimed.owner_user_id,
-      claimed.campaign_id,
-      claimed.turn_id,
-      segment.character_visual_reference
-    );
+    const storyContext = await loadBriefIllustrationStoryContext(pool, segment, segment.character_visual_reference);
     const result = await refinementPort.refinePrompt({
         ownerUserId: claimed.owner_user_id,
         campaignId: claimed.campaign_id,

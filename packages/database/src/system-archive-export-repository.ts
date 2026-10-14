@@ -904,6 +904,7 @@ const DOMAIN_SQL = {
                  'maxAttempts',config.max_attempts,'segmentWordCount',config.segment_word_count,
                  'imagesPerSegment',config.images_per_segment,'segmentPromptMode',config.segment_prompt_mode,
                  'refinementPrompt',config.refinement_prompt,
+                 'artStyle',config.art_style,'negativePrompt',config.negative_prompt,
                  'sourcePolicy',config.source_policy,'matchingScope',config.matching_scope,
                  'confidenceProfile',config.confidence_profile,
                  'repetitionWindow',config.repetition_window,

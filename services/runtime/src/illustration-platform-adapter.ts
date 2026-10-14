@@ -191,7 +191,8 @@ export function createIllustrationImageProviderAdapter(
           quality: request.quality,
           outputFormat: request.outputFormat,
           idempotencyKey: request.idempotencyKey,
-          imageCount: request.imageCount
+          imageCount: request.imageCount,
+          ...(request.negativePrompt.trim() ? { negativePrompt: request.negativePrompt.trim() } : {})
         });
         await dependencies.recordProviderHealth(
           pool,

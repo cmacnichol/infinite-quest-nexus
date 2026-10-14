@@ -344,6 +344,15 @@
                 <label>Images per segment<select id="illustrationImagesPerSegment"><option value="1">1 image</option><option value="2">2 images</option></select></label>
                 <label>Segment prompt mode<select id="illustrationSegmentPromptMode"><option value="direct">Use accepted segment text</option><option value="ai_refined">AI-refined visual prompt</option></select></label>
               </div>
+              <div id="illustrationStyleSettings" class="illustration-settings-group illustration-style-group">
+                <div class="illustration-group-heading">
+                  <h3>Style</h3>
+                  <p>Keep every illustration in one visual language, and list what images should never contain.</p>
+                </div>
+                <label>Art style<input id="illustrationArtStyle" type="text" maxlength="500" placeholder="For example: ink and watercolor storybook, muted palette"></label>
+                <label>Exclude from images<textarea id="illustrationNegativePrompt" rows="2" maxlength="500"></textarea></label>
+                <p class="field-note">Exclusions are sent as a negative prompt when the image provider supports one, and as an “Avoid” note otherwise. Leave the art style empty to let each prompt choose.</p>
+              </div>
               <div id="illustrationRefinementPromptField" class="illustration-refinement-prompt hidden">
                 <div><strong>AI prompt editor</strong><span id="illustrationRefinementPromptSummary" class="field-note">The AI refinement prompt is edited in the Prompt Library (Illustration refinement), where campaign overrides apply to every segment job.</span></div>
                 <button id="openIllustrationPromptEditor" class="button secondary" type="button">Read or edit prompt…</button>

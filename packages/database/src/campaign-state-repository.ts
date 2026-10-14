@@ -900,12 +900,12 @@ function createPostgresCampaignAuthorityRepository(
            campaign_id, owner_user_id, enabled, source_policy, matching_scope,
            confidence_profile, repetition_window, provider_profile_id, model, size,
            aspect_ratio, quality, output_format, max_attempts, segment_word_count,
-           images_per_segment, segment_prompt_mode, refinement_prompt
+           images_per_segment, segment_prompt_mode, refinement_prompt, art_style, negative_prompt
          )
          SELECT $1, owner_user_id, enabled, source_policy, matching_scope,
                 confidence_profile, repetition_window, provider_profile_id, model, size,
                 aspect_ratio, quality, output_format, max_attempts, segment_word_count,
-                images_per_segment, segment_prompt_mode, refinement_prompt
+                images_per_segment, segment_prompt_mode, refinement_prompt, art_style, negative_prompt
            FROM campaign_illustration_configs
           WHERE campaign_id = $2 AND owner_user_id = $3
          ON CONFLICT DO NOTHING`,
