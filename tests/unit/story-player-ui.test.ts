@@ -247,6 +247,26 @@ function deferred<T>() {
 }
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
+  it("advances one turn at a time from a History turn outside the loaded window", async () => {
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(51, 100) });
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      (document.getElementById("turnHistoryJumpNumber") as HTMLInputElement).value = "49";
+      document.getElementById("btnTurnHistoryJumpExact")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(document.querySelector("[data-reader-turn-count]")?.textContent).toBe("Turn 49 of 100"));
+
+      for (const turnNumber of [50, 51, 52]) {
+        (document.getElementById("btnNext") as HTMLButtonElement).click();
+        await vi.waitFor(() => expect(document.querySelector("[data-reader-turn-count]")?.textContent).toBe(`Turn ${turnNumber} of 100`));
+        expect(document.querySelector(`#scene-${turnNumber}`)?.textContent).toContain(`Narration ${turnNumber}`);
+      }
+      (document.getElementById("btnReaderJumpLatest") as HTMLButtonElement).click();
+      expect(document.querySelector("[data-reader-turn-count]")?.textContent).toBe("Turn 100 of 100");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("provides accessible campaign-search and exact-jump controls inside History", () => {
     const { document } = parseHTML(storyHtml);
     expect(document.querySelector("#turnHistorySearch")?.getAttribute("type")).toBe("search");

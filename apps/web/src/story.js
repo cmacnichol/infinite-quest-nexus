@@ -4053,7 +4053,7 @@ function goToNext() {
   const curr = viewedTurnIndex();
   const isLatest = isViewingLatestTurn();
   if (state.busy || state.turns.length === 0 || isLatest) return;
-  if (state.readerPinnedTurn) return navigateToTurn(null);
+  if (state.readerPinnedTurn) return loadExactHistoryTurn(currentViewTurnNumber() + 1);
   if (curr < state.turns.length - 1) navigateToTurn(state.turns[curr + 1]?.turnNumber ?? null);
   else navigateToTurn(null);
 }
