@@ -51,7 +51,8 @@ function managementFunctions<T extends Record<string, (...args: never[]) => unkn
       "campaignStoryContextBudgetTokens", "saveCampaign", "transferCampaign", "editCampaignCharacter", "loadCampaign", "exportCampaign", "deleteCampaign",
       "illustrationSourcePolicy", "campaignImageProvider", "illustrationModel", "illustrationSize", "illustrationAspectRatio", "illustrationQuality",
       "illustrationOutputFormat", "illustrationMaxAttempts", "illustrationMatchingScope", "illustrationConfidenceProfile", "illustrationRepetitionWindow",
-      "illustrationSegmentWordCount", "illustrationImagesPerSegment", "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "embeddingEnabled",
+      "illustrationSegmentWordCount", "illustrationImagesPerSegment", "illustrationSegmentPromptMode", "openIllustrationPromptEditor",
+      "illustrationArtStyle", "illustrationNegativePrompt", "embeddingEnabled",
       "embeddingRetrievalImplementation", "embeddingRetrievalShadowEnabled", "embeddingProvider", "discoverEmbeddingModels", "embeddingModel",
       "embeddingDocumentPrefix", "embeddingQueryPrefix", "embeddingBatchSize", "budgetTokens", "compression", "memoryQuery"
     ],
@@ -720,12 +721,13 @@ describe("Nexus management UI contracts", () => {
     expect(hidesRailButton).toBe(false);
   });
 
-  it("groups every illustration control by source, segmentation, matching, provider, and history", () => {
+  it("groups every illustration control by source, segmentation, style, matching, provider, and history", () => {
     const panel = managementDocument.querySelector("#campaignPanelIllustrations")!;
     const markup = panel.innerHTML;
     const groups = [
       "illustrationSourceGroup",
       "illustrationSegmentSettings",
+      "illustrationStyleSettings",
       "illustrationMatchingSettings",
       "illustrationProviderSettings",
       "illustrationHistoryGroup"
@@ -738,6 +740,8 @@ describe("Nexus management UI contracts", () => {
       "illustrationSegmentWordCount",
       "illustrationImagesPerSegment",
       "illustrationSegmentPromptMode",
+      "illustrationArtStyle",
+      "illustrationNegativePrompt",
       "illustrationMatchingScope",
       "illustrationConfidenceProfile",
       "illustrationRepetitionWindow",
@@ -1371,6 +1375,9 @@ describe("Nexus management UI contracts", () => {
     // The illustration-config save must still carry the campaign's stored refinementPrompt
     // unchanged, so saving other illustration settings never resets it to the shipped default.
     expect(managementScript).toContain("refinementPrompt: illustrationRefinementPromptValue");
+    // Art style and exclusions are sent on every save so they are never reset to defaults.
+    expect(managementScript).toContain("artStyle: elements.illustrationArtStyle.value");
+    expect(managementScript).toContain("negativePrompt: elements.illustrationNegativePrompt.value");
     expect(managementScript).toContain("function openIllustrationPromptEditor()");
     expect(managementScript).toContain('selectedPromptTemplateKey = "illustration_refinement"');
     expect(managementScript).toContain('elements.illustrationSegmentPromptMode.value === "ai_refined"');

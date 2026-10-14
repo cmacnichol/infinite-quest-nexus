@@ -2,12 +2,13 @@ import { captureSegmentActivity } from "../../../packages/database/src/illustrat
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import { logger } from "../../../packages/logger/src/index.js";
+import { illustrationScenePrompt, illustrationTemplateWording } from "../../../packages/domain/src/index.js";
 import { containsMechanicsLanguage } from "../../../packages/story-engine/src/index.js";
 import { enqueueIllustration } from "./illustration-image-job-adapter.js";
 import { enqueueSegmentProviderImage } from "./illustration-segment-job-adapter.js";
 import type { IllustrationProviderCollaborators } from "./provider-application-composition.js";
 
-const MATCH_ALGORITHM_VERSION = "library-match-v1";
+const MATCH_ALGORITHM_VERSION = "library-match-v2";
 const THRESHOLDS = { strict: 0.68, balanced: 0.52, broad: 0.38 } as const;
 const STOP_WORDS = new Set(["a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "is", "of", "on", "or", "the", "to", "with"]);
 
@@ -75,26 +76,40 @@ function queryCoverage(query: Set<string>, candidate: Set<string>): number {
   return intersection / query.size;
 }
 
+function sceneTokens(value: string, ignored: ReadonlySet<string>): Set<string> {
+  return new Set([...tokens(value)].filter((token) => !ignored.has(token)));
+}
+
+/** Text coverage at which campaign and world provenance earn their full bonus. */
+const FULL_CONTEXT_SUPPORT_OVERLAP = 0.35;
+
 export function scoreLibraryCandidate(
   query: { imagePrompt: string; entities: unknown; campaignId: string; worldId: string },
-  candidate: MatchCandidateRow
+  candidate: MatchCandidateRow,
+  templateWording = illustrationTemplateWording()
 ): MatchScore {
-  const queryTokens = tokens(query.imagePrompt);
-  const candidateTokens = tokens([candidate.title, candidate.caption, candidate.fiction_prompt, ...(candidate.tags || [])].join(" "));
+  const ignored = tokens(templateWording);
+  const queryTokens = sceneTokens(illustrationScenePrompt(query.imagePrompt), ignored);
+  const candidateTokens = sceneTokens([
+    candidate.title, candidate.caption, illustrationScenePrompt(candidate.fiction_prompt), ...(candidate.tags || [])
+  ].join(" "), ignored);
   const textOverlap = queryCoverage(queryTokens, candidateTokens);
   const queryEntities = stringValues(query.entities);
   const candidateEntities = stringValues([candidate.entities, candidate.characters, candidate.locations]);
   const entityOverlap = overlapRatio(queryEntities, candidateEntities);
   const sameCampaign = candidate.campaign_id === query.campaignId;
   const sameWorld = candidate.world_id === query.worldId;
+  // Provenance only strengthens a candidate that already resembles the scene.
+  const contextSupport = Math.min(1, Math.max(textOverlap / FULL_CONTEXT_SUPPORT_OVERLAP, entityOverlap));
   const repetitionPenalty = candidate.recent_uses > 0 ? Math.min(0.28, 0.12 + (candidate.recent_uses - 1) * 0.04) : 0;
   const entityMismatchPenalty = queryEntities.size > 0 && candidateEntities.size > 0 && entityOverlap === 0 ? 0.16 : 0;
-  const raw = textOverlap * 0.55 + entityOverlap * 0.25 + (sameCampaign ? 0.18 : 0) + (sameWorld ? 0.12 : 0)
+  const raw = textOverlap * 0.55 + entityOverlap * 0.25
+    + ((sameCampaign ? 0.18 : 0) + (sameWorld ? 0.12 : 0)) * contextSupport
     - repetitionPenalty - entityMismatchPenalty;
   const score = Math.max(0, Math.min(1, Number(raw.toFixed(6))));
   return {
     score,
-    components: { textOverlap, entityOverlap, sameCampaign, sameWorld, repetitionPenalty, entityMismatchPenalty },
+    components: { textOverlap, entityOverlap, sameCampaign, sameWorld, contextSupport, repetitionPenalty, entityMismatchPenalty },
     rejectionReasons: entityMismatchPenalty ? ["canonical_entity_mismatch"] : []
   };
 }
@@ -130,6 +145,8 @@ async function resolutionContext(client: DatabaseClient, job: ResolutionRow) {
     world_id: string;
     world_version_id: string;
     entities: string[];
+    anchor_turn_number: number | null;
+    illustration_set_id: string | null;
   }>(
     `SELECT COALESCE(
               NULLIF(segments.resolved_prompt, ''),
@@ -142,14 +159,21 @@ async function resolutionContext(client: DatabaseClient, job: ResolutionRow) {
               SELECT DISTINCT unnest(memories.entities)
                 FROM chronicle_memories memories
                WHERE memories.turn_id = turns.id AND memories.owner_user_id = turns.owner_user_id
-            ), '{}') AS entities
+            ), '{}') AS entities,
+            -- A streamed segment is matched before its turn exists; its
+            -- generation knows which turn position it will occupy.
+            COALESCE(turns.turn_number, generation.expected_turn_number) AS anchor_turn_number,
+            segments.illustration_set_id
        FROM campaigns
        JOIN world_versions ON world_versions.id = campaigns.world_version_id
         AND world_versions.owner_user_id = campaigns.owner_user_id
-       LEFT JOIN turns
-         ON turns.id = $1 AND turns.campaign_id = campaigns.id AND turns.owner_user_id = campaigns.owner_user_id
        LEFT JOIN turn_illustration_segments segments
          ON segments.id = $4 AND segments.owner_user_id = campaigns.owner_user_id
+       LEFT JOIN turns
+         ON turns.id = COALESCE($1, segments.turn_id) AND turns.campaign_id = campaigns.id
+        AND turns.owner_user_id = campaigns.owner_user_id
+       LEFT JOIN generation_jobs generation
+         ON generation.id = segments.generation_job_id AND generation.owner_user_id = campaigns.owner_user_id
       WHERE campaigns.id = $2 AND campaigns.owner_user_id = $3`,
     [job.turn_id, job.campaign_id, job.owner_user_id, job.segment_id, JSON.stringify(job.query_context_snapshot)]
   );
@@ -161,14 +185,32 @@ async function resolutionContext(client: DatabaseClient, job: ResolutionRow) {
   return row;
 }
 
-async function candidates(client: DatabaseClient, job: ResolutionRow, context: Awaited<ReturnType<typeof resolutionContext>>) {
+/** Plain lexemes for the database pre-rank; punctuation inside tokens is tsquery syntax. */
+export function libraryRankTerms(imagePrompt: string, templateWording: string): string[] {
+  const terms = [...sceneTokens(illustrationScenePrompt(imagePrompt), tokens(templateWording))]
+    .flatMap((token) => token.split(/['-]+/u))
+    .filter((term) => /^[\p{L}\p{N}]{2,}$/u.test(term));
+  return [...new Set(terms)].slice(0, 64);
+}
+
+async function candidates(
+  client: DatabaseClient,
+  job: ResolutionRow,
+  context: Awaited<ReturnType<typeof resolutionContext>>,
+  templateWording: string,
+) {
   const excluded = Array.isArray(job.query_context_snapshot.excludedAssetIds)
     ? job.query_context_snapshot.excludedAssetIds.filter((value): value is string => typeof value === "string")
     : [];
   return client.query<MatchCandidateRow>(
     `SELECT assets.id AS asset_id, library.title, library.caption, library.tags,
             COALESCE(context.fiction_prompt, '') AS fiction_prompt,
-            COALESCE(context.entities, '[]'::jsonb) AS entities,
+            -- Generated assets record no entities of their own; their source
+            -- turn's Chronicle entities stand in so mismatches stay visible.
+            COALESCE(NULLIF(context.entities, '[]'::jsonb), to_jsonb(ARRAY(
+              SELECT DISTINCT unnest(memories.entities) FROM chronicle_memories memories
+               WHERE memories.turn_id = context.turn_id AND memories.owner_user_id = assets.owner_user_id
+            )), '[]'::jsonb) AS entities,
             COALESCE(context.characters, '[]'::jsonb) AS characters,
             COALESCE(context.locations, '[]'::jsonb) AS locations,
             context.campaign_id, context.world_id,
@@ -177,13 +219,21 @@ async function candidates(client: DatabaseClient, job: ResolutionRow, context: A
               JOIN turns recent_turn ON recent_turn.id = recent_refs.turn_id AND recent_turn.owner_user_id = recent_refs.owner_user_id
               WHERE recent_refs.asset_id = assets.id AND recent_refs.owner_user_id = assets.owner_user_id
                 AND recent_refs.campaign_id = $2
-                AND recent_turn.turn_number > (SELECT turn_number FROM turns WHERE id = $3) - $7
+                AND recent_turn.turn_number > $3::integer - $7
+            ), 0) + COALESCE((
+              -- Earlier segments of the same turn count as recent uses too.
+              SELECT count(*)::int FROM turn_illustration_segment_assets set_assets
+              JOIN turn_illustration_segments set_segments
+                ON set_segments.id = set_assets.segment_id AND set_segments.owner_user_id = set_assets.owner_user_id
+              WHERE set_assets.asset_id = assets.id AND set_assets.owner_user_id = assets.owner_user_id
+                AND set_segments.illustration_set_id = $9::uuid
+                AND set_segments.id IS DISTINCT FROM $10::uuid
             ), 0) AS recent_uses
        FROM assets
        JOIN asset_library_entries library ON library.asset_id = assets.id AND library.owner_user_id = assets.owner_user_id
        LEFT JOIN LATERAL (
          SELECT generation.fiction_prompt, generation.entities, generation.characters, generation.locations,
-                generation.campaign_id, generation.world_id
+                generation.campaign_id, generation.world_id, generation.turn_id
            FROM asset_generation_contexts generation
           WHERE generation.asset_id = assets.id AND generation.owner_user_id = assets.owner_user_id
           ORDER BY generation.created_at DESC, generation.id DESC LIMIT 1
@@ -205,11 +255,14 @@ async function candidates(client: DatabaseClient, job: ResolutionRow, context: A
         AND ($5 NOT IN ('campaign', 'world') OR context.world_id = $4)
       ORDER BY ts_rank_cd(
         to_tsvector('simple', concat_ws(' ', library.title, library.caption, array_to_string(library.tags, ' '), COALESCE(context.fiction_prompt, ''))),
-        websearch_to_tsquery('simple', $8)
+        -- Any shared scene word ranks a candidate; requiring every prompt word
+        -- would rank nearly everything zero and fall back to recency.
+        to_tsquery('simple', array_to_string(ARRAY(SELECT quote_literal(term) FROM unnest($8::text[]) term), ' | '))
       ) DESC, assets.created_at DESC
       LIMIT 100`,
-    [job.owner_user_id, job.campaign_id, job.turn_id, context.world_id, job.matching_scope, excluded,
-      job.repetition_window, context.image_prompt]
+    [job.owner_user_id, job.campaign_id, context.anchor_turn_number, context.world_id, job.matching_scope, excluded,
+      job.repetition_window, libraryRankTerms(context.image_prompt, templateWording), context.illustration_set_id,
+      job.segment_id]
   );
 }
 
@@ -269,10 +322,13 @@ async function attachMatch(client: DatabaseClient, job: ResolutionRow, assetId: 
         ) AND sets.owner_user_id = $2`,
       [job.segment_id, job.owner_user_id]
     );
+    // A streamed segment may have been promoted after this job was claimed.
     await client.query(
       `INSERT INTO asset_references (owner_user_id, asset_id, campaign_id, turn_id, asset_role)
-       VALUES ($1,$2,$3,$4,'turn_illustration') ON CONFLICT DO NOTHING`,
-      [job.owner_user_id, assetId, job.campaign_id, job.turn_id]
+       SELECT $1,$2,$3,COALESCE($4::uuid, segments.turn_id),'turn_illustration'
+         FROM turn_illustration_segments segments WHERE segments.id = $5 AND segments.owner_user_id = $1
+       ON CONFLICT DO NOTHING`,
+      [job.owner_user_id, assetId, job.campaign_id, job.turn_id, job.segment_id]
     );
     return true;
   }
@@ -331,6 +387,18 @@ async function markResolutionFailure(pool: DatabasePool, job: ResolutionRow, wor
   });
 }
 
+/** The campaign's own illustration templates are shared wording too. */
+async function campaignTemplateWording(providers: IllustrationProviderCollaborators, job: ResolutionRow): Promise<string> {
+  const snapshot = (await providers.prompts.loadIllustrationPromptSnapshot({
+    ownerUserId: job.owner_user_id,
+    campaignId: job.campaign_id
+  })).snapshot;
+  return illustrationTemplateWording([
+    providers.promptTools.content(snapshot, "illustration_direct"),
+    providers.promptTools.content(snapshot, "illustration_character_reference")
+  ]);
+}
+
 export async function runIllustrationResolutionJob(
   pool: DatabasePool,
   workerId: string,
@@ -341,6 +409,7 @@ export async function runIllustrationResolutionJob(
   if (!job) return false;
   const startedAt = Date.now();
   try {
+    const templateWording = await campaignTemplateWording(providers, job);
     const outcome = await withTransaction(pool, async (client) => {
       if (!await lockActiveProvisionalParent(client, job)) {
         return { kind: "stale" as const, candidateCount: 0, selectedAssetId: null, selectedScore: null, threshold: THRESHOLDS[job.confidence_profile] };
@@ -348,14 +417,14 @@ export async function runIllustrationResolutionJob(
       const liveClaim = await client.query("SELECT id FROM illustration_resolution_jobs WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND attempts=$4 AND status='matching' AND lease_expires_at > clock_timestamp() FOR UPDATE", [job.id, job.owner_user_id, workerId, job.attempts]);
       if (!liveClaim.rows[0]) return { kind: "stale" as const, candidateCount: 0, selectedAssetId: null, selectedScore: null, threshold: THRESHOLDS[job.confidence_profile] };
       const context = await resolutionContext(client, job);
-      const result = await candidates(client, job, context);
+      const result = await candidates(client, job, context, templateWording);
       const scored = result.rows
         .map((candidate) => ({ candidate, ...scoreLibraryCandidate({
           imagePrompt: context.image_prompt,
           entities: context.entities,
           campaignId: job.campaign_id,
           worldId: context.world_id
-        }, candidate) }))
+        }, candidate, templateWording) }))
         .sort((left, right) => right.score - left.score || left.candidate.asset_id.localeCompare(right.candidate.asset_id));
       await client.query("DELETE FROM illustration_match_candidates WHERE resolution_job_id = $1 AND owner_user_id = $2", [job.id, job.owner_user_id]);
       for (const [index, candidate] of scored.slice(0, 10).entries()) {

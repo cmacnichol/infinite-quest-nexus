@@ -223,7 +223,7 @@ export const SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS = Object.freeze({
       "campaign_id", "enabled", "provider_profile_id", "model", "size", "aspect_ratio",
       "quality", "output_format", "max_attempts", "created_at", "updated_at", "source_policy",
       "matching_scope", "confidence_profile", "repetition_window", "segment_word_count",
-      "images_per_segment", "segment_prompt_mode", "refinement_prompt"
+      "images_per_segment", "segment_prompt_mode", "refinement_prompt", "art_style", "negative_prompt"
     ],
     owner_remapped: ["owner_user_id"]
   }),

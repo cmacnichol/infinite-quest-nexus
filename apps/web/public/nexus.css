@@ -295,6 +295,8 @@ textarea { resize: vertical; }
 .illustration-settings { display: grid; gap: 16px; }
 .illustration-settings-group { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; border-top: 1px solid var(--line); padding-top: 16px; }
 .illustration-group-heading { grid-column: 1 / -1; }
+.illustration-style-group label { grid-column: 1 / -1; }
+.illustration-style-group textarea { resize: vertical; }
 .illustration-group-heading h3 { margin: 0; font-size: .92rem; }
 .illustration-group-heading p { max-width: 68ch; margin: 4px 0 0; color: var(--muted); font-size: .74rem; line-height: 1.45; }
 .illustration-history-group { display: grid; gap: 10px; border-top: 1px solid var(--line); padding-top: 16px; }

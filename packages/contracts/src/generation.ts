@@ -12,8 +12,14 @@ import {
   safeGenerationDiagnosticSchema,
   storyTurnOutputSchema
 } from "./story-prompt.js";
-export { ILLUSTRATION_REFINEMENT_DEFAULT as DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "./illustration-refinement-default.js";
-import { ILLUSTRATION_REFINEMENT_DEFAULT as DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "./illustration-refinement-default.js";
+export {
+  ILLUSTRATION_NEGATIVE_PROMPT_DEFAULT as DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT,
+  ILLUSTRATION_REFINEMENT_DEFAULT as DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT
+} from "./illustration-refinement-default.js";
+import {
+  ILLUSTRATION_NEGATIVE_PROMPT_DEFAULT as DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT,
+  ILLUSTRATION_REFINEMENT_DEFAULT as DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT
+} from "./illustration-refinement-default.js";
 import { apiTimestampSchema } from "./http.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
 import { generationPolicySnapshotSchema } from "./campaign-generation-policy.js";
@@ -148,7 +154,9 @@ export const illustrationConfigSchema = z.object({
   segmentWordCount: z.coerce.number().int().min(100).max(5_000).default(500),
   imagesPerSegment: z.coerce.number().int().min(1).max(2).default(1),
   segmentPromptMode: illustrationSegmentPromptModeSchema.default("direct"),
-  refinementPrompt: z.string().trim().min(1).max(4_000).default(DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT)
+  refinementPrompt: z.string().trim().min(1).max(4_000).default(DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT),
+  artStyle: z.string().trim().max(500).default(""),
+  negativePrompt: z.string().trim().max(500).default(DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT)
 }).superRefine((value, context) => {
   const sourcePolicy = value.sourcePolicy ?? (value.enabled ? "generate_only" : "off");
   if (["library_then_generate", "generate_only"].includes(sourcePolicy) && !value.providerProfileId) {

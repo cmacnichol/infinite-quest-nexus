@@ -134,12 +134,18 @@ const JOB_OWNER_JOINS = `
     ON world_version.id=campaign.world_version_id
    AND world_version.owner_user_id=job.owner_user_id`;
 
+/**
+ * A streamed image may publish while its generation is active, or once
+ * promotion has bound it to the accepted turn. Rejected or cancelled
+ * generations never bind their children, so they stay fenced.
+ */
 async function activeParent(
   database: DatabaseClient,
   ownerUserId: string,
   generationJobId: string | null,
+  turnId: string | null,
 ): Promise<boolean> {
-  if (!generationJobId) return true;
+  if (!generationJobId || turnId) return true;
   const parent = await database.query<{ status: string }>(
     "SELECT status FROM generation_jobs WHERE id=$1 AND owner_user_id=$2 FOR UPDATE",
     [generationJobId, ownerUserId],
@@ -196,6 +202,7 @@ export function createPostgresIllustrationAssetPublicationRepository(
             AND job.status IN ('generating','provider_pending','downloading')
             AND (
               job.generation_job_id IS NULL
+              OR job.turn_id IS NOT NULL
               OR EXISTS (
                 SELECT 1
                   FROM generation_jobs parent
@@ -210,7 +217,7 @@ export function createPostgresIllustrationAssetPublicationRepository(
     },
 
     async lockCompletionInTransaction(database, { job, workerId }) {
-      if (!(await activeParent(database, job.ownerUserId, job.generationJobId))) return null;
+      if (!(await activeParent(database, job.ownerUserId, job.generationJobId, job.turnId))) return null;
       const locked = await database.query<ImageJobRow>(
         `SELECT ${JOB_COLUMNS}
            FROM image_jobs job

@@ -706,6 +706,9 @@ const systemIllustrationConfigDetailsSchema = z.object({
   imagesPerSegment: z.number().int().min(1).max(2),
   segmentPromptMode: z.enum(["direct", "ai_refined"]),
   refinementPrompt: z.string().max(4_000),
+  // Optional: archives exported before these settings existed omit them.
+  artStyle: z.string().max(500).optional(),
+  negativePrompt: z.string().max(500).optional(),
   createdAt: archiveTimestampSchema,
   updatedAt: archiveTimestampSchema
 }).strict().superRefine((details, context) => {

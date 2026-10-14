@@ -1372,9 +1372,12 @@ export async function callImageProvider(
   await ensureLmStudioModelLoaded(profile, "image model loading", transport);
   const base = profile.providerType === "openrouter" ? rootUrl(profile.baseUrl) : openAiRoot(profile.baseUrl);
   const url = profile.providerType === "openrouter" ? `${base}/images` : `${base}/images/generations`;
+  // These endpoints have no negative-prompt field; their models follow a
+  // plain-language exclusion, unlike diffusion models that draw what is named.
+  const negativePrompt = request.negativePrompt?.trim().replace(/[.\s]+$/u, "");
   const payload: Record<string, unknown> = {
     model: profile.model,
-    prompt: request.prompt,
+    prompt: negativePrompt ? `${request.prompt}\n\nAvoid: ${negativePrompt}.` : request.prompt,
     n: request.imageCount ?? 1,
     size: request.size,
     quality: request.quality,

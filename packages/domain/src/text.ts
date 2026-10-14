@@ -142,6 +142,18 @@ export function truncateAtBoundary(text: string, maximumCharacters: number): str
   return `${cut.trimEnd()}…`;
 }
 
+/** Keeps the end of the text, starting at a sentence boundary when one is near. */
+export function truncateTailAtBoundary(text: string, maximumCharacters: number): string {
+  const value = String(text ?? "").trim();
+  if (value.length <= maximumCharacters) return value;
+  const candidate = value.slice(value.length - Math.max(0, maximumCharacters - 1));
+  const sentenceStart = /[.!?]["”’)\]]*\s+/u.exec(candidate);
+  const start = sentenceStart && sentenceStart.index + sentenceStart[0].length <= candidate.length * 0.45
+    ? sentenceStart.index + sentenceStart[0].length
+    : 0;
+  return `…${candidate.slice(start).trimStart()}`;
+}
+
 export function removeProviderSecrets(settings: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!settings) return {};
   const secretKeys = new Set(["apiKey", "customApiKey", "lmStudioApiKey", "imageApiKey", "token", "password"]);

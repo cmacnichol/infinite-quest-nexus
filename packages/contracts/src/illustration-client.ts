@@ -49,6 +49,9 @@ export const illustrationConfigResponseSchema = z.object({
   segmentPromptMode: z.enum(["direct", "ai_refined"]),
   refinementPrompt: z.string().trim().min(1),
   defaultRefinementPrompt: z.string().trim().min(1),
+  artStyle: z.string().default(""),
+  negativePrompt: z.string().default(""),
+  defaultNegativePrompt: z.string().default(""),
   updatedAt: nullableTimestampSchema
 });
 

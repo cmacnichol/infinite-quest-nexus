@@ -5,7 +5,10 @@ import type {
   StreamingIllustrationConfig,
   TurnIllustrationResolution
 } from "../../../packages/application/src/index.js";
-import { DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "../../../packages/contracts/src/generation.js";
+import {
+  DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT,
+  DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT
+} from "../../../packages/contracts/src/generation.js";
 import type { IllustrationRepositoryFactories } from "../../../packages/database/src/illustration-repository.js";
 import {
   initialOwnerId,
@@ -121,6 +124,9 @@ function streamingConfig(config: SegmentConfigRow): StreamingIllustrationConfig 
     segmentPromptMode: config.segment_prompt_mode,
     refinementPrompt: config.refinement_prompt,
     defaultRefinementPrompt: DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
+    artStyle: config.art_style,
+    negativePrompt: config.negative_prompt,
+    defaultNegativePrompt: DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT,
     updatedAt: config.updated_at.toISOString(),
     campaignImageProviderProfileId: config.campaign_image_provider_id,
     campaignTextProviderProfileId: config.campaign_text_provider_id
@@ -147,6 +153,8 @@ function segmentConfig(config: StreamingIllustrationConfig): SegmentConfigRow {
     images_per_segment: config.imagesPerSegment as 1 | 2,
     segment_prompt_mode: config.segmentPromptMode,
     refinement_prompt: config.refinementPrompt,
+    art_style: config.artStyle,
+    negative_prompt: config.negativePrompt,
     updated_at: config.updatedAt ? new Date(config.updatedAt) : new Date(0)
   };
 }

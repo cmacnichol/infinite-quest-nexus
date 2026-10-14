@@ -1,5 +1,6 @@
 import { captureImageActivity, captureSegmentActivity } from "../../../packages/database/src/illustration-activity.js";
 import {
+  DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT,
   DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
   type IllustrationConfig,
   type IllustrationRequest,
@@ -48,6 +49,8 @@ type IllustrationConfigRow = {
   images_per_segment?: number;
   segment_prompt_mode?: IllustrationConfig["segmentPromptMode"];
   refinement_prompt?: string;
+  art_style?: string;
+  negative_prompt?: string;
   updated_at?: Date;
 };
 
@@ -71,6 +74,7 @@ type ImageJobRow = {
   aspect_ratio: string;
   quality: IllustrationConfig["quality"];
   output_format: IllustrationConfig["outputFormat"];
+  negative_prompt: string;
   asset_id: string | null;
   provider_type: string | null;
   generation_revision: number;
@@ -112,6 +116,9 @@ function publicConfig(row?: IllustrationConfigRow) {
     segmentPromptMode: row?.segment_prompt_mode ?? "direct",
     refinementPrompt: row?.refinement_prompt?.trim() || DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
     defaultRefinementPrompt: DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
+    artStyle: row?.art_style ?? "",
+    negativePrompt: row?.negative_prompt ?? DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT,
+    defaultNegativePrompt: DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT,
     updatedAt: row?.updated_at?.toISOString() ?? null
   };
 }
@@ -160,7 +167,7 @@ const jobColumns = `id, owner_user_id, campaign_id, turn_id, world_id, target_ty
   prompt, status, attempts, max_attempts, size, aspect_ratio, quality, output_format, asset_id,
   provider_type, generation_revision, remote_job_id, provider_status, provider_progress, provider_queue_position, provider_eta_at, submitted_at, last_polled_at,
   next_poll_at, generation_deadline, provider_request_metadata, provider_result_metadata,
-  error_code, error_message, created_at, updated_at, completed_at, generation_job_id`;
+  error_code, error_message, created_at, updated_at, completed_at, generation_job_id, negative_prompt`;
 
 export async function getIllustrationConfig(pool: DatabasePool, campaignId: string) {
   const ownerUserId = await initialOwnerId(pool);
@@ -169,7 +176,8 @@ export async function getIllustrationConfig(pool: DatabasePool, campaignId: stri
   const result = await pool.query<IllustrationConfigRow>(
     `SELECT enabled, source_policy, matching_scope, confidence_profile, repetition_window,
             provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts,
-            segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt, updated_at
+            segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt,
+            art_style, negative_prompt, updated_at
        FROM campaign_illustration_configs WHERE campaign_id = $1 AND owner_user_id = $2`,
     [campaignId, ownerUserId]
   );
@@ -201,8 +209,9 @@ export async function setIllustrationConfig(pool: DatabasePool, campaignId: stri
     `INSERT INTO campaign_illustration_configs (
        campaign_id, owner_user_id, enabled, source_policy, matching_scope, confidence_profile, repetition_window,
        provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts,
-       segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt
-     ) SELECT c.id, c.owner_user_id, $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+       segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt,
+       art_style, negative_prompt
+     ) SELECT c.id, c.owner_user_id, $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
          FROM campaigns c WHERE c.id = $1 AND c.owner_user_id = $2
      ON CONFLICT (campaign_id) DO UPDATE SET enabled = EXCLUDED.enabled,
        source_policy = EXCLUDED.source_policy, matching_scope = EXCLUDED.matching_scope,
@@ -212,14 +221,17 @@ export async function setIllustrationConfig(pool: DatabasePool, campaignId: stri
        max_attempts = EXCLUDED.max_attempts, segment_word_count = EXCLUDED.segment_word_count,
        images_per_segment = EXCLUDED.images_per_segment, segment_prompt_mode = EXCLUDED.segment_prompt_mode,
        refinement_prompt = EXCLUDED.refinement_prompt,
+       art_style = EXCLUDED.art_style, negative_prompt = EXCLUDED.negative_prompt,
        updated_at = now()
      RETURNING enabled, source_policy, matching_scope, confidence_profile, repetition_window,
                provider_profile_id, model, size, aspect_ratio, quality, output_format, max_attempts,
-               segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt, updated_at`,
+               segment_word_count, images_per_segment, segment_prompt_mode, refinement_prompt,
+               art_style, negative_prompt, updated_at`,
     [campaignId, ownerUserId, sourcePolicy !== "off", sourcePolicy, config.matchingScope,
       config.confidenceProfile, config.repetitionWindow, config.providerProfileId, config.model, config.size,
       config.aspectRatio, config.quality, config.outputFormat, config.maxAttempts,
-      config.segmentWordCount, config.imagesPerSegment, config.segmentPromptMode, config.refinementPrompt]
+      config.segmentWordCount, config.imagesPerSegment, config.segmentPromptMode, config.refinementPrompt,
+      config.artStyle ?? "", config.negativePrompt ?? DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT]
   );
   return publicConfig(loadOrNotFound(result, "Campaign"));
 }
@@ -252,7 +264,7 @@ export async function insertImageJob(
        id, owner_user_id, campaign_id, turn_id, world_id, target_type, segment_id, image_count,
        provider_profile_id, requested_model, prompt, prompt_hash,
        size, aspect_ratio, quality, output_format, max_attempts, provider_type, provider_request_metadata,
-       generation_job_id
+       generation_job_id, negative_prompt
      ) SELECT $1::uuid,$2,$3,$4,$5,$6,$7::uuid,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, provider_type,
               jsonb_build_object(
                 'idempotencyKey', ($1::uuid)::text || ':0',
@@ -261,14 +273,14 @@ export async function insertImageJob(
                 'segmentId', ($7::uuid)::text,
                 'targetVariantIndex', $18::integer
               ),
-              $19::uuid
+              $19::uuid, $20
          FROM provider_profiles WHERE id = $9 AND owner_user_id = $2
      RETURNING ${jobColumns}`,
     [jobId, values.ownerUserId, values.campaignId ?? null, values.turnId ?? null, values.worldId ?? null,
       values.targetType ?? "turn_illustration", values.segmentId ?? null, values.config.imagesPerSegment,
       values.config.providerProfileId, values.config.model, prompt, sha256(prompt), values.config.size,
       values.config.aspectRatio, values.config.quality, values.config.outputFormat, values.config.maxAttempts,
-      values.targetVariantIndex ?? null, values.generationJobId ?? null]
+      values.targetVariantIndex ?? null, values.generationJobId ?? null, values.config.negativePrompt.trim()]
   );
   if (result.rows[0]) await captureImageActivity(client, result.rows[0].id, values.ownerUserId, "image.queued");
   return result.rows[0] || null;
@@ -344,6 +356,7 @@ export async function enqueueAcceptedTurnIllustration(
   const configResult = await client.query<IllustrationConfigRow & { campaign_provider_profile_id: string | null }>(
     `SELECT c.enabled, c.source_policy, c.matching_scope, c.confidence_profile, c.repetition_window,
             c.provider_profile_id, c.model, c.size, c.aspect_ratio, c.quality, c.output_format, c.max_attempts,
+            c.art_style, c.negative_prompt,
             campaign.image_provider_profile_id AS campaign_provider_profile_id
        FROM campaign_illustration_configs c
        JOIN campaigns campaign ON campaign.id = c.campaign_id AND campaign.owner_user_id = c.owner_user_id
@@ -373,7 +386,9 @@ export async function enqueueAcceptedTurnIllustration(
   if (resolution.status !== "resolved") return null;
   row.provider_profile_id = resolution.providerProfileId;
   row.model = resolution.model;
-  const job = await insertImageJob(client, { ownerUserId, campaignId, turnId, prompt: imagePrompt, config: publicConfig(row) });
+  const config = publicConfig(row);
+  const prompt = composeIllustrationProviderPrompt(imagePrompt, "", undefined, { artStyle: config.artStyle });
+  const job = await insertImageJob(client, { ownerUserId, campaignId, turnId, prompt, config });
   return job?.id || null;
 }
 
@@ -407,7 +422,8 @@ export async function enqueueIllustration(
     }
     const configResult = await client.query<IllustrationConfigRow & { campaign_provider_profile_id: string | null }>(
       `SELECT config.enabled, config.provider_profile_id, config.model, config.size, config.aspect_ratio, config.quality,
-              config.output_format, config.max_attempts, campaign.image_provider_profile_id AS campaign_provider_profile_id
+              config.output_format, config.max_attempts, config.art_style, config.negative_prompt,
+              campaign.image_provider_profile_id AS campaign_provider_profile_id
          FROM campaign_illustration_configs config
          JOIN campaigns campaign ON campaign.id = config.campaign_id AND campaign.owner_user_id = config.owner_user_id
         WHERE config.campaign_id = $1 AND config.owner_user_id = $2`,
@@ -436,7 +452,8 @@ export async function enqueueIllustration(
     const prompt = composeIllustrationProviderPrompt(
       request.prompt || turn.image_prompt,
       characterVisualReference(turn.character_profile, turn.character_snapshot),
-      providers.promptTools.content(promptSnapshot.snapshot, "illustration_character_reference")
+      providers.promptTools.content(promptSnapshot.snapshot, "illustration_character_reference"),
+      { artStyle: config.artStyle }
     );
     const job = await insertImageJob(client, { ownerUserId, campaignId: turn.campaign_id, turnId, prompt, config });
     if (!job) throw Object.assign(new Error("The accepted turn does not contain a safe fiction-only image prompt."), { statusCode: 409 });
@@ -501,6 +518,14 @@ export async function retryImageJob(pool: DatabasePool, jobId: string) {
          ),
          error_code = NULL, error_message = NULL, completed_at = NULL, updated_at = now()
         WHERE id = $1 AND owner_user_id = $2 AND status IN ('recoverable', 'failed', 'expired', 'cancelled')
+          -- A superseded or orphaned set illustrated narration that was not accepted.
+          AND NOT EXISTS (
+            SELECT 1 FROM turn_illustration_segments segments
+            JOIN turn_illustration_sets sets
+              ON sets.id = segments.illustration_set_id AND sets.owner_user_id = segments.owner_user_id
+           WHERE segments.id = image_jobs.segment_id AND segments.owner_user_id = image_jobs.owner_user_id
+             AND (NOT sets.is_active OR sets.status IN ('superseded', 'orphaned'))
+          )
         RETURNING ${jobColumns}`,
       [jobId, ownerUserId]
     );
@@ -765,6 +790,7 @@ async function runImageJobThroughPorts(
       aspectRatio: job.aspect_ratio,
       quality: job.quality,
       outputFormat: job.output_format,
+      negativePrompt: job.negative_prompt,
       remoteJobId: job.remote_job_id
     });
     if (result.status === "pending") {

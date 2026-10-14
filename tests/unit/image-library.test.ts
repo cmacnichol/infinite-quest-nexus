@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assetListQuerySchema, assetMetadataUpdateSchema } from "../../packages/contracts/src/assets.js";
+import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
 import { scoreLibraryCandidate } from "../../services/runtime/src/illustration-resolution-job-adapter.js";
 
 describe("image library contracts", () => {
@@ -78,6 +79,37 @@ describe("provider-independent library scoring", () => {
     expect(exact.score).toBeGreaterThan(loose.score);
     expect(exact.components.sameCampaign).toBe(true);
     expect(loose.rejectionReasons).toContain("canonical_entity_mismatch");
+  });
+
+  const unrelated = {
+    asset_id: "asset-3", title: "", caption: "", tags: [], entities: [], characters: [], locations: [],
+    campaign_id: "campaign-1", world_id: "world-1", recent_uses: 0
+  };
+
+  it("ignores prompt-template and character-reference wording shared by every illustration", () => {
+    const scene = scoreLibraryCandidate({
+      ...query,
+      entities: [],
+      imagePrompt: directIllustrationPrompt("Lyra stands beneath the violet arch.")
+    }, {
+      ...unrelated,
+      fiction_prompt: composeIllustrationProviderPrompt(
+        directIllustrationPrompt("A bright harbor full of fishing boats at noon."),
+        "Name: Lyra\nHair: silver braid"
+      )
+    });
+    expect(scene.components.textOverlap).toBeLessThan(0.2);
+    expect(scene.score).toBeLessThan(0.38);
+  });
+
+  it("does not let campaign and world context stand in for scene overlap", () => {
+    const weak = scoreLibraryCandidate({
+      ...query,
+      entities: [],
+      imagePrompt: "lantern quay fog estuary bells channel ferry pilings gull harbor chart barrel tide midnight coat silver deck ropes mist lights"
+    }, { ...unrelated, fiction_prompt: "lantern quay fog over a desert caravan" });
+    expect(weak.components.textOverlap).toBeCloseTo(0.15, 2);
+    expect(weak.score).toBeLessThan(0.38);
   });
 
   it("penalizes repetition without making a result mandatory", () => {

@@ -24,7 +24,8 @@ const disabledStreamingIllustrationConfig: StreamingIllustrationConfig = {
   enabled: false, sourcePolicy: "off", matchingScope: "world", confidenceProfile: "balanced", repetitionWindow: 5,
   providerProfileId: null, model: "", size: "1024x1024", aspectRatio: "1:1", quality: "auto", outputFormat: "png",
   maxAttempts: 3, segmentWordCount: 500, imagesPerSegment: 1, segmentPromptMode: "direct", refinementPrompt: "disabled",
-  defaultRefinementPrompt: "disabled", updatedAt: null, campaignImageProviderProfileId: null, campaignTextProviderProfileId: null
+  defaultRefinementPrompt: "disabled", artStyle: "", negativePrompt: "", defaultNegativePrompt: "",
+  updatedAt: null, campaignImageProviderProfileId: null, campaignTextProviderProfileId: null
 };
 
 integration("Story Direction composed PostgreSQL generation", () => {
