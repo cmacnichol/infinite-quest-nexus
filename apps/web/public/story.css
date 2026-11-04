@@ -1,6 +1,8 @@
 @import url('tokens.css');
 @import url('navigation.css');
 
+html { scroll-padding-top: var(--story-reader-inset, 139px); }
+
 body {
   background:
     radial-gradient(circle at 25% -10%, rgba(74, 214, 255, 0.18), transparent 35%),
@@ -292,7 +294,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .action-tag { color: var(--gold2); background: rgba(241,194,50,.08); border: 1px solid rgba(241,194,50,.22); border-radius: 13px; padding: 9px 11px; line-height: 1.35; }
 .action-tag-event { border-color: rgba(116,228,255,.3); color: var(--accent2); }
 
-.scene { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; scroll-margin-top: 135px; }
+.scene { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; scroll-margin-top: 0; }
 
 .continuous-reader-controls {
   display: flex;

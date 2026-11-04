@@ -2057,8 +2057,7 @@ function scrollToView() {
   }
 }
 
-function scrollSceneIntoView(scene) {
-
+function updateReaderScrollPadding() {
   const header = document.querySelector(".universal-nav");
   const toolbar = document.querySelector("[data-story-reader-toolbar]");
   const headerHeight = header?.getBoundingClientRect?.().height;
@@ -2069,10 +2068,14 @@ function scrollSceneIntoView(scene) {
 
   if (Number.isFinite(headerHeight) && headerHeight > 0
     && Number.isFinite(toolbarHeight) && toolbarHeight > 0
-    && Number.isFinite(stickyTop) && stickyTop >= 0
-    && scene?.style) {
-    scene.style.scrollMarginTop = `${Math.ceil(Math.max(headerHeight, stickyTop) + toolbarHeight + 12)}px`;
+    && Number.isFinite(stickyTop) && stickyTop >= 0) {
+    // Use the sticky inset, not the toolbar's document position before it sticks.
+    document.documentElement.style.setProperty("--story-reader-inset", `${Math.ceil(Math.max(headerHeight, stickyTop) + toolbarHeight + 12)}px`);
   }
+}
+
+function scrollSceneIntoView(scene) {
+  updateReaderScrollPadding();
   scene.scrollIntoView({
     behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
     block: "start"
@@ -6195,6 +6198,13 @@ async function init() {
 
 // ── Boot Sequence ─────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
+  updateReaderScrollPadding();
+  if (typeof window.ResizeObserver === "function") {
+    const readerResizeObserver = new window.ResizeObserver(updateReaderScrollPadding);
+    for (const element of document.querySelectorAll(".universal-nav, [data-story-reader-toolbar]")) {
+      readerResizeObserver.observe(element);
+    }
+  }
   window.addEventListener("beforeunload", (event) => {
     flushReaderPositionSave();
     if (!actionDraftNeedsNavigationGuard()) return;

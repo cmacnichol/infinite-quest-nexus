@@ -37,7 +37,8 @@ async function expectSelectedSceneBelowReaderToolbar(page: Page, turnNumber: num
       return {
         gap: summary.getBoundingClientRect().top - toolbarBottom,
         sceneTop,
-        targetTop: Number.parseFloat(getComputedStyle(scene).scrollMarginTop),
+        targetTop: Number.parseFloat(getComputedStyle(scene).scrollMarginTop)
+          + (Number.parseFloat(getComputedStyle(document.documentElement).scrollPaddingTop) || 0),
         toolbarBottom,
         scrollY: window.scrollY
       };
@@ -268,6 +269,32 @@ test("settled_navigation_keeps_each_long_scene_anchor_below_both_sticky_layers",
     await expect(toolbar.locator("[data-reader-turn-count]")).toHaveText("Turn 6 of 6");
     await expectSelectedSceneBelowReaderToolbar(page, 6);
     await page.screenshot({ path: `${fix1Evidence}/long-scene-anchor-${fix1EvidenceRun}-${viewport.width}x${viewport.height}.png`, fullPage: false });
+
+    // Native paging must not skip text hidden underneath the sticky bars.
+    const start = await page.evaluate(() => ({
+      y: window.scrollY,
+      readableHeight: window.innerHeight - document.querySelector("[data-story-reader-toolbar]")!.getBoundingClientRect().bottom
+    }));
+    for (const key of ["PageDown", "PageDown", "PageUp", "PageUp"]) {
+      const before = await page.evaluate(() => window.scrollY);
+      await page.keyboard.press(key);
+      await page.waitForFunction(async previous => {
+        let last = window.scrollY;
+        let stable = 0;
+        for (let frame = 0; frame < 120; frame += 1) {
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+          const current = window.scrollY;
+          stable = Math.abs(current - last) < 0.5 && Math.abs(current - previous) > 1 ? stable + 1 : 0;
+          if (stable >= 4) return true;
+          last = current;
+        }
+        return false;
+      }, before);
+      const distance = await page.evaluate(previous => window.scrollY - previous, before);
+      expect(key === "PageDown" ? distance : -distance).toBeGreaterThan(0);
+      expect(Math.abs(distance)).toBeLessThanOrEqual(start.readableHeight);
+    }
+    expect(Math.abs(await page.evaluate(() => window.scrollY) - start.y)).toBeLessThanOrEqual(2);
   }
 
   await expect(action).toHaveValue("Keep this draft while moving between long scenes.");
