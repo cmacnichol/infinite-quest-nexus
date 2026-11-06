@@ -61,7 +61,8 @@ export function createCampaignCastApplication(repository: CampaignCastWritePort,
       if (query.cursor && offset === 0) throw new CampaignCastError("cast_revision_conflict");
       const characters = matches.slice(offset, offset + query.limit);
       const attention = characters.map((person) => ({ characterId: person.id, review: workspace?.reviewIds.includes(person.id) === true,
-        conflict: workspace?.conflictIds.includes(person.id) === true })).filter((item) => item.review || item.conflict);
+        conflict: workspace?.conflictIds.includes(person.id) === true,
+        ...(workspace?.attentionCounts?.[person.id] ? { reviewCount: workspace.attentionCounts[person.id]!.review, conflictCount: workspace.attentionCounts[person.id]!.conflict } : {}) })).filter((item) => item.review || item.conflict);
       return { ...value, characters, attention, recentWindow: 10, nextCursor: offset + characters.length < matches.length ? characters.at(-1)!.id : null };
     },
     async detail(scope: CastScope, id: string) {

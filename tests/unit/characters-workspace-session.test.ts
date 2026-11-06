@@ -1,3 +1,4 @@
+import { NexusApiError } from "../../packages/client-core/src/errors.js";
 import { describe, expect, it, vi } from "vitest";
 import { createCharactersWorkspaceSession } from "../../packages/client-web/src/characters-workspace-session.js";
 
@@ -30,4 +31,27 @@ describe("characters workspace refresh", () => {
     expect(states).toHaveLength(notifications);
     session.dispose(); vi.useRealTimers();
   });
+  it("restarts once on a rejected later page and preserves the roster if it changes again", async () => {
+    const boundary = { turnNumber: 1, timelineRevision: 0 };
+    let revision = 1, failEveryPage = false, calls = 0;
+    const states: any[] = [];
+    const status = () => ({ revision, boundary, capabilities: { editing: true, discovery: false, autoMatch: false, backfill: false, context: false }, contextDisabledReason: null, counts: { identities: 0, details: 0, conflicts: 0 }, tracking: null });
+    const session = createCharactersWorkspaceSession({ api: {
+      workspaceStatus: async () => status(),
+      list: async (_campaign, input) => {
+        calls++;
+        if (input.cursor || failEveryPage) { revision++; throw new NexusApiError("Changed", { statusCode: 409, domainCode: "cast_revision_conflict" }); }
+        return { revision, boundary, characters: [], nextCursor: revision === 1 ? "next" : null };
+      }, detail: async () => { throw new Error("No selection"); }
+    }, onChange: state => states.push(state) });
+    try {
+      session.open("campaign");
+      await vi.waitFor(() => expect(states.at(-1)?.status?.revision).toBe(2));
+      expect(calls).toBe(3); expect(states.at(-1).error).toBeNull();
+      failEveryPage = true; calls = 0; await session.refresh();
+      expect(calls).toBe(2); expect(states.at(-1).status.revision).toBe(2);
+      expect(states.at(-1).error).not.toBeNull();
+    } finally { session.dispose(); }
+  });
+
 });

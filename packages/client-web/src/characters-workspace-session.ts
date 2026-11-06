@@ -1,4 +1,4 @@
-import { DEFAULT_RECENT_WINDOW_TURNS, matchesLocalCharacterFilter } from "@infinite-quest/client-core";
+import { NexusApiError, DEFAULT_RECENT_WINDOW_TURNS, matchesLocalCharacterFilter } from "@infinite-quest/client-core";
 import type { CharacterFilter, CastDetail, CastCharacter, CharactersWorkspaceStatus } from "@infinite-quest/contracts";
 
 export interface CharactersWorkspaceState<Draft = unknown> {
@@ -8,7 +8,7 @@ export interface CharactersWorkspaceState<Draft = unknown> {
   /** Accepted-turn window the server used for the Recent filter. */
   recentWindow: number;
   /** Server-reported review/conflict markers by character ID; absent on older servers. */
-  attention: Record<string, { review: boolean; conflict: boolean }>;
+  attention: Record<string, { review: boolean; conflict: boolean; reviewCount?: number | undefined; conflictCount?: number | undefined }>;
   selectedId: string | null;
   detail: CastDetail | null;
   draft: Draft | null;
@@ -20,7 +20,7 @@ export interface CharactersWorkspaceState<Draft = unknown> {
 export interface CharactersWorkspaceSessionOptions<Draft> {
   api: {
     workspaceStatus(campaignId: string, signal?: AbortSignal): Promise<CharactersWorkspaceStatus>;
-    list(campaignId: string, input: { query: string; filter: CharacterFilter; cursor?: string; expectedRevision?: number; expectedTurnNumber?: number; expectedTimelineRevision?: number }, signal?: AbortSignal): Promise<{ revision: number; boundary: { turnNumber: number; timelineRevision: number }; characters: CastCharacter[]; nextCursor: string | null; recentWindow?: number | undefined; attention?: { characterId: string; review: boolean; conflict: boolean }[] | undefined }>;
+    list(campaignId: string, input: { query: string; filter: CharacterFilter; cursor?: string; expectedRevision?: number; expectedTurnNumber?: number; expectedTimelineRevision?: number }, signal?: AbortSignal): Promise<{ revision: number; boundary: { turnNumber: number; timelineRevision: number }; characters: CastCharacter[]; nextCursor: string | null; recentWindow?: number | undefined; attention?: { characterId: string; review: boolean; conflict: boolean; reviewCount?: number | undefined; conflictCount?: number | undefined }[] | undefined }>;
     detail(campaignId: string, id: string, signal?: AbortSignal): Promise<CastDetail>;
   };
   schedule?: { set(callback: () => void, delay: number): unknown; clear(handle: unknown): void; visible(): boolean; onVisibilityChange(callback: () => void): () => void };
@@ -55,10 +55,16 @@ export function createCharactersWorkspaceSession<Draft = unknown>({ api, schedul
         for (let attempt = 0; ; attempt++) {
           let cursor: string | undefined, consistent = true; characters = []; attention = {};
           do {
-            const page = await api.list(campaignId, { query, filter: status.legacyServer ? "all" : filter, ...(cursor ? status.legacyServer ? { cursor } : { cursor, expectedRevision: status.revision, expectedTurnNumber: status.boundary.turnNumber, expectedTimelineRevision: status.boundary.timelineRevision } : {}) }, abort.signal);
+            let page: Awaited<ReturnType<typeof api.list>>;
+            try {
+              page = await api.list(campaignId, { query, filter: status.legacyServer ? "all" : filter, ...(cursor ? status.legacyServer ? { cursor } : { cursor, expectedRevision: status.revision, expectedTurnNumber: status.boundary.turnNumber, expectedTimelineRevision: status.boundary.timelineRevision } : {}) }, abort.signal);
+            } catch (error) {
+              if (!(error instanceof NexusApiError) || error.domainCode !== "cast_revision_conflict") throw error;
+              consistent = false; break;
+            }
             if (!sameBoundary(page)) { consistent = false; break; }
             recentWindow = page.recentWindow ?? DEFAULT_RECENT_WINDOW_TURNS;
-            for (const item of page.attention ?? []) attention[item.characterId] = { review: item.review, conflict: item.conflict };
+            for (const item of page.attention ?? []) attention[item.characterId] = { review: item.review, conflict: item.conflict, reviewCount: item.reviewCount, conflictCount: item.conflictCount };
             characters.push(...page.characters); cursor = page.nextCursor ?? undefined;
           } while (cursor);
           if (consistent) break;

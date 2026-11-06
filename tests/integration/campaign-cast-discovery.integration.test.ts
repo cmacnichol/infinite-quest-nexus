@@ -485,6 +485,10 @@ describe("durable cast discovery", () => {
       expect((await editor.current(f.scope)).characters.filter(person => person.name === "Mara")).toHaveLength(1);
       const row = (await pool.query("SELECT status,proposal FROM campaign_cast_discovery_candidates WHERE id=$1", [candidate.id])).rows[0];
       expect(row).toEqual({ status: "pending", proposal: output.characters[0] });
+      const listed = await app.inject({ method: "GET", url: `/api/v1/campaigns/${f.scope.campaignId}/cast` });
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json().attention).toContainEqual({ characterId: saved.character.id, review: true, conflict: false,
+        reviewCount: allDisputed ? 2 : 1, conflictCount: 0 });
       const detailInbox = await editor.candidates(f.scope, { view: "details" });
       const detail = detailInbox.candidates[0]!.details!.find(item => item.observationIndex === 1)!;
       expect(detail).toMatchObject({ field: "story.role", value: "the gatekeeper", observationIndex: 1 });

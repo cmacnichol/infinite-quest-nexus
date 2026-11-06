@@ -530,10 +530,19 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
             AND n.correction_revision=(p.source->>'narrationRevision')::integer
             AND encode(digest(n.effective_narration,'sha256'),'hex')=p.source->>'sourceHash'`,
         [scope.campaignId, scope.ownerUserId, boundary.timelineRevision, boundary.turnNumber])).rows;
-        const reviewIds = new Set<string>(), conflictIds = new Set<string>(); let identities = 0, details = 0, conflicts = 0;
+        const reviewIds = new Set<string>(), conflictIds = new Set<string>();
+        const attentionCounts: Record<string, { review: number; conflict: number }> = {};
+        const addAttention = (id: string, review: number, conflict = 0) => {
+          const count = attentionCounts[id] ??= { review: 0, conflict: 0 };
+          count.review += review; count.conflict += conflict;
+        };
+        let identities = 0, details = 0, conflicts = 0;
         for (const row of rows) {
           const id = row.resolution_receipt?.result?.character?.id ?? row.proposal?.existingCharacterId;
-          if (id && (!row.resolution_receipt || row.pending_indexes.length) && projected.snapshot.characters.some(person => person.id === id)) reviewIds.add(id);
+          if (id && (!row.resolution_receipt || row.pending_indexes.length) && projected.snapshot.characters.some(person => person.id === id)) {
+            reviewIds.add(id);
+            addAttention(id, row.resolution_receipt ? row.pending_indexes.length : 1);
+          }
           if (!row.resolution_receipt) identities++;
           else {
             details += row.pending_indexes.length;
@@ -557,12 +566,12 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
             if (item.mode !== "fact" || superseded.has(item.id) || item.field.startsWith("state.") || item.field === "story.goals") continue;
             const values = fields.get(item.field) ?? new Set<string>(); values.add(item.value); fields.set(item.field, values);
           }
-          for (const [field, values] of fields) if (values.size > 1 && !detail.overrides.some(item => item.field === field)) { conflicts++; reviewIds.add(detail.characterId); conflictIds.add(detail.characterId); }
+          for (const [field, values] of fields) if (values.size > 1 && !detail.overrides.some(item => item.field === field)) { conflicts++; reviewIds.add(detail.characterId); conflictIds.add(detail.characterId); addAttention(detail.characterId, 1, 1); }
         }
         const levels = ["r1", "r2", "r3"];
         const context = options.castContextEnabled === true && !!enrollment && !!options.storyMemoryCapability
           && levels.indexOf(options.storyMemoryCapability) >= levels.indexOf(enrollment.capability);
-        const value = { snapshot: projected.snapshot, reviewIds: [...reviewIds], conflictIds: [...conflictIds], status: {
+        const value = { snapshot: projected.snapshot, reviewIds: [...reviewIds], conflictIds: [...conflictIds], attentionCounts, status: {
           revision: state.revision, boundary, capabilities: { editing: options.editingEnabled === true,
             discovery: options.discoveryEnabled === true, autoMatch: options.castAutoMatchEnabled === true && options.discoveryEnabled === true && options.editingEnabled === true, backfill: options.backfillEnabled === true,
             context }, contextDisabledReason: context ? null : "Story Memory or character context is unavailable.",

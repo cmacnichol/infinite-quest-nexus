@@ -57,10 +57,20 @@ Live text/image providers, paid scans, production enablement and copied-campaign
 A post-implementation review found the issues below; the [fix plan](../../superpowers/plans/2026-11-06-characters-revamp-fixes.md) records them. All are fixed in the follow-up commit:
 
 - Lexical mention tracking now runs only while `CAST_AUTO_MATCH_ENABLED` is effective, on accepted turns and narration corrections. Before, it ran whatever the flags said.
-- Migration `0120` uses statement-level triggers. Discovery-job lease and checkpoint writes, and turn updates other than narration changes, no longer bump the workspace revision. Migrations `0118`–`0120` refuse to roll back while they hold data, and otherwise reverse cleanly.
+- Migration `0120` uses statement-level triggers. Discovery-job lease and checkpoint writes, and turn updates other than narration changes, no longer bump the workspace revision. Migrations `0118` and `0119` refuse to roll back while they hold review data. Migration `0120` removes only its operational counter and invalidation triggers on rollback.
 - The replacement client's roster shows provenance, Pinned/Ignored and server-reported Needs review / Conflicting details markers. Both clients label the Recent filter with the server's window.
 - The replacement client edits the main character inside the Characters sheet through the revisioned `/character-profile` endpoint. A conflict keeps the draft.
 - The roster filter predicate now lives in `client-core`. Sheet locks list manually corrected fields. A revision change during pagination restarts once immediately. The lexical matcher merges a name with a longer alias of the same character, and it skips sentence-initial common-word names.
 - Screenshots moved to `docs/review/assets/characters-revamp/`. The e2e profile fixture now returns the strict update response shape. Before, a failed save went unnoticed because the test only checked that a request was sent.
 
 Fix-round verification (2026-11-06): `pnpm check`, client-boundary check, `pnpm build` and the whitespace check passed. 16 affected unit files passed (521 tests). Eleven focused PostgreSQL files passed: cast lifecycle, discovery, API, generation, portability, migrations, generation execution, generation, narration corrections, generation events and the adapter matrix. That is 235 tests, with 6 existing Windows filesystem-staging skips not counted as passing. The cast Playwright suite passed 26/26. The full unit and full integration suites were not rerun in this round.
+
+## Publication review
+
+Reviewed the other agent's `c6466249...8c953a1a` update against the plans and repository rules before publishing. No additional trigger, lexical-gating or authority-boundary defect was found in that review. Three follow-up corrections are included:
+
+- A server-rejected `cast_revision_conflict` during pagination now restarts once with fresh status. Repeated conflicts retain the last successful roster and enter the existing backoff. The new case in the existing session suite failed before the fix and passed afterward.
+- Each character's attention response now includes optional review/conflict counts, which the replacement roster displays. Existing scoped caching and older-server boolean fallbacks remain intact.
+- The new in-sheet protagonist editor blocks cancellation and further edits while saving/loading, guards responses by editor identity, resets on opening another campaign and clears the sheet grid when opening the form. Its existing browser journey now delays the save and verifies the stored value after completion.
+
+Publication verification: `pnpm check`, `pnpm build`, client-boundary check and 19 focused application/API/session/matcher unit tests passed. The existing PostgreSQL discovery suite passed 59/59 after the count change. The full existing cast Playwright suite passed 26/26 after the follow-up, including delayed-save guards, persisted profile values and roster review counts. Desktop/mobile roster and in-sheet profile screenshots were refreshed. No new test suite or migration was added in this round. Earlier complete-suite results above remain baseline evidence; only affected checks were repeated for this publication review.

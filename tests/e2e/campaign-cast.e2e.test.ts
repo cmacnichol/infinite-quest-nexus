@@ -241,7 +241,7 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
       const matches = characters.filter((c) => (url.searchParams.get("filter") !== "conflicts" || c.id === (conflictFixture ? candidateId : protagonistId)) && [c.name, ...c.aliases].some((name: string) => name.toLowerCase().includes(query)));
       const cursor = url.searchParams.get("cursor"), offset = cursor ? matches.findIndex((person) => person.id === cursor) + 1 : 0;
       const page = matches.slice(offset, offset + 2);
-      return send(route, { revision, boundary, characters: page,
+      return send(route, { revision, boundary, characters: page, attention: page.filter((person) => person.id === protagonistId).map((person) => ({ characterId: person.id, review: true, conflict: true, reviewCount: 2, conflictCount: 1 })),
         nextCursor: offset + page.length < matches.length ? page.at(-1).id : null, capabilities: { castEditing: enabled } });
     }
     if (path === "/api/v1/session") return send(route, { user: { id: worldId, displayName: "Fixture owner", settings: { autoSubmitTurnChoices: true, continuousReading: false, defaultTurnControlStyle: "flexible_action" } }, authentication: "deferred" });
@@ -482,6 +482,7 @@ for (const surface of ["legacy", "next"] as const) for (const width of [1440, 39
   await expect(dialog).toContainText("conflicts: 1");
   await dialog.getByRole("button", { name: "Review conflicts", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toBeVisible();
+  if (surface === "next") await expect(dialog).toContainText("Needs review (2)");
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/roster-${surface}-${width}.png` });
   await dialog.getByRole("button", { name: "Likely included for this input", exact: true }).click();
   await dialog.getByRole("button", { name: "Refresh estimate", exact: true }).click(); await expect(dialog).toContainText("Estimate at turn 1");
@@ -500,10 +501,24 @@ for (const surface of ["legacy", "next"] as const) for (const width of [1440, 39
   await expect(profile.getByText("Profile JSON", { exact: true })).toHaveCount(0);
   if (screenshotRoot) await profile.screenshot({ path: `${screenshotRoot}/profile-${surface}-${width}.png` });
   await profile.getByLabel("Pronouns", { exact: true }).fill("they/them");
+  let releaseSave: (() => void) | undefined;
+  if (surface === "next" && width === 1440) {
+    const gate = new Promise<void>(resolve => { releaseSave = resolve; });
+    await page.route(`**/character-profile`, async route => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      await gate; return route.fallback();
+    });
+  }
   await profile.getByRole("button", { name: /Save character profile/i }).click();
+  if (releaseSave) {
+    await expect(profile.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
+    await expect(profile.getByRole("button", { name: "Close", exact: true })).toBeDisabled();
+    await expect(profile.getByLabel("Pronouns", { exact: true })).toBeDisabled();
+    releaseSave();
+  }
   await expect.poll(() => api.profileWrites.length).toBe(1);
   expect(api.profileWrites[0].profile.identity.pronouns).toBe("they/them");
-  if (surface === "next") await expect(dialog.getByRole("button", { name: "Edit main character", exact: true })).toBeVisible();
+  if (surface === "next") { await expect(dialog.getByRole("button", { name: "Edit main character", exact: true })).toBeVisible(); await expect(dialog).toContainText("they/them"); }
 });
 
 for (const surface of ["legacy", "next"] as const) test(`shared review and undo ${surface}`, async ({ page }) => {

@@ -21,7 +21,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => { const el = document.createElement(tag); el.textContent = text; return el; };
   const button = (text: string, action: () => void, disabled = false) => { const el = node("button", text); el.type = "button"; el.disabled = disabled; el.addEventListener("click", action); return el; };
   const discard = () => !(editor?.dirty || profileEditor?.form.dirty) || (document.defaultView?.confirm("Discard unsaved character changes?") ?? false);
-  function close() { if (!discard() || editor?.saving || profileEditor?.saving) return; openEpoch++; editor = null; profileEditor = null; reviewing = false; session.close(); operationKeys.clear(); dialog.close(); focus?.focus(); }
+  function close() { if (editor?.saving || profileEditor?.saving || !discard()) return; openEpoch++; editor = null; profileEditor = null; reviewing = false; session.close(); operationKeys.clear(); dialog.close(); focus?.focus(); }
   function render() {
     if (!state || !dialog.open || reviewing || profileEditor) return;
     if (editor) { if (state.changedWhileEditing && !dialog.querySelector("[data-stale]")) { const notice = node("p", "This character changed while you were editing. Your draft is preserved; compare the latest before saving."); notice.dataset.stale = ""; dialog.prepend(notice); } return; }
@@ -84,7 +84,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     const roster = node("ul"); for (const person of state.characters) {
       const item = node("li"), attention = state.attention[person.id];
       const facts = [person.profile["story.role"], characterProvenanceLabel(person), person.pinned ? "Pinned" : "", person.ignored ? "Ignored" : "",
-        attention?.review ? "Needs review" : "", attention?.conflict ? "Conflicting details" : "", `Last observed turn ${person.lastObservedTurn}`,
+        attention?.review ? `Needs review${attention.reviewCount != null ? ` (${attention.reviewCount})` : ""}` : "", attention?.conflict ? `Conflicting details${attention.conflictCount != null ? ` (${attention.conflictCount})` : ""}` : "", `Last observed turn ${person.lastObservedTurn}`,
         person.lastMentionedTurn != null ? `Last mentioned turn ${person.lastMentionedTurn}` : ""].filter(Boolean).join(" · ");
       item.append(button(person.name, () => session.select(person.id)), node("span", ` ${facts}`)); roster.append(item);
     }
@@ -175,34 +175,36 @@ export function createCharactersWorkspace(document: Document, generationActive: 
   /** Edit the main character in the sheet through the existing revisioned profile endpoint. */
   function renderProfileEditor(campaign: string, profile: ProtagonistProfile, message = "") {
     const epoch = openEpoch;
-    dialog.replaceChildren(); const head = node("header"); head.append(node("h2", `Edit ${profile.name}`), button("Close", close)); dialog.append(head);
+    dialog.classList.remove("characters-sheet-layout"); dialog.replaceChildren(); const head = node("header"); const closeButton = button("Close", close); head.append(node("h2", `Edit ${profile.name}`), closeButton); dialog.append(head);
     dialog.append(node("p", `Revision ${profile.revision}. Profile edits apply to future turns only.`));
     const form = node("form"), fields = node("div"); fields.className = "characters-profile-fields";
     const editing = { form: createCharacterProfileForm(fields, profile), saving: false }; profileEditor = editing;
     const status = node("p", message); status.setAttribute("aria-live", "polite");
     const save = node("button", "Save character profile"); save.type = "submit"; save.disabled = generationActive();
-    const cancel = button("Cancel", () => { if (!discard()) return; profileEditor = null; render(); });
+    const cancel = button("Cancel", () => { if (editing.saving || !discard()) return; profileEditor = null; render(); });
+    const setBusy = (busy: boolean) => { editing.saving = busy; save.disabled = busy || generationActive(); cancel.disabled = busy; closeButton.disabled = busy; const reload = form.querySelector<HTMLButtonElement>("[data-load-latest]"); if (reload) reload.disabled = busy; fields.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea").forEach(control => { control.disabled = busy; }); };
     form.append(fields, status, save, cancel); dialog.append(form);
     form.addEventListener("submit", async event => {
       event.preventDefault(); if (profileEditor !== editing || editing.saving) return;
       if (generationActive()) { status.textContent = "Story generation is active. Your edits are kept; save when it finishes."; return; }
-      editing.saving = true; save.disabled = true; status.textContent = "Saving…";
+      setBusy(true); status.textContent = "Saving…";
       try {
         const saved = await saveProfile(campaign, editing.form.update());
-        if (epoch !== openEpoch || state.campaignId !== campaign) return;
+        if (epoch !== openEpoch || state.campaignId !== campaign || profileEditor !== editing) return;
         protagonist = { name: saved.name, profile: saved.profile, revision: saved.revision }; profileEditor = null;
         onProfileSaved(campaign); render();
       } catch (error) {
         if (epoch !== openEpoch || profileEditor !== editing) return;
-        editing.saving = false; save.disabled = generationActive();
+        setBusy(false);
         const code = (error as { statusCode?: number; status?: number }).statusCode ?? (error as { status?: number }).status;
         status.textContent = code === 409 ? "The main character changed elsewhere. Your edits are kept here; load the latest version to start again from it."
           : "Could not save the main character. Your edits are kept.";
         if (code === 409 && !form.querySelector("[data-load-latest]")) {
           const reload = button("Load latest version", async () => {
-            if (!discard()) return;
-            try { const latest = await getProfile(campaign); if (epoch !== openEpoch) return; protagonist = latest; renderProfileEditor(campaign, latest, "Loaded the latest version."); }
-            catch { status.textContent = "Could not load the latest version. Try again."; }
+            if (editing.saving || !discard()) return;
+            setBusy(true); reload.disabled = true;
+            try { const latest = await getProfile(campaign); if (epoch !== openEpoch || profileEditor !== editing || state.campaignId !== campaign) return; protagonist = latest; renderProfileEditor(campaign, latest, "Loaded the latest version."); }
+            catch { if (epoch !== openEpoch || profileEditor !== editing) return; setBusy(false); reload.disabled = false; status.textContent = "Could not load the latest version. Try again."; }
           }); reload.dataset.loadLatest = ""; form.append(reload);
         }
       }
@@ -210,6 +212,6 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     fields.querySelector<HTMLElement>("input, textarea")?.focus();
   }
   dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
-  return { open(campaignId: string, returnFocus?: HTMLElement | null) { openEpoch++; protagonist = null; protagonistLoading = false; focus = returnFocus ?? document.activeElement as HTMLElement | null; editor = null; reviewing = false; dialog.showModal(); session.open(campaignId); }, dispose() { openEpoch++; session.dispose(); dialog.remove(); } };
+  return { open(campaignId: string, returnFocus?: HTMLElement | null) { openEpoch++; protagonist = null; protagonistLoading = false; focus = returnFocus ?? document.activeElement as HTMLElement | null; editor = null; profileEditor = null; reviewing = false; dialog.showModal(); session.open(campaignId); }, dispose() { openEpoch++; session.dispose(); dialog.remove(); } };
 }
 
