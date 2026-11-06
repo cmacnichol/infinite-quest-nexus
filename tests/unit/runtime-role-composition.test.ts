@@ -160,7 +160,9 @@ describe("runtime role generation composition", () => {
     const { values, server } = dependencies(controller);
     server.listen.mockImplementation(async () => undefined);
     const runtime = authoringRuntimeFixture(async () => authoringResult("unused"));
-    const claim = vi.fn(async () => null);
+    // Stop as soon as the enabled lane is observed; otherwise it can poll a
+    // second time before the generation lane's next eligible rotation.
+    const claim = vi.fn(async () => { controller.abort(); return null; });
     const createAuthoring = vi.fn((_pool: DatabasePool, providers: WorkerProviderApplicationComposition["worldGeneration"], signal: AbortSignal) => createRuntimeAuthoringWorkerApplication({ repository: { claim } as never, providers, signal, sha256: authoringHash }));
     let rotations = 0;
     const generation = { claimNext: async () => { if (++rotations === 2) controller.abort(); return null; }, executeClaimed: async () => false };

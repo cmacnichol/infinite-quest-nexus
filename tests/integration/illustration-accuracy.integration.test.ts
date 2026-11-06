@@ -67,7 +67,9 @@ integration("illustration accuracy", () => {
 
   async function campaign(config: Record<string, unknown> = {}) {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
-    fixture.world.title = `Lantern Coast ${crypto.randomUUID()}`;
+    // Distinct imports need distinct titles; letters cannot resemble dice notation.
+    const suffix = crypto.randomUUID().replaceAll("-", "").replace(/[0-9]/g, (digit) => String.fromCharCode(103 + Number(digit)));
+    fixture.world.title = `Lantern Coast ${suffix}`;
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
       sourceName: "illustration-accuracy.story",
       story: fixture
