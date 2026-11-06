@@ -3,6 +3,7 @@ import { PROFILE_FIELDS, SUPPORTING_FIELDS, type CharacterSectionName } from "./
 
 export type CharacterRecord = { kind: "protagonist"; profile: CampaignCharacterProfile; revision: number } | { kind: "supporting"; detail: CastDetail };
 export type CharacterField = { path: string; label: string; value: string | string[] | null; origin: "unknown" | "observed" | "claim" | "user" | "conflicted"; observations: CastObservation[]; override?: CastOverride };
+/** `locks` lists field paths held by a manual correction; automatic evidence cannot replace them. */
 export type CharacterSheet = { name: string; kind: CharacterRecord["kind"]; sections: { name: CharacterSectionName; fields: CharacterField[] }[]; sources: CastEvidence[]; locks: string[]; attention: string[] };
 export function buildCharacterSheet(record: CharacterRecord): CharacterSheet {
   const descriptors = record.kind === "protagonist" ? PROFILE_FIELDS : SUPPORTING_FIELDS;
@@ -32,6 +33,7 @@ export function buildCharacterSheet(record: CharacterRecord): CharacterSheet {
     section.fields.push({ path: descriptor.path, label: descriptor.label, value, origin, observations: relevant, ...(override ? { override } : {}) });
   }
   return { name: record.kind === "protagonist" ? record.profile.name : record.detail.character.name, kind: record.kind, sections,
-    sources: observations.map((item) => item.evidence), locks: [], attention: record.kind === "supporting" ? record.detail.unresolvedCandidateIds : [] };
+    sources: observations.map((item) => item.evidence),
+    locks: record.kind === "supporting" ? sections.flatMap((section) => section.fields.filter((item) => item.override).map((item) => item.path)) : [], attention: record.kind === "supporting" ? record.detail.unresolvedCandidateIds : [] };
 }
 

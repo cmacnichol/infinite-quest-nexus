@@ -14,7 +14,8 @@ import { castBackfillRequestSchema, castBackfillPreviewSchema, castBackfillProgr
   type CastBackfillRequest, type CastBackfillRetry } from "@infinite-quest/contracts";
 
 const capabilities = z.object({ castEditing: z.boolean() });
-export const castListResponseSchema = castSnapshotSchema.extend({ nextCursor: z.uuid().nullable(), recentWindow: z.number().int().positive().optional(), capabilities });
+export const castListResponseSchema = castSnapshotSchema.extend({ nextCursor: z.uuid().nullable(), recentWindow: z.number().int().positive().optional(), capabilities,
+  attention: z.array(z.object({ characterId: z.uuid(), review: z.boolean(), conflict: z.boolean() }).strict()).max(50).optional() });
 export const castDetailResponseSchema = castDetailSchema.extend({ capabilities });
 export function createCampaignCastApi(options: NexusHttpClientOptions = {
   basePath: "/api/v1", session: { authorization: async () => ({}), onUnauthorized: async () => false }

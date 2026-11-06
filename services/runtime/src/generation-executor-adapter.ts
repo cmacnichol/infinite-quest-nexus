@@ -279,6 +279,8 @@ type GenerationCostAttribution = Readonly<{
 
 export type GenerationExecutionCollaborators = Readonly<{
   prepareCastDiscoveryExecution?(input: { ownerUserId: string; execution: RuntimeTextExecution }): Promise<CastDiscoveryExecution>;
+  /** Records provider-free lexical cast mentions with the accepted turn. Default off. */
+  castLexicalMentionsEnabled?: boolean;
   memory: MemoryGenerationTransactionPort;
   illustration: IllustrationGenerationTransactionPort;
   /** Resolves optional illustration route metadata before the accepted-turn transaction begins. */
@@ -4912,6 +4914,7 @@ async function executeLoadedGeneration(
       ...(illustrationTextExecutionSnapshot ? { illustrationTextExecutionSnapshot } : {}),
       ...(castAdmission?.status === "ready" ? { castDiscoveryExecution: castAdmission.execution }
         : castAdmission?.status === "unavailable" ? { castDiscoveryUnavailable: true } : {}),
+      ...(collaborators.castLexicalMentionsEnabled === true ? { castLexicalMentions: true } : {}),
       collaborators: acceptedCommitCollaborators,
       onIllustrationEnqueueError(error, acceptedTurnId) {
         logger.warn({

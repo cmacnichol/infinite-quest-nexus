@@ -727,7 +727,8 @@ export async function buildServer({
   });
   const memoryAdapter = createMemoryApplicationAdapter(pool, memory, createCastContextPreview(pool, config));
   const turnCorrections = createTurnCorrectionApplication({
-    corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation })
+    corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation,
+      castLexicalMentionsEnabled: config.castAutoMatchEnabled === true && config.castDiscoveryEnabled === true })
   });
   const readerHistory = createReaderHistoryApplication({
     turns: createPostgresReaderHistoryRepository(pool, {

@@ -1,22 +1,29 @@
 import { renderLegacyCastScan } from "./campaign-cast-scan-panel";
-import { buildCharacterSheet, createCastEditor, changeCastEditor, setCastEditorField, canSaveCastEditor, prepareCastSubmission, failCastSubmission, reapplyCastDraft, SUPPORTING_FIELDS, type CastEditorState } from "@infinite-quest/client-core";
+import { createCharacterProfileForm } from "./character-profile-form";
+import { buildCharacterSheet, createCastEditor, changeCastEditor, setCastEditorField, canSaveCastEditor, prepareCastSubmission, failCastSubmission, reapplyCastDraft, SUPPORTING_FIELDS, characterProvenanceLabel, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
 import { createCampaignCastApi, createCharactersWorkspaceSession, type CharactersWorkspaceState } from "@infinite-quest/client-web";
-import type { CampaignCharacterProfile, CastCharacter, CharacterFilter, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
+import type { CampaignCharacterProfile, CampaignCharacterProfileUpdate, CastCharacter, CharacterFilter, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
 
-export function createCharactersWorkspace(document: Document, generationActive: () => boolean, openProfile: () => void, navigateToTurn: (turn: number) => void, getProfile: (campaign: string) => Promise<CampaignCharacterProfile & { revision: number }>) {
+type ProtagonistProfile = CampaignCharacterProfile & { revision: number };
+
+export function createCharactersWorkspace(document: Document, generationActive: () => boolean,
+  saveProfile: (campaign: string, update: CampaignCharacterProfileUpdate) => Promise<ProtagonistProfile>,
+  navigateToTurn: (turn: number) => void, getProfile: (campaign: string) => Promise<ProtagonistProfile>,
+  onProfileSaved: (campaign: string) => void = () => {}) {
   const api = createCampaignCastApi();
   const dialog = document.createElement("dialog"); dialog.className = "characters-workspace"; document.body.append(dialog);
-  let openEpoch = 0; let protagonist: (CampaignCharacterProfile & { revision: number }) | null = null; let protagonistLoading = false;
+  let openEpoch = 0; let protagonist: ProtagonistProfile | null = null; let protagonistLoading = false;
+  let profileEditor: { form: ReturnType<typeof createCharacterProfileForm>; saving: boolean } | null = null;
   let state: CharactersWorkspaceState<CastEditorState>, editor: CastEditorState | null = null, filter: CharacterFilter = "all", query = "", focus: HTMLElement | null = null, reviewing = false;
   const session = createCharactersWorkspaceSession<CastEditorState>({ api, onChange(next) { state = next; render(); } });
   const operationKeys = new Map<string, string>();
   function operationKey(operation: string, payload: unknown) { const key = `${operation}:${JSON.stringify(payload)}`; let id = operationKeys.get(key); if (!id) { id = crypto.randomUUID(); operationKeys.set(key, id); } return id; }
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => { const el = document.createElement(tag); el.textContent = text; return el; };
   const button = (text: string, action: () => void, disabled = false) => { const el = node("button", text); el.type = "button"; el.disabled = disabled; el.addEventListener("click", action); return el; };
-  const discard = () => !editor?.dirty || (document.defaultView?.confirm("Discard unsaved character changes?") ?? false);
-  function close() { if (!discard() || editor?.saving) return; openEpoch++; editor = null; reviewing = false; session.close(); operationKeys.clear(); dialog.close(); focus?.focus(); }
+  const discard = () => !(editor?.dirty || profileEditor?.form.dirty) || (document.defaultView?.confirm("Discard unsaved character changes?") ?? false);
+  function close() { if (!discard() || editor?.saving || profileEditor?.saving) return; openEpoch++; editor = null; profileEditor = null; reviewing = false; session.close(); operationKeys.clear(); dialog.close(); focus?.focus(); }
   function render() {
-    if (!state || !dialog.open || reviewing) return;
+    if (!state || !dialog.open || reviewing || profileEditor) return;
     if (editor) { if (state.changedWhileEditing && !dialog.querySelector("[data-stale]")) { const notice = node("p", "This character changed while you were editing. Your draft is preserved; compare the latest before saving."); notice.dataset.stale = ""; dialog.prepend(notice); } return; }
     const sourceOpen = dialog.querySelector("details")?.open ?? false; const scroll = dialog.scrollTop;
     dialog.classList.toggle("characters-sheet-layout", Boolean(state.selectedId));
@@ -34,7 +41,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
       }
       const sheet = protagonist && detail.character.origin.kind === "protagonist" ? buildCharacterSheet({ kind: "protagonist", profile: { name: protagonist.name, profile: protagonist.profile }, revision: protagonist.revision }) : buildCharacterSheet({ kind: "supporting", detail });
       dialog.append(node("p", `Last observed turn ${detail.character.lastObservedTurn}${detail.character.lastMentionedTurn != null ? ` · Last mentioned turn ${detail.character.lastMentionedTurn}` : ""}`));
-      if (detail.character.origin.kind === "protagonist") dialog.append(button("Edit main character", () => { close(); openProfile(); }, generationActive()));
+      if (detail.character.origin.kind === "protagonist") dialog.append(button("Edit main character", () => { if (protagonist && state.campaignId) renderProfileEditor(state.campaignId, protagonist); }, generationActive() || !protagonist));
       else dialog.append(button("Edit character", () => { editor = createCastEditor(detail, detail); session.setDraft(editor); renderEditor(); }, state.status.capabilities.editing !== true || generationActive()));
       for (const section of sheet.sections) { const group = node("section"); group.append(node("h3", section.name)); for (const field of section.fields) { const value = Array.isArray(field.value) ? field.value.join(", ") : field.value; group.append(node("p", `${field.label}: ${value || (field.origin === "conflicted" ? "Conflicting observations" : field.origin === "claim" ? "Unverified claim" : "Unknown")} ${field.origin === "unknown" ? "" : `· ${field.origin}`}`)); } dialog.append(group); }
       const sources = node("details"); sources.append(node("summary", "Sources and edit history"));
@@ -69,12 +76,19 @@ export function createCharactersWorkspace(document: Document, generationActive: 
       button("Review conflicts", () => { filter = "conflicts"; session.setQuery(query, filter); }));
     dialog.append(button("Scan earlier story", () => { void scan(); }), button("Likely included for this input", () => { void preview(); }), button("Review character matches", () => { void review("matches"); }), button("Review character details", () => { void review("details"); }));
     const form = node("form"), search = node("input"), select = node("select"); search.type = "search"; search.value = query; search.setAttribute("aria-label", "Find a character");
-    for (const [value, label] of [["all", "All"], ["main", "Main"], ["recent", "Recent"], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"]]) { const option = node("option", label); option.value = value!; select.append(option); } select.value = filter; select.setAttribute("aria-label", "Filter characters");
+    for (const [value, label] of [["all", "All"], ["main", "Main"], ["recent", recentFilterLabel(state.recentWindow)], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"]]) { const option = node("option", label); option.value = value!; select.append(option); } select.value = filter; select.setAttribute("aria-label", "Filter characters");
     form.append(search, select, button("Search", () => { query = search.value; filter = select.value as CharacterFilter; session.setQuery(query, filter); })); form.addEventListener("submit", event => { event.preventDefault(); query = search.value; filter = select.value as CharacterFilter; session.setQuery(query, filter); }); select.addEventListener("change", () => { query = search.value; filter = select.value as CharacterFilter; session.setQuery(query, filter); }); dialog.append(form);
     dialog.append(button("Add character", async () => {
       if (!state.campaignId) return; const campaign = state.campaignId, epoch = openEpoch; const roster = await api.list(campaign); if (epoch !== openEpoch || state.campaignId !== campaign || !dialog.open) return; editor = createCastEditor(roster); session.setDraft(editor); renderEditor();
     }, state.status.capabilities.editing !== true || generationActive()));
-    const roster = node("ul"); for (const person of state.characters) { const item = node("li"); item.append(button(person.name, () => session.select(person.id)), node("span", ` ${person.profile["story.role"] ?? ""} · Last observed turn ${person.lastObservedTurn}${person.lastMentionedTurn != null ? ` · Last mentioned turn ${person.lastMentionedTurn}` : ""}`)); roster.append(item); } dialog.append(roster); if (!state.characters.length) dialog.append(node("p", "No characters match."));
+    const roster = node("ul"); for (const person of state.characters) {
+      const item = node("li"), attention = state.attention[person.id];
+      const facts = [person.profile["story.role"], characterProvenanceLabel(person), person.pinned ? "Pinned" : "", person.ignored ? "Ignored" : "",
+        attention?.review ? "Needs review" : "", attention?.conflict ? "Conflicting details" : "", `Last observed turn ${person.lastObservedTurn}`,
+        person.lastMentionedTurn != null ? `Last mentioned turn ${person.lastMentionedTurn}` : ""].filter(Boolean).join(" · ");
+      item.append(button(person.name, () => session.select(person.id)), node("span", ` ${facts}`)); roster.append(item);
+    }
+    if (filter === "recent") dialog.append(node("p", recentFilterLabel(state.recentWindow))); dialog.append(roster); if (!state.characters.length) dialog.append(node("p", "No characters match."));
   }
   async function scan() {
     if (!state.campaignId) return; const campaign = state.campaignId; reviewing = true; dialog.classList.remove("characters-sheet-layout");
@@ -157,6 +171,43 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     }
     save.disabled = !canSaveCastEditor(editor) || generationActive() || state.changedWhileEditing; form.append(save, button("Cancel", () => { if (!discard()) return; editor = null; session.setDraft(null); }));
     form.addEventListener("submit", async event => { event.preventDefault(); if (!editor || !state.campaignId || generationActive() || !canSaveCastEditor(editor) || state.changedWhileEditing) return; const campaign = state.campaignId, id = editor.characterId; try { editor = prepareCastSubmission(editor, crypto.randomUUID()); renderEditor(); const result = id ? await api.edit(campaign, id, editor.submission as EditCastCharacter) : await api.create(campaign, editor.submission as CreateCastCharacter); editor = null; session.setDraft(null); session.select(result.character.id); } catch (error) { if (!editor) return; editor = failCastSubmission(editor, error instanceof Error ? error.message : "Could not save character.", (error as { statusCode?: number }).statusCode === 409); renderEditor(); } }); dialog.append(form);
+  }
+  /** Edit the main character in the sheet through the existing revisioned profile endpoint. */
+  function renderProfileEditor(campaign: string, profile: ProtagonistProfile, message = "") {
+    const epoch = openEpoch;
+    dialog.replaceChildren(); const head = node("header"); head.append(node("h2", `Edit ${profile.name}`), button("Close", close)); dialog.append(head);
+    dialog.append(node("p", `Revision ${profile.revision}. Profile edits apply to future turns only.`));
+    const form = node("form"), fields = node("div"); fields.className = "characters-profile-fields";
+    const editing = { form: createCharacterProfileForm(fields, profile), saving: false }; profileEditor = editing;
+    const status = node("p", message); status.setAttribute("aria-live", "polite");
+    const save = node("button", "Save character profile"); save.type = "submit"; save.disabled = generationActive();
+    const cancel = button("Cancel", () => { if (!discard()) return; profileEditor = null; render(); });
+    form.append(fields, status, save, cancel); dialog.append(form);
+    form.addEventListener("submit", async event => {
+      event.preventDefault(); if (profileEditor !== editing || editing.saving) return;
+      if (generationActive()) { status.textContent = "Story generation is active. Your edits are kept; save when it finishes."; return; }
+      editing.saving = true; save.disabled = true; status.textContent = "Saving…";
+      try {
+        const saved = await saveProfile(campaign, editing.form.update());
+        if (epoch !== openEpoch || state.campaignId !== campaign) return;
+        protagonist = { name: saved.name, profile: saved.profile, revision: saved.revision }; profileEditor = null;
+        onProfileSaved(campaign); render();
+      } catch (error) {
+        if (epoch !== openEpoch || profileEditor !== editing) return;
+        editing.saving = false; save.disabled = generationActive();
+        const code = (error as { statusCode?: number; status?: number }).statusCode ?? (error as { status?: number }).status;
+        status.textContent = code === 409 ? "The main character changed elsewhere. Your edits are kept here; load the latest version to start again from it."
+          : "Could not save the main character. Your edits are kept.";
+        if (code === 409 && !form.querySelector("[data-load-latest]")) {
+          const reload = button("Load latest version", async () => {
+            if (!discard()) return;
+            try { const latest = await getProfile(campaign); if (epoch !== openEpoch) return; protagonist = latest; renderProfileEditor(campaign, latest, "Loaded the latest version."); }
+            catch { status.textContent = "Could not load the latest version. Try again."; }
+          }); reload.dataset.loadLatest = ""; form.append(reload);
+        }
+      }
+    });
+    fields.querySelector<HTMLElement>("input, textarea")?.focus();
   }
   dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
   return { open(campaignId: string, returnFocus?: HTMLElement | null) { openEpoch++; protagonist = null; protagonistLoading = false; focus = returnFocus ?? document.activeElement as HTMLElement | null; editor = null; reviewing = false; dialog.showModal(); session.open(campaignId); }, dispose() { openEpoch++; session.dispose(); dialog.remove(); } };

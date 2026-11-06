@@ -103,7 +103,7 @@ Undo appends a detach event; it does not erase a character or rewrite accepted t
 
 Dismissals suppress matching observation content from the same turn and narration revision across retained review proposals, including a repeat scan. A changed observation or narration can be reviewed again. Workspace diagnostics report retained identity decisions and confirmed or dismissed fields as aggregate counts capped at 10,000; they include no names or quotations.
 
-Character text references are recorded without a provider call after accepted narration. **Last mentioned** is textual recency; **last observed** remains established evidence. Neither alone claims current location or presence. Optional mention failures roll back to a savepoint and do not reject an accepted story.
+While `CAST_AUTO_MATCH_ENABLED` is effective (it requires discovery and editing), character text references are recorded without a provider call after accepted narration and narration corrections. With auto-match off, no lexical mention work runs. **Last mentioned** is textual recency; **last observed** remains established evidence. Neither alone claims current location or presence. Optional mention failures roll back to a savepoint and do not reject an accepted story.
 
 Cast archives now export version 2. Readers accept legacy version 1 and reject unknown newer versions. Branch, transfer and import remap attachment events, source ranges and observation IDs. Operational discovery jobs, inbox dismissals and receipt queues are not portable; confirmed overrides and undo authority are portable. Imported history creates no paid scan automatically. New discovery or an explicit scan may present previously dismissed evidence again.
 

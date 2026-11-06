@@ -5,7 +5,11 @@ ALTER TABLE campaign_cast_discovery_candidates ADD CONSTRAINT cast_candidate_cam
 CREATE UNIQUE INDEX campaign_cast_detach_review_unique ON campaign_cast_discovery_candidates(campaign_id,local_key) WHERE job_id IS NULL;
 
 -- Down Migration
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM campaign_cast_discovery_candidates WHERE job_id IS NULL) THEN
+    RAISE EXCEPTION 'Retain detach review items; disable cast editing instead';
+  END IF;
+END $$;
 DROP INDEX campaign_cast_detach_review_unique;
 ALTER TABLE campaign_cast_discovery_candidates DROP CONSTRAINT cast_candidate_campaign_owner;
-DELETE FROM campaign_cast_discovery_candidates WHERE job_id IS NULL;
 ALTER TABLE campaign_cast_discovery_candidates ALTER COLUMN job_id SET NOT NULL;

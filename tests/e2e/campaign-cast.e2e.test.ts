@@ -252,7 +252,7 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
     if (path.endsWith("/turns")) return send(route, { campaignId, turns: [turn], nextCursor: null });
     if (path.endsWith("/state")) return send(route, { campaignId, activeTurnNumber: 1, revision: 1, viewedTurnNumber: 1, isCurrent: true, updatedAt: "2026-09-16T12:00:00.000Z", canonicalFacts: [], openThreads: [], continuitySummary: "", scratchpad: "", rpgStats: [], trackers: [], eventTriggers: [], pendingEventTriggers: [], recordedResolution: null });
     if (path.endsWith("/story-memory")) return send(route, { level: "standard", reviewMode: "observe", availableLevels: ["off", "standard", "enhanced", "max"] });
-    if (path.endsWith("/character-profile")) { const input = request.method() === "PUT" ? request.postDataJSON() : null; if (input) profileWrites.push(input); return send(route, { campaignId, name: input?.name ?? "Iven", profile: input?.profile ?? {}, revision: input ? 1 : 0,
+    if (path.endsWith("/character-profile")) { const input = request.method() === "PUT" ? request.postDataJSON() : null; if (input) { profileWrites.push(input); return send(route, { campaignId, name: input.name, profile: input.profile, revision: 1 }); } return send(route, { campaignId, name: input?.name ?? "Iven", profile: input?.profile ?? {}, revision: input ? 1 : 0,
       characterId: null, storedProfile: null, inheritedFromSnapshot: false, legacyCharacterText: "Iven", rpgStats: [], defaultTriggers: [] }); }
     if (path.endsWith("/memory/metrics")) return send(route, { turns: 1, estimatedCompleteHistoryTokens: 10, memoryCount: 0, embeddedMemories: 0, semanticHealth: { indexedMemories: 0, jobStatus: "idle" } });
     if (path.endsWith("/cost-summary")) return send(route, { hasReportedCosts: false, totals: [] });
@@ -494,7 +494,8 @@ for (const surface of ["legacy", "next"] as const) for (const width of [1440, 39
   await expect(dialog).toContainText("Unknown");
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/sheet-${surface}-${width}.png` });
   await dialog.getByRole("button", { name: "Edit main character", exact: true }).click();
-  const profile = surface === "legacy" ? page.locator("#editCharacterProfileDialog") : page.locator("[data-story-tool-dialog]");
+  // The replacement client edits the main character inside the Characters sheet.
+  const profile = surface === "legacy" ? page.locator("#editCharacterProfileDialog") : dialog;
   await expect(profile).toBeVisible(); await expect(profile.getByText("Pronouns", { exact: true })).toBeVisible();
   await expect(profile.getByText("Profile JSON", { exact: true })).toHaveCount(0);
   if (screenshotRoot) await profile.screenshot({ path: `${screenshotRoot}/profile-${surface}-${width}.png` });
@@ -502,6 +503,7 @@ for (const surface of ["legacy", "next"] as const) for (const width of [1440, 39
   await profile.getByRole("button", { name: /Save character profile/i }).click();
   await expect.poll(() => api.profileWrites.length).toBe(1);
   expect(api.profileWrites[0].profile.identity.pronouns).toBe("they/them");
+  if (surface === "next") await expect(dialog.getByRole("button", { name: "Edit main character", exact: true })).toBeVisible();
 });
 
 for (const surface of ["legacy", "next"] as const) test(`shared review and undo ${surface}`, async ({ page }) => {

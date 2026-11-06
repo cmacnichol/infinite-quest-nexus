@@ -67,6 +67,7 @@ export function createGenerationExecutionCollaborators(
 ): GenerationExecutionCollaborators {
   return {
     ...(providers.prepareCastDiscoveryExecution ? { prepareCastDiscoveryExecution: providers.prepareCastDiscoveryExecution } : {}),
+    ...(providers.castLexicalMentionsEnabled === true ? { castLexicalMentionsEnabled: true } : {}),
     memory: memory.generation,
     illustration: illustration.generation,
     prepareIllustrationTextExecution: async ({ ownerUserId, campaignId, operationPrompt }) => {

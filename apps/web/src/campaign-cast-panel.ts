@@ -1,5 +1,5 @@
 import { buildCharacterSheet, canSaveCastEditor, createCastEditor, changeCastEditor, setCastEditorField, prepareCastSubmission,
-  failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, type CastEditorState } from "@infinite-quest/client-core";
+  failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, characterProvenanceLabel, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
 import { createCharactersWorkspaceSession, type CampaignCastApi } from "@infinite-quest/client-web";
 import type { CampaignCharacterProfile, CharacterFilter, CastDetail, CastDiscoveryStatus, CastField, CastCandidateList, ResolveCastCandidate, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
 import { renderLegacyCastScan } from "./campaign-cast-scan-panel.js";
@@ -292,7 +292,7 @@ export function createLegacyCastPanel(options: {
     const search = node("input"); search.id = "cast-search"; search.type = "search"; search.value = query; search.maxLength = 200;
     const submit = node("button", "Search"); submit.type = "submit";
     const filterLabel = node("label", "Filter characters"), filterSelect = node("select"); filterLabel.htmlFor = "cast-filter"; filterSelect.id = "cast-filter";
-    for (const [value, label] of [["all", "All"], ["main", "Main"], ["recent", "Recent"], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"]]) { const option = node("option", label); option.value = value!; option.selected = value === filter; filterSelect.append(option); }
+    for (const [value, label] of [["all", "All"], ["main", "Main"], ["recent", recentFilterLabel(list?.recentWindow)], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"]]) { const option = node("option", label); option.value = value!; option.selected = value === filter; filterSelect.append(option); }
     filterSelect.addEventListener("change", () => { filter = filterSelect.value as CharacterFilter; query = search.value; workspace.setQuery(query, filter); void loadRoster(); });
     controls.append(label, search, filterLabel, filterSelect, submit);
     controls.addEventListener("submit", (event) => { event.preventDefault(); query = search.value; workspace.setQuery(query, filter); void loadRoster(); });
@@ -300,12 +300,13 @@ export function createLegacyCastPanel(options: {
     if (!enabled) status("Character editing is disabled. Saved characters remain available to read.");
     else if (options.generationActive()) status("Finish or resolve the current generation before editing characters.");
     else dialog.append(button("Add character", () => { editor = createCastEditor(list!); renderEditor(); }));
+    if (filter === "recent") status(recentFilterLabel(list!.recentWindow));
     const roster = node("ul"); roster.className = "cast-roster";
     for (const person of list!.characters) {
       const li = node("li"), title = button(person.name, () => { void openDetail(person.id); });
-      const provenance = person.origin.kind === "protagonist" ? "Main character" : person.origin.kind === "manual" ? "Added by you" : "Discovered";
-      li.append(title, node("p", [person.profile["story.role"], provenance, `Last observed turn ${person.lastObservedTurn}${person.lastMentionedTurn != null ? ` · Last mentioned turn ${person.lastMentionedTurn}` : ""}`,
-        person.pinned ? "Pinned" : "", person.ignored ? "Ignored" : ""].filter(Boolean).join(" · ")));
+      const attention = list!.attention?.find((item) => item.characterId === person.id);
+      li.append(title, node("p", [person.profile["story.role"], characterProvenanceLabel(person), `Last observed turn ${person.lastObservedTurn}${person.lastMentionedTurn != null ? ` · Last mentioned turn ${person.lastMentionedTurn}` : ""}`,
+        person.pinned ? "Pinned" : "", person.ignored ? "Ignored" : "", attention?.review ? "Needs review" : "", attention?.conflict ? "Conflicting details" : ""].filter(Boolean).join(" · ")));
       roster.append(li);
     }
     dialog.append(roster);

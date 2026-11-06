@@ -1515,7 +1515,7 @@ export function mountStoryPlayerPage(
       });
     }
   };
-  const charactersWorkspace = createCharactersWorkspace(root.ownerDocument, () => projection.generation !== null, () => runCampaignCommand("edit-character-profile"), (turn) => { void history.loadTurn(turn); }, (campaign) => composition.api.campaigns.getCharacterProfile(campaign));
+  const charactersWorkspace = createCharactersWorkspace(root.ownerDocument, () => projection.generation !== null, (campaign, update) => composition.api.campaigns.updateCharacterProfile(campaign, update), (turn) => { void history.loadTurn(turn); }, (campaign) => composition.api.campaigns.getCharacterProfile(campaign), (campaign) => { if (projection.campaign?.id === campaign) { characterProfile = null; characterProfileDraft = null; } });
   const onToolsClick = (event: Event) => {
     const target = event.target;
     if (!target || typeof (target as Element).closest !== "function") return;

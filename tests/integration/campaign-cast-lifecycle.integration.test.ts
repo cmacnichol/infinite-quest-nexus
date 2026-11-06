@@ -145,8 +145,12 @@ integration("campaign cast lifecycle", () => {
     await withTransaction(pool, async (client) => importCampaignCast(client, destination.scope, await exportCampaignCast(client, scope),
       { turns: new Map(originalTurns.map((turn) => [turn.id, targetTurns.find((target) => target.turn_number === turn.turn_number)!.id])), worlds: new Map() }));
     expect((await repo.current(destination.scope)).characters.find((item) => item.name === "Mara")!.lastMentionedTurn).toBeNull();
-    const correction = await createPostgresTurnCorrectionRepository(pool, { memory: memoryGeneration(pool) }).correctNarration(scope,
-      { turnId, expectedActiveTurnNumber: number, expectedCorrectionRevision: 0, narration: "Mara returns.", source: "user_edit" });
+    const gatedOff = await createPostgresTurnCorrectionRepository(pool, { memory: memoryGeneration(pool) }).correctNarration(scope,
+      { turnId, expectedActiveTurnNumber: number, expectedCorrectionRevision: 0, narration: "Mara pauses.", source: "user_edit" });
+    expect(gatedOff.ok).toBe(true);
+    expect((await repo.current(scope)).characters.find((item) => item.id === person.id)!.lastMentionedTurn).toBeNull();
+    const correction = await createPostgresTurnCorrectionRepository(pool, { memory: memoryGeneration(pool), castLexicalMentionsEnabled: true }).correctNarration(scope,
+      { turnId, expectedActiveTurnNumber: number, expectedCorrectionRevision: 1, narration: "Mara returns.", source: "user_edit" });
     expect(correction.ok).toBe(true);
     expect((await repo.current(scope)).characters.find((item) => item.id === person.id)!.lastMentionedTurn).toBe(number);
     const correctedDestination = await fixture(), correctedTurn = randomUUID();

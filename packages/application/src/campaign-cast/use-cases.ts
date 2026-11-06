@@ -60,7 +60,9 @@ export function createCampaignCastApplication(repository: CampaignCastWritePort,
       const offset = query.cursor ? matches.findIndex((person) => person.id === query.cursor) + 1 : 0;
       if (query.cursor && offset === 0) throw new CampaignCastError("cast_revision_conflict");
       const characters = matches.slice(offset, offset + query.limit);
-      return { ...value, characters, recentWindow: 10, nextCursor: offset + characters.length < matches.length ? characters.at(-1)!.id : null };
+      const attention = characters.map((person) => ({ characterId: person.id, review: workspace?.reviewIds.includes(person.id) === true,
+        conflict: workspace?.conflictIds.includes(person.id) === true })).filter((item) => item.review || item.conflict);
+      return { ...value, characters, attention, recentWindow: 10, nextCursor: offset + characters.length < matches.length ? characters.at(-1)!.id : null };
     },
     async detail(scope: CastScope, id: string) {
       return castDetailSchema.parse(await repository.detail(castScopeSchema.parse(scope), id));

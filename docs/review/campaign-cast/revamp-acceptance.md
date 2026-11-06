@@ -2,7 +2,7 @@
 
 Status: implementation complete with local verification recorded below. Existing platform/opt-in skips and live rollout validation remain explicit limits. This is not deployment approval.
 
-Worktree: `codex/characters-revamp`, based on `6cd29919`. Changes are uncommitted. The implementation follows the [master plan](../../superpowers/plans/2026-11-06-characters-revamp.md), including the amended October auto-match policy. Terra subagents implemented bounded tasks; the coordinator integrated persistence, review, compatibility and verification fixes.
+Worktree: `codex/characters-revamp`, based on `6cd29919`. The implementation is committed, followed by a separate review-fix commit (see [Review fix round](#review-fix-round)). The implementation follows the [master plan](../../superpowers/plans/2026-11-06-characters-revamp.md), including the amended October auto-match policy. Terra subagents implemented bounded tasks; the coordinator integrated persistence, review, compatibility and verification fixes.
 
 ## Delivered behavior
 
@@ -32,9 +32,9 @@ The two-case checkpoint fixture compares strict and relaxed name-only identity m
 
 ## Browser evidence
 
-Fixture-backed rendered checks cover both clients at 1440px and 390px, profile save, source expansion retained across refresh, context preview, match review, detail confirm/dismiss and attachment undo. Existing workflows cover scan preview/start/pause/resume/cancel, retry/conflict recovery, long lists and draft preservation. Sanitized screenshots are in [screenshots](screenshots/), including [replacement sheet](screenshots/sheet-next-390.png), [legacy profile](screenshots/profile-legacy-390.png), and [replacement context](screenshots/context-next-390.png).
+Fixture-backed rendered checks cover both clients at 1440px and 390px, profile save, source expansion retained across refresh, context preview, match review, detail confirm/dismiss and attachment undo. Existing workflows cover scan preview/start/pause/resume/cancel, retry/conflict recovery, long lists and draft preservation. Sanitized screenshots are in [screenshots](../assets/characters-revamp/), including [replacement sheet](../assets/characters-revamp/sheet-next-390.png), [legacy profile](../assets/characters-revamp/profile-legacy-390.png), and [replacement context](../assets/characters-revamp/context-next-390.png).
 
-A 720x500 reduced-motion viewport passes pointer Close and focus return. Actual native 200% Chromium zoom was then verified through the browser zoom API in an isolated temporary extension: zoom 2, CSS inner width 713, device pixel ratio 2.5 at a 1440 window. Both dialogs opened and pointer Close succeeded. [Legacy](screenshots/native-zoom-legacy.png) and [replacement](screenshots/native-zoom-next.png) captures are cropped at 891x566 because of an unresolved capture/zoom mismatch; they do not establish full-viewport fit. Geometry assertions and successful pointer clicks establish control reachability. Ordinary desktop/mobile screenshots remain the visual layout evidence. Synthetic CSS body zoom was not used as native-zoom evidence. Browser fixtures do not establish real database or live-provider behavior. The match target chooser loads all paginated targets but does not provide a separate target-search field.
+A 720x500 reduced-motion viewport passes pointer Close and focus return. Actual native 200% Chromium zoom was then verified through the browser zoom API in an isolated temporary extension: zoom 2, CSS inner width 713, device pixel ratio 2.5 at a 1440 window. Both dialogs opened and pointer Close succeeded. [Legacy](../assets/characters-revamp/native-zoom-legacy.png) and [replacement](../assets/characters-revamp/native-zoom-next.png) captures are cropped at 891x566 because of an unresolved capture/zoom mismatch; they do not establish full-viewport fit. Geometry assertions and successful pointer clicks establish control reachability. Ordinary desktop/mobile screenshots remain the visual layout evidence. Synthetic CSS body zoom was not used as native-zoom evidence. Browser fixtures do not establish real database or live-provider behavior. The match target chooser loads all paginated targets but does not provide a separate target-search field.
 
 ## Review and minimal-test policy
 
@@ -51,3 +51,16 @@ Cast archives export v2 and read v1/v2. Old v1-only binaries are not safe rollba
 Context preview uses compatible locally saved direct/preset wire settings and the shared serializer; continuity review uses the same estimator and separate reviewer cap. Missing compatible preset/custom-reviewer settings report unavailable. Direct models without saved settings disclose configured-limit estimates. Later action assessment, routing and state changes can alter actual generation selection.
 
 Live text/image providers, paid scans, production enablement and copied-campaign rollout canaries were not run. No deployment or production database was changed. These remain operator validation, not passing local checks.
+
+## Review fix round
+
+A post-implementation review found the issues below; the [fix plan](../../superpowers/plans/2026-11-06-characters-revamp-fixes.md) records them. All are fixed in the follow-up commit:
+
+- Lexical mention tracking now runs only while `CAST_AUTO_MATCH_ENABLED` is effective, on accepted turns and narration corrections. Before, it ran whatever the flags said.
+- Migration `0120` uses statement-level triggers. Discovery-job lease and checkpoint writes, and turn updates other than narration changes, no longer bump the workspace revision. Migrations `0118`–`0120` refuse to roll back while they hold data, and otherwise reverse cleanly.
+- The replacement client's roster shows provenance, Pinned/Ignored and server-reported Needs review / Conflicting details markers. Both clients label the Recent filter with the server's window.
+- The replacement client edits the main character inside the Characters sheet through the revisioned `/character-profile` endpoint. A conflict keeps the draft.
+- The roster filter predicate now lives in `client-core`. Sheet locks list manually corrected fields. A revision change during pagination restarts once immediately. The lexical matcher merges a name with a longer alias of the same character, and it skips sentence-initial common-word names.
+- Screenshots moved to `docs/review/assets/characters-revamp/`. The e2e profile fixture now returns the strict update response shape. Before, a failed save went unnoticed because the test only checked that a request was sent.
+
+Fix-round verification (2026-11-06): `pnpm check`, client-boundary check, `pnpm build` and the whitespace check passed. 16 affected unit files passed (521 tests). Eleven focused PostgreSQL files passed: cast lifecycle, discovery, API, generation, portability, migrations, generation execution, generation, narration corrections, generation events and the adapter matrix. That is 235 tests, with 6 existing Windows filesystem-staging skips not counted as passing. The cast Playwright suite passed 26/26. The full unit and full integration suites were not rerun in this round.

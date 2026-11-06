@@ -289,7 +289,11 @@ describe("durable cast discovery", () => {
     expect(job.identities.worldCharacters).toContainEqual(expect.objectContaining({ entityId: "iven", identityHints: ["Iven is a ferryman."] }));
     expect(JSON.stringify(job.identities)).not.toContain("PRIVATE_MARKER");
     expect(JSON.stringify(job.identities)).not.toContain("Strength");
+    const workspaceRevision = async () => (await pool.query("SELECT workspace_revision FROM campaign_cast_state WHERE campaign_id=$1", [f.scope.campaignId])).rows[0]?.workspace_revision ?? null;
+    const beforeCheckpoint = await workspaceRevision();
     await jobs.checkpoint(job, proposal());
+    // Lease and checkpoint housekeeping must not make open workspaces reload.
+    expect(await workspaceRevision()).toBe(beforeCheckpoint);
     expect(await jobs.publish(job)).toBe("complete");
     expect((await createPostgresCampaignCastRepository(pool).current(f.scope)).characters.find((person) => person.name === "Mara")?.origin)
       .toEqual({ kind: "world", worldVersionId: f.versionId, entityId: "mara-playable" });

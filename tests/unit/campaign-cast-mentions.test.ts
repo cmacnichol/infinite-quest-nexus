@@ -10,7 +10,9 @@ const source = (narration: string) => buildCastDiscoverySource({ scope: { ownerU
 describe("lexical cast mentions", () => {
   it.each([
     ["Mara sees Mara.", [person(1, "Mara")], ["Mara", "Mara"]],
-    ["I hope so. Hope waits.", [person(1, "Hope")], ["Hope"]],
+    ["I hope so. Hope waits.", [person(1, "Hope")], []],
+    ["They said Hope would come.", [person(1, "Hope")], ["Hope"]],
+    ["Mara Venn nods; Mara smiles.", [person(1, "Mara", ["Mara Venn"])], ["Mara Venn", "Mara"]],
     ["Émara Mara!", [person(1, "Mara")], ["Mara"]],
     ["Captain waits.", [person(1, "Captain")], []],
     ["Mara waits.", [person(1, "Mara"), { ...person(2, "Other", ["Mara"]), ignored: true }], []],

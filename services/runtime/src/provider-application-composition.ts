@@ -88,6 +88,8 @@ export type ProviderConsumerRuntime = Readonly<{
 
 export type ApiGenerationProviderCollaborators = ProviderConsumerRuntime & Readonly<{
   prepareCastDiscoveryExecution?(input: { ownerUserId: string; execution: RuntimeTextExecution }): Promise<CastDiscoveryExecution>;
+  /** Provider-free lexical mention tracking; effective only with auto-match (and therefore discovery and editing) enabled. */
+  castLexicalMentionsEnabled?: boolean;
   prompts: GenerationPromptPort;
   costs: GenerationCostPort;
   reads: Pick<ProviderCostPort, "getTurnCosts">;
@@ -400,12 +402,13 @@ function createInternals(
       for (const providerProfileId of invalidatedProfileIds) responseFormatCapabilities.invalidate(providerProfileId);
       return result;
     },
-    generation: Object.freeze({ ...runtime, prompts: generationPrompts, costs: generationCosts, reads: costs, responseFormatCapabilities, responseFormatInventory: base.runtime.inventory,
+    generation: Object.freeze({ ...runtime, castLexicalMentionsEnabled: options.castAutoMatchEnabled === true && options.castDiscoveryEnabled === true, prompts: generationPrompts, costs: generationCosts, reads: costs, responseFormatCapabilities, responseFormatInventory: base.runtime.inventory,
       ...(options.castDiscoveryEnabled === true ? { prepareCastDiscoveryExecution: (input: { ownerUserId: string; execution: RuntimeTextExecution }) =>
         prepareCastDiscoveryExecution({ ...input, identityPolicy: options.castAutoMatchEnabled === true ? "unique_name" : "strict", ports: authoringTextPlans.ports, responseFormatCapabilities }) } : {}),
       loadQueuedTextProfile: (client: DatabaseClient, ownerUserId: string, providerProfileId: string, model?: string) =>
         bind(client).runtime.execution.text({ ownerUserId }, providerProfileId, "text", model) }),
     workerGeneration: Object.freeze({
+      castLexicalMentionsEnabled: options.castAutoMatchEnabled === true && options.castDiscoveryEnabled === true,
       ...(options.castDiscoveryEnabled === true ? { prepareCastDiscoveryExecution: (input: { ownerUserId: string; execution: RuntimeTextExecution }) =>
         prepareCastDiscoveryExecution({ ...input, identityPolicy: options.castAutoMatchEnabled === true ? "unique_name" : "strict", ports: authoringTextPlans.ports, responseFormatCapabilities }) } : {}),
       ...runtime,

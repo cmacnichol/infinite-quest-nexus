@@ -1139,6 +1139,8 @@ export type AcceptedGenerationCommit = Readonly<{
   /** Prepared before the transaction; absent while discovery is disabled. */
   castDiscoveryExecution?: CastDiscoveryExecution;
   castDiscoveryUnavailable?: boolean;
+  /** Optional provider-free mention tracking; only set while cast auto-match is enabled. */
+  castLexicalMentions?: boolean;
   scope: GenerationLeaseScope;
   job: GenerationExecutionPayload;
   story: StoryTurnOutput;
@@ -1858,7 +1860,7 @@ async function commitAcceptedTurn(
     campaignId: job.campaign_id,
     worldVersionId: campaign.world_version_id
   });
-  await recordAcceptedTurnCastMentions(client, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id }, turnId,
+  if (input.castLexicalMentions === true) await recordAcceptedTurnCastMentions(client, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id }, turnId,
     () => logger.warn({ event: "cast_lexical_mentions_failed", campaignId: job.campaign_id, turnId, code: "enrichment_failed" }));
   if (input.castDiscoveryExecution || input.castDiscoveryUnavailable) {
     await enqueueCastDiscoveryWithClient(client, { scope: { ownerUserId: job.owner_user_id, campaignId: job.campaign_id },
