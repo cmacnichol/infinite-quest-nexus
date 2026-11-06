@@ -113,6 +113,31 @@ test("next_advances_from_an_older_history_turn", async ({ page }) => {
   expect(api.writes.filter(write => write.method === "POST")).toEqual([]);
 });
 
+test("previous_steps_back_from_an_older_history_turn", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 100, worldCount: 1, campaignCount: 1 });
+  const api = await installLegacyUiFixture(page, fixture);
+  await page.route(`**/api/v1/campaigns/${fixture.campaignId}/reader/turns/*`, async route => {
+    const turnNumber = Number(new URL(route.request().url()).pathname.split("/").at(-1));
+    await route.fulfill({ json: { campaignId: fixture.campaignId, turn: fixture.turns[turnNumber - 1] } });
+  });
+  await loadStoryDocument(page, fixture.campaignId);
+  const toolbar = page.locator("[data-story-reader-toolbar]");
+  await toolbar.getByRole("button", { name: "History" }).click();
+  await page.locator("#turnHistoryJumpNumber").fill("3");
+  await page.locator("#btnTurnHistoryJumpExact").click();
+  await expect(toolbar.locator("[data-reader-turn-count]")).toHaveText("Turn 3 of 100");
+  const previous = toolbar.getByRole("button", { name: "Previous turn" });
+  for (const turnNumber of [2, 1]) {
+    await previous.click();
+    await expect(toolbar.locator("[data-reader-turn-count]")).toHaveText(`Turn ${turnNumber} of 100`);
+    await expect(page.locator(`#scene-${turnNumber}`)).toBeVisible();
+  }
+  await expect(previous).toBeDisabled();
+  await toolbar.getByRole("button", { name: "Jump to latest" }).click();
+  await expect(toolbar.locator("[data-reader-turn-count]")).toHaveText("Turn 100 of 100");
+  expect(api.writes.filter(write => write.method === "POST")).toEqual([]);
+});
+
 test("boundary_buttons_are_disabled", async ({ page }) => {
   await openReader(page, false);
   const toolbar = page.locator("[data-story-reader-toolbar]");
