@@ -1,3 +1,4 @@
+import { createCastContextPreview } from "../../runtime/src/campaign-cast-context-preview.js";
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { readFile, realpath, stat } from "node:fs/promises";
@@ -21,7 +22,7 @@ import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { clearStoryMemoryEnrollment, readStoryMemorySettings, saveStoryMemoryEnrollment, saveStoryMemorySettings } from "../../../packages/database/src/story-memory-policy-repository.js";
 import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
 import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema } from "../../../packages/contracts/src/imports.js";
-import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
+import { campaignEmbeddingConfigSchema, castContextPreviewRequestSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
 import {
   campaignBranchSchema,
   campaignRuntimeStateUpdateSchema,
@@ -724,9 +725,10 @@ export async function buildServer({
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
-  const memoryAdapter = createMemoryApplicationAdapter(pool, memory);
+  const memoryAdapter = createMemoryApplicationAdapter(pool, memory, createCastContextPreview(pool, config));
   const turnCorrections = createTurnCorrectionApplication({
-    corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation })
+    corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation,
+      castLexicalMentionsEnabled: config.castAutoMatchEnabled === true && config.castDiscoveryEnabled === true })
   });
   const readerHistory = createReaderHistoryApplication({
     turns: createPostgresReaderHistoryRepository(pool, {
@@ -2082,8 +2084,12 @@ export async function buildServer({
   app.get<{ Params: { campaignId: string }; Querystring: Record<string, unknown> }>(
     "/api/v1/campaigns/:campaignId/memory/context-preview",
     async (request) => {
-      const query = memoryContextQuerySchema.parse(request.query);
       const ownerUserId = await initialOwnerId(pool);
+      if (request.query.view === "characters") {
+        const { view: _view, ...input } = request.query;
+        return memoryAdapter.charactersPreview(ownerUserId, uuidSchema.parse(request.params.campaignId), castContextPreviewRequestSchema.parse(input));
+      }
+      const query = memoryContextQuerySchema.parse(request.query);
       return memoryAdapter.contextPreview(ownerUserId, uuidSchema.parse(request.params.campaignId), query);
     }
   );

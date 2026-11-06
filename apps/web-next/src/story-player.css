@@ -599,3 +599,24 @@ main[data-ui-implementation="web-awesome"] .quiet-leaf[data-story-width="full"] 
 [data-story-tool-dialog]:has(.story-character-profile-field) {
   background: var(--surface-page);
 }
+.characters-workspace { width: min(52rem, 94vw); max-height: 90vh; overflow: auto; border: 1px solid #b5a98e; border-radius: 0; padding: 1.5rem; }
+.characters-workspace header { display: flex; justify-content: space-between; align-items: center; }
+.characters-workspace form, .character-profile-fields, .story-character-profile-fields { display: grid; gap: .8rem; }
+.characters-workspace label, .character-profile-field, .story-character-profile-field { display: grid; gap: .3rem; }
+.characters-workspace textarea, .character-profile-field textarea, .story-character-profile-field textarea { min-height: 4rem; width: 100%; }
+.characters-workspace { color: var(--text, #e5e1d7); background: var(--surface, #242523); border-color: var(--border, #625e50); }
+.characters-workspace::backdrop { background: rgb(0 0 0 / 68%); }
+.characters-workspace button, .characters-workspace input, .characters-workspace select, .characters-workspace textarea { font: inherit; color: inherit; background: var(--surface-raised, #353630); border: 1px solid var(--border, #77705e); padding: .55rem .75rem; }
+.characters-workspace button { cursor: pointer; }
+.characters-workspace button:hover { border-color: var(--accent, #d1b874); }
+.characters-workspace button:disabled { opacity: .55; cursor: not-allowed; }
+.characters-workspace section { border-top: 1px solid var(--border, #625e50); padding-block: .6rem; }
+.characters-workspace ul { list-style: none; padding: 0; }
+.characters-workspace li { display: flex; gap: .75rem; align-items: center; padding-block: .3rem; }
+@media (min-width: 900px) {
+  .characters-workspace.characters-sheet-layout[open] { display: grid; grid-template-columns: minmax(11rem, 30%) minmax(0, 1fr); column-gap: 1rem; align-content: start; }
+  .characters-sheet-layout > header { grid-column: 1 / -1; }
+  .characters-sheet-layout > .characters-sheet-roster { grid-column: 1; grid-row: 2 / span 99; display: grid; align-content: start; gap: .5rem; }
+  .characters-sheet-layout > :not(header):not(.characters-sheet-roster) { grid-column: 2; }
+}
+@media (max-width: 899px) { .characters-sheet-roster { display: none; } }

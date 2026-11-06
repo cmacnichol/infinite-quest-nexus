@@ -14,6 +14,13 @@ describe("cast editing application boundary", () => {
     const app = createCampaignCastApplication(repository);
     await expect(app.list(scope)).resolves.toMatchObject({ characters: [], nextCursor: null });
     await expect(app.discoveryStatus(scope)).rejects.toThrow("status unavailable");
+    const people = ["identity", "conflict"].map(id => ({ id, name: id, aliases: [], ignored: false }));
+    const reviewed = createCampaignCastApplication({ workspaceRead: async () => ({
+      snapshot: { revision: 0, boundary: { turnNumber: 0, timelineRevision: 0 }, characters: people },
+      reviewIds: ["identity", "conflict"], conflictIds: ["conflict"]
+    }) } as unknown as CampaignCastWritePort);
+    expect((await reviewed.list(scope, { filter: "conflicts" })).characters.map(person => person.id)).toEqual(["conflict"]);
+    expect((await reviewed.list(scope, { filter: "needs_review" })).characters).toHaveLength(2);
   });
   it("preserves intentional blanks and rejects ambiguous reset/set and empty edits", () => {
     expect(editCastCharacterSchema.parse({ ...base, setOverrides: { "appearance.description": "" } }).setOverrides)

@@ -37,6 +37,19 @@ An alias must be explicitly linked to the person in the evidence; co-occurring n
 For claims, preserve mode claim and identify the supplied speaker only when a complete quoted assertion directly attributes that claim to that speaker. Never convert a claim into a fact. Do not silently edit the protagonist's profile.
 Use unique localKey values, at most 20 characters and 20 observations per character. Empty characters is valid when nobody is discoverable. Do not omit discoverable characters to fit an output limit; an incomplete or truncated response is a failed extraction.`;
 
+export const CAST_DISCOVERY_SYSTEM_PROMPT_V1 = CAST_DISCOVERY_SYSTEM_PROMPT;
+export const CAST_DISCOVERY_SYSTEM_PROMPT_V2 = CAST_DISCOVERY_SYSTEM_PROMPT_V1.replace(
+  "Use existingCharacterId only for an unambiguous supplied campaign identity supported by a linked alias or directly attributed identifying detail beyond a shared name. Otherwise leave it null so the application can retain ambiguity for review.",
+  "Use existingCharacterId only when the source identifies the supplied campaign person and that identity is unambiguous. A unique matching name or alias can support a returning identity, but leave it null when the person could be someone new or the match is uncertain."
+);
+export function castDiscoveryTrustedPrompt(identifier: "cast-discovery-prompt-v1" | "cast-discovery-prompt-v2"): string {
+  switch (identifier) {
+    case "cast-discovery-prompt-v1": return CAST_DISCOVERY_SYSTEM_PROMPT_V1;
+    case "cast-discovery-prompt-v2": return CAST_DISCOVERY_SYSTEM_PROMPT_V2;
+    default: throw new Error("Unknown cast discovery prompt.");
+  }
+}
+
 export type PromptCompatibilityRequirement = Readonly<{
   requiredShapeVersion: string;
   protocolIdentity: string;

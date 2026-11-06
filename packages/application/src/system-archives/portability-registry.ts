@@ -147,7 +147,7 @@ function sourceColumns(
 export const SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS = Object.freeze({
   campaign_cast_state: sourceColumns({
     portable_exact: ["campaign_id", "revision", "timeline_revision"],
-    operational_excluded: ["last_boundary_change_key", "coverage_start_turn"],
+    operational_excluded: ["last_boundary_change_key", "coverage_start_turn", "workspace_revision"],
     owner_remapped: ["owner_user_id"]
   }),
   campaign_cast_characters: sourceColumns({
@@ -155,7 +155,7 @@ export const SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS = Object.freeze({
     owner_remapped: ["owner_user_id"]
   }),
   campaign_cast_events: sourceColumns({
-    portable_exact: ["id", "campaign_id", "sequence", "effective_turn_number", "timeline_revision", "idempotency_key", "request_hash", "payload", "receipt", "created_at"],
+    portable_exact: ["id", "campaign_id", "sequence", "effective_turn_number", "timeline_revision", "idempotency_key", "request_hash", "payload", "receipt", "attachment", "created_at"],
     owner_remapped: ["owner_user_id"]
   }),
   campaign_cast_observations: sourceColumns({

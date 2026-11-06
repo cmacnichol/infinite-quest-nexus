@@ -1,4 +1,4 @@
-import { CAST_DISCOVERY_PROTOCOL, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoveryCandidate, type CastDiscoveryIdentitySnapshot, type CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
+import { CAST_DISCOVERY_PROTOCOL, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoveryCandidate, type CastDiscoveryIdentitySnapshot, type CastDiscoverySource, type CastIdentityPolicy, type CastIdentityBasis } from "../../contracts/src/campaign-cast-discovery.js";
 import type { CastCharacter, CastField, CastOrigin } from "../../contracts/src/campaign-cast.js";
 import { estimateTokens, sha256, stableStringify } from "./text.js";
 import { validateCastFiction } from "./campaign-cast.js";
@@ -73,7 +73,7 @@ export function chunkCastDiscoverySource(source: CastDiscoverySource, targetToke
     : { status: "ready" as const, chunks };
 }
 
-type ValidatedCandidate = CastDiscoveryCandidate & { resolvedOrigin: CastOrigin };
+type ValidatedCandidate = CastDiscoveryCandidate & { resolvedOrigin: CastOrigin; identityBasis: CastIdentityBasis };
 export type CastDiscoveryValidation = {
   accepted: ValidatedCandidate[];
   rejected: { localKey: string; code: string }[];
@@ -116,7 +116,7 @@ function explicitlyLinksAlias(text: string, name: string, alias: string) {
 /** Lexical guards establish bounded provenance, not a general semantic truth proof. */
 type DiscoveryValidationInput = {
   source: CastDiscoverySource; output: unknown; knownCharacters: CastCharacter[];
-  worldCharacters?: CastDiscoveryWorldIdentity[]; worldVersionId?: string;
+  worldCharacters?: CastDiscoveryWorldIdentity[]; worldVersionId?: string; identityPolicy?: CastIdentityPolicy;
 };
 export function validateCastDiscovery(input: DiscoveryValidationInput): CastDiscoveryValidation {
   return validateDiscovery(input, false);
@@ -179,13 +179,15 @@ function validateDiscovery(input: DiscoveryValidationInput, explicitIdentity: bo
       person.aliases.some((alias) => normalizeEntityTerm(alias) !== normalizeEntityTerm(person.name)
         && explicitlyLinksAlias(identityText, person.name, alias))
       || hints.some((value) => value.trim().length >= 3 && directlyAttributes(identityText, [person.name, ...person.aliases], value));
-    if (!explicitIdentity && candidate.existingCharacterId && !corroborates(known.get(candidate.existingCharacterId)!, Object.values(known.get(candidate.existingCharacterId)!.profile))) {
+    const campaignCorroborated = !!candidate.existingCharacterId && corroborates(known.get(candidate.existingCharacterId)!, Object.values(known.get(candidate.existingCharacterId)!.profile));
+    if (!explicitIdentity && candidate.existingCharacterId && !campaignCorroborated && input.identityPolicy !== "unique_name") {
       hold("identity_needs_review"); continue;
     }
     const worldMatches = (input.worldCharacters ?? []).filter((person) => [person.name, ...person.aliases].some((alias) => terms.includes(normalizeEntityTerm(alias)) && contains(identityText, alias)));
     if (!candidate.existingCharacterId && (worldMatches.length > 1 || worldMatches.some((match) =>
       (input.worldCharacters ?? []).filter((person) => person.entityId === match.entityId).length > 1))) { hold("identity_needs_review"); continue; }
-    if (!candidate.existingCharacterId && worldMatches[0] && !corroborates(worldMatches[0], worldMatches[0].identityHints ?? [])) {
+    const worldCorroborated = !!worldMatches[0] && corroborates(worldMatches[0], worldMatches[0].identityHints ?? []);
+    if (!explicitIdentity && !candidate.existingCharacterId && worldMatches[0] && !worldCorroborated && input.identityPolicy !== "unique_name") {
       hold("identity_needs_review"); continue;
     }
     let invalid: string | null = null;
@@ -209,7 +211,10 @@ function validateDiscovery(input: DiscoveryValidationInput, explicitIdentity: bo
     }
     if (invalid) { hold(invalid); continue; }
     const world = worldMatches[0];
-    result.accepted.push({ ...candidate, resolvedOrigin: candidate.existingCharacterId ? known.get(candidate.existingCharacterId)!.origin
+    const identityBasis: CastIdentityBasis = explicitIdentity ? "user_confirmed" : candidate.existingCharacterId
+      ? campaignCorroborated ? "corroborated" : "unique_name"
+      : world && input.worldVersionId ? worldCorroborated ? "corroborated" : "unique_world_name" : "new_identity";
+    result.accepted.push({ ...candidate, identityBasis, resolvedOrigin: candidate.existingCharacterId ? known.get(candidate.existingCharacterId)!.origin
       : world && input.worldVersionId ? { kind: "world", worldVersionId: input.worldVersionId, entityId: world.entityId } : { kind: "discovered" } });
   }
   return result;

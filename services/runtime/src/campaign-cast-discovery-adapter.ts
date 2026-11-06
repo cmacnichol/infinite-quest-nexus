@@ -1,4 +1,4 @@
-import { CAST_DISCOVERY_PROTOCOL, CAST_DISCOVERY_TIMEOUT_MS, CAST_DISCOVERY_MAX_OUTPUT_TOKENS, isCastDiscoveryTimeout, CAST_DISCOVERY_SYSTEM_PROMPT, bindFrozenResponseContractInvocationV2,
+import { CAST_DISCOVERY_PROTOCOL, CAST_DISCOVERY_TIMEOUT_MS, CAST_DISCOVERY_MAX_OUTPUT_TOKENS, isCastDiscoveryTimeout, castDiscoveryFrozenIdentitySchema, castDiscoveryTrustedPrompt, bindFrozenResponseContractInvocationV2,
   assertDirectResponseContractRouteBasisAuthority, deriveTextExecutionPlan, readTextExecutionPlan } from "@infinite-quest/contracts";
 import { CastDiscoveryExtractionError, type CastDiscoveryExecution, type CastDiscoveryExtractorPort } from "../../../packages/application/src/campaign-cast/discovery.js";
 import { buildCastDiscoveryInput } from "../../../packages/domain/src/campaign-cast-discovery.js";
@@ -14,15 +14,18 @@ import type { TextExecutionPlanDiscoveryPorts } from "./provider-preset-resoluti
 /** Called before acceptance, never inside its database transaction. Performs discovery but no generation. */
 export async function prepareCastDiscoveryExecution(input: {
   ownerUserId: string; execution: RuntimeTextExecution; ports: TextExecutionPlanDiscoveryPorts;
-  responseFormatCapabilities?: DirectAuthoringTextPlanOptions["responseFormatCapabilities"];
+  responseFormatCapabilities?: DirectAuthoringTextPlanOptions["responseFormatCapabilities"]; identityPolicy?: "strict" | "unique_name";
 }): Promise<CastDiscoveryExecution> {
   if (input.execution.providerRole !== "text" || !["openrouter", "openai_compatible"].includes(input.execution.providerType)) {
     throw new Error("Cast discovery requires a schema-capable text provider.");
   }
   const execution = { ...input.execution, requestTimeoutMs: CAST_DISCOVERY_TIMEOUT_MS,
     maxOutputTokens: Math.min(input.execution.maxOutputTokens, CAST_DISCOVERY_MAX_OUTPUT_TOKENS) };
+  const identity = castDiscoveryFrozenIdentitySchema.parse(input.identityPolicy === "unique_name"
+    ? { identityPolicy: "unique_name", promptIdentifier: "cast-discovery-prompt-v2" } : {});
+  const prompt = castDiscoveryTrustedPrompt(identity.promptIdentifier);
   const prepared = await prepareAuthoringTextExecution({ ownerUserId: input.ownerUserId, execution, ports: input.ports,
-    protocolVersion: CAST_DISCOVERY_PROTOCOL, operationPrompts: { cast_discovery: CAST_DISCOVERY_SYSTEM_PROMPT } });
+    protocolVersion: CAST_DISCOVERY_PROTOCOL, operationPrompts: { cast_discovery: prompt } });
   const admission = prepareTextResponseContractAdmission({ execution, selection: prepared.routeBasis.selection,
     routeBasis: prepared.routeBasis, invocationKeys: ["cast_discovery:nonstream"], modelAdvertisements: prepared.modelAdvertisements,
     ...(input.responseFormatCapabilities === undefined ? {} : { capabilities: input.responseFormatCapabilities }) });
@@ -30,7 +33,7 @@ export async function prepareCastDiscoveryExecution(input: {
     capabilityEvidenceHash: admission.capabilityEvidenceHash, ...(admission.eligible === undefined ? {} : { eligible: admission.eligible }) });
   return { providerProfileId: execution.id, plan: prepared.plans.cast_discovery!, admission: {
     routeBasis: prepared.routeBasis, frozenResponseContracts, providerType: execution.providerType as "openrouter" | "openai_compatible",
-    configuration: structuredClone(execution.configuration) } };
+    configuration: structuredClone(execution.configuration), ...identity } };
 }
 
 export function createCastDiscoveryExtractor(input: { executor: PreparedAuthoringTextExecutor }): CastDiscoveryExtractorPort {
@@ -40,9 +43,14 @@ export function createCastDiscoveryExtractor(input: { executor: PreparedAuthorin
     if (!admission || plan.protocolVersion !== CAST_DISCOVERY_PROTOCOL || !isCastDiscoveryTimeout(plan.requestTimeoutMs)) {
       throw new CastDiscoveryExtractionError("provider_failed");
     }
+    const identity = castDiscoveryFrozenIdentitySchema.safeParse({
+      ...(admission.identityPolicy === undefined ? {} : { identityPolicy: admission.identityPolicy }),
+      ...(admission.promptIdentifier === undefined ? {} : { promptIdentifier: admission.promptIdentifier }) });
+    if (!identity.success) throw new CastDiscoveryExtractionError("provider_failed");
+    const prompt = castDiscoveryTrustedPrompt(identity.data.promptIdentifier);
     if (plan.selection.kind === "model") {
       const basis = assertDirectResponseContractRouteBasisAuthority(admission.frozenResponseContracts.queuedPolicy, admission.routeBasis);
-      if (deriveTextExecutionPlan(basis, CAST_DISCOVERY_SYSTEM_PROMPT).planHash !== plan.planHash) {
+      if (deriveTextExecutionPlan(basis, prompt).planHash !== plan.planHash) {
         throw new CastDiscoveryExtractionError("provider_failed");
       }
     }
@@ -53,7 +61,7 @@ export function createCastDiscoveryExtractor(input: { executor: PreparedAuthorin
       contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens,
       temperature: plan.parameters.temperature ?? 0, requestTimeoutMs: plan.requestTimeoutMs, configuration: admission.configuration };
     const binding = { frozen: admission.frozenResponseContracts, routeBasis: admission.routeBasis, plan,
-      invocationKey: "cast_discovery:nonstream" as const, operation: "cast_discovery" as const, trustedOperationPrompt: CAST_DISCOVERY_SYSTEM_PROMPT };
+      invocationKey: "cast_discovery:nonstream" as const, operation: "cast_discovery" as const, trustedOperationPrompt: prompt };
     const checkedOptions = { inputLimit: candidate.contextWindowTokens - candidate.maxOutputTokens,
       count: estimateStoryTokens, countMode: "estimated" as const, safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
       contextWindowTokens: candidate.contextWindowTokens, output: { kind: "story_append" as const } };
@@ -63,7 +71,7 @@ export function createCastDiscoveryExtractor(input: { executor: PreparedAuthorin
         : serializeCheckedProviderRequest(profile, request, { ...checkedOptions, responseContract: bindFrozenResponseContractInvocationV2(binding) });
       const result = await input.executor.execute({ plan, routeBasis: admission.routeBasis, frozenResponseContracts: admission.frozenResponseContracts,
         ownerUserId: claim.scope.ownerUserId, providerProfileId: claim.execution.providerProfileId, operation: "cast_discovery",
-        invocationKey: "cast_discovery:nonstream", trustedOperationPrompt: CAST_DISCOVERY_SYSTEM_PROMPT, request, preparedRequest,
+        invocationKey: "cast_discovery:nonstream", trustedOperationPrompt: prompt, request, preparedRequest,
         logicalReservation: { kind: "cast_discovery", ownerUserId: claim.scope.ownerUserId, jobId: claim.id,
           chunkOrdinal: claim.chunkOrdinal, claimAttempt: claim.attempt, ...(claim.retryGeneration ? { retryGeneration: claim.retryGeneration } : {}), leaseToken: claim.leaseToken } });
       if (result.outputLimited) return null;

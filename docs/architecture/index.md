@@ -43,6 +43,7 @@ See also [Repository Overview](./repository-overview.md) for project-goal/naming
 - [ADR 0024: Central Prompt Library](./0024-central-prompt-library.md)
 - [ADR 0039: Implicit Prompt Override Acknowledgement](./0039-implicit-prompt-override-acknowledgement.md)
 - [ADR 0040: Versioned history-coverage context enrollment](./0040-history-coverage-context.md)
+- [ADR 0041: Graduated campaign cast identity matching](./0041-campaign-cast-unique-name-matching.md)
 - [Task 10 B1 generation boundary completion audit](../review/2026-08-03-task-10-b1-completion.md)
 
 ## World Library and characters

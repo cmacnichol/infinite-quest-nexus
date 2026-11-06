@@ -69,7 +69,7 @@ integration("Historical fact candidate lanes", () => {
     const cast: CastGenerationSnapshot = { version: "cast-context-v1", scope: { ownerUserId, campaignId: value.campaignId }, worldVersionId: value.worldVersionId,
       revision: 1, boundary: { turnNumber: 3, timelineRevision: 0 }, coverageStartTurn: 1, trackedThroughTurn: 3, discoveryStatus: "current",
       characters: [{ id: characterId, name: "Mara", aliases: ["The Watcher"], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false,
-        revision: 1, firstObservedTurn: 1, lastObservedTurn: 1 }], details: [{ characterId, observations: [], overrides: [] }] };
+        revision: 1, firstObservedTurn: 1, lastObservedTurn: 1, lastMentionedTurn: null }], details: [{ characterId, observations: [], overrides: [] }] };
     const result = await value.read("Ask The Watcher", true, 3, cast);
     expect(result.candidates.map((candidate) => candidate.id)).toContain(wanted);
     expect(result.candidates.map((candidate) => candidate.id)).not.toContain(foreignFact);

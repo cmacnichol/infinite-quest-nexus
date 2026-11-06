@@ -90,23 +90,30 @@ export async function copyCampaignCast(client: DatabaseClient, source: CastScope
       [characterIds.get(person.id), destination.ownerUserId, destination.campaignId, JSON.stringify(origin), person.firstObservedTurn]);
   }
   const copiedEvents = new Set<string>();
+  const copyableAttachments = new Set(events.filter((event) => event.attachment
+    && event.attachment.sourceRanges.every((range: { turnId: string }) => turnIds.has(range.turnId))
+    && event.attachment.observationIds.every((id: string) => observationIds.has(id))).map((event) => event.id));
   for (const event of events) {
     const payload = event.payload.filter((item: { command: unknown; characterId?: string; observationId?: string }) => {
       const command = castCommandSchema.parse(item.command);
       if (command.kind === "create") return characterIds.has(item.characterId!);
       if (command.kind === "observe") return observationIds.has(item.observationId!);
       if (command.kind === "mention") return characterIds.has(command.characterId) && turnIds.has(command.evidence.turnId);
+      if (command.kind === "detach") return event.effective_turn_number <= throughTurn && characterIds.has(command.characterId) && copyableAttachments.has(command.eventId);
       return event.effective_turn_number <= throughTurn && characterIds.has(command.characterId);
     });
     if (!payload.length) continue;
+    if (payload.some((item: { command: { kind: string; eventId?: string } }) => item.command.kind === "detach" && !copiedEvents.has(item.command.eventId!)))
+      throw new Error("Invalid retained cast detach reference.");
+    const attachment = copyableAttachments.has(event.id) ? remap(event.attachment) : null;
     const receipt = castBatchReceiptSchema.parse(event.receipt);
     delete receipt.result;
     receipt.characterIds = receipt.characterIds.filter((id) => characterIds.has(id));
     receipt.observationIds = receipt.observationIds.filter((id) => observationIds.has(id));
     const mapped = remap(payload);
-    await client.query(`INSERT INTO campaign_cast_events(id,owner_user_id,campaign_id,effective_turn_number,timeline_revision,idempotency_key,request_hash,payload,receipt)
-      VALUES($1,$2,$3,$4,0,$5,$6,$7,$8)`, [eventIds.get(event.id), destination.ownerUserId, destination.campaignId,
-      Math.min(event.effective_turn_number, throughTurn), `copy:${eventIds.get(event.id)}`, sha256(stableStringify(mapped)), JSON.stringify(mapped), JSON.stringify(remap(receipt))]);
+    await client.query(`INSERT INTO campaign_cast_events(id,owner_user_id,campaign_id,effective_turn_number,timeline_revision,idempotency_key,request_hash,payload,receipt,attachment)
+      VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,$9)`, [eventIds.get(event.id), destination.ownerUserId, destination.campaignId,
+      Math.min(event.effective_turn_number, throughTurn), `copy:${eventIds.get(event.id)}`, sha256(stableStringify(mapped)), JSON.stringify(mapped), JSON.stringify(remap(receipt)), attachment ? JSON.stringify(attachment) : null]);
     copiedEvents.add(event.id);
   }
   for (const row of observations) {

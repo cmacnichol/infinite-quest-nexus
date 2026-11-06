@@ -10,7 +10,7 @@ import { ContextBudgetError, buildStoryMemoryUserPrompt, buildStoryUserPrompt, c
 import { selectWorldFictionReferences, sha256, stableStringify } from "../../../packages/domain/src/index.js";
 import type { RuntimeTextExecution as GenerationTextProvider } from "./provider-credential-transport-adapter.js";
 import { isGenerationBaseIdentityV4 } from "../../../packages/application/src/memory/generation-context.js";
-import { selectCastContext, type CastContextSelection } from "../../../packages/domain/src/campaign-cast-context.js";
+import { castContextTokenBudget, selectCastContext, type CastContextSelection } from "../../../packages/domain/src/campaign-cast-context.js";
 import { reserveNewestWholeSuffix } from "../../../packages/application/src/memory/story-history-reservation.js";
 import type { ProtectedFact } from "../../../packages/application/src/memory/story-history-facts.js";
 
@@ -470,8 +470,7 @@ export function planGenerationPromptContext(
     let protectedPlan = measure([authorityBlock]);
     const castBlocks: typeof blocks = [];
     if (castSnapshot) {
-      castAllocatedTokens = Math.min(3000, Math.floor(0.10 * Math.max(0, Math.min(
-        contextLimit - protectedPlan.contextTokens, requestHeadroom(protectedPlan)))));
+      castAllocatedTokens = castContextTokenBudget(contextLimit - protectedPlan.contextTokens, requestHeadroom(protectedPlan));
       let budgetTokens = castAllocatedTokens;
       for (;;) {
         castSelection = selectCastContext({ snapshot: castSnapshot, direction: action,
@@ -808,6 +807,13 @@ export function planGenerationPromptContext(
     }
   }) : undefined;
   return {
+    // Separate, allowlisted projection for a future read-only preview caller.
+    // The private selection content and field evidence must never cross this seam.
+    ...(castSnapshot && castSelection ? { castExplanation: {
+      boundary: castSnapshot.boundary, castRevision: castSnapshot.revision, mode: "estimate" as const,
+      budgetTokens: castAllocatedTokens, usedTokens: castSelection.estimatedTokens,
+      coverage: castSelection.coverage, ...castSelection.explanation, disabledReason: null
+    } } : {}),
     layerDiagnostics: {
       ...(castSelection ? { cast: { allocatedTokens: castAllocatedTokens, estimatedTokens: castSelection.estimatedTokens,
         omittedCharacterIds: castSelection.omittedCharacterIds, omittedFieldCount: castSelection.omittedFieldCount, coverage: castSelection.coverage } } : {}),

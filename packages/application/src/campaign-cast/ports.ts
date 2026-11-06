@@ -1,8 +1,12 @@
+import type { ReviewCastDetail, ReviewCastDetailResult } from "@infinite-quest/contracts";
 import type { CastScope, CastBoundary, CastSnapshot, CastBatch, CastBatchReceipt } from "./types.js";
 import type { CreateCastCharacter, EditCastCharacter, CastWriteResult, CastDetail, CastDiscoveryStatus,
   CastCandidateList, CastCandidateQuery, ResolveCastCandidate, CastCandidateResolution } from "@infinite-quest/contracts";
 
 export interface CampaignCastWritePort {
+  workspaceRead?(scope: CastScope, statusOnly?: boolean): Promise<{ snapshot: CastSnapshot; reviewIds: string[]; conflictIds: string[]; attentionCounts?: Record<string, { review: number; conflict: number }>; status: import("@infinite-quest/contracts").CharactersWorkspaceStatus }>;
+  detachAttachment(scope: CastScope, characterId: string, eventId: string, request: import("@infinite-quest/contracts").DetachCastAttachment): Promise<import("@infinite-quest/contracts").DetachCastAttachmentResult>;
+  resolveDetail?(scope: CastScope, id: string, request: ReviewCastDetail): Promise<ReviewCastDetailResult>;
   candidates(scope: CastScope, query: Partial<CastCandidateQuery>): Promise<CastCandidateList>;
   resolveCandidate(scope: CastScope, id: string, request: ResolveCastCandidate): Promise<CastCandidateResolution>;
   discoveryStatus(scope: CastScope): Promise<CastDiscoveryStatus>;
