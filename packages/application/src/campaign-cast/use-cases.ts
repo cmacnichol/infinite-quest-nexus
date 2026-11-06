@@ -1,3 +1,5 @@
+import { reviewCastDetailSchema, reviewCastDetailResultSchema, type ReviewCastDetail } from "@infinite-quest/contracts";
+import { detachCastAttachmentSchema, detachCastAttachmentResultSchema, type DetachCastAttachment } from "@infinite-quest/contracts";
 import { castScopeSchema, castListQuerySchema, createCastCharacterSchema, editCastCharacterSchema,
   castWriteResultSchema, castDetailSchema, type CastScope, type CastListQuery,
   type CreateCastCharacter, type EditCastCharacter } from "@infinite-quest/contracts";
@@ -17,8 +19,15 @@ export function createCampaignCastApplication(repository: CampaignCastWritePort,
       if (!discovery) throw new CampaignCastError("cast_discovery_disabled");
       return castDiscoveryRetryResultSchema.parse(await discovery.retryFailed(parsedScope, id, parsedRequest));
     },
+    async detachAttachment(scope: CastScope, characterId: string, eventId: string, input: DetachCastAttachment) {
+      return detachCastAttachmentResultSchema.parse(await repository.detachAttachment(castScopeSchema.parse(scope), characterId, eventId, detachCastAttachmentSchema.parse(input)));
+    },
     async candidates(scope: CastScope, query: Partial<CastCandidateQuery> = {}) {
       return castCandidateListSchema.parse(await repository.candidates(castScopeSchema.parse(scope), castCandidateQuerySchema.parse(query)));
+    },
+    async resolveDetail(scope: CastScope, id: string, request: ReviewCastDetail) {
+      if (!repository.resolveDetail) throw new CampaignCastError("cast_invalid_request");
+      return reviewCastDetailResultSchema.parse(await repository.resolveDetail(castScopeSchema.parse(scope), id, reviewCastDetailSchema.parse(request)));
     },
     async resolveCandidate(scope: CastScope, id: string, request: ResolveCastCandidate) {
       return castCandidateResolutionSchema.parse(await repository.resolveCandidate(castScopeSchema.parse(scope), id, resolveCastCandidateSchema.parse(request)));
@@ -26,16 +35,35 @@ export function createCampaignCastApplication(repository: CampaignCastWritePort,
     async discoveryStatus(scope: CastScope) {
       return castDiscoveryStatusSchema.parse(await repository.discoveryStatus(castScopeSchema.parse(scope)));
     },
+    async workspaceStatus(scope: CastScope) {
+      if (!repository.workspaceRead) throw new CampaignCastError("cast_discovery_unavailable");
+      return (await repository.workspaceRead(castScopeSchema.parse(scope), true)).status;
+    },
     async list(scope: CastScope, input: Partial<CastListQuery> = {}) {
       const query = castListQuerySchema.parse(input);
-      const value = await repository.current(castScopeSchema.parse(scope));
-      const matches = value.characters.filter((person) => [person.name, ...person.aliases]
+      const parsedScope = castScopeSchema.parse(scope);
+      const workspace = repository.workspaceRead ? await repository.workspaceRead(parsedScope) : null;
+      const value = workspace?.snapshot ?? await repository.current(parsedScope);
+      if (query.expectedRevision !== undefined && query.expectedRevision !== value.revision
+        || query.expectedTurnNumber !== undefined && query.expectedTurnNumber !== value.boundary.turnNumber
+        || query.expectedTimelineRevision !== undefined && query.expectedTimelineRevision !== value.boundary.timelineRevision) throw new CampaignCastError("cast_revision_conflict");
+      const matches = value.characters.filter((person) => query.filter === "ignored" ? person.ignored : !person.ignored)
+        .filter((person) => query.filter === "main" ? person.origin.kind === "protagonist"
+          : query.filter === "pinned" ? person.pinned
+          : query.filter === "conflicts" ? workspace?.conflictIds.includes(person.id) === true
+          : query.filter === "needs_review" ? workspace?.reviewIds.includes(person.id) === true
+          : query.filter === "recent" ? Math.max(person.lastObservedTurn, person.lastMentionedTurn ?? 0) > 0 && Math.max(person.lastObservedTurn, person.lastMentionedTurn ?? 0) >= Math.max(1, value.boundary.turnNumber - 9)
+          : true)
+        .filter((person) => [person.name, ...person.aliases]
         .some((name) => name.toLocaleLowerCase("en-US").includes(query.query.toLocaleLowerCase("en-US"))))
         .sort((a, b) => a.id.localeCompare(b.id));
       const offset = query.cursor ? matches.findIndex((person) => person.id === query.cursor) + 1 : 0;
       if (query.cursor && offset === 0) throw new CampaignCastError("cast_revision_conflict");
       const characters = matches.slice(offset, offset + query.limit);
-      return { ...value, characters, nextCursor: offset + characters.length < matches.length ? characters.at(-1)!.id : null };
+      const attention = characters.map((person) => ({ characterId: person.id, review: workspace?.reviewIds.includes(person.id) === true,
+        conflict: workspace?.conflictIds.includes(person.id) === true,
+        ...(workspace?.attentionCounts?.[person.id] ? { reviewCount: workspace.attentionCounts[person.id]!.review, conflictCount: workspace.attentionCounts[person.id]!.conflict } : {}) })).filter((item) => item.review || item.conflict);
+      return { ...value, characters, attention, recentWindow: 10, nextCursor: offset + characters.length < matches.length ? characters.at(-1)!.id : null };
     },
     async detail(scope: CastScope, id: string) {
       return castDetailSchema.parse(await repository.detail(castScopeSchema.parse(scope), id));

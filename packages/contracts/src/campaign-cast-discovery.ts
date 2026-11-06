@@ -2,6 +2,15 @@ import { z } from "zod";
 import { castCharacterSchema, castFieldSchema, castScopeSchema, castBoundarySchema, castWriteBase, castWriteResultSchema } from "./campaign-cast.js";
 
 export const CAST_DISCOVERY_PROTOCOL = "cast-discovery-v1";
+export const castIdentityPolicySchema = z.enum(["strict", "unique_name"]);
+export type CastIdentityPolicy = z.infer<typeof castIdentityPolicySchema>;
+export const castIdentityBasisSchema = z.enum(["new_identity", "corroborated", "unique_name", "unique_world_name", "user_confirmed"]);
+export type CastIdentityBasis = z.infer<typeof castIdentityBasisSchema>;
+export const castDiscoveryPromptIdentifierSchema = z.enum(["cast-discovery-prompt-v1", "cast-discovery-prompt-v2"]);
+export const castDiscoveryFrozenIdentitySchema = z.object({
+  identityPolicy: castIdentityPolicySchema.default("strict"),
+  promptIdentifier: castDiscoveryPromptIdentifierSchema.default("cast-discovery-prompt-v1")
+}).strict().refine((value) => value.identityPolicy === "strict" ? value.promptIdentifier === "cast-discovery-prompt-v1" : value.promptIdentifier === "cast-discovery-prompt-v2", "Invalid discovery policy and prompt combination.");
 export const CAST_DISCOVERY_TIMEOUT_MS = 120000;
 export const CAST_DISCOVERY_MAX_OUTPUT_TOKENS = 4096;
 // Existing durable jobs retain their original frozen execution policy.
@@ -52,9 +61,11 @@ export type RetryCastDiscovery = z.infer<typeof retryCastDiscoverySchema>;
 export type CastDiscoveryRetryResult = z.infer<typeof castDiscoveryRetryResultSchema>;
 
 export const castCandidateQuerySchema = z.object({ cursor: z.uuid().optional(), limit: z.coerce.number().int().min(1).max(50).default(20),
-  view: z.enum(["all", "matches"]).default("all") }).strict();
+  view: z.enum(["all", "matches", "details"]).default("all") }).strict();
 export const castPendingCandidateSchema = z.object({ id: z.uuid(), reason: z.string().min(1).max(100), proposal: castDiscoveryCandidateSchema,
   resolvedCharacterId: z.uuid().optional(),
+  details: z.array(z.object({ observationIndex: z.number().int().min(0).max(19), field: castFieldSchema,
+    value: z.string().max(2000), quote: z.string().max(1000), reason: z.string(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict()).optional(),
   source: z.object({ turnId: z.uuid(), turnNumber: z.number().int().positive(), narrationRevision: z.number().int().nonnegative() }).strict() }).strict();
 export const castCandidateListSchema = z.object({ revision: z.number().int().nonnegative(), boundary: castBoundarySchema,
   candidates: z.array(castPendingCandidateSchema).max(50), nextCursor: z.uuid().nullable() }).strict();
@@ -68,3 +79,13 @@ export type CastCandidateQuery = z.infer<typeof castCandidateQuerySchema>;
 export type CastCandidateList = z.infer<typeof castCandidateListSchema>;
 export type ResolveCastCandidate = z.infer<typeof resolveCastCandidateSchema>;
 export type CastCandidateResolution = z.infer<typeof castCandidateResolutionSchema>;
+
+const reviewDetailBase = { ...castWriteBase, expectedCharacterRevision: z.number().int().nonnegative(),
+  observationIndex: z.number().int().min(0).max(19), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u) };
+export const reviewCastDetailSchema = z.discriminatedUnion("action", [
+  z.object({ ...reviewDetailBase, action: z.literal("confirm"), confirmedValue: z.string().max(2000).optional() }).strict(),
+  z.object({ ...reviewDetailBase, action: z.literal("dismiss") }).strict()
+]);
+export const reviewCastDetailResultSchema = castWriteResultSchema.extend({ candidateId: z.uuid(), observationIndex: z.number().int().min(0).max(19), disposition: z.enum(["confirm", "dismiss"]) });
+export type ReviewCastDetail = z.infer<typeof reviewCastDetailSchema>;
+export type ReviewCastDetailResult = z.infer<typeof reviewCastDetailResultSchema>;

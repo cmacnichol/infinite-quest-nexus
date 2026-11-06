@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { CAST_DISCOVERY_PROTOCOL, isCastDiscoveryTimeout, castDiscoveryIdentitySnapshotSchema, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
+import { CAST_DISCOVERY_PROTOCOL, castDiscoveryFrozenIdentitySchema, isCastDiscoveryTimeout, castDiscoveryIdentitySnapshotSchema, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
 import { castScopeSchema, type CastScope } from "../../contracts/src/campaign-cast.js";
 import { deriveTextExecutionPlan, readTextExecutionPlan, readTextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
 import { assertDirectResponseContractRouteBasisAuthority, bindFrozenResponseContractInvocationV2, readFrozenResponseContractsV2 } from "../../contracts/src/generation-response-contract.js";
-import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../contracts/src/prompt-library.js";
+import { castDiscoveryTrustedPrompt } from "../../contracts/src/prompt-library.js";
 import { buildCastDiscoverySource, chunkCastDiscoverySource } from "../../domain/src/campaign-cast-discovery.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.js";
@@ -21,11 +21,14 @@ const diagnostics = z.enum(["provider_timeout", "provider_failed", "invalid_outp
 export function readCastDiscoveryExecution(value: unknown): CastDiscoveryExecution {
   const parsed = z.object({ providerProfileId: z.uuid(), plan: z.unknown(), admission: z.object({
     routeBasis: z.unknown(), frozenResponseContracts: z.unknown(), providerType: z.enum(["openrouter", "openai_compatible"]),
-    configuration: z.record(z.string(), z.unknown()) }).strict().optional() }).strict().parse(value);
+    configuration: z.record(z.string(), z.unknown()),
+    identityPolicy: z.unknown().optional(), promptIdentifier: z.unknown().optional() }).strict().optional() }).strict().parse(value);
   const providerProfileId = parsed.providerProfileId;
   const plan = readTextExecutionPlan(parsed.plan);
   if (!plan || plan.protocolVersion !== CAST_DISCOVERY_PROTOCOL || !isCastDiscoveryTimeout(plan.requestTimeoutMs)) throw new Error("Invalid cast discovery execution snapshot.");
   if (!parsed.admission) return { providerProfileId, plan };
+  const identity = castDiscoveryFrozenIdentitySchema.parse({ identityPolicy: parsed.admission.identityPolicy, promptIdentifier: parsed.admission.promptIdentifier });
+  const trustedPrompt = castDiscoveryTrustedPrompt(identity.promptIdentifier);
   const routeBasis = readTextExecutionRouteBasis(parsed.admission.routeBasis);
   const frozenResponseContracts = readFrozenResponseContractsV2(parsed.admission.frozenResponseContracts);
   if (routeBasis.credentialReference !== providerProfileId || frozenResponseContracts.queuedPolicy.providerProfileId !== providerProfileId) {
@@ -33,11 +36,11 @@ export function readCastDiscoveryExecution(value: unknown): CastDiscoveryExecuti
   }
   if (plan.selection.kind === "model") {
     assertDirectResponseContractRouteBasisAuthority(frozenResponseContracts.queuedPolicy, routeBasis);
-    if (deriveTextExecutionPlan(routeBasis, CAST_DISCOVERY_SYSTEM_PROMPT).planHash !== plan.planHash) throw new Error("Invalid cast discovery plan binding.");
+    if (deriveTextExecutionPlan(routeBasis, trustedPrompt).planHash !== plan.planHash) throw new Error("Invalid cast discovery plan binding.");
   }
   bindFrozenResponseContractInvocationV2({ frozen: frozenResponseContracts, routeBasis, plan,
-    invocationKey: "cast_discovery:nonstream", operation: "cast_discovery", trustedOperationPrompt: CAST_DISCOVERY_SYSTEM_PROMPT });
-  return { providerProfileId, plan, admission: { ...parsed.admission, routeBasis, frozenResponseContracts } };
+    invocationKey: "cast_discovery:nonstream", operation: "cast_discovery", trustedOperationPrompt: trustedPrompt });
+  return { providerProfileId, plan, admission: { ...parsed.admission, ...identity, routeBasis, frozenResponseContracts } };
 }
 
 const readExecution = readCastDiscoveryExecution;
@@ -106,6 +109,24 @@ export async function reconcileCastDiscoveryBoundary(client: DatabaseClient, sco
       JSON.stringify(job.chunks.map((chunk: CastDiscoverySource) => ({ ...chunk, timelineRevision: revision })))]);
     await client.query(`UPDATE campaign_cast_discovery_candidates SET source=jsonb_set(source,'{timelineRevision}',to_jsonb($2::integer))
       WHERE job_id=$1 AND status='pending'`, [job.id, revision]);
+  }
+  // Inbox dispositions follow the retained boundary; authoritative overrides are
+  // independently replayed from cast events. Detached review rows have no job.
+  const candidates = (await client.query(`SELECT p.*,n.turn_number,n.correction_revision,n.effective_narration
+    FROM campaign_cast_discovery_candidates p LEFT JOIN effective_turn_narrations n
+      ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
+    WHERE p.campaign_id=$1 AND p.owner_user_id=$2 AND p.status<>'cancelled' FOR UPDATE OF p`, [scope.campaignId, scope.ownerUserId])).rows;
+  for (const row of candidates) {
+    if (!row.effective_narration || row.turn_number > throughTurn || row.correction_revision !== row.source.narrationRevision
+      || sha256(row.effective_narration) !== row.source.sourceHash) {
+      await client.query("UPDATE campaign_cast_discovery_candidates SET status='cancelled' WHERE id=$1", [row.id]); continue;
+    }
+    const resolution = row.resolution_receipt?.result?.boundary?.turnNumber > throughTurn ? null : row.resolution_receipt;
+    const decisions = resolution ? row.detail_decisions.filter((item: { result: { boundary: { turnNumber: number } } }) => item.result.boundary.turnNumber <= throughTurn) : [];
+    const pending = !resolution || (resolution.result.pendingObservations?.length ?? 0) > decisions.length;
+    await client.query("UPDATE campaign_cast_discovery_candidates SET source=$2,resolution_receipt=$3,detail_decisions=$4,status=$5 WHERE id=$1", [row.id,
+      JSON.stringify({ ...row.source, timelineRevision: state.timeline_revision }), resolution ? JSON.stringify(resolution) : null,
+      JSON.stringify(decisions), pending ? "pending" : "resolved"]);
   }
 }
 

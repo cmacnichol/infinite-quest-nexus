@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { campaignRuntimeStateContentSchema } from "./generation.js";
+import { castBoundarySchema } from "./campaign-cast.js";
 
 export const currentContinuitySchema = campaignRuntimeStateContentSchema.pick({
   continuitySummary: true,
@@ -23,6 +24,23 @@ export const chronicleRetrievalComparisonImplementationSchema = z.enum([
 const safeTelemetryCodeSchema = z.string().min(1).max(200).regex(/^[a-z0-9][a-z0-9_.:-]*$/u);
 const safeFingerprintSchema = z.string().min(1).max(512).regex(/^[A-Za-z0-9_.:-]+$/u);
 const nonnegativeIntegerSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+/** Public, allowlisted estimate. It contains no captured character fields or prompt text. */
+export const castContextExplanationSchema = z.object({
+  boundary: castBoundarySchema,
+  castRevision: nonnegativeIntegerSchema,
+  mode: z.literal("estimate"),
+  note: z.string().max(400).optional(),
+  budgetTokens: nonnegativeIntegerSchema,
+  usedTokens: nonnegativeIntegerSchema,
+  coverage: z.object({ fromTurn: nonnegativeIntegerSchema.nullable(), throughTurn: nonnegativeIntegerSchema.nullable(),
+    baseTurn: nonnegativeIntegerSchema, current: z.boolean() }).strict(),
+  selected: z.array(z.object({ characterId: z.uuid(), name: z.string().max(200),
+    reason: z.enum(["direct_reference", "open_thread", "pinned", "recent_observation", "recent_mention"]) }).strict()),
+  omitted: z.array(z.object({ characterId: z.uuid(),
+    reason: z.enum(["budget", "ignored", "ambiguous", "not_relevant", "stale_dynamic_fields"]) }).strict()),
+  disabledReason: z.string().max(200).nullable()
+}).strict();
+export type CastContextExplanation = z.infer<typeof castContextExplanationSchema>;
 const safeAuditProviderValueSchema = z.string().trim().min(1).max(500)
   .refine((value) => !/[\u0000-\u001F\u007F-\u009F]/u.test(value), {
     message: "Provider audit values must not contain control characters."
@@ -322,3 +340,9 @@ export type CampaignEmbeddingConfig = Omit<
   retrievalImplementation?: RetrievalImplementation;
   retrievalShadowEnabled?: boolean;
 };
+
+export const castContextPreviewRequestSchema = z.object({
+  query: z.string().max(4000).default(""), budgetTokens: z.coerce.number().int().min(0).max(4000000).optional(),
+  inputMode: z.enum(["action", "scene"]).default("action")
+}).strict();
+export type CastContextPreviewRequest = z.infer<typeof castContextPreviewRequestSchema>;

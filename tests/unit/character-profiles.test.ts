@@ -654,3 +654,13 @@ describe("strict character profile organizer validation", () => {
     expect(sources["world.canon"]).toContain("gatehouse key");
   });
 });
+
+it("preserves profile extensions and untouched appearance when editing a field", async () => {
+  const { createProfileDraft, setProfileDraftField, buildProfileUpdate } = await import("../../packages/client-core/src/characters/profile-fields.js");
+  const original = { name: "Mira", profile: characterProfileSchema.parse({ extension: { custom: true }, appearance: { hair: "silver", eyes: "green" } }) };
+  const draft = setProfileDraftField(createProfileDraft(original), "story.personality", "Curious");
+  const update = buildProfileUpdate(setProfileDraftField(draft, "unclassifiedNotes", "Extra notes"), 3);
+  expect(update.profile.extension).toEqual(original.profile.extension);
+  expect(update.profile.unclassifiedNotes).toBe("Extra notes");
+  expect(update.profile.appearance).toEqual(original.profile.appearance);
+});

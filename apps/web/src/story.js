@@ -34,6 +34,7 @@ import {
 } from "./story-generation-monitor.js";
 import { handleStoryEscape } from "./story-keyboard.js";
 import { bindLegacyTabGroup } from "./legacy-tabs.js";
+import { createCharacterProfileForm } from "./character-profile-form.js";
 import { createLegacyCastPanel } from "./campaign-cast-panel.js";
 import { createStoryStreamRenderer } from "./story-stream-renderer.js";
 import {
@@ -148,6 +149,7 @@ const readerHistoryApi = composition.readerHistory;
 const readerPositionStore = composition.readerPositions;
 const castPanel = composition.cast ? createLegacyCastPanel({ api: composition.cast,
   campaignId: () => state.campaignId, generationActive: () => responseGenerationIsActive(),
+  getProfile: (campaign) => apiClient.campaigns.getCharacterProfile(campaign),
   openProtagonist: () => { void openEditCharacterProfile(); },
   navigateToTurn: async (turn) => { await ensureCompleteTurnHistory(); navigateToTurn(turn); }
 }) : null;
@@ -1123,7 +1125,9 @@ function syncInputState() {
 
   const lastTurnHasAction = turnCount > 0 && Boolean(state.turns[turnCount - 1] && state.turns[turnCount - 1].action);
 
-  const previousDisabled = generationLocked || turnCount === 0 || Boolean(state.readerPinnedTurn) || (curr <= 0 && !state.historyNextCursor);
+  const previousDisabled = generationLocked || turnCount === 0 || (state.readerPinnedTurn
+    ? currentViewTurnNumber() <= 1
+    : curr <= 0 && !state.historyNextCursor);
   const nextDisabled = generationLocked || turnCount === 0 || isLatest;
   if (btnPrev) {
     btnPrev.disabled = previousDisabled;
@@ -2057,8 +2061,7 @@ function scrollToView() {
   }
 }
 
-function scrollSceneIntoView(scene) {
-
+function updateReaderScrollPadding() {
   const header = document.querySelector(".universal-nav");
   const toolbar = document.querySelector("[data-story-reader-toolbar]");
   const headerHeight = header?.getBoundingClientRect?.().height;
@@ -2069,10 +2072,14 @@ function scrollSceneIntoView(scene) {
 
   if (Number.isFinite(headerHeight) && headerHeight > 0
     && Number.isFinite(toolbarHeight) && toolbarHeight > 0
-    && Number.isFinite(stickyTop) && stickyTop >= 0
-    && scene?.style) {
-    scene.style.scrollMarginTop = `${Math.ceil(Math.max(headerHeight, stickyTop) + toolbarHeight + 12)}px`;
+    && Number.isFinite(stickyTop) && stickyTop >= 0) {
+    // Use the sticky inset, not the toolbar's document position before it sticks.
+    document.documentElement.style.setProperty("--story-reader-inset", `${Math.ceil(Math.max(headerHeight, stickyTop) + toolbarHeight + 12)}px`);
   }
+}
+
+function scrollSceneIntoView(scene) {
+  updateReaderScrollPadding();
   scene.scrollIntoView({
     behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
     block: "start"
@@ -4039,7 +4046,11 @@ async function loadOlderTurnPage() {
 async function goToPrevious() {
   const curr = viewedTurnIndex();
   if (state.busy || state.turns.length === 0) return;
-  if (state.readerPinnedTurn) return;
+  if (state.readerPinnedTurn) {
+    const target = currentViewTurnNumber() - 1;
+    if (target >= 1) return loadExactHistoryTurn(target);
+    return;
+  }
   if (curr <= 0) {
     if (!await loadOlderTurnPage()) return;
     const viewedIndex = viewedTurnIndex();
@@ -5864,18 +5875,18 @@ async function openEditCharacterProfile() {
     showBusy("Loading campaign character profile…");
     const profile = await apiClient.campaigns.getCharacterProfile(campaignId);
     if (requestToken !== characterProfileEditRequestToken || state.campaignId !== campaignId || dialog.open) return;
-    const name = $("editCharacterProfileName");
-    const editor = $("editCharacterProfileJson");
+    const fields = $("editCharacterProfileFields");
     const status = $("editCharacterProfileStatus");
-    if (!name || !editor) return;
+    if (!fields) return;
     state.characterProfileEditSession = {
       id: `edit-character-profile:${++nextCharacterProfileEditSessionId}`,
       campaignId,
       revision: profile.revision,
-      saving: false
+      saving: false,
+      form: null
     };
-    name.value = profile.name;
-    editor.value = JSON.stringify(profile.profile, null, 2);
+    fields.replaceChildren();
+    state.characterProfileEditSession.form = createCharacterProfileForm(fields, profile);
     if (status) status.textContent = `Editing character profile revision ${profile.revision}.`;
     openManagedModal(dialog);
     syncInputState();
@@ -5890,31 +5901,17 @@ async function openEditCharacterProfile() {
 
 async function saveEditCharacterProfile() {
   const session = state.characterProfileEditSession;
-  const name = $("editCharacterProfileName");
-  const editor = $("editCharacterProfileJson");
   const status = $("editCharacterProfileStatus");
-  if (!session || session.saving || !name || !editor) return;
-
-  let profile;
-  try {
-    profile = JSON.parse(editor.value);
-  } catch (_) {
-    if (status) status.textContent = "Profile JSON must be valid before it can be saved.";
-    return;
-  }
-  if (!profile || Array.isArray(profile) || typeof profile !== "object") {
-    if (status) status.textContent = "Profile JSON must be an object.";
-    return;
-  }
+  if (!session || session.saving || !session.form) return;
+  let update;
+  try { update = session.form.update(); }
+  catch (error) { if (status) status.textContent = `Check the profile fields: ${error.message}`; return; }
 
   session.saving = true;
   try {
     showBusy("Saving character profile…");
     const saved = await apiClient.campaigns.updateCharacterProfile(session.campaignId, {
-      expectedRevision: session.revision,
-      name: name.value,
-      profile,
-      editSource: "manual"
+      ...update
     });
     if (state.campaignId !== session.campaignId || state.characterProfileEditSession?.id !== session.id) return;
     state.playerConfig = {
@@ -6195,6 +6192,13 @@ async function init() {
 
 // ── Boot Sequence ─────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
+  updateReaderScrollPadding();
+  if (typeof window.ResizeObserver === "function") {
+    const readerResizeObserver = new window.ResizeObserver(updateReaderScrollPadding);
+    for (const element of document.querySelectorAll(".universal-nav, [data-story-reader-toolbar]")) {
+      readerResizeObserver.observe(element);
+    }
+  }
   window.addEventListener("beforeunload", (event) => {
     flushReaderPositionSave();
     if (!actionDraftNeedsNavigationGuard()) return;

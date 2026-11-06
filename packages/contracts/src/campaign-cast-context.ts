@@ -17,7 +17,7 @@ export const castGenerationSnapshotSchema = castSnapshotSchema.extend({
   if (characters.size !== snapshot.characters.length || details.size !== snapshot.details.length
     || characters.size !== details.size || [...details].some((id) => !characters.has(id))) invalid("Invalid cast detail scope");
   const observationIds = new Set<string>();
-  if (snapshot.characters.some((character) => character.lastObservedTurn > snapshot.boundary.turnNumber)) invalid("Character exceeds captured turn");
+  if (snapshot.characters.some((character) => character.lastObservedTurn > snapshot.boundary.turnNumber || (character.lastMentionedTurn ?? 0) > snapshot.boundary.turnNumber)) invalid("Character exceeds captured turn");
   for (const detail of snapshot.details) {
     if (new Set(detail.overrides.map((override) => override.field)).size !== detail.overrides.length) invalid("Duplicate current override");
     for (const observation of detail.observations) {
@@ -41,5 +41,9 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value);
 }
 export function castGenerationSnapshotFingerprint(value: unknown): string {
-  return sha256Hex(canonicalJson(castGenerationSnapshotSchema.parse(value)));
+  const snapshot = castGenerationSnapshotSchema.parse(value);
+  // Preserve fingerprints of historical snapshots written before lexical recency existed.
+  const characters = snapshot.characters.map(({ lastMentionedTurn, ...character }) =>
+    lastMentionedTurn === null ? character : { ...character, lastMentionedTurn });
+  return sha256Hex(canonicalJson({ ...snapshot, characters }));
 }

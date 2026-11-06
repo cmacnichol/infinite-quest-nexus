@@ -149,6 +149,19 @@ integration("campaign cast editing API", () => {
       expect(next.characters).toHaveLength(1);
       expect(next.characters[0].id).not.toBe(page.characters[0].id);
       expect(next.nextCursor).toBeNull();
+      const main = (await app.inject({ method: "GET", url: `${base}?filter=main` })).json();
+      expect(main.characters.every((person: any) => person.origin.kind === "protagonist")).toBe(true);
+      const pinned = (await app.inject({ method: "GET", url: `${base}?filter=pinned` })).json();
+      expect(pinned.characters).toEqual([]);
+      const stale = await app.inject({ method: "GET", url: `${base}?cursor=${page.nextCursor}&expectedRevision=0` });
+      expect(stale.statusCode).toBe(409);
+      const staleBoundary = await app.inject({ method: "GET", url: `${base}?cursor=${page.nextCursor}&expectedRevision=${page.revision}&expectedTurnNumber=1&expectedTimelineRevision=0` });
+      expect(staleBoundary.statusCode).toBe(409);
+      const status = await app.inject({ method: "GET", url: `${base}/workspace-status` });
+      expect(status.statusCode).toBe(200);
+      const repeatedStatus = await app.inject({ method: "GET", url: `${base}/workspace-status` });
+      expect(repeatedStatus.json()).toEqual(status.json());
+      expect(status.json()).toMatchObject({ revision: second.json().revision, counts: { identities: 0, details: 0, conflicts: 0 }, capabilities: { autoMatch: false } });
     } finally { await app.close(); }
   });
   it("enforces ownership, shape, body limits, protagonist protection and disabled writes", async () => {

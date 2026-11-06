@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool, withTransaction } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { applyCastBatchWithClient, createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
 import { exportCampaignCast, importCampaignCast } from "../../packages/database/src/campaign-cast-portability.js";
 import { loadCampaignArchiveExportSnapshot } from "../../packages/database/src/campaign-archive-export-repository.js";
 import { campaignArchivePayloads } from "../../services/runtime/src/campaign-archive-export-composition.js";
@@ -42,8 +42,14 @@ integration("campaign cast portable authority", () => {
     const scope = { ownerUserId, campaignId: imported.campaignId };
     const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
     const initial = await repo.current(scope);
-    await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: "system",
+    const created = await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: "system",
       name: "Mara", aliases: [], profile: { "appearance.description": "" } });
+    const turn = (await pool.query("SELECT turn_id,turn_number,correction_revision,effective_narration FROM effective_turn_narrations WHERE campaign_id=$1 ORDER BY turn_number LIMIT 1", [scope.campaignId])).rows[0];
+    const quote = turn.effective_narration.slice(0, 10), sourceHash = sha256(turn.effective_narration);
+    await withTransaction(pool, client => applyCastBatchWithClient(client, scope, { boundary: initial.boundary, idempotencyKey: "system-attachment",
+      commands: [{ kind: "observe", characterId: created.character.id, field: "appearance.description", value: "blue eyes", mode: "fact", speakerCharacterId: null, supersedesObservationId: null,
+        evidence: { kind: "turn", turnId: turn.turn_id, turnNumber: turn.turn_number, narrationRevision: turn.correction_revision, sourceHash, paragraphId: "p1", quote } }] },
+      { attachment: { characterId: created.character.id, basis: "unique_name", sourceRanges: [{ turnId: turn.turn_id, narrationRevision: turn.correction_revision, sourceHash, paragraphId: "p1", start: 0, end: quote.length }] } }));
     const records: SystemRecordEnvelope[] = [];
     await createPostgresSystemArchiveExportRepository(pool, { sourceApplicationVersion: "0.1.0" }).withOwnerSnapshot({ ownerUserId }, async (snapshot) => {
       for (const domain of SYSTEM_ARCHIVE_DOMAINS) for await (const record of snapshot.streamDomain(domain)) records.push(record);
@@ -63,6 +69,14 @@ integration("campaign cast portable authority", () => {
       expect(value.characters.filter((c) => c.origin.kind !== "protagonist")).toEqual([
         expect.objectContaining({ name: "Mara", profile: { "appearance.description": "" } })
       ]);
+      const restoredRepository = createPostgresCampaignCastRepository(destination, { editingEnabled: true });
+      const restoredScope = { ...target, campaignId: scope.campaignId };
+      const person = value.characters.find(character => character.name === "Mara")!;
+      const detail = await restoredRepository.detail(restoredScope, person.id);
+      expect(detail.autoMatches).toHaveLength(1);
+      await restoredRepository.detachAttachment(restoredScope, person.id, detail.autoMatches[0]!.eventId, {
+        expectedCastRevision: detail.revision, expectedBoundary: detail.boundary, expectedCharacterRevision: person.revision, idempotencyKey: "restore-undo" });
+      expect((await restoredRepository.detail(restoredScope, person.id)).observations).toEqual([]);
     } finally { await destination.end(); await pool.query(`DROP DATABASE ${databaseName}`); }
   });
   it("round-trips separate identities and user blanks with new IDs and no profile caches", async () => {
@@ -87,6 +101,22 @@ integration("campaign cast portable authority", () => {
     for (const payload of [ { formatVersion: 99 }, { formatVersion: 1, revision: 0, characters: [], events: [], ownerUserId: randomUUID() } ]) {
       await expect(withTransaction(pool, (client) => importCampaignCast(client, scope, payload, { turns: new Map(), worlds: new Map() }))).rejects.toThrow();
     }
+    expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_state WHERE campaign_id=$1", [scope.campaignId])).rows[0].n).toBe(0);
+  });
+  it("rejects forged attachment ranges before writing cast authority", async () => {
+    const scope = await fixture(), characterId = randomUUID(), turnId = randomUUID(), createId = randomUUID(), eventId = randomUUID(), observationId = randomUUID();
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,1,'Mara waits.')", [turnId, scope.ownerUserId, scope.campaignId]);
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [scope.campaignId]);
+    const origin = { kind: "manual" }, evidence = { kind: "turn", turnId, turnNumber: 1, narrationRevision: 0,
+      sourceHash: sha256("Mara waits."), paragraphId: "p1", quote: "Mara" };
+    const payload = { formatVersion: 2, revision: 2, characters: [{ id: characterId, origin, firstObservedTurn: 0 }], events: [
+      { id: createId, effectiveTurnNumber: 0, revision: 1, commands: [{ characterId, command: { kind: "create", name: "Mara", aliases: [], origin } }] },
+      { id: eventId, effectiveTurnNumber: 1, revision: 2, commands: [{ observationId, command: { kind: "observe", characterId,
+        field: "story.role", value: "guide", mode: "fact", speakerCharacterId: null, evidence, supersedesObservationId: null } }],
+        attachment: { eventId, characterId, basis: "unique_name", sourceRanges: [{ turnId, narrationRevision: 0,
+          sourceHash: evidence.sourceHash, paragraphId: "p1", start: 5, end: 10 }], observationIds: [observationId] } }
+    ] };
+    await expect(withTransaction(pool, (client) => importCampaignCast(client, scope, payload, { turns: new Map([[turnId, turnId]]), worlds: new Map() }))).rejects.toThrow("cast_archive_reference_invalid");
     expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_state WHERE campaign_id=$1", [scope.campaignId])).rows[0].n).toBe(0);
   });
   it("rejects forged identity chronology before writing authority", async () => {
@@ -155,7 +185,7 @@ integration("campaign cast portable authority", () => {
     await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: "cast-export",
       name: "Mara", aliases: [], profile: { "appearance.description": "" } });
     const projected = campaignArchivePayloads(await loadCampaignArchiveExportSnapshot(pool, ownerUserId, scope.campaignId));
-    expect(projected.campaign.archiveRecords).toHaveProperty("cast.formatVersion", 1);
+    expect(projected.campaign.archiveRecords).toHaveProperty("cast.formatVersion", 2);
     const mutations = createPostgresPortableFamilyMutationRepository(createPostgresWorldRepositoryAdapters(pool, { memory: memoryGeneration(pool) }).worlds);
     const restored = await withTransaction(pool, (client) => mutations.commitCampaignZip(client, {
       owner: { ownerUserId }, destination: { kind: "existing_world_version", worldId: imported.worldId, worldVersionId: imported.worldVersionId },
@@ -168,7 +198,7 @@ integration("campaign cast portable authority", () => {
     await system.withOwnerSnapshot({ ownerUserId }, async (snapshot) => {
       let found = false;
       for await (const envelope of snapshot.streamDomain("campaigns")) if (envelope.sourceId === scope.campaignId) {
-        expect(envelope.record).toHaveProperty("cast.formatVersion", 1);
+        expect(envelope.record).toHaveProperty("cast.formatVersion", 2);
         found = true;
       }
       expect(found).toBe(true);

@@ -165,6 +165,14 @@ describe("cast discovery evidence boundary", () => {
       output: { version: 1, characters: [candidate({ existingCharacterId: id })] }, knownCharacters: people });
     expect(resolve([person], null).unresolved[0]?.code).toBe("identity_needs_review");
     expect(resolve([person], person.id).unresolved[0]?.code).toBe("identity_needs_review");
+    expect(validateCastDiscovery({ source: source(), output: { version: 1, characters: [candidate({ existingCharacterId: person.id })] }, knownCharacters: [person], identityPolicy: "unique_name" }).accepted[0]?.identityBasis).toBe("unique_name");
+    const relaxed = (people: CastCharacter[], id: string | null) => validateCastDiscovery({ source: source(),
+      output: { version: 1, characters: [candidate({ existingCharacterId: id })] }, knownCharacters: people, identityPolicy: "unique_name" });
+    expect(relaxed([person], null).unresolved[0]?.code).toBe("identity_needs_review");
+    expect(relaxed([person, { ...known("55555555-5555-4555-8555-555555555555"), ignored: true }], person.id).unresolved[0]?.code).toBe("identity_needs_review");
+    expect(relaxed([], person.id).rejected[0]?.code).toBe("unknown_character_id");
+    expect(validateCastDiscovery({ source: source(), output: { version: 1, characters: [candidate()] }, knownCharacters: [], identityPolicy: "unique_name",
+      worldVersionId: "55555555-5555-4555-8555-555555555555", worldCharacters: [{ entityId: "mara", name: "Mara", aliases: [], identityHints: [] }] }).accepted[0]?.identityBasis).toBe("unique_world_name");
     expect(resolve([{ ...person, profile: { "appearance.description": "blue eyes" } }], person.id).accepted[0]?.existingCharacterId).toBe(person.id);
     expect(resolve([person, known("55555555-5555-4555-8555-555555555555")], person.id).unresolved[0]?.code).toBe("identity_needs_review");
   });

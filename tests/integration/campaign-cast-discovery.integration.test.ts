@@ -289,7 +289,11 @@ describe("durable cast discovery", () => {
     expect(job.identities.worldCharacters).toContainEqual(expect.objectContaining({ entityId: "iven", identityHints: ["Iven is a ferryman."] }));
     expect(JSON.stringify(job.identities)).not.toContain("PRIVATE_MARKER");
     expect(JSON.stringify(job.identities)).not.toContain("Strength");
+    const workspaceRevision = async () => (await pool.query("SELECT workspace_revision FROM campaign_cast_state WHERE campaign_id=$1", [f.scope.campaignId])).rows[0]?.workspace_revision ?? null;
+    const beforeCheckpoint = await workspaceRevision();
     await jobs.checkpoint(job, proposal());
+    // Lease and checkpoint housekeeping must not make open workspaces reload.
+    expect(await workspaceRevision()).toBe(beforeCheckpoint);
     expect(await jobs.publish(job)).toBe("complete");
     expect((await createPostgresCampaignCastRepository(pool).current(f.scope)).characters.find((person) => person.name === "Mara")?.origin)
       .toEqual({ kind: "world", worldVersionId: f.versionId, entityId: "mara-playable" });
@@ -481,6 +485,37 @@ describe("durable cast discovery", () => {
       expect((await editor.current(f.scope)).characters.filter(person => person.name === "Mara")).toHaveLength(1);
       const row = (await pool.query("SELECT status,proposal FROM campaign_cast_discovery_candidates WHERE id=$1", [candidate.id])).rows[0];
       expect(row).toEqual({ status: "pending", proposal: output.characters[0] });
+      const listed = await app.inject({ method: "GET", url: `/api/v1/campaigns/${f.scope.campaignId}/cast` });
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json().attention).toContainEqual({ characterId: saved.character.id, review: true, conflict: false,
+        reviewCount: allDisputed ? 2 : 1, conflictCount: 0 });
+      const detailInbox = await editor.candidates(f.scope, { view: "details" });
+      const detail = detailInbox.candidates[0]!.details!.find(item => item.observationIndex === 1)!;
+      expect(detail).toMatchObject({ field: "story.role", value: "the gatekeeper", observationIndex: 1 });
+      const detailUrl = `/api/v1/campaigns/${f.scope.campaignId}/cast/candidates/${candidate.id}/details/resolve`;
+      const decision = { action: action === "attach" ? "dismiss" : "confirm", ...(action === "create" ? { confirmedValue: "" } : {}),
+        expectedCastRevision: saved.revision, expectedBoundary: saved.boundary, expectedCharacterRevision: saved.character.revision,
+        sourceHash: detail.sourceHash, observationIndex: 1, idempotencyKey: "review-detail" };
+      expect((await app.inject({ method: "POST", url: detailUrl, payload: { ...decision, action: "confirm", confirmedValue: "roll 1d20" } })).statusCode).toBe(422);
+      const decided = await app.inject({ method: "POST", url: detailUrl, payload: decision });
+      expect(decided.statusCode).toBe(200);
+      expect(decided.json().character.profile["story.role"]).toBe(action === "create" ? "" : undefined);
+      expect((await app.inject({ method: "POST", url: detailUrl, payload: decision })).json()).toEqual(decided.json());
+      if (action === "attach") {
+        await pool.query(`INSERT INTO campaign_cast_discovery_candidates(owner_user_id,campaign_id,job_id,chunk_ordinal,local_key,source,proposal,reason,resolution_receipt)
+          SELECT owner_user_id,campaign_id,job_id,chunk_ordinal,'duplicate-rescan',source,proposal,reason,resolution_receipt
+          FROM campaign_cast_discovery_candidates WHERE id=$1`, [candidate.id]);
+        const diagnostics = (await editor.workspaceRead!(f.scope, true)).status.reviewDecisions;
+        expect(diagnostics).toMatchObject({ confirmed: 0, dismissed: 1 });
+        expect((await editor.candidates(f.scope, { view: "details" })).candidates).toEqual([]);
+        await pool.query(`UPDATE campaign_cast_discovery_candidates SET proposal=jsonb_set(proposal,'{observations,1,value}',to_jsonb('another role'::text))
+          WHERE campaign_id=$1 AND local_key='duplicate-rescan'`, [f.scope.campaignId]);
+        expect((await editor.candidates(f.scope, { view: "details" })).candidates[0]?.details?.[0]?.value).toBe("another role");
+        await pool.query("DELETE FROM campaign_cast_discovery_candidates WHERE campaign_id=$1 AND local_key='duplicate-rescan'", [f.scope.campaignId]);
+      }
+      const afterDetails = await editor.candidates(f.scope, { view: "details" });
+      expect(afterDetails.candidates.flatMap(item => item.details ?? []).map(item => item.observationIndex)).toEqual(allDisputed ? [0] : []);
+
     } finally { await app.close(); }
   });
   it.each(["self-alias", "second-person"])("attaches reviewed %s evidence without renaming or duplicating the target", async mode => {
@@ -837,6 +872,37 @@ describe("durable cast discovery", () => {
     expect(scans).toBe(1);
   });
 
+  it.each(["strict", "unique_name"] as const)("recovers %s admission and publishes only captured matching authority", async (identityPolicy) => {
+    const f = await fixture(), cast = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    if (identityPolicy === "unique_name") await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.turnIds[0], "Mara has blue eyes." + " The path continues.".repeat(900)]);
+    const initial = await cast.current(f.scope);
+    const created = await cast.create(f.scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary,
+      idempotencyKey: "unique-mara", name: "Mara", aliases: [], profile: {} });
+    const execution: RuntimeTextExecution = { id: f.execution.providerProfileId, name: "Fixture", providerRole: "text", providerType: "openrouter",
+      model: "@preset/fixture", contextWindowTokens: 32768, maxOutputTokens: 2048, temperature: 0.2, requestTimeoutMs: 120000,
+      configuration: {}, executionRevision: "revision", authorityRevision: "authority", endpointIdentity: "endpoint",
+      textSelection: { kind: "openrouter_preset", slug: "fixture" }, async execute() { throw new Error("Checkpoint must not dispatch"); } };
+    const frozen = await prepareCastDiscoveryExecution({ ownerUserId, execution, identityPolicy, ports: {
+      async resolvePreset() { return { slug: "fixture", name: "Fixture", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { model: "fixture" }, systemPrompt: "Frozen." }; },
+      async discoverModels() { return [{ id: "fixture", contextWindowTokens: 32768, maxOutputTokens: 2048 }]; }
+    } });
+    await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!, execution: frozen, enabled: true }));
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), first = (await jobs.claim("before-restart"))!;
+    const output = proposal(created.character.id);
+    output.characters[0]!.identityEvidence[0]!.paragraphId = first.source.paragraphs[0]!.id;
+    output.characters[0]!.observations[0]!.paragraphId = first.source.paragraphs[0]!.id;
+    await jobs.checkpoint(first, output);
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [first.id]);
+    const recovered = (await createCastDiscoveryJobRepository(pool, () => true).claim("after-restart"))!;
+    expect(recovered.execution.admission?.identityPolicy).toBe(identityPolicy);
+    await jobs.publish(recovered);
+    const detail = await cast.detail(f.scope, created.character.id);
+    expect(detail.autoMatches).toHaveLength(identityPolicy === "unique_name" ? 1 : 0);
+    expect(detail.observations).toHaveLength(identityPolicy === "unique_name" ? 1 : 0);
+    expect((await cast.candidates(f.scope, { view: "matches" })).candidates).toHaveLength(identityPolicy === "strict" ? 1 : 0);
+    await jobs.publish(recovered);
+    expect((await cast.detail(f.scope, created.character.id)).autoMatches).toHaveLength(identityPolicy === "unique_name" ? 1 : 0);
+  });
   it("publishes validated sparse identities and evidence from the durable checkpoint", async () => {
     const f = await fixture(); await f.enqueue();
     const repo = createCastDiscoveryJobRepository(pool, () => true), job = (await repo.claim("a"))!;

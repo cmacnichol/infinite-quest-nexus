@@ -64,6 +64,17 @@ describe("cast discovery runtime execution", () => {
     expect(saved.admission?.frozenResponseContracts.contracts["cast_discovery:nonstream"]).toBeDefined();
     expect(f.execution.execute).not.toHaveBeenCalled(); expect(f.ports.resolvePreset).toHaveBeenCalledTimes(1);
   });
+  it("freezes matching guidance and rejects policy changes before dispatch", async () => {
+    const f = fixture(), saved = await prepareCastDiscoveryExecution({ ownerUserId: id, ...f, identityPolicy: "unique_name" });
+    expect(saved.admission).toMatchObject({ identityPolicy: "unique_name", promptIdentifier: "cast-discovery-prompt-v2" });
+    const c = await claim(); c.value.execution = saved;
+    const execute = vi.fn<PreparedAuthoringTextExecutor["execute"]>(async () => result);
+    await createCastDiscoveryExtractor({ executor: { execute } }).extract(c.value);
+    c.value.execution = { ...saved, admission: { ...saved.admission!, identityPolicy: "strict" } };
+    execute.mockClear();
+    await expect(createCastDiscoveryExtractor({ executor: { execute } }).extract(c.value)).rejects.toThrow();
+    expect(execute).not.toHaveBeenCalled();
+  });
   it("caps large profile and preset output allowances before freezing the request", async () => {
     const f = fixture();
     const execution = { ...f.execution, maxOutputTokens: 48000, contextWindowTokens: 163840 };
