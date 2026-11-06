@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { campaignEmbeddingConfigSchema } from "../../packages/contracts/src/memory.js";
+import { campaignEmbeddingConfigSchema, castContextExplanationSchema } from "../../packages/contracts/src/memory.js";
 import {
   createMemoryApplication,
   createMemoryWorkerApplication,
@@ -14,6 +14,13 @@ const scope = {
 } as const;
 
 describe("MemoryApplication", () => {
+  it("rejects private fields in a cast explanation", () => {
+    const explanation = { boundary: { turnNumber: 0, timelineRevision: 0 }, castRevision: 0, mode: "estimate",
+      budgetTokens: 0, usedTokens: 0, coverage: { fromTurn: null, throughTurn: null, baseTurn: 0, current: false },
+      selected: [], omitted: [], disabledReason: null };
+    expect(castContextExplanationSchema.safeParse(explanation).success).toBe(true);
+    expect(castContextExplanationSchema.safeParse({ ...explanation, privatePrompt: "canary" }).success).toBe(false);
+  });
   it("defaults new retrieval controls while preserving the context-preview transaction seam", () => {
     expect(campaignEmbeddingConfigSchema.parse({})).toMatchObject({
       enabled: false,

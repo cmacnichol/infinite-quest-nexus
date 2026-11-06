@@ -1,3 +1,4 @@
+import { createCharactersWorkspace } from "./characters-workspace";
 import {
   buildCurrentStateUpdate,
   createCampaignContinuityDraft,
@@ -926,18 +927,8 @@ export function mountStoryPlayerPage(
         const campaign = projection.campaign;
         const profile = characterProfile;
         if (control.disabled || campaign === null || profile === null || projection.generation !== null || characterProfileSaveInFlight) return;
-        const name = root.querySelector<HTMLInputElement>("[data-story-tool-dialog] [data-character-profile-name]")?.value.trim() ?? "";
-        const profileText = root.querySelector<HTMLTextAreaElement>("[data-story-tool-dialog] [data-character-profile-json]")?.value ?? "";
-        let nextProfile: CampaignCharacterProfileUpdate["profile"];
-        try {
-          const parsed: unknown = JSON.parse(profileText);
-          if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("Profile must be an object.");
-          nextProfile = parsed as CampaignCharacterProfileUpdate["profile"];
-        } catch {
-          const message = root.querySelector<HTMLElement>("[data-story-tool-dialog] [data-story-status]");
-          if (message) message.textContent = "Character profile JSON must be an object. Your story draft is preserved.";
-          return;
-        }
+        const name = characterProfileDraft?.name ?? profile.name;
+        const nextProfile = JSON.parse(characterProfileDraft?.profileJson ?? JSON.stringify(profile.profile)) as CampaignCharacterProfileUpdate["profile"];
         const requestToken = ++characterProfileRequestToken;
         characterProfileSaveInFlight = true;
         characterProfileError = null;
@@ -1046,16 +1037,17 @@ export function mountStoryPlayerPage(
         });
       });
     }
-    for (const input of root.querySelectorAll<HTMLInputElement>("[data-story-tool-dialog] [data-character-profile-name]")) {
+    for (const input of root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[data-story-tool-dialog] [data-character-profile-field]")) {
       input.addEventListener("input", () => {
-        const current = characterProfileDraft;
-        characterProfileDraft = { name: input.value, profileJson: current?.profileJson ?? "" };
-      });
-    }
-    for (const input of root.querySelectorAll<HTMLTextAreaElement>("[data-story-tool-dialog] [data-character-profile-json]")) {
-      input.addEventListener("input", () => {
-        const current = characterProfileDraft;
-        characterProfileDraft = { name: current?.name ?? "", profileJson: input.value };
+        const current = characterProfileDraft; if (!current) return;
+        const path = input.dataset.characterProfileField!;
+        if (path === "name") { characterProfileDraft = { ...current, name: input.value }; return; }
+        const profile = JSON.parse(current.profileJson) as Record<string, unknown>;
+        const [part, key] = path.split(".");
+        const value = input.dataset.profileList === "true" ? input.value.split("\n").map(item => item.trim()).filter(Boolean) : input.value;
+        if (key) { const group = (profile[part!] ?? {}) as Record<string, unknown>; group[key] = value; profile[part!] = group; }
+        else profile[part!] = value;
+        characterProfileDraft = { ...current, profileJson: JSON.stringify(profile) };
       });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='save-narration-correction']")) {
@@ -1523,6 +1515,7 @@ export function mountStoryPlayerPage(
       });
     }
   };
+  const charactersWorkspace = createCharactersWorkspace(root.ownerDocument, () => projection.generation !== null, (campaign, update) => composition.api.campaigns.updateCharacterProfile(campaign, update), (turn) => { void history.loadTurn(turn); }, (campaign) => composition.api.campaigns.getCharacterProfile(campaign), (campaign) => { if (projection.campaign?.id === campaign) { characterProfile = null; characterProfileDraft = null; } });
   const onToolsClick = (event: Event) => {
     const target = event.target;
     if (!target || typeof (target as Element).closest !== "function") return;
@@ -1533,6 +1526,7 @@ export function mountStoryPlayerPage(
     if (action === "export-markdown" || action === "export-html" || action === "export-pdf") {
       toolsDisclosure!.querySelector<HTMLElement>("summary")?.focus();
     }
+    if (action === "open-characters") { if (projection.campaign) charactersWorkspace.open(projection.campaign.id, toolsDisclosure?.querySelector<HTMLElement>("summary")); return; }
     runCampaignCommand(action);
   };
   root.addEventListener("click", onClick);
@@ -1545,6 +1539,7 @@ export function mountStoryPlayerPage(
       if (disposed) return;
       disposed = true;
       controller?.abort();
+      charactersWorkspace.dispose();
       generation.dispose();
       scrollWindow?.removeEventListener("scroll", onDocumentScroll);
       programmaticFollowTarget = null;

@@ -64,6 +64,7 @@ export type RuntimeConfig = {
   worldSharingEnabled?: boolean;
   castEditingEnabled?: boolean;
   castDiscoveryEnabled?: boolean;
+  castAutoMatchEnabled?: boolean;
   castContextEnabled?: boolean;
   /** New eligible jobs use v5 unless an operator performs a compatible-reader rollback. */
   historyCoverageEnabled?: boolean;
@@ -280,6 +281,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     worldSharingEnabled: booleanSetting("WORLD_SHARING_ENABLED", false),
     castEditingEnabled,
     castDiscoveryEnabled,
+    castAutoMatchEnabled: booleanSetting("CAST_AUTO_MATCH_ENABLED", false) && castDiscoveryEnabled,
     castContextEnabled: booleanSetting("CAST_CONTEXT_ENABLED", false) && castDiscoveryEnabled,
     historyCoverageEnabled: booleanSetting("HISTORY_COVERAGE_ENABLED", true),
     castBackfillEnabled: booleanSetting("CAST_BACKFILL_ENABLED", false) && castDiscoveryEnabled,

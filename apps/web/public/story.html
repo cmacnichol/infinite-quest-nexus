@@ -345,13 +345,7 @@
       </div>
       <div class="dialog-scroll stack">
         <p id="editCharacterProfileStatus" class="mini" role="status" aria-live="polite"></p>
-        <label for="editCharacterProfileName">Character name
-          <input id="editCharacterProfileName" maxlength="200" autocomplete="off" />
-        </label>
-        <label for="editCharacterProfileJson">Profile JSON
-          <textarea id="editCharacterProfileJson" class="profile-json-editor" rows="18" spellcheck="false" aria-describedby="editCharacterProfileJsonHelp"></textarea>
-        </label>
-        <p id="editCharacterProfileJsonHelp" class="mini">Use the structured profile fields. Changes are revision-checked before they are saved.</p>
+        <div id="editCharacterProfileFields" class="character-profile-fields"></div>
       </div>
       <div class="row wrap dialog-actions">
         <button id="btnCancelEditCharacterProfile" type="button">Cancel</button>

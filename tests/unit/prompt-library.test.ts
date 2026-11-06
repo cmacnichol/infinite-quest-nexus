@@ -189,6 +189,20 @@ describe("Prompt Library catalog", () => {
     }
   });
 
+  it("carries End Scene boundaries into the resolved story writer preview", async () => {
+    const prompts = createPromptRepository({ query: vi.fn().mockResolvedValue({ rows: [] }) } as never);
+    const { snapshot } = await prompts.loadPromptSnapshot({ ownerUserId: crypto.randomUUID(), scope: "application" });
+    const preview = buildPromptPreview("story_system", snapshot.story_system.content);
+    const text = preview.sections.map((section) => section.content).join("\n");
+
+    expect(text).toContain('"End Scene"');
+    expect(text).toContain("stop at or before that boundary");
+    expect(text).toContain("A complete response does not require a completed scene");
+    expect(text).toContain("Do not narrate consequences, aftermath, transitions, or resolution beyond the boundary");
+    expect(text).toContain("Do not include the End Scene instruction in narration or continuity facts");
+    expect(preview.unresolvedVariables).toEqual([]);
+  });
+
   it("makes story-writing length a soft goal without permitting invented padding", () => {
     expect(PROMPT_TEMPLATE_CATALOG.story_system.defaultContent).toContain("The length range is a soft pacing goal, not a requirement.");
     expect(PROMPT_TEMPLATE_CATALOG.story_recovery_output_limit.defaultContent).toContain("soft pacing goal");

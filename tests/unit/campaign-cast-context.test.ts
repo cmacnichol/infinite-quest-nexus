@@ -44,6 +44,7 @@ describe("captured cast context", () => {
   it("selects an alias with complete dated fields and exact serialized token accounting", () => {
     const result = select(fixture());
     expect(result.records.map((record) => record.characterId)).toEqual([id(1)]);
+    expect(result.explanation.selected).toEqual([{ characterId: id(1), name: "Mara", reason: "direct_reference" }]);
     expect(result.records[0]!.fields).toEqual(expect.arrayContaining([
       expect.objectContaining({ field: "appearance.description", value: "blue eyes", authority: "observation", evidenceId: id(11) }),
       expect.objectContaining({ field: "state.location", value: "the gate" })
@@ -78,6 +79,7 @@ describe("captured cast context", () => {
     expect(result.omittedFieldCount).toBeGreaterThan(0);
     const zero = select(snapshot, 0);
     expect(zero.records).toEqual([]); expect(zero.content).toBe(""); expect(zero.estimatedTokens).toBe(0);
+    expect(zero.explanation.omitted).toContainEqual({ characterId: id(1), reason: "budget" });
   });
   it("excludes ignored and duplicate protagonist cards and does not resolve a shared alias", () => {
     const input = fixture();

@@ -28,6 +28,7 @@ const securitySettingNames = [
   "SYSTEM_ARCHIVE_ENABLED",
   "CAST_EDITING_ENABLED",
   "CAST_DISCOVERY_ENABLED",
+  "CAST_AUTO_MATCH_ENABLED",
   "CAST_CONTEXT_ENABLED",
   "HISTORY_COVERAGE_ENABLED",
   "CAST_BACKFILL_ENABLED",
@@ -55,12 +56,13 @@ describe("runtime security configuration", () => {
     minimumEnvironment();
     expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castBackfillEnabled: false, historyCoverageEnabled: true });
     process.env.CAST_CONTEXT_ENABLED = "true";
+    process.env.CAST_AUTO_MATCH_ENABLED = "true";
     process.env.CAST_BACKFILL_ENABLED = "true";
-    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castBackfillEnabled: false });
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castAutoMatchEnabled: false, castBackfillEnabled: false });
     process.env.CAST_EDITING_ENABLED = "true";
     expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false });
     process.env.CAST_DISCOVERY_ENABLED = "true";
-    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: true, castBackfillEnabled: true });
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: true, castAutoMatchEnabled: true, castBackfillEnabled: true });
     process.env.CAST_CONTEXT_ENABLED = "false";
     expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castDiscoveryEnabled: true });
     process.env.HISTORY_COVERAGE_ENABLED = "false";

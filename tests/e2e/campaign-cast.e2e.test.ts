@@ -162,13 +162,14 @@ for (const width of [1280, 390]) test(`legacy filters handled identities from ma
   expect(api.writes).toHaveLength(1);
 });
 
-async function fixture(page: Page, deferredDetails = false) {
+async function fixture(page: Page, deferredDetails = false, conflictFixture = false) {
   let revision = 0, enabled = true, conflict = false, trackingComplete = false, trackingUnavailable = false, pendingMatch = true;
   let resolvedCharacterId: string | undefined;
   const characters: any[] = [{ id: protagonistId, name: "Iven", aliases: [], origin: { kind: "protagonist", selectedCharacterId: null },
     profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 0, lastObservedTurn: 1 }];
+  if (conflictFixture) characters.push({ id: candidateId, name: "Mara", aliases: [], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 1, lastObservedTurn: 1 });
   const overrides = new Map<string, Record<string, string>>();
-  const writes: any[] = [];
+  const writes: any[] = [], profileWrites: any[] = [];
   const campaign = { id: campaignId, title: "Cast fixture", status: "active", activeTurnNumber: 1, createdAt: "2026-09-16T12:00:00.000Z", updatedAt: "2026-09-16T12:00:00.000Z", worldId, worldTitle: "Fixture world",
     worldVersionId: versionId, worldVersionNumber: 1, latestWorldVersionNumber: 1, worldUpdateAvailable: false,
     selectedCharacterId: null, selectedCharacterName: "", characterSnapshot: null, characterProfile: null,
@@ -183,6 +184,8 @@ async function fixture(page: Page, deferredDetails = false) {
     const request = route.request(), url = new URL(request.url()), path = url.pathname;
     if (path.includes("/cast")) {
       const id = path.split("/cast/")[1];
+      if (id === "context-preview") return send(route, { mode: "estimate", boundary, castRevision: revision, budgetTokens: 500, usedTokens: 25, coverage: { fromTurn: 1, throughTurn: 1, baseTurn: 1, current: true }, selected: [{ characterId: protagonistId, name: "Iven", reason: "pinned" }], omitted: [{ characterId: candidateId, reason: "budget" }], disabledReason: null });
+      if (id === "workspace-status") return send(route, { revision, boundary, capabilities: { editing: enabled, discovery: true, autoMatch: true, backfill: true, context: true }, contextDisabledReason: null, counts: { identities: pendingMatch ? 1 : 0, details: 0, conflicts: 1 }, tracking: { enabled: true, state: trackingComplete ? "complete" : "catching_up", activeTurnNumber: 1, coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: pendingMatch ? 1 : 0, firstGap: trackingComplete ? null : { turnNumber: 1, jobId: null, status: "missing", diagnosticCode: null } } });
       if (id === "discovery") return trackingUnavailable ? send(route, {}, 503) : send(route, {
         enabled: true, state: trackingComplete ? "complete" : "catching_up", activeTurnNumber: 1,
         coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: pendingMatch ? 1 : 0,
@@ -225,6 +228,7 @@ async function fixture(page: Page, deferredDetails = false) {
       }
       if (id) {
         const person = characters.find((c) => c.id === id);
+        if (conflictFixture && id === candidateId) return send(route, { character: person, revision, boundary, capabilities: { castEditing: enabled }, observations: ["guide", "guard"].map((value, index) => ({ id: index ? "77777777-7777-4777-8777-777777777778" : "77777777-7777-4777-8777-777777777777", characterId: id, field: "story.role", value, mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: turn.id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: turn.narration } })), overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null });
         return send(route, { character: person, revision, boundary, capabilities: { castEditing: enabled }, observations: id === protagonistId ? [] : [{
           id: "77777777-7777-4777-8777-777777777777", characterId: id, field: "story.role", value: "gatekeeper", mode: "claim",
           speakerCharacterId: protagonistId, supersedesObservationId: null,
@@ -234,10 +238,10 @@ async function fixture(page: Page, deferredDetails = false) {
           identityEvents: [], unresolvedCandidateIds: [], editorDestination: id === protagonistId ? `/api/v1/campaigns/${campaignId}/character-profile` : null });
       }
       const query = url.searchParams.get("query")?.toLowerCase() ?? "";
-      const matches = characters.filter((c) => [c.name, ...c.aliases].some((name: string) => name.toLowerCase().includes(query)));
+      const matches = characters.filter((c) => (url.searchParams.get("filter") !== "conflicts" || c.id === (conflictFixture ? candidateId : protagonistId)) && [c.name, ...c.aliases].some((name: string) => name.toLowerCase().includes(query)));
       const cursor = url.searchParams.get("cursor"), offset = cursor ? matches.findIndex((person) => person.id === cursor) + 1 : 0;
       const page = matches.slice(offset, offset + 2);
-      return send(route, { revision, boundary, characters: page,
+      return send(route, { revision, boundary, characters: page, attention: page.filter((person) => person.id === protagonistId).map((person) => ({ characterId: person.id, review: true, conflict: true, reviewCount: 2, conflictCount: 1 })),
         nextCursor: offset + page.length < matches.length ? page.at(-1).id : null, capabilities: { castEditing: enabled } });
     }
     if (path === "/api/v1/session") return send(route, { user: { id: worldId, displayName: "Fixture owner", settings: { autoSubmitTurnChoices: true, continuousReading: false, defaultTurnControlStyle: "flexible_action" } }, authentication: "deferred" });
@@ -248,21 +252,22 @@ async function fixture(page: Page, deferredDetails = false) {
     if (path.endsWith("/turns")) return send(route, { campaignId, turns: [turn], nextCursor: null });
     if (path.endsWith("/state")) return send(route, { campaignId, activeTurnNumber: 1, revision: 1, viewedTurnNumber: 1, isCurrent: true, updatedAt: "2026-09-16T12:00:00.000Z", canonicalFacts: [], openThreads: [], continuitySummary: "", scratchpad: "", rpgStats: [], trackers: [], eventTriggers: [], pendingEventTriggers: [], recordedResolution: null });
     if (path.endsWith("/story-memory")) return send(route, { level: "standard", reviewMode: "observe", availableLevels: ["off", "standard", "enhanced", "max"] });
-    if (path.endsWith("/character-profile")) return send(route, { campaignId, name: "Iven", profile: {}, revision: 0,
-      characterId: null, storedProfile: null, inheritedFromSnapshot: false, legacyCharacterText: "Iven", rpgStats: [], defaultTriggers: [] });
+    if (path.endsWith("/character-profile")) { const input = request.method() === "PUT" ? request.postDataJSON() : null; if (input) { profileWrites.push(input); return send(route, { campaignId, name: input.name, profile: input.profile, revision: 1 }); } return send(route, { campaignId, name: input?.name ?? "Iven", profile: input?.profile ?? {}, revision: input ? 1 : 0,
+      characterId: null, storedProfile: null, inheritedFromSnapshot: false, legacyCharacterText: "Iven", rpgStats: [], defaultTriggers: [] }); }
     if (path.endsWith("/memory/metrics")) return send(route, { turns: 1, estimatedCompleteHistoryTokens: 10, memoryCount: 0, embeddedMemories: 0, semanticHealth: { indexedMemories: 0, jobStatus: "idle" } });
     if (path.endsWith("/cost-summary")) return send(route, { hasReportedCosts: false, totals: [] });
     if (path.endsWith("/memory/embedding-config")) return send(route, { enabled: false, retrievalImplementation: "disabled", retrievalShadowEnabled: false, model: null, documentPrefix: null, queryPrefix: null, batchSize: 1 });
     if (path.endsWith("/illustration-config")) return send(route, { enabled: false, sourcePolicy: "off", matchingScope: "world", confidenceProfile: "balanced", repetitionWindow: 5, maxAttempts: 3, segmentWordCount: 500, imagesPerSegment: 1, segmentPromptMode: "direct" });
     if (path.endsWith("/illustrations/segments")) return send(route, { segments: [] });
+    if (path.includes("context-preview") && url.searchParams.get("view") === "characters") return send(route, { mode: "estimate", boundary, castRevision: revision, budgetTokens: 500, usedTokens: 25, coverage: { fromTurn: 1, throughTurn: 1, baseTurn: 1, current: true }, selected: [{ characterId: protagonistId, name: "Iven", reason: "pinned" }], omitted: [{ characterId: candidateId, reason: "budget" }], disabledReason: null });
     if (path.includes("context-preview")) return send(route, { selectedCompression: "none", retrieval: { mode: "local" }, budget: { estimatedSelectedTokens: 0, configuredTokens: 32000, truncated: false }, scopes: { chronicle: [] } });
     return send(route, {});
   });
   const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
-  await page.route(`**/story/${campaignId}`, (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.route(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/story/${campaignId}`, (route) => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/story/${campaignId}`);
   await expect(page.locator("#storyTitle")).toHaveText("Cast fixture");
-  return { characters, writes, conflict: () => { conflict = true; }, disable: () => { enabled = false; },
+  return { characters, writes, profileWrites, conflict: () => { conflict = true; }, disable: () => { enabled = false; },
     publishDiscovery: () => {
       revision++; trackingComplete = true; pendingMatch = false;
       let person = characters.find((character) => character.origin.kind === "discovered");
@@ -292,6 +297,7 @@ test("legacy renders completed discovery and preserves edited and ignored charac
   await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click();
   await expect(dialog).toContainText("Character tracking is up to date");
   await dialog.getByRole("button", { name: "Mara", exact: true }).click();
+  await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
   await expect(dialog.getByLabel("Appearance", { exact: true })).toHaveValue("blue eyes");
   await dialog.getByLabel("Appearance", { exact: true }).fill("green eyes");
   await dialog.getByLabel("Ignore character", { exact: true }).check();
@@ -301,6 +307,7 @@ test("legacy renders completed discovery and preserves edited and ignored charac
   await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
   await expect(dialog).toContainText("Ignored");
   await dialog.getByRole("button", { name: "Mara", exact: true }).click();
+  await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
   await expect(dialog.getByLabel("Appearance", { exact: true })).toHaveValue("green eyes");
   await expect(dialog.getByLabel("Ignore character", { exact: true })).toBeChecked();
   expect(api.writes).toHaveLength(1);
@@ -355,6 +362,7 @@ for (const width of [1440, 390]) test(`legacy cast add, edit, reset, conflict an
   await expect(dialog.getByRole("button", { name: "Mara Reed", exact: true })).toBeVisible();
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/roster-${width}.png` });
   await dialog.getByRole("button", { name: "Mara Reed", exact: true }).click();
+  await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
   api.disable();
   await dialog.getByLabel("Name", { exact: true }).fill("Kept draft");
   await dialog.getByRole("button", { name: "Save character", exact: true }).click();
@@ -426,7 +434,7 @@ test("legacy cast creates separate same-name people after a conflict and links t
   const api = await fixture(page); await open(page);
   const dialog = page.locator("#campaignCastDialog");
   await dialog.getByRole("button", { name: "Iven", exact: true }).click();
-  await expect(dialog.getByLabel("Name", { exact: true })).toBeDisabled();
+  await expect(dialog).toContainText("This is your main character");
   await dialog.getByRole("button", { name: "Edit main character", exact: true }).click();
   await expect(page.locator("#editCharacterProfileDialog")).toBeVisible();
   await page.locator("#btnCancelEditCharacterProfile").click();
@@ -459,4 +467,105 @@ test("legacy cast creates separate same-name people after a conflict and links t
   await dialog.getByRole("button", { name: "Turn 1", exact: true }).click();
   await expect(dialog).not.toBeVisible();
   await expect(page.locator("#storyArea")).toContainText("Mara waits at the gate");
+});
+
+for (const surface of ["legacy", "next"] as const) for (const width of [1440, 390]) test(`shared character sheet and profile fields ${surface} ${width}`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 1000 }); const api = await fixture(page); api.characters.push({ id: candidateId, name: "Mara", aliases: [], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 1, lastObservedTurn: 1 });
+  if (surface === "legacy") await open(page);
+  else {
+    await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`);
+    await page.locator("[data-campaign-tools] summary").click();
+    await page.locator("[data-tool-action='open-characters']").click();
+  }
+  const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("conflicts: 1");
+  await dialog.getByRole("button", { name: "Review conflicts", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toBeVisible();
+  if (surface === "next") await expect(dialog).toContainText("Needs review (2)");
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/roster-${surface}-${width}.png` });
+  await dialog.getByRole("button", { name: "Likely included for this input", exact: true }).click();
+  await dialog.getByRole("button", { name: "Refresh estimate", exact: true }).click(); await expect(dialog).toContainText("Estimate at turn 1");
+  await expect(dialog).toContainText("Estimated usage: 25 of 500 tokens");
+  await expect(dialog).toContainText("Included: Iven · pinned");
+  await expect(dialog).toContainText("Omitted: Mara · budget");
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/context-${surface}-${width}.png` });
+  await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
+  await dialog.getByRole("button", { name: "Iven", exact: true }).click();
+  await expect(dialog).toContainText("Unknown");
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/sheet-${surface}-${width}.png` });
+  await dialog.getByRole("button", { name: "Edit main character", exact: true }).click();
+  // The replacement client edits the main character inside the Characters sheet.
+  const profile = surface === "legacy" ? page.locator("#editCharacterProfileDialog") : dialog;
+  await expect(profile).toBeVisible(); await expect(profile.getByText("Pronouns", { exact: true })).toBeVisible();
+  await expect(profile.getByText("Profile JSON", { exact: true })).toHaveCount(0);
+  if (screenshotRoot) await profile.screenshot({ path: `${screenshotRoot}/profile-${surface}-${width}.png` });
+  await profile.getByLabel("Pronouns", { exact: true }).fill("they/them");
+  let releaseSave: (() => void) | undefined;
+  if (surface === "next" && width === 1440) {
+    const gate = new Promise<void>(resolve => { releaseSave = resolve; });
+    await page.route(`**/character-profile`, async route => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      await gate; return route.fallback();
+    });
+  }
+  await profile.getByRole("button", { name: /Save character profile/i }).click();
+  if (releaseSave) {
+    await expect(profile.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
+    await expect(profile.getByRole("button", { name: "Close", exact: true })).toBeDisabled();
+    await expect(profile.getByLabel("Pronouns", { exact: true })).toBeDisabled();
+    releaseSave();
+  }
+  await expect.poll(() => api.profileWrites.length).toBe(1);
+  expect(api.profileWrites[0].profile.identity.pronouns).toBe("they/them");
+  if (surface === "next") { await expect(dialog.getByRole("button", { name: "Edit main character", exact: true })).toBeVisible(); await expect(dialog).toContainText("they/them"); }
+});
+
+for (const surface of ["legacy", "next"] as const) test(`shared review and undo ${surface}`, async ({ page }) => {
+  await fixture(page, true);
+  const eventId = "99999999-9999-4999-8999-999999999999", boundary = { turnNumber: 1, timelineRevision: 0 };
+  const writes: any[] = []; let detached = false;
+  const send = (route: Route, value: unknown) => route.fulfill({ contentType: "application/json", body: JSON.stringify(value) });
+  await page.route(`**/cast/${protagonistId}`, route => send(route, { revision: 0, boundary, capabilities: { castEditing: true }, character: { id: protagonistId, name: "Iven", aliases: [], origin: { kind: "protagonist", selectedCharacterId: null }, profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 0, lastObservedTurn: 1 }, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null, autoMatches: detached ? [] : [{ eventId, characterId: protagonistId, basis: "unique_name", sourceRanges: [{ turnId: "55555555-5555-4555-8555-555555555555", narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", start: 0, end: 4 }], observationIds: [], turnNumber: 1, quote: "Mara waits at the gate." }] }));
+  await page.route(`**/cast/${protagonistId}/attachments/${eventId}/detach`, route => { writes.push(route.request().postDataJSON()); detached = true; return send(route, { revision: 1, boundary, detachedEventId: eventId, character: { id: protagonistId, name: "Iven", aliases: [], origin: { kind: "protagonist", selectedCharacterId: null }, profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 0, lastObservedTurn: 1 } }); });
+  let remainingDetails = 2; const decisions: any[] = [];
+  await page.route("**/cast/candidates?**", route => {
+    const url = new URL(route.request().url()); if (url.searchParams.get("view") !== "details") return route.fallback();
+    return send(route, { revision: 0, boundary, nextCursor: null, candidates: remainingDetails ? [{ id: candidateId, reason: "detail_needs_review", resolvedCharacterId: protagonistId, proposal: { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote: "Mara waits at the gate." }], observations: [] }, source: { turnId: "55555555-5555-4555-8555-555555555555", turnNumber: 1, narrationRevision: 0 }, details: [{ observationIndex: 2 - remainingDetails, field: "story.role", value: "gatekeeper", quote: "Mara waits at the gate.", reason: "unverified", sourceHash: "a".repeat(64) }] }] : [] });
+  });
+  await page.route(`**/cast/candidates/${candidateId}/details/resolve`, route => { const input = route.request().postDataJSON(); decisions.push(input); remainingDetails--; return send(route, { revision: 0, boundary, character: { id: protagonistId, name: "Iven", aliases: [], origin: { kind: "protagonist", selectedCharacterId: null }, profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 0, lastObservedTurn: 1 }, candidateId, observationIndex: input.observationIndex, disposition: input.action }); });
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
+  await dialog.getByRole("button", { name: "Review character matches", exact: true }).click();
+  await expect(dialog).toContainText("Mara");
+  await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
+  await dialog.getByRole("button", { name: "Review character details", exact: true }).click();
+  await expect(dialog.locator("textarea").first()).toHaveValue("gatekeeper"); await dialog.getByRole("button", { name: "Confirm detail", exact: true }).click();
+  await expect.poll(() => decisions.length).toBe(1); await dialog.getByRole("button", { name: "Dismiss detail", exact: true }).click();
+  await expect.poll(() => decisions.length).toBe(2); expect(decisions.map(item => item.action)).toEqual(["confirm", "dismiss"]);
+  await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
+  await dialog.getByRole("button", { name: "Iven", exact: true }).click();
+  if (surface === "next") { const sources = dialog.locator("details").first(); await sources.locator("summary").click(); await expect(sources).toHaveAttribute("open", ""); await page.waitForTimeout(5500); await expect(sources).toHaveAttribute("open", ""); }
+  await dialog.getByRole("button", { name: "Not this character", exact: true }).click();
+  await expect.poll(() => writes.length).toBe(1); await expect(dialog.getByRole("button", { name: "Not this character", exact: true })).toHaveCount(0);
+});
+
+for (const surface of ["legacy", "next"] as const) test(`character accessibility at 200 percent ${surface}`, async ({ page }) => {
+  await page.setViewportSize({ width: 720, height: 500 }); await page.emulateMedia({ reducedMotion: "reduce" }); await fixture(page);
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
+  await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toBeVisible();
+  expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/zoom-${surface}.png` });
+  await dialog.getByRole("button", { name: "Close", exact: true }).click(); await expect(dialog).not.toBeVisible();
+  if (surface === "legacy") await expect(page.getByRole("button", { name: "Setup", exact: true })).toBeFocused();
+  else await expect(page.locator("[data-campaign-tools] summary")).toBeFocused();
+});
+
+for (const surface of ["legacy", "next"] as const) test(`conflict field can be corrected ${surface}`, async ({ page }) => {
+  await fixture(page, false, true);
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
+  await dialog.getByRole("button", { name: "Review conflicts", exact: true }).click(); await expect(dialog.getByRole("button", { name: "Mara", exact: true })).toBeVisible(); await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Mara", exact: true }).click(); await expect(dialog).toContainText("Conflicting observations"); await dialog.getByRole("button", { name: "Edit character", exact: true }).click(); if (surface === "legacy") await dialog.getByText("Story profile", { exact: true }).click(); await dialog.getByLabel("Role", { exact: true }).fill("guide"); await dialog.getByRole("button", { name: "Save character", exact: true }).click();
 });

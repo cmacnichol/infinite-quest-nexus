@@ -28,3 +28,8 @@ When an effective default text model is configured:
 5. Select **Add character** or **Save changes**.
 
 Generation never persists the candidate automatically. Unsaved premise and canon editor values may guide the candidate as bounded generation-only context. If either is empty, Nexus shows **World context is incomplete** and requires **Go back** or **Generate anyway**. If generation cannot be validated, your prompt and candidate fields remain available to review and retry; validated failures identify the affected stage or field and include a correlation ID. If the text provider is unavailable, use **Provider Setup** to open `/nexus/#providers` before retrying.
+
+
+## World characters and campaign Characters
+
+Published world characters are reusable starting canon. Story's **Characters** workspace manages the campaign's protagonist and supporting cast separately. Campaign corrections and discoveries do not edit the world draft or another campaign. Changing a world draft does not update existing campaign snapshots; publish and explicitly migrate when that is intended.

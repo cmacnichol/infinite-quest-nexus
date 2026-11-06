@@ -210,11 +210,13 @@ describe("Story campaign tools", () => {
     open?.click();
     await settle();
     const dialog = root.querySelector<HTMLElement>("[data-story-tool-dialog]");
-    const name = dialog?.querySelector<HTMLInputElement>("[data-character-profile-name]");
-    const profile = dialog?.querySelector<HTMLTextAreaElement>("[data-character-profile-json]");
+    const name = dialog?.querySelector<HTMLInputElement>("[data-character-profile-field='name']");
+    const profile = dialog?.querySelector<HTMLTextAreaElement>("[data-character-profile-field='unclassifiedNotes']");
     if (!name || !profile) throw new Error("Character profile editor is missing.");
     name.value = "Mira Vale";
-    profile.value = '{"unclassifiedNotes":"Keeps the repaired lighthouse key."}';
+    name.dispatchEvent(new document.defaultView!.Event("input"));
+    profile.value = "Keeps the repaired lighthouse key.";
+    profile.dispatchEvent(new document.defaultView!.Event("input"));
     dialog.querySelector<HTMLButtonElement>("[data-action='save-character-profile']")?.click();
     await settle();
 
@@ -245,11 +247,11 @@ describe("Story campaign tools", () => {
     root.querySelector<HTMLButtonElement>("[data-tool-action='edit-character-profile']")?.click();
     oldResponse.resolve({ campaignId, revision: 4, name: "Stale Mira", profile: {} });
     await settle();
-    expect(root.querySelector<HTMLInputElement>("[data-character-profile-name]")).toBeNull();
+    expect(root.querySelector<HTMLInputElement>("[data-character-profile-field='name']")).toBeNull();
 
     currentResponse.resolve({ campaignId, revision: 5, name: "Current Mira", profile: {} });
     await settle();
-    expect(root.querySelector<HTMLInputElement>("[data-character-profile-name]")?.value).toBe("Current Mira");
+    expect(root.querySelector<HTMLInputElement>("[data-character-profile-field='name']")?.value).toBe("Current Mira");
     mounted.dispose();
   });
 

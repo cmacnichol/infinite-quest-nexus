@@ -8,21 +8,24 @@ export async function registerCampaignCastRoutes(app: FastifyInstance, options: 
 }) {
   await registerCampaignCastScanRoutes(app, { ...(options.application.scans ? { application: options.application.scans } : {}), resolveOwner: options.resolveOwner });
   const base = "/api/v1/campaigns/:campaignId/cast";
-  const params = z.object({ campaignId: z.uuid(), characterId: z.uuid().optional(), candidateId: z.uuid().optional(), jobId: z.uuid().optional() });
-  for (const [method, path] of [["GET", base], ["POST", base], ["GET", `${base}/discovery`], ["GET", `${base}/candidates`],
-    ["POST", `${base}/discovery/:jobId/retry`], ["POST", `${base}/candidates/:candidateId/resolve`], ["GET", `${base}/:characterId`], ["PATCH", `${base}/:characterId`]] as const) {
+  const params = z.object({ campaignId: z.uuid(), characterId: z.uuid().optional(), candidateId: z.uuid().optional(), jobId: z.uuid().optional(), eventId: z.uuid().optional() });
+  for (const [method, path] of [["GET", base], ["POST", base], ["GET", `${base}/workspace-status`], ["GET", `${base}/discovery`], ["GET", `${base}/candidates`],
+    ["POST", `${base}/:characterId/attachments/:eventId/detach`], ["POST", `${base}/discovery/:jobId/retry`], ["POST", `${base}/candidates/:candidateId/details/resolve`], ["POST", `${base}/candidates/:candidateId/resolve`], ["GET", `${base}/:characterId`], ["PATCH", `${base}/:characterId`]] as const) {
     app.route({ method, url: path, bodyLimit: 64 * 1024, handler: async (request, reply) => {
       try {
         const ids = params.parse(request.params);
         const scope = { ...await options.resolveOwner(), campaignId: ids.campaignId };
         const capabilities = { castEditing: options.enabled };
+        if (path === `${base}/workspace-status`) return await options.application.workspaceStatus(scope);
         if (path === `${base}/discovery`) return await options.application.discoveryStatus(scope);
         if (path === `${base}/candidates`) return await options.application.candidates(scope, request.query as never);
         if (method === "GET") return ids.characterId
           ? { ...await options.application.detail(scope, ids.characterId), capabilities }
           : { ...await options.application.list(scope, request.query as never), capabilities };
         if (!options.enabled) throw new CampaignCastError("cast_editing_disabled");
+        if (ids.eventId) return await options.application.detachAttachment(scope, ids.characterId!, ids.eventId, request.body as never);
         if (ids.jobId) return await options.application.retryDiscovery(scope, ids.jobId, request.body as never);
+        if (path === `${base}/candidates/:candidateId/details/resolve`) return await options.application.resolveDetail(scope, ids.candidateId!, request.body as never);
         if (ids.candidateId) return await options.application.resolveCandidate(scope, ids.candidateId, request.body as never);
         if (method === "POST") return reply.code(201).send(await options.application.create(scope, request.body as never));
         return await options.application.edit(scope, ids.characterId!, request.body as never);

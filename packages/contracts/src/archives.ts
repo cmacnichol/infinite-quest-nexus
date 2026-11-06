@@ -4,7 +4,7 @@ import { portableCampaignCastSchema, portableCastReferences } from "./campaign-c
 /** Shared preview/commit boundary for the optional versioned cast extension. */
 export function validateCampaignArchiveCast(value: unknown, turns: ReadonlySet<string>): void {
   if (value === undefined) return;
-  if (value && typeof value === "object" && "formatVersion" in value && value.formatVersion !== 1) {
+  if (value && typeof value === "object" && "formatVersion" in value && value.formatVersion !== 1 && value.formatVersion !== 2) {
     throw new Error("cast_archive_version_unsupported");
   }
   const cast = portableCampaignCastSchema.parse(value);
