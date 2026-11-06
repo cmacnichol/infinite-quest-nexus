@@ -34,6 +34,7 @@ import {
 } from "./story-generation-monitor.js";
 import { handleStoryEscape } from "./story-keyboard.js";
 import { bindLegacyTabGroup } from "./legacy-tabs.js";
+import { createCharacterProfileForm } from "./character-profile-form.js";
 import { createLegacyCastPanel } from "./campaign-cast-panel.js";
 import { createStoryStreamRenderer } from "./story-stream-renderer.js";
 import {
@@ -148,6 +149,7 @@ const readerHistoryApi = composition.readerHistory;
 const readerPositionStore = composition.readerPositions;
 const castPanel = composition.cast ? createLegacyCastPanel({ api: composition.cast,
   campaignId: () => state.campaignId, generationActive: () => responseGenerationIsActive(),
+  getProfile: (campaign) => apiClient.campaigns.getCharacterProfile(campaign),
   openProtagonist: () => { void openEditCharacterProfile(); },
   navigateToTurn: async (turn) => { await ensureCompleteTurnHistory(); navigateToTurn(turn); }
 }) : null;
@@ -5867,18 +5869,18 @@ async function openEditCharacterProfile() {
     showBusy("Loading campaign character profile…");
     const profile = await apiClient.campaigns.getCharacterProfile(campaignId);
     if (requestToken !== characterProfileEditRequestToken || state.campaignId !== campaignId || dialog.open) return;
-    const name = $("editCharacterProfileName");
-    const editor = $("editCharacterProfileJson");
+    const fields = $("editCharacterProfileFields");
     const status = $("editCharacterProfileStatus");
-    if (!name || !editor) return;
+    if (!fields) return;
     state.characterProfileEditSession = {
       id: `edit-character-profile:${++nextCharacterProfileEditSessionId}`,
       campaignId,
       revision: profile.revision,
-      saving: false
+      saving: false,
+      form: null
     };
-    name.value = profile.name;
-    editor.value = JSON.stringify(profile.profile, null, 2);
+    fields.replaceChildren();
+    state.characterProfileEditSession.form = createCharacterProfileForm(fields, profile);
     if (status) status.textContent = `Editing character profile revision ${profile.revision}.`;
     openManagedModal(dialog);
     syncInputState();
@@ -5893,31 +5895,17 @@ async function openEditCharacterProfile() {
 
 async function saveEditCharacterProfile() {
   const session = state.characterProfileEditSession;
-  const name = $("editCharacterProfileName");
-  const editor = $("editCharacterProfileJson");
   const status = $("editCharacterProfileStatus");
-  if (!session || session.saving || !name || !editor) return;
-
-  let profile;
-  try {
-    profile = JSON.parse(editor.value);
-  } catch (_) {
-    if (status) status.textContent = "Profile JSON must be valid before it can be saved.";
-    return;
-  }
-  if (!profile || Array.isArray(profile) || typeof profile !== "object") {
-    if (status) status.textContent = "Profile JSON must be an object.";
-    return;
-  }
+  if (!session || session.saving || !session.form) return;
+  let update;
+  try { update = session.form.update(); }
+  catch (error) { if (status) status.textContent = `Check the profile fields: ${error.message}`; return; }
 
   session.saving = true;
   try {
     showBusy("Saving character profile…");
     const saved = await apiClient.campaigns.updateCharacterProfile(session.campaignId, {
-      expectedRevision: session.revision,
-      name: name.value,
-      profile,
-      editSource: "manual"
+      ...update
     });
     if (state.campaignId !== session.campaignId || state.characterProfileEditSession?.id !== session.id) return;
     state.playerConfig = {

@@ -4,6 +4,22 @@ import Fastify from "fastify";
 import { registerCampaignCastRoutes } from "../../services/api/src/campaign-cast-routes.js";
 import { apiErrorEnvelopeSchema } from "../../packages/contracts/src/http.js";
 describe("cast browser adapter", () => {
+  it("reports unknown new capabilities when connected to an older server", async () => {
+    const boundary = { turnNumber: 0, timelineRevision: 0 };
+    let discoveryAvailable = true;
+    const api = createCampaignCastApi({ basePath: "/api/v1", session: { authorization: async () => ({}), onUnauthorized: async () => false },
+      fetchImpl: async url => {
+        const path = String(url);
+        if (path.endsWith("/workspace-status") || !discoveryAvailable && path.endsWith("/discovery")) return new Response("{}", { status: 404 });
+        const body = path.endsWith("/discovery")
+          ? { enabled: false, activeTurnNumber: 0, coverageStartTurn: null, trackedThroughTurn: null, state: "disabled", unresolvedCount: 0, firstGap: null }
+          : { revision: 0, boundary, characters: [], nextCursor: null, capabilities: { castEditing: true } };
+        return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+      } });
+    expect(await api.workspaceStatus("campaign")).toMatchObject({ legacyServer: true, capabilities: { editing: true, discovery: null, autoMatch: null, backfill: null, context: null }, counts: { identities: null, details: null, conflicts: null } });
+    discoveryAvailable = false;
+    expect(await api.workspaceStatus("campaign")).toMatchObject({ tracking: null, capabilities: { editing: true, discovery: null } });
+  });
   it("requests the filtered matches view", async () => {
     let requested = "";
     const api = createCampaignCastApi({ basePath: "/api/v1", session: { authorization: async () => ({}), onUnauthorized: async () => false },

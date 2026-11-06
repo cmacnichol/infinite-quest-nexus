@@ -1,8 +1,9 @@
 import type { MemoryApplication } from "../../../packages/application/src/memory/index.js";
-import { chronicleHealthSchema, type MemoryContextQuery } from "../../../packages/contracts/src/memory.js";
+import { castContextExplanationSchema, type CastContextPreviewRequest, type CastContextExplanation, chronicleHealthSchema, type MemoryContextQuery } from "../../../packages/contracts/src/memory.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 
 export type MemoryApplicationAdapter = Readonly<{
+  charactersPreview(ownerUserId: string, campaignId: string, request: CastContextPreviewRequest): Promise<CastContextExplanation>;
   metrics(ownerUserId: string, campaignId: string): Promise<Record<string, unknown>>;
   contextPreview(ownerUserId: string, campaignId: string, request: MemoryContextQuery): Promise<Record<string, unknown>>;
   reindex(ownerUserId: string, campaignId: string): Promise<Readonly<{ jobId: string; status: "queued" }>>;
@@ -27,8 +28,14 @@ async function campaignScope(pool: DatabasePool, ownerUserId: string, campaignId
 export function createMemoryApplicationAdapter(
   pool: DatabasePool,
   application: MemoryApplication,
+  characterPreview?: (ownerUserId: string, campaignId: string, request: CastContextPreviewRequest) => Promise<CastContextExplanation>,
 ): MemoryApplicationAdapter {
   return {
+    async charactersPreview(ownerUserId, campaignId, request) {
+      await campaignScope(pool, ownerUserId, campaignId);
+      if (!characterPreview) throw Object.assign(new Error("Character preview unavailable."), { statusCode: 503 });
+      return castContextExplanationSchema.parse(await characterPreview(ownerUserId, campaignId, request));
+    },
     async metrics(ownerUserId, campaignId) {
       const metrics = await application.getMetrics(await campaignScope(pool, ownerUserId, campaignId));
       if ("failure" in metrics) return metrics;

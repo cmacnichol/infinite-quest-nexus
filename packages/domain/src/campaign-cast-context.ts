@@ -7,8 +7,13 @@ import { estimateTokens } from "./text.js";
 export type CastContextField = { field: CastField; value: string; authority: "user" | "observation";
   evidenceId: string; evidence: CastEvidence };
 export type CastContextRecord = { characterId: string; revision: number; content: string; fields: CastContextField[] };
+export type CastContextReason = "direct_reference" | "open_thread" | "pinned" | "recent_observation" | "recent_mention";
+export type CastContextExplanation = { selected: { characterId: string; name: string; reason: CastContextReason }[]; omitted: { characterId: string; reason: "budget" | "ignored" | "ambiguous" | "not_relevant" }[] };
+export function castContextTokenBudget(contextHeadroom: number, requestHeadroom = contextHeadroom): number {
+  return Math.min(3000, Math.floor(0.10 * Math.max(0, Math.min(contextHeadroom, requestHeadroom))));
+}
 export type CastContextSelection = { records: CastContextRecord[]; content: string; estimatedTokens: number;
-  omittedCharacterIds: string[]; omittedFieldCount: number;
+  omittedCharacterIds: string[]; omittedFieldCount: number; explanation: CastContextExplanation;
   coverage: { fromTurn: number | null; throughTurn: number | null; baseTurn: number; current: boolean } };
 type CapturedReadonly<T> = T extends readonly (infer U)[] ? readonly CapturedReadonly<U>[]
   : T extends object ? { readonly [K in keyof T]: CapturedReadonly<T[K]> } : T;
@@ -33,16 +38,18 @@ export function selectCastContext(input: {
   const threads = input.openThreads.join("\n");
   const matched = (text: string) => new Set(findEntityReferences(text, catalog).map((entry) => entry.id));
   const directIds = matched(direct), threadIds = matched(threads);
+  const omitted: CastContextExplanation["omitted"] = snapshot.characters.filter((person) => person.ignored && person.origin.kind !== "protagonist").map((person) => ({ characterId: person.id, reason: "ignored" }));
   const ranked = snapshot.characters.filter((person) => person.origin.kind !== "protagonist" && !person.ignored).map((person) => {
     const key = `campaign:${person.id}`;
     const reference = catalog.find((entry) => entry.id === key)!;
     const ambiguousOnly = !directIds.has(key) && !threadIds.has(key)
       && findEntityReferences(`${direct}\n${threads}`, [reference]).length > 0;
     const rank = directIds.has(key) ? 0 : threadIds.has(key) ? 1 : person.pinned ? 2
-      : !ambiguousOnly && person.lastObservedTurn > 0 && person.lastObservedTurn >= baseTurn - 2 ? 3 : 4;
+      : !ambiguousOnly && Math.max(person.lastObservedTurn, person.lastMentionedTurn ?? 0) > 0 && Math.max(person.lastObservedTurn, person.lastMentionedTurn ?? 0) >= baseTurn - 2 ? 3 : 4;
+    if (rank === 4) omitted.push({ characterId: person.id, reason: ambiguousOnly ? "ambiguous" : "not_relevant" });
     return { person, rank };
   }).filter(({ rank }) => rank < 4).sort((a, b) => a.rank - b.rank
-    || b.person.lastObservedTurn - a.person.lastObservedTurn || a.person.id.localeCompare(b.person.id, "en"));
+    || Math.max(b.person.lastObservedTurn, b.person.lastMentionedTurn ?? 0) - Math.max(a.person.lastObservedTurn, a.person.lastMentionedTurn ?? 0) || a.person.id.localeCompare(b.person.id, "en"));
   const records: CastContextRecord[] = [];
   let omittedFieldCount = 0;
   const notice = current
@@ -93,6 +100,9 @@ export function selectCastContext(input: {
   }
   const content = records.length ? envelope() : "";
   const selected = new Set(records.map((record) => record.characterId));
-  return { records, content, estimatedTokens: estimateTokens(content), coverage, omittedFieldCount,
+  const reasons: CastContextReason[] = ["direct_reference", "open_thread", "pinned", "recent_observation"];
+  const explanation: CastContextExplanation = { selected: ranked.filter(({ person }) => selected.has(person.id)).map(({ person, rank }) => ({ characterId: person.id, name: person.name, reason: reasons[rank]! })),
+    omitted: [...omitted, ...ranked.filter(({ person }) => !selected.has(person.id)).map(({ person }) => ({ characterId: person.id, reason: "budget" as const }))] };
+  return { records, content, estimatedTokens: estimateTokens(content), coverage, omittedFieldCount, explanation,
     omittedCharacterIds: ranked.filter(({ person }) => !selected.has(person.id)).map(({ person }) => person.id) };
 }

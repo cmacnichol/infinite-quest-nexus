@@ -1,3 +1,5 @@
+import { logger } from "../../logger/src/index.js";
+import { recordAcceptedTurnCastMentions } from "./campaign-cast-mentions.js";
 import { captureGenerationActivity } from "./generation-activity.js";
 import { STORY_CONTEXT_BUDGET_TOKEN_VALUES } from "../../contracts/src/story-settings.js";
 import { applyCastBoundaryChange } from "./campaign-cast-lifecycle.js";
@@ -1856,6 +1858,8 @@ async function commitAcceptedTurn(
     campaignId: job.campaign_id,
     worldVersionId: campaign.world_version_id
   });
+  await recordAcceptedTurnCastMentions(client, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id }, turnId,
+    () => logger.warn({ event: "cast_lexical_mentions_failed", campaignId: job.campaign_id, turnId, code: "enrichment_failed" }));
   if (input.castDiscoveryExecution || input.castDiscoveryUnavailable) {
     await enqueueCastDiscoveryWithClient(client, { scope: { ownerUserId: job.owner_user_id, campaignId: job.campaign_id },
       turnId, ...(input.castDiscoveryExecution ? { execution: input.castDiscoveryExecution } : { admissionUnavailable: true }), enabled: true });

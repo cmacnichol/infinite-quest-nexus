@@ -1,6 +1,6 @@
 import { castDiscoveryIdentitySnapshotSchema, type CastDiscoveryIdentitySnapshot } from "../../contracts/src/campaign-cast-discovery.js";
 import type { CastEvidence, CastScope } from "../../contracts/src/campaign-cast.js";
-import { validateCastDiscovery } from "../../domain/src/campaign-cast-discovery.js";
+import { buildCastDiscoverySource, validateCastDiscovery } from "../../domain/src/campaign-cast-discovery.js";
 import { castDiscoveryWorldIdentities } from "../../domain/src/campaign-cast-world-identities.js";
 import { stableStringify } from "../../domain/src/text.js";
 import { applyCastBatchWithClient, initializeCastWithClient } from "./campaign-cast-repository.js";
@@ -19,18 +19,24 @@ export async function captureCastDiscoveryIdentities(client: DatabaseClient, sco
 
 export async function applyValidatedCastDiscovery(client: DatabaseClient, claim: CastDiscoveryClaim) {
   if (!claim.output) throw new Error("Discovery output is missing.");
+  const row = (await client.query("SELECT effective_narration,correction_revision FROM effective_turn_narrations WHERE turn_id=$1 AND campaign_id=$2 AND owner_user_id=$3", [claim.source.turnId, claim.scope.campaignId, claim.scope.ownerUserId])).rows[0];
+  if (!row || row.correction_revision !== claim.source.narrationRevision) throw new Error("Discovery source changed.");
+  const fullSource = buildCastDiscoverySource({ ...claim.source, narration: row.effective_narration });
+  if (fullSource.sourceHash !== claim.source.sourceHash) throw new Error("Discovery source changed.");
+  const sourceParagraphId = (id: string) => id.replace(/\.s\d+$/u, "");
   const captured = claim.identities;
+  const identityPolicy = claim.execution.admission?.identityPolicy ?? "strict";
   const first = validateCastDiscovery({ source: claim.source, output: claim.output, knownCharacters: captured.characters,
-    worldCharacters: captured.worldCharacters, worldVersionId: captured.worldVersionId });
+    worldCharacters: captured.worldCharacters, worldVersionId: captured.worldVersionId, identityPolicy });
   let current = await initializeCastWithClient(client, claim.scope);
   const rejected = [...first.rejected], unresolved = [...first.unresolved];
   const characterIds: string[] = [], observationIds: string[] = [];
   let accepted = 0;
   const evidence = (citation: { paragraphId: string; quote: string }): Extract<CastEvidence, { kind: "turn" }> => ({ kind: "turn", turnId: claim.source.turnId,
     turnNumber: claim.source.turnNumber, narrationRevision: claim.source.narrationRevision, sourceHash: claim.source.sourceHash,
-    paragraphId: citation.paragraphId, quote: citation.quote });
+    paragraphId: sourceParagraphId(citation.paragraphId), quote: citation.quote });
   for (const candidate of first.accepted) {
-    const { resolvedOrigin, ...proposal } = candidate;
+    const { resolvedOrigin, identityBasis, ...proposal } = candidate;
     const prior = captured.characters.find((person) => person.id === candidate.existingCharacterId);
     const now = current.characters.find((person) => person.id === candidate.existingCharacterId);
     if (prior && (!now || stableStringify([prior.name, prior.aliases, prior.origin]) !== stableStringify([now.name, now.aliases, now.origin]))) {
@@ -41,12 +47,23 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
     const reconciled = current.characters.map((person) => ({ ...person,
       profile: captured.characters.find((old) => old.id === person.id)?.profile ?? person.profile }));
     const checked = validateCastDiscovery({ source: claim.source, output: { version: 1, characters: [proposal] }, knownCharacters: reconciled,
-      worldCharacters: captured.worldCharacters, worldVersionId: captured.worldVersionId });
+      worldCharacters: captured.worldCharacters, worldVersionId: captured.worldVersionId, identityPolicy });
     if (!checked.accepted.length) { rejected.push(...checked.rejected); unresolved.push(...checked.unresolved); continue; }
     let characterId = candidate.existingCharacterId;
     if (!characterId && resolvedOrigin.kind === "world") {
       characterId = current.characters.find((person) => person.origin.kind === "world"
         && person.origin.worldVersionId === resolvedOrigin.worldVersionId && person.origin.entityId === resolvedOrigin.entityId)?.id ?? null;
+    }
+    const automatic = identityBasis === "unique_name" || identityBasis === "unique_world_name";
+    const sourceRanges = candidate.identityEvidence.flatMap((citation) => {
+      const paragraph = fullSource.paragraphs.find((item) => item.id === sourceParagraphId(citation.paragraphId));
+      const start = paragraph?.text.indexOf(citation.quote) ?? -1;
+      if (!paragraph || start < 0 || paragraph.text.indexOf(citation.quote, start + 1) !== -1) return [];
+      return [{ turnId: claim.source.turnId, narrationRevision: claim.source.narrationRevision,
+        sourceHash: claim.source.sourceHash, paragraphId: sourceParagraphId(citation.paragraphId), start, end: start + citation.quote.length }];
+    });
+    if (automatic && sourceRanges.length !== candidate.identityEvidence.length) {
+      unresolved.push({ candidate: proposal, code: "identity_changed" }); continue;
     }
     const key = `discovery:${claim.id}:${claim.chunkOrdinal}:${candidate.localKey}`;
     if (!characterId) {
@@ -59,7 +76,7 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
       { kind: "mention", characterId, evidence: evidence(candidate.identityEvidence[0]!) },
       ...candidate.observations.map((observation) => ({ kind: "observe" as const, characterId: characterId!, field: observation.field, value: observation.value,
         mode: observation.mode, speakerCharacterId: observation.speakerCharacterId, evidence: evidence(observation), supersedesObservationId: null }))
-    ] });
+    ] }, automatic ? { attachment: { characterId, basis: identityBasis, sourceRanges } } : {});
     observationIds.push(...receipt.observationIds);
     accepted++;
     current = await initializeCastWithClient(client, claim.scope);

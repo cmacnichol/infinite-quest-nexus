@@ -1,7 +1,7 @@
-import { canSaveCastEditor, createCastEditor, changeCastEditor, setCastEditorField, prepareCastSubmission,
+import { buildCharacterSheet, canSaveCastEditor, createCastEditor, changeCastEditor, setCastEditorField, prepareCastSubmission,
   failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, type CastEditorState } from "@infinite-quest/client-core";
-import type { CampaignCastApi } from "@infinite-quest/client-web";
-import type { CastDetail, CastDiscoveryStatus, CastField, CastCandidateList, ResolveCastCandidate, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
+import { createCharactersWorkspaceSession, type CampaignCastApi } from "@infinite-quest/client-web";
+import type { CampaignCharacterProfile, CharacterFilter, CastDetail, CastDiscoveryStatus, CastField, CastCandidateList, ResolveCastCandidate, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
 import { renderLegacyCastScan } from "./campaign-cast-scan-panel.js";
 
 const fields: [CastField, string][] = [
@@ -13,16 +13,31 @@ const fields: [CastField, string][] = [
 type List = Awaited<ReturnType<CampaignCastApi["list"]>>;
 export function createLegacyCastPanel(options: {
   api: Omit<CampaignCastApi, "scans"> & Partial<Pick<CampaignCastApi, "scans">>; campaignId(): string | null; generationActive(): boolean;
+  getProfile?(campaign: string): Promise<CampaignCharacterProfile & { revision: number }>;
   openProtagonist(): void; navigateToTurn(turn: number): Promise<void>; confirmDiscard?: () => boolean;
 }) {
   const dialog = document.createElement("dialog");
   dialog.id = "campaignCastDialog"; dialog.className = "cast-dialog";
   dialog.setAttribute("aria-labelledby", "cast-title"); document.body.append(dialog);
   let campaign = "", epoch = 0, editor: CastEditorState | null = null, list: List | null = null;
-  let enabled = false, query = "", latest: CastDetail | null = null, returnFocus: HTMLElement | null = null;
+  let enabled = false, query = "", filter: CharacterFilter = "all", latest: CastDetail | null = null, returnFocus: HTMLElement | null = null;
   let latestRoster: List | null = null;
   let discovery: CastDiscoveryStatus | null = null;
+  let rosterVisible = false;
+  let attention: { identities: number | null; details: number | null; conflicts: number | null } | null = null;
+  const workspace = createCharactersWorkspaceSession<CastEditorState>({ api: options.api, onChange(next) {
+    if (!dialog.open || next.campaignId !== campaign) return;
+    attention = next.status?.counts ?? null;
+    const notice = dialog.querySelector<HTMLElement>("[data-cast-attention]");
+    if (notice && attention) { const count = (value: number | null) => value === null ? "unavailable" : String(value); notice.textContent = `Attention — identity matches: ${count(attention.identities)} · details: ${count(attention.details)} · conflicts: ${count(attention.conflicts)}`; }
+    if (editor?.dirty && next.changedWhileEditing && !dialog.querySelector("[data-cast-stale]")) {
+      const warning = node("p", "This character changed while you were editing. Your draft is preserved. Compare the latest version before saving."); warning.dataset.castStale = ""; dialog.prepend(warning);
+    }
+    if (rosterVisible && list && next.status && next.status.revision !== list.revision) void loadRoster();
+  } });
   let scanData: Awaited<ReturnType<CampaignCastApi["scans"]["latest"]>> | null = null;
+  const operationKeys = new Map<string, string>();
+  function operationKey(operation: string, payload: unknown) { const key = `${operation}:${JSON.stringify(payload)}`; let id = operationKeys.get(key); if (!id) { id = crypto.randomUUID(); operationKeys.set(key, id); } return id; }
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => {
     const result = document.createElement(tag); result.textContent = text; return result;
   };
@@ -35,10 +50,10 @@ export function createLegacyCastPanel(options: {
   }
   function requestClose() {
     if (!discardAllowed()) return;
-    epoch++; editor = null; dialog.close(); returnFocus?.focus();
+    epoch++; editor = null; workspace.close(); operationKeys.clear(); dialog.close(); returnFocus?.focus();
   }
   function shell(title: string) {
-    dialog.replaceChildren();
+    dialog.classList.remove("cast-sheet-layout"); dialog.replaceChildren();
     const heading = node("header"); heading.className = "cast-heading";
     const h = node("h2", title); h.id = "cast-title";
     heading.append(h, button("Close", requestClose)); dialog.append(heading);
@@ -48,11 +63,11 @@ export function createLegacyCastPanel(options: {
   }
   const current = (token: number) => token === epoch && campaign === options.campaignId();
   async function loadRoster(cursor?: string, notice?: string) {
-    const token = ++epoch; editor = null; latest = null; latestRoster = null;
+    const token = ++epoch; editor = null; latest = null; latestRoster = null; rosterVisible = true;
     shell("Characters"); status("Loading characters…");
     try {
       const [rosterResult, discoveryResult, scanResult] = await Promise.allSettled([
-        options.api.list(campaign, { query, ...(cursor ? { cursor } : {}) }), options.api.discoveryStatus(campaign),
+        options.api.list(campaign, { query, filter, ...(cursor ? { cursor } : {}) }), options.api.discoveryStatus(campaign),
         options.api.scans?.latest(campaign) ?? Promise.resolve(null)
       ]);
       if (!current(token)) return;
@@ -70,6 +85,7 @@ export function createLegacyCastPanel(options: {
     }
   }
   async function loadScan() {
+    rosterVisible = false;
     if (!options.api.scans) return;
     const token = ++epoch; editor = null; shell("Scan earlier story"); status("Loading scan…");
     try {
@@ -86,6 +102,7 @@ export function createLegacyCastPanel(options: {
     }
   }
   async function loadCandidates(cursor?: string) {
+    rosterVisible = false;
     const token = ++epoch; editor = null;
     shell("Character matches"); status("Loading matches…");
     try {
@@ -184,6 +201,46 @@ export function createLegacyCastPanel(options: {
       }
     }
   }
+  function previewContext() {
+    rosterVisible = false; const token = ++epoch; shell("Likely included for this input"); dialog.append(button("Back to characters", () => { void loadRoster(); }));
+    const label = node("label", "Story input"), input = node("textarea"), result = node("section"); label.append(input);
+    dialog.append(label, button("Refresh estimate", async () => { try { const data = await options.api.contextPreview(campaign, { query: input.value }); if (!current(token)) return; result.replaceChildren(node("p", `Estimate at turn ${data.boundary.turnNumber}, cast revision ${data.castRevision}. Refresh after your story or characters change.`)); result.append(node("p", `Estimated usage: ${data.usedTokens.toLocaleString()} of ${data.budgetTokens.toLocaleString()} tokens.`));
+      if (data.note) result.append(node("p", data.note)); if (data.disabledReason) result.append(node("p", data.disabledReason));
+      if (!data.selected.length && !data.omitted.length && !data.disabledReason) result.append(node("p", "No characters are likely to be included for this input."));
+      for (const item of data.selected) result.append(node("p", `Included: ${item.name} · ${item.reason.replaceAll("_", " ")}`));
+      if (data.omitted.length) {
+        const names = new Map<string, string>(); let cursor: string | undefined;
+        try { do { const page = await options.api.list(campaign, { limit: 50, ...(cursor ? { cursor, expectedRevision: data.castRevision } : {}) }); if (page.revision !== data.castRevision) break; for (const person of page.characters) names.set(person.id, person.name); cursor = page.nextCursor ?? undefined; } while (cursor); } catch { /* The estimate is still useful if names cannot be loaded. */ }
+        if (!(current(token))) return;
+        for (const item of data.omitted) result.append(node("p", `Omitted: ${names.get(item.characterId) ?? "Character unavailable"} · ${item.reason.replaceAll("_", " ")}`));
+      } } catch { result.replaceChildren(node("p", "Estimate unavailable.")); } }), result);
+  }
+  async function loadDetails() {
+    rosterVisible = false; const token = ++epoch; shell("Review character details"); status("Loading details…");
+    try {
+      const matches = await options.api.candidates(campaign, { view: "details" }); if (!current(token)) return;
+      shell("Review character details"); dialog.append(button("Back to characters", () => { void loadRoster(); }));
+      if (!matches.candidates.length) status("No details need review.");
+      for (const candidate of matches.candidates) {
+        if (!candidate.resolvedCharacterId) continue;
+        for (const item of candidate.details ?? []) {
+          const row = node("section"); row.append(node("h3", `${candidate.proposal.name} · ${fields.find(([path]) => path === item.field)?.[1] ?? item.field}`), node("p", item.reason), node("blockquote", item.quote));
+          const label = node("label", "Confirmed value"), value = node("textarea"); value.value = item.value; label.append(value); row.append(label);
+          const feedback = node("p"); feedback.setAttribute("role", "status");
+          let pending: { signature: string; request: Parameters<typeof options.api.resolveDetail>[2] } | null = null;
+          async function decide(action: "confirm" | "dismiss") {
+            try {
+              const signature = JSON.stringify([action, action === "confirm" ? value.value : null]);
+              if (!pending || pending.signature !== signature) { const latest = await options.api.detail(campaign, candidate.resolvedCharacterId!);
+              pending = { signature, request: { expectedCastRevision: matches.revision, expectedBoundary: matches.boundary, expectedCharacterRevision: latest.character.revision, observationIndex: item.observationIndex, sourceHash: item.sourceHash, action, ...(action === "confirm" ? { confirmedValue: value.value } : {}), idempotencyKey: operationKey("detail", [campaign, candidate.id, item.observationIndex, item.sourceHash, action, action === "confirm" ? value.value : null, matches.revision, latest.character.revision]) } }; }
+              await options.api.resolveDetail(campaign, candidate.id, pending.request); pending = null; operationKeys.clear(); if (current(token)) await loadDetails();
+            } catch { feedback.textContent = "Could not save this decision. Refresh the review list and try again."; }
+          }
+          row.append(button("Confirm detail", () => { void decide("confirm"); }, !enabled || options.generationActive()), button("Dismiss detail", () => { void decide("dismiss"); }, !enabled || options.generationActive()), feedback); dialog.append(row);
+        }
+      }
+    } catch (error) { if (current(token)) { shell("Review character details"); status(message(error)); dialog.append(button("Retry", () => { void loadDetails(); }), button("Back to characters", () => { void loadRoster(); })); } }
+  }
   function renderRoster() {
     shell("Characters");
     if (!discovery) status("Character tracking status is unavailable. Saved characters are still available.");
@@ -225,14 +282,20 @@ export function createLegacyCastPanel(options: {
         dialog.append(retry, feedback);
       }
     }
-    dialog.append(button("Refresh characters", () => { void loadRoster(); }));
+    const notice = status("Attention counts are unavailable."); notice.dataset.castAttention = "";
+    if (attention) { const count = (value: number | null) => value === null ? "unavailable" : String(value); notice.textContent = `Attention — identity matches: ${count(attention.identities)} · details: ${count(attention.details)} · conflicts: ${count(attention.conflicts)}`; }
+    dialog.append(button("Review conflicts", () => { filter = "conflicts"; workspace.setQuery(query, filter); void loadRoster(); }));
+    dialog.append(button("Refresh characters", () => { void loadRoster(); }), button("Review character details", () => { void loadDetails(); }), button("Likely included for this input", previewContext));
     if (scanData && (scanData.capabilities.castBackfill || scanData.scan)) dialog.append(button("Scan earlier story", () => { void loadScan(); }));
     const controls = node("form"); controls.className = "cast-toolbar";
     const label = node("label", "Find a character"); label.htmlFor = "cast-search";
     const search = node("input"); search.id = "cast-search"; search.type = "search"; search.value = query; search.maxLength = 200;
     const submit = node("button", "Search"); submit.type = "submit";
-    controls.append(label, search, submit);
-    controls.addEventListener("submit", (event) => { event.preventDefault(); query = search.value; void loadRoster(); });
+    const filterLabel = node("label", "Filter characters"), filterSelect = node("select"); filterLabel.htmlFor = "cast-filter"; filterSelect.id = "cast-filter";
+    for (const [value, label] of [["all", "All"], ["main", "Main"], ["recent", "Recent"], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"]]) { const option = node("option", label); option.value = value!; option.selected = value === filter; filterSelect.append(option); }
+    filterSelect.addEventListener("change", () => { filter = filterSelect.value as CharacterFilter; query = search.value; workspace.setQuery(query, filter); void loadRoster(); });
+    controls.append(label, search, filterLabel, filterSelect, submit);
+    controls.addEventListener("submit", (event) => { event.preventDefault(); query = search.value; workspace.setQuery(query, filter); void loadRoster(); });
     dialog.append(controls);
     if (!enabled) status("Character editing is disabled. Saved characters remain available to read.");
     else if (options.generationActive()) status("Finish or resolve the current generation before editing characters.");
@@ -241,7 +304,7 @@ export function createLegacyCastPanel(options: {
     for (const person of list!.characters) {
       const li = node("li"), title = button(person.name, () => { void openDetail(person.id); });
       const provenance = person.origin.kind === "protagonist" ? "Main character" : person.origin.kind === "manual" ? "Added by you" : "Discovered";
-      li.append(title, node("p", [person.profile["story.role"], provenance, `Last seen turn ${person.lastObservedTurn}`,
+      li.append(title, node("p", [person.profile["story.role"], provenance, `Last observed turn ${person.lastObservedTurn}${person.lastMentionedTurn != null ? ` · Last mentioned turn ${person.lastMentionedTurn}` : ""}`,
         person.pinned ? "Pinned" : "", person.ignored ? "Ignored" : ""].filter(Boolean).join(" · ")));
       roster.append(li);
     }
@@ -251,17 +314,51 @@ export function createLegacyCastPanel(options: {
   }
   async function openDetail(id: string) {
     if (!discardAllowed()) return;
+    rosterVisible = false; workspace.select(id);
     const token = ++epoch; shell("Character"); status("Loading character…");
     try {
       const detail = await options.api.detail(campaign, id);
       if (!current(token)) return;
       enabled = detail.capabilities.castEditing;
-      editor = createCastEditor(detail, detail); latest = null; renderEditor();
+      editor = createCastEditor(detail, detail); latest = null;
+      let profile: (CampaignCharacterProfile & { revision: number }) | null = null;
+      if (detail.character.origin.kind === "protagonist" && options.getProfile) profile = await options.getProfile(campaign).catch(() => null);
+      if (!current(token)) return; renderSheet(detail, profile);
     } catch (error) {
       if (!current(token)) return;
       shell("Character"); status(`Could not load this character: ${message(error)}`);
       dialog.append(button("Back to characters", () => { void loadRoster(); }));
     }
+  }
+  function renderSheet(detail: CastDetail, profile: (CampaignCharacterProfile & { revision: number }) | null = null) {
+    const sheet = profile ? buildCharacterSheet({ kind: "protagonist", profile: { name: profile.name, profile: profile.profile }, revision: profile.revision }) : buildCharacterSheet({ kind: "supporting", detail });
+    shell(sheet.name); dialog.classList.add("cast-sheet-layout");
+    const sidebar = node("nav"); sidebar.className = "cast-sheet-roster"; sidebar.setAttribute("aria-label", "Characters");
+    for (const person of list?.characters ?? []) sidebar.append(button(person.name, () => { void openDetail(person.id); })); dialog.append(sidebar);
+    dialog.append(button("Back to characters", () => { void loadRoster(); }), node("p", `Last observed turn ${detail.character.lastObservedTurn}${detail.character.lastMentionedTurn != null ? ` · Last mentioned turn ${detail.character.lastMentionedTurn}` : ""}`));
+    if (detail.character.origin.kind === "protagonist") {
+      status("This is your main character.");
+      dialog.append(button("Edit main character", () => { requestClose(); options.openProtagonist(); }));
+    } else {
+      dialog.append(button("Edit character", () => { workspace.setDraft(editor); renderEditor(); }, !enabled || options.generationActive()));
+    }
+    for (const section of sheet.sections) {
+      const group = node("section"); group.className = "cast-sheet-section"; group.append(node("h3", section.name));
+      for (const field of section.fields) {
+        const row = node("p"); const label = node("strong", `${field.label}: `);
+        const value = Array.isArray(field.value) ? field.value.join(", ") : field.value;
+        row.append(label, node("span", value || (field.origin === "conflicted" ? "Conflicting observations" : field.origin === "claim" ? "Unverified claim" : "Unknown")), node("small", field.origin === "unknown" ? "" : ` · ${field.origin}`)); group.append(row);
+      }
+      dialog.append(group);
+    }
+    for (const match of detail.autoMatches) {
+      const row = node("section"); row.append(node("p", `${match.basis === "unique_world_name" ? "Unique world name" : "Unique campaign name"} · turn ${match.turnNumber}: “${match.quote}”`));
+      row.append(button("Not this character", async () => {
+        try { await options.api.detachAttachment(campaign, detail.character.id, match.eventId, { expectedCastRevision: detail.revision, expectedBoundary: detail.boundary, expectedCharacterRevision: detail.character.revision, idempotencyKey: operationKey("detach", [campaign, detail.character.id, match.eventId, detail.revision, detail.boundary, detail.character.revision]) }); operationKeys.clear(); await openDetail(detail.character.id); }
+        catch { row.append(node("p", "Could not undo this match. Refresh and try again.")); }
+      }, !enabled || options.generationActive())); dialog.append(row);
+    }
+    renderEvidence();
   }
   function renderEditor() {
     if (!editor) return;
@@ -312,7 +409,9 @@ export function createLegacyCastPanel(options: {
     if (editor.conflict) {
       form.append(button("Compare latest", () => { void compareLatest(); }));
       if (latest) {
-        const comparison = node("pre", JSON.stringify({ name: latest.character.name, aliases: latest.character.aliases, profile: latest.character.profile }, null, 2));
+        const comparison = node("div");
+        comparison.append(node("p", `Name: ${latest.character.name}`), node("p", `Aliases: ${latest.character.aliases.join(", ") || "None"}`));
+        for (const [field, label] of fields) comparison.append(node("p", `${label}: ${latest.character.profile[field] ?? "Unknown"}`));
         comparison.className = "cast-comparison"; form.append(node("h3", "Latest saved character"), comparison);
         form.append(button("Reapply my changes", () => { editor = reapplyCastDraft(editor!, latest!); latest = null; renderEditor(); }, !enabled));
         form.append(button("Discard draft and load latest", () => { if (discardAllowed()) { editor = createCastEditor(latest!, latest!); latest = null; renderEditor(); } }));
@@ -368,7 +467,7 @@ export function createLegacyCastPanel(options: {
       const result = editor.characterId ? await options.api.edit(campaign, editor.characterId, editor.submission as EditCastCharacter)
         : await options.api.create(campaign, editor.submission as CreateCastCharacter);
       if (!current(token)) return;
-      editor = null; await openDetail(result.character.id);
+      editor = null; await openDetail(result.character.id); if (editor) renderEditor();
     } catch (error) {
       if (!current(token) || !editor) return;
       const code = (error as { statusCode?: number }).statusCode;
@@ -382,7 +481,7 @@ export function createLegacyCastPanel(options: {
   window.addEventListener("beforeunload", (event) => { if (editor?.dirty) { event.preventDefault(); event.returnValue = ""; } });
   return { requestClose, async open(focusTarget?: HTMLElement | null) {
     const id = options.campaignId(); if (!id || dialog.open) return;
-    campaign = id; query = ""; returnFocus = focusTarget ?? document.activeElement as HTMLElement | null;
-    shell("Characters"); dialog.showModal(); await loadRoster();
+    campaign = id; query = ""; filter = "all"; returnFocus = focusTarget ?? document.activeElement as HTMLElement | null;
+    shell("Characters"); dialog.showModal(); workspace.open(campaign); await loadRoster();
   } };
 }

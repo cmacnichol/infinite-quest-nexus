@@ -65,3 +65,23 @@ describe("campaign cast projection", () => {
     expect(() => projectCastProfile({ observations: [correction, first], overrides: [] })).toThrow(/supersession/i);
   });
 });
+
+
+it("projects attachment detach only at and after its boundary", async () => {
+  const { projectCastAttachments, castRangesOverlap } = await import("../../packages/domain/src/campaign-cast-attachments.js");
+  const range = { turnId: uuid(7), narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", start: 2, end: 6 };
+  const attachment = { eventId: uuid(1), characterId, basis: "unique_name" as const, sourceRanges: [range], observationIds: [uuid(2)] };
+  const other = { ...attachment, eventId: uuid(3), characterId: uuid(4), observationIds: [uuid(5)] };
+  const events = [
+    { id: uuid(1), effective_turn_number: 1, attachment, payload: [] },
+    { id: uuid(3), effective_turn_number: 1, attachment: other, payload: [] },
+    { id: uuid(6), effective_turn_number: 3, payload: [{ command: { kind: "detach" as const, characterId, eventId: uuid(1) } }] }
+  ];
+  expect(projectCastAttachments(events, 2).active).toHaveLength(2);
+  const projected = projectCastAttachments(events, 3);
+  expect(projected.active).toEqual([other]);
+  expect([...projected.suppressedObservationIds]).toEqual([uuid(2)]);
+  expect(castRangesOverlap(range, { ...range, start: 5, end: 8 })).toBe(true);
+  expect(castRangesOverlap(range, { ...range, start: 6, end: 8 })).toBe(false);
+  expect(projectCastProfile({ observations: [], overrides: [override("")] })).toEqual({ "appearance.description": "" });
+});

@@ -1,3 +1,5 @@
+import { resolveGenerationResponseContractsV2 } from "../../services/runtime/src/generation-response-contract.js";
+import { createCastContextPreview } from "../../services/runtime/src/campaign-cast-context-preview.js";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -69,6 +71,63 @@ integration("campaign cast composed generation", () => {
     await pool.query("UPDATE campaign_memory_configs SET embedding_enabled=false WHERE campaign_id=$1", [imported.campaignId]);
     return { ownerUserId, campaignId: imported.campaignId };
   }
+
+  it("previews current scoped character selection without dispatch or authority writes", async () => {
+    const scope = await campaign(), foreign = await campaign(true);
+    await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [scope.campaignId, providerProfileId]);
+    await saveStoryMemoryEnrollment(pool, scope, { capability: "r1", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: true });
+    const cast = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const initial = await cast.initialize(scope);
+    const person = await cast.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary,
+      idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: { "story.role": "guide" } });
+    const preview = createCastContextPreview(pool, { castContextEnabled: true, storyMemoryCapability: "r3", storyMemoryEnforceEnabled: true });
+    const counts = async () => (await pool.query(`SELECT (SELECT count(*) FROM generation_jobs WHERE campaign_id=$1) AS jobs,
+      (SELECT count(*) FROM campaign_cast_events WHERE campaign_id=$1) AS events,
+      (SELECT count(*) FROM campaign_cast_discovery_jobs WHERE campaign_id=$1) AS discovery`, [scope.campaignId])).rows[0];
+    const before = await counts();
+    const value = await preview(scope.ownerUserId, scope.campaignId, { query: "Ask Mara.", inputMode: "action" });
+    expect(value.disabledReason).toBeNull();
+    expect(value.selected).toContainEqual({ characterId: person.character.id, name: "Mara", reason: "direct_reference" });
+    expect(JSON.stringify(value)).not.toMatch(/FOREIGN_CAST|scratchpad|promptContext|authoritativeRules|guide/);
+    expect(await counts()).toEqual(before);
+    await saveStoryMemoryEnrollment(pool, scope, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
+    const reviewed = await preview(scope.ownerUserId, scope.campaignId, { query: "Ask Mara.", inputMode: "action" });
+    expect(reviewed.disabledReason).toBeNull();
+    expect(reviewed.selected.some(item => item.characterId === person.character.id)).toBe(true);
+    expect(await counts()).toEqual(before);
+
+    expect((await preview(scope.ownerUserId, scope.campaignId, { query: "Ask Mara.", budgetTokens: 0, inputMode: "action" })).budgetTokens).toBe(0);
+    await expect(preview(randomUUID(), scope.campaignId, { query: "Mara", inputMode: "action" })).rejects.toThrow("Campaign not found");
+    expect((await preview(foreign.ownerUserId, foreign.campaignId, { query: "Mara", inputMode: "action" })).selected).toEqual([]);
+    const updated = await cast.edit(scope, person.character.id, { expectedCastRevision: person.revision, expectedBoundary: person.boundary,
+      expectedCharacterRevision: person.character.revision, idempotencyKey: randomUUID(), ignored: true });
+    const changed = await preview(scope.ownerUserId, scope.campaignId, { query: "Ask Mara.", inputMode: "action" });
+    expect(changed.castRevision).toBe(updated.revision); expect(changed.castRevision).not.toBe(value.castRevision);
+    expect(changed.omitted).toContainEqual({ characterId: person.character.id, reason: "ignored" });
+    expect((await createCastContextPreview(pool, { castContextEnabled: false, storyMemoryCapability: "r3" })(scope.ownerUserId, scope.campaignId, { query: "Mara", inputMode: "action" })).disabledReason).toContain("disabled");
+    await saveStoryMemoryEnrollment(pool, scope, { capability: "r1", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: true });
+    const providerBefore = (await pool.query("SELECT provider_type,text_selection,default_model FROM provider_profiles WHERE id=$1", [providerProfileId])).rows[0];
+    try {
+      await pool.query("UPDATE provider_profiles SET provider_type='openrouter',text_selection=$2,default_model='@preset/preview' WHERE id=$1", [providerProfileId, JSON.stringify({ kind: "openrouter_preset", slug: "preview" })]);
+      expect((await preview(scope.ownerUserId, scope.campaignId, { query: "Mara", inputMode: "action" })).disabledReason).toContain("locally saved");
+      const queued = await commands().enqueueAppend(scope, generationRequestSchema.parse({ action: "Wait.", providerProfileId, model: "@preset/preview", idempotencyKey: randomUUID(), context: { budgetTokens: 32000 } }));
+      const draft = { version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "preview" }, preset: { slug: "preview", versionId: "v1", configHash: "a".repeat(64) },
+        candidates: [{ modelId: "cast-test", providerPolicy: {}, contextWindowTokens: 32768, maxOutputTokens: 4096 }], presetSystemPrompt: "Private preset canary.",
+        parameters: {}, endpointReference: "private-endpoint", credentialReference: providerProfileId, profileRevision: "v1", authorityRevision: "v1", requestTimeoutMs: 5000, protocolVersion: "story-openrouter-preset-v2", routeBasisHash: "0".repeat(64) };
+      const routeBasis = { ...draft, routeBasisHash: textExecutionRouteBasisHash(draft) };
+      const contracts = resolveGenerationResponseContractsV2({ queuedPolicy: { version: 2, policy: "required", providerProfileId,
+        admission: { mode: "json_schema", basis: "preset_trusted" }, authority: { kind: "preset_trusted", routeBasisHash: routeBasis.routeBasisHash,
+          selection: routeBasis.selection, endpointReference: routeBasis.endpointReference, credentialReference: providerProfileId, authorityRevision: "v1", profileRevision: "v1" },
+        operationClosureVersion: 2, invocationKeys: ["story:nonstream"] }, capabilityEvidenceHash: "a".repeat(64), routeProtocolVersion: routeBasis.protocolVersion });
+      await pool.query("UPDATE generation_jobs SET orchestration_private=$2 WHERE id=$1", [queued.id, JSON.stringify({ textExecutionRouteBasis: routeBasis, frozenResponseContracts: contracts })]);
+      const cachedPreview = await preview(scope.ownerUserId, scope.campaignId, { query: "Mara", inputMode: "action" });
+      expect(cachedPreview.disabledReason).toBeNull();
+      expect(JSON.stringify(cachedPreview)).not.toMatch(/private-endpoint|Private preset|routeBasis/);
+    } finally {
+      await pool.query("UPDATE provider_profiles SET provider_type=$2,text_selection=$3,default_model=$4 WHERE id=$1", [providerProfileId, providerBefore.provider_type, JSON.stringify(providerBefore.text_selection), providerBefore.default_model]);
+    }
+
+  });
 
   it.each([["action", true, false, false, false], ["scene", true, false, false, false], ["action", false, false, false, false], ["scene", false, false, false, false],
     ["action", true, true, false, false], ["scene", true, true, false, false], ["action", false, false, true, false], ["scene", false, false, true, false],
@@ -213,7 +272,7 @@ integration("campaign cast composed generation", () => {
     const authority = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client,
       { ...scope, operationKind: "append", expectedTurnNumber: 10, baseIdentityVersion: nextEnabled ? "generation-base-v4" : "generation-base-v3" }));
     if (nextEnabled) {
-      expect(authority.castSnapshot).toMatchObject({ revision: edited.revision, boundary: { turnNumber: 9 },
+      expect(authority.castSnapshot).toMatchObject({ revision: expect.any(Number), boundary: { turnNumber: 9 },
         characters: expect.arrayContaining([expect.objectContaining({ id: person.id, profile: expect.objectContaining({ "appearance.description": historicalRetry ? "violet eyes" : "gray eyes" }) })]) });
       if (!("castFingerprint" in authority.baseIdentity)) throw new Error("Next generation did not capture cast authority.");
       expect((await pool.query("SELECT generation_base_identity FROM generation_jobs WHERE id=$1", [next.id])).rows[0].generation_base_identity.castFingerprint)

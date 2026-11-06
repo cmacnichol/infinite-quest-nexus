@@ -1,3 +1,5 @@
+import { logger } from "../../logger/src/index.js";
+import { recordAcceptedTurnCastMentions } from "./campaign-cast-mentions.js";
 import { applyCastBoundaryChange } from "./campaign-cast-lifecycle.js";
 import type {
   CampaignWorldVersionMemoryScope,
@@ -148,6 +150,7 @@ export function createPostgresTurnCorrectionRepository(
 
         await applyCastBoundaryChange(client, scope, { turnNumber: campaign.activeTurnNumber,
           changeKey: `correction:${turn.id}:${nextRevision}` });
+        await recordAcceptedTurnCastMentions(client, scope, turn.id, () => logger.warn({ event: "cast_lexical_mentions_failed", campaignId: scope.campaignId, turnId: turn.id, code: "enrichment_failed" }));
         const memoryScope = {
           ownerUserId: scope.ownerUserId,
           campaignId: scope.campaignId,

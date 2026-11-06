@@ -60,6 +60,7 @@ type ProviderCompositionOptions = Readonly<{
   /** One admission switch is supplied unchanged to API enqueue and every worker graph. */
   nativeTextExecutionPlanAdmission?: boolean;
   castDiscoveryEnabled?: boolean;
+  castAutoMatchEnabled?: boolean;
   castContextEnabled?: boolean;
   textProviderConcurrency?: number;
 }>;
@@ -401,12 +402,12 @@ function createInternals(
     },
     generation: Object.freeze({ ...runtime, prompts: generationPrompts, costs: generationCosts, reads: costs, responseFormatCapabilities, responseFormatInventory: base.runtime.inventory,
       ...(options.castDiscoveryEnabled === true ? { prepareCastDiscoveryExecution: (input: { ownerUserId: string; execution: RuntimeTextExecution }) =>
-        prepareCastDiscoveryExecution({ ...input, ports: authoringTextPlans.ports, responseFormatCapabilities }) } : {}),
+        prepareCastDiscoveryExecution({ ...input, identityPolicy: options.castAutoMatchEnabled === true ? "unique_name" : "strict", ports: authoringTextPlans.ports, responseFormatCapabilities }) } : {}),
       loadQueuedTextProfile: (client: DatabaseClient, ownerUserId: string, providerProfileId: string, model?: string) =>
         bind(client).runtime.execution.text({ ownerUserId }, providerProfileId, "text", model) }),
     workerGeneration: Object.freeze({
       ...(options.castDiscoveryEnabled === true ? { prepareCastDiscoveryExecution: (input: { ownerUserId: string; execution: RuntimeTextExecution }) =>
-        prepareCastDiscoveryExecution({ ...input, ports: authoringTextPlans.ports, responseFormatCapabilities }) } : {}),
+        prepareCastDiscoveryExecution({ ...input, identityPolicy: options.castAutoMatchEnabled === true ? "unique_name" : "strict", ports: authoringTextPlans.ports, responseFormatCapabilities }) } : {}),
       ...runtime,
       prompts: generationPrompts,
       costs: generationCosts,

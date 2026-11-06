@@ -183,7 +183,7 @@ export function castAdmissionFailureReason(error: unknown): CastAdmissionFailure
  * their public transport fields and cannot serialize private route metadata.
  */
 export function deriveCampaignTextExecutionPlan(
-  job: GenerationExecutionPayload,
+  job: Pick<GenerationExecutionPayload, "orchestration_private">,
   operationPrompt: string
 ): TextExecutionPlan | undefined {
   const routeBasis = job.orchestration_private?.textExecutionRouteBasis;
@@ -216,7 +216,7 @@ function prepareCampaignSystemPrompt(job: GenerationExecutionPayload, operationP
 }
 
 export function bindCampaignTextExecutionPlan(
-  job: GenerationExecutionPayload,
+  job: Pick<GenerationExecutionPayload, "orchestration_private">,
   request: ProviderRequest,
   preboundPlan?: TextExecutionPlan
 ): ProviderRequest {
@@ -377,7 +377,7 @@ function responseContractIdentity(operation: StoryCostOperation, streaming: bool
   }
 }
 
-function responseContractForOperation(job: GenerationExecutionPayload, operation: StoryCostOperation, streaming: boolean) {
+function responseContractForOperation(job: Pick<GenerationExecutionPayload, "orchestration_private">, operation: StoryCostOperation, streaming: boolean) {
   const frozen = job.orchestration_private?.frozenResponseContracts as FrozenResponseContracts | FrozenResponseContractsV2 | undefined;
   if (!frozen) return undefined;
   const identity = responseContractIdentity(operation, streaming);
@@ -1058,7 +1058,7 @@ function repairResponseFormat(body: string): "json_object" | "none" {
  * reservation. Operations outside the frozen closure deliberately stay on
  * their legacy request path. */
 export function bindCampaignResponseContract(
-  job: GenerationExecutionPayload,
+  job: Pick<GenerationExecutionPayload, "orchestration_private">,
   operation: StoryCostOperation,
   request: ProviderRequest,
   preboundPlan?: TextExecutionPlan
@@ -1123,7 +1123,7 @@ export function bindCampaignResponseContract(
  * before producing transport bytes, so this descriptor cannot mint trust.
  */
 function boundFrozenPresetRequestBinding(
-  job: GenerationExecutionPayload,
+  job: Pick<GenerationExecutionPayload, "orchestration_private">,
   operation: StoryCostOperation,
   streaming: boolean,
   trustedOperationPrompt: string,
@@ -1153,9 +1153,9 @@ function boundFrozenPresetRequestBinding(
 /** Uses the exact frozen preset serializer for pre-dispatch measurements made
  * by continuity helpers.  The later callCampaign path repeats this binding
  * and must therefore produce identical body bytes. */
-function serializeFrozenCampaignRequest(
+export function serializeFrozenCampaignRequest(
   provider: GenerationTextProvider,
-  job: GenerationExecutionPayload,
+  job: Pick<GenerationExecutionPayload, "orchestration_private">,
   operation: StoryCostOperation,
   request: ProviderRequest,
   preboundPlan?: TextExecutionPlan

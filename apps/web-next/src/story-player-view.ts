@@ -1,4 +1,4 @@
-import { generationProviderFailurePresentation, generationDiagnosticPresentation, generationResponseFormatPresentation, generationReviewPresentation, generationReviewTechnicalDiagnosticMessage, type CampaignProjection } from "@infinite-quest/client-core";
+import { PROFILE_FIELDS, generationProviderFailurePresentation, generationDiagnosticPresentation, generationResponseFormatPresentation, generationReviewPresentation, generationReviewTechnicalDiagnosticMessage, type CampaignProjection } from "@infinite-quest/client-core";
 import type { AcceptedTurnCorrectionView, CampaignCharacterProfileUpdate, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse, StoryLengthProfile, StoryMemorySettings } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
@@ -1000,16 +1000,22 @@ function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialog
       if (state.characterProfileLocked) dialog.append(element(document, "p", "story-status", state.characterProfileSaveInFlight
         ? "Saving character profile. Your story draft is preserved."
         : "Story generation is active or recovering. Profile edits are temporarily unavailable; your story draft is preserved."));
-      const name = element(document, "input") as HTMLInputElement;
-      name.value = draft.name; name.dataset.characterProfileName = ""; name.disabled = state.characterProfileLocked;
-      const nameLabel = element(document, "label", "story-tool-field story-character-profile-field", "Character name"); nameLabel.append(name);
-      const json = element(document, "textarea") as HTMLTextAreaElement;
-      json.rows = 12;
-      json.value = draft.profileJson; json.dataset.characterProfileJson = ""; json.disabled = state.characterProfileLocked;
-      const jsonLabel = element(document, "label", "story-tool-field story-character-profile-field", "Character profile JSON"); jsonLabel.append(json);
+      const fields = element(document, "div", "story-character-profile-fields");
+      const profileDraft = JSON.parse(draft.profileJson) as Record<string, unknown>;
+      let sectionName = "";
+      for (const descriptor of PROFILE_FIELDS) {
+        if (sectionName !== descriptor.section) { sectionName = descriptor.section; fields.append(element(document, "h3", undefined, sectionName)); }
+        const control = element(document, descriptor.input === "text" ? "input" : "textarea") as HTMLInputElement | HTMLTextAreaElement;
+        const [part, key] = descriptor.path.split(".");
+        const group = profileDraft[part!] as Record<string, unknown> | undefined;
+        const value = descriptor.path === "name" ? draft.name : key ? group?.[key] : profileDraft[part!];
+        control.value = Array.isArray(value) ? value.join("\n") : typeof value === "string" ? value : "";
+        control.dataset.characterProfileField = descriptor.path; control.dataset.profileList = String(descriptor.input === "list"); control.disabled = state.characterProfileLocked;
+        const label = element(document, "label", "story-tool-field story-character-profile-field", descriptor.label); label.append(control); fields.append(label);
+      }
       const save = element(document, "button", undefined, "Save Character Profile"); save.type = "button"; save.dataset.action = "save-character-profile"; save.disabled = state.characterProfileLocked;
       const status = element(document, "p", "story-status", state.characterProfileError ?? ""); status.dataset.storyStatus = ""; status.setAttribute("aria-live", "polite");
-      dialog.append(nameLabel, jsonLabel, status, save);
+      dialog.append(fields, status, save);
     }
   } else if (active === "story-memory") {
     const settings = state.storyMemorySettings;
