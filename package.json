@@ -43,7 +43,7 @@
     "archiver": "^8.0.0",
     "fastify": "^5.12.5",
     "node-pg-migrate": "9.0.0",
-    "pg": "^8.23.0",
+    "pg": "^8.23.1",
     "photoswipe": "^5.4.4",
     "pino": "^10.3.1",
     "pino-pretty": "^13.1.3",
