@@ -267,6 +267,41 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     }
   });
 
+  it("steps back one turn at a time from a History turn outside the loaded window", async () => {
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(51, 100) });
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      (document.getElementById("turnHistoryJumpNumber") as HTMLInputElement).value = "49";
+      document.getElementById("btnTurnHistoryJumpExact")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(document.querySelector("[data-reader-turn-count]")?.textContent).toBe("Turn 49 of 100"));
+
+      const previous = document.getElementById("btnPrev") as HTMLButtonElement;
+      for (const turnNumber of [48, 47, 46]) {
+        expect(previous.disabled).toBe(false);
+        previous.click();
+        await vi.waitFor(() => expect(document.querySelector("[data-reader-turn-count]")?.textContent).toBe(`Turn ${turnNumber} of 100`));
+        expect(document.querySelector(`#scene-${turnNumber}`)?.textContent).toContain(`Narration ${turnNumber}`);
+      }
+      (document.getElementById("btnNext") as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(document.querySelector("[data-reader-turn-count]")?.textContent).toBe("Turn 47 of 100"));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("disables Previous on a History-pinned Turn 1", async () => {
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(51, 100) });
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      (document.getElementById("turnHistoryJumpNumber") as HTMLInputElement).value = "1";
+      document.getElementById("btnTurnHistoryJumpExact")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(document.querySelector("[data-reader-turn-count]")?.textContent).toBe("Turn 1 of 100"));
+      expect((document.getElementById("btnPrev") as HTMLButtonElement).disabled).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("provides accessible campaign-search and exact-jump controls inside History", () => {
     const { document } = parseHTML(storyHtml);
     expect(document.querySelector("#turnHistorySearch")?.getAttribute("type")).toBe("search");
@@ -4034,7 +4069,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('const storyInputLocked = generationLocked || !isLatest;');
     expect(storyScript).toContain('if (btnAction) btnAction.disabled = storyInputLocked;');
     expect(storyScript).not.toContain('inputAction.style.pointerEvents = "none";');
-    expect(storyScript).toContain('const previousDisabled = generationLocked || turnCount === 0 || Boolean(state.readerPinnedTurn) || (curr <= 0 && !state.historyNextCursor);');
+    expect(storyScript).toContain("const previousDisabled = generationLocked || turnCount === 0 || (state.readerPinnedTurn\n    ? currentViewTurnNumber() <= 1\n    : curr <= 0 && !state.historyNextCursor);");
     expect(storyScript).toContain('const nextDisabled = generationLocked || turnCount === 0 || isLatest;');
     expect(storyScript).toContain('if (btnReaderJumpLatest) {');
     expect(storyScript).toContain('btnReaderJumpLatest.disabled = generationLocked || turnCount === 0 || isLatest;');
