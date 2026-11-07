@@ -39,13 +39,16 @@ export type RuntimeRoleDependencies = Readonly<{
   createApiProviders(
     pool: DatabasePool,
     credentialSecret: string,
-    transport: ProviderTransport
+    transport: ProviderTransport,
+    config: RuntimeConfig
   ): ApiProviderApplicationComposition;
   createWorkerProviders(
     pool: DatabasePool,
     credentialSecret: string,
-    transport: ProviderTransport
+    transport: ProviderTransport,
+    config: RuntimeConfig
   ): WorkerProviderApplicationComposition;
+  resolveSettings?(pool: DatabasePool, config: RuntimeConfig, signal: AbortSignal): Promise<{config:RuntimeConfig;dispose():Promise<void>;markReady?():Promise<void>;isReady?():Promise<boolean>}>;
   createProviderApiAdapter(composition: ApiProviderApplicationComposition): ProviderApiTransportAdapter;
   createApiGeneration(
     pool: DatabasePool,
@@ -143,23 +146,38 @@ async function waitForAbort(signal: AbortSignal): Promise<void> {
 }
 
 export async function dispatchRuntimeRole(
-  config: RuntimeConfig,
+  bootstrapConfig: RuntimeConfig,
   pool: DatabasePool,
   signal: AbortSignal,
   dependencies: RuntimeRoleDependencies,
   providerTransport: ProviderTransport,
   generationEvents: GenerationEventSource | undefined
 ): Promise<void> {
-  await prepareDatabase(config, pool, dependencies);
+  await prepareDatabase(bootstrapConfig, pool, dependencies);
+  if (bootstrapConfig.role === "migrate") return;
+  const settings = await dependencies.resolveSettings?.(pool, bootstrapConfig, signal);
+  const config = settings?.config ?? bootstrapConfig;
+  try {
+    await dispatchResolvedRuntimeRole(config, pool, signal, dependencies, providerTransport, generationEvents, settings);
+  } finally { await settings?.dispose(); }
+}
 
-  if (config.role === "migrate") return;
+async function dispatchResolvedRuntimeRole(
+  config: RuntimeConfig,
+  pool: DatabasePool,
+  signal: AbortSignal,
+  dependencies: RuntimeRoleDependencies,
+  providerTransport: ProviderTransport,
+  generationEvents: GenerationEventSource | undefined,
+  settings: Awaited<ReturnType<NonNullable<RuntimeRoleDependencies["resolveSettings"]>>> | undefined
+): Promise<void> {
 
   if (config.role === "api") {
     if (!generationEvents) throw new Error("The API role requires a generation event source.");
     const providerGraph = dependencies.createApiProviders(
       pool,
       config.credentialEncryptionKey,
-      providerTransport
+      providerTransport, config
     );
     const generation = dependencies.createApiGeneration(pool, providerGraph.generation, {
       installedCapability: config.storyMemoryCapability ?? null,
@@ -172,18 +190,21 @@ export async function dispatchRuntimeRole(
     const authoring = dependencies.createApiAuthoring(pool);
     const providers = dependencies.createProviderApiAdapter(providerGraph);
     const server = await dependencies.buildServer({
+      ...(settings?.isReady ? { settingsReadiness: settings.isReady } : {}),
       config, pool, generation, illustration, memory, providers, generationEvents, worldCampaign, authoring,
       infiniteWorldsProviders: providerGraph.infiniteWorlds,
       ...(dependencies.createApiCast ? { cast: dependencies.createApiCast(pool, config, providerGraph.generation) } : {}),
     });
-    await server.listen({ host: config.host, port: config.port });
-    await waitForAbort(signal);
-    await server.close();
+    try {
+      await server.listen({ host: config.host, port: config.port });
+      await settings?.markReady?.();
+      await waitForAbort(signal);
+    } finally { await server.close(); }
     return;
   }
 
   if (config.role === "worker") {
-    const providerGraph = dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport);
+    const providerGraph = dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport, config);
     const illustration = dependencies.createApiIllustration(pool, providerGraph.illustration);
     const memory = dependencies.createApiMemory(pool, providerGraph.chronicle);
     const generation = dependencies.createWorkerGeneration(pool, illustration, memory, providerGraph.generation);
@@ -192,6 +213,7 @@ export async function dispatchRuntimeRole(
       pool,
       providerGraph.illustration,
     );
+    await settings?.markReady?.();
     await dependencies.runWorker(pool, config, signal, {
       generation,
       illustration: workerIllustration,
@@ -207,9 +229,9 @@ export async function dispatchRuntimeRole(
   const apiProviderGraph = dependencies.createApiProviders(
     pool,
     config.credentialEncryptionKey,
-    providerTransport
+    providerTransport, config
   );
-  const workerProviderGraph = dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport);
+  const workerProviderGraph = dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport, config);
   const apiGeneration = dependencies.createApiGeneration(pool, apiProviderGraph.generation, {
     installedCapability: config.storyMemoryCapability ?? null,
     enforceEnabled: config.storyMemoryEnforceEnabled === true,
@@ -232,19 +254,22 @@ export async function dispatchRuntimeRole(
     workerProviderGraph.illustration,
   );
   const server = await dependencies.buildServer({
+    ...(settings?.isReady ? { settingsReadiness: settings.isReady } : {}),
     config, pool, generation: apiGeneration, illustration, memory, providers, generationEvents, worldCampaign, authoring: apiAuthoring,
     infiniteWorldsProviders: apiProviderGraph.infiniteWorlds,
     ...(dependencies.createApiCast ? { cast: dependencies.createApiCast(pool, config, apiProviderGraph.generation) } : {}),
   });
-  await server.listen({ host: config.host, port: config.port });
-  await dependencies.runWorker(pool, config, signal, {
-    generation: workerGeneration,
-    illustration: workerIllustration,
-    generationIllustration: workerIllustrationTransactions,
-    ...(config.castDiscoveryEnabled === true && dependencies.createWorkerCastDiscovery
-      ? { castDiscovery: dependencies.createWorkerCastDiscovery(pool, config, workerProviderGraph.generation) } : {}),
-    memory: dependencies.createWorkerMemory(pool, workerProviderGraph.chronicle),
-    authoring
-  });
-  await server.close();
+  try {
+    await server.listen({ host: config.host, port: config.port });
+    await settings?.markReady?.();
+    await dependencies.runWorker(pool, config, signal, {
+      generation: workerGeneration,
+      illustration: workerIllustration,
+      generationIllustration: workerIllustrationTransactions,
+      ...(config.castDiscoveryEnabled === true && dependencies.createWorkerCastDiscovery
+        ? { castDiscovery: dependencies.createWorkerCastDiscovery(pool, config, workerProviderGraph.generation) } : {}),
+      memory: dependencies.createWorkerMemory(pool, workerProviderGraph.chronicle),
+      authoring
+    });
+  } finally { await server.close(); }
 }

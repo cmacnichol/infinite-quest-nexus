@@ -64,10 +64,12 @@ export function createInstanceSettingsRepository(pool: DatabasePool, options: { 
         await lock(client); await checkActor(client, input.actor);
         const state = await readState(client);
         if (state.requestedRevision !== input.expectedRequestedRevision) throw new SettingsConflictError(state.requestedRevision);
-        if (JSON.stringify(state.requested) === JSON.stringify(snapshot)) return state;
+        if (input.policyDigest !== undefined) digest.parse(input.policyDigest);
+        const policyDigest = input.policyDigest ?? state.policyDigest;
+        if (JSON.stringify(state.requested) === JSON.stringify(snapshot) && policyDigest === state.policyDigest) return state;
         const next = settingsRevisionSchema.parse((BigInt(input.expectedRequestedRevision) + 1n).toString());
         await client.query(`INSERT INTO instance_settings_revisions(revision,previous_revision,snapshot,schema_version,actor_user_id,operator_session_id,cli_reference,kind,policy_digest)
-          VALUES($1,$2,$3,1,$4,$5,$6,$7,$8)`, [next, state.requestedRevision, snapshot, input.actor.userId, input.actor.operatorSessionId ?? null, input.actor.cliReference ?? null, kind, state.policyDigest]);
+          VALUES($1,$2,$3,1,$4,$5,$6,$7,$8)`, [next, state.requestedRevision, snapshot, input.actor.userId, input.actor.operatorSessionId ?? null, input.actor.cliReference ?? null, kind, policyDigest]);
         const updated = await client.query("UPDATE instance_settings_state SET requested_revision=$1,updated_at=clock_timestamp() WHERE requested_revision=$2", [next, input.expectedRequestedRevision]);
         if (updated.rowCount !== 1) throw new SettingsConflictError(state.requestedRevision);
         // Audit a fixed code, never arbitrary operator text or setting values.
@@ -85,7 +87,7 @@ export function createInstanceSettingsRepository(pool: DatabasePool, options: { 
         const state = await readState(client);
         if (state.activeRevision !== input.expectedActiveRevision || state.requestedRevision !== input.expectedRequestedRevision) throw new SettingsConflictError(state.requestedRevision);
         if (state.policyDigest !== input.policyDigest) throw new Error("settings_policy_mismatch");
-        const live = await client.query("SELECT process_id FROM instance_settings_runtime_reports WHERE heartbeat_at > clock_timestamp()-interval '60 seconds' LIMIT 1");
+        const live = await client.query("SELECT process_id FROM instance_settings_runtime_reports WHERE heartbeat_at > clock_timestamp()-interval '30 seconds' LIMIT 1");
         if (live.rowCount) throw new Error("settings_runtime_not_drained");
         await options.activationGuard!(client, state, input);
         await client.query("UPDATE instance_settings_state SET active_revision=requested_revision,mode='database',activation_epoch=activation_epoch+1,updated_at=clock_timestamp()");

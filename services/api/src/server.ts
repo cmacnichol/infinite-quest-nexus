@@ -177,6 +177,7 @@ import {
 } from "../../../packages/application/src/imports/index.js";
 
 export type BuildServerOptions = {
+  settingsReadiness?: () => Promise<boolean>;
   config: RuntimeConfig;
   pool: DatabasePool;
   generation: GenerationApplication;
@@ -680,6 +681,7 @@ async function generationLifecycleLogContext(
 }
 
 export async function buildServer({
+  settingsReadiness,
   config,
   pool,
   generation,
@@ -990,6 +992,7 @@ export async function buildServer({
   app.get("/health/live", async () => ({ status: "ok", role: config.role }));
   app.get("/health/ready", async (_request, reply) => {
     try {
+      if (settingsReadiness && !await settingsReadiness()) return reply.code(503).send({ status: "not_ready", reason: "settings runtime incompatible" });
       const result = await pool.query<{ database_version: string; vector_version: string | null }>(
         `SELECT current_setting('server_version') AS database_version,
                 (SELECT extversion FROM pg_extension WHERE extname = 'vector') AS vector_version`

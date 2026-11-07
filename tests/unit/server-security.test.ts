@@ -135,6 +135,14 @@ describe("API server security and CORS headers", () => {
     }),
   } as unknown as DatabasePool;
 
+  it("fails readiness while the settings runtime is incompatible", async () => {
+    const mockPool = { query: async () => ({ rows: [{ database_version: "18", vector_version: "0.8.6" }] }) } as unknown as DatabasePool;
+    const app = await buildServer({ ...serverOptions({ config: makeConfig(), pool: mockPool }), settingsReadiness: async () => false });
+    try {
+      expect((await app.inject({ method: "GET", url: "/health/ready" })).statusCode).toBe(503);
+      expect((await app.inject({ method: "GET", url: "/health/live" })).statusCode).toBe(200);
+    } finally { await app.close(); }
+  });
   it("keeps readiness available while System Import rejects domain mutations", async () => {
     const gateClient = {
       query: vi.fn(async (sql: string) => sql.includes("pg_try_advisory_lock_shared")
