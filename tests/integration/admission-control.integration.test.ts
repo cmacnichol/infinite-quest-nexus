@@ -25,7 +25,7 @@ integration("PostgreSQL API admission control", () => {
   });
 
   afterEach(async () => {
-    await pool.query("TRUNCATE api_admission_leases, api_admission_buckets");
+    await pool.query("TRUNCATE api_admission_events, api_admission_windows, api_admission_leases, api_admission_buckets");
   });
 
   afterAll(async () => {

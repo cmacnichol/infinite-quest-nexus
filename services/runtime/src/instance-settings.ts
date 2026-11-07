@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { deploymentSettingsPolicySchema, instanceSettingsSchema, settingsFeatureGatesSchema, type DeploymentSettingsPolicy, type InstanceSettings } from "../../../packages/contracts/src/instance-settings.js";
-import { resolveInstanceSettings } from "../../../packages/domain/src/instance-settings.js";
+import { resolveInstanceSettings, resolveRequestPolicy } from "../../../packages/domain/src/instance-settings.js";
 import { validateSettingsPolicy, type SettingsState } from "../../../packages/application/src/settings/index.js";
 import { createInstanceSettingsRepository } from "../../../packages/database/src/instance-settings-repository.js";
 import { withTransaction } from "../../../packages/database/src/pool.js";
@@ -46,7 +46,8 @@ export function resolveRuntimeSettingsState(state:SettingsState, bootstrap:Runti
   // Emergency deployment disables are honored but divergence cannot become healthy.
   const permitted=resolveInstanceSettings(state.active,policy,{role:bootstrap.role,databaseMaxConnections:bootstrap.databaseMaxConnections});
   if(!permitted.ok || settingsDigest(resolved.effective)!==settingsDigest(permitted.effective)) throw new Error('settings_deployment_divergence');
-  const config={...mergeRuntimeSettings(bootstrap,resolved.effective),instanceSettingsRevision:state.activeRevision};
+  const merged=mergeRuntimeSettings(bootstrap,resolved.effective);
+  const config={...merged,security:{...merged.security,...resolveRequestPolicy(resolved.effective,policy)},instanceSettingsRevision:state.activeRevision};
   return {config,mode:'database',activeRevision:state.activeRevision,policyDigest:settingsDigest(policy),activationEpoch:state.activationEpoch,effectiveDigest:settingsDigest(resolved.effective)};
 }
 export async function loadActiveRuntimeSettings(pool:DatabasePool,bootstrap:RuntimeConfig,policy?:DeploymentSettingsPolicy):Promise<ResolvedRuntimeSettings> {

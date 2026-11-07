@@ -8,6 +8,11 @@ export function runtimeArchivePolicy(config: RuntimeConfig, scope: "campaign" | 
     artifactTtlSeconds: config.systemArchiveArtifactTtlSeconds,
     uploadTtlSeconds: config.systemArchiveUploadTtlSeconds,
     chunkBytes: config.systemArchiveChunkBytes,
-    limits: scope === "system" ? config.systemArchiveLimits : config.campaignArchiveLimits,
+    limits: scope === "system" ? config.systemArchiveLimits : {
+      ...config.campaignArchiveLimits,
+      maxCompressedBytes: Math.min(config.campaignArchiveLimits.maxCompressedBytes, config.security.apiImportBodyLimitBytes),
+      maxJsonEntryBytes: Math.min(config.campaignArchiveLimits.maxJsonEntryBytes, config.security.apiImportBodyLimitBytes),
+      maxOriginalImageBytes: Math.min(config.campaignArchiveLimits.maxOriginalImageBytes, config.security.apiAssetBodyLimitBytes),
+    },
   });
 }

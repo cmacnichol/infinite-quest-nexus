@@ -80,6 +80,12 @@ async function cleanupExpiredBuckets(client: DatabaseClient, now: Date): Promise
       )`,
     [now]
   );
+  // Reviewed windows cannot exceed one hour. Retain timestamp authority for
+  // at least that lookback, independently of legacy fixed-window cleanup.
+  await client.query(`DELETE FROM api_admission_events WHERE id IN (
+    SELECT id FROM api_admission_events WHERE accepted_at < $1::timestamptz-interval '1 hour' LIMIT 100)`,[now]);
+  await client.query(`DELETE FROM api_admission_windows WHERE ctid IN (
+    SELECT ctid FROM api_admission_windows WHERE window_expires_at < $1::timestamptz-interval '1 hour' LIMIT 100)`,[now]);
 }
 
 export async function acquireAdmission(
@@ -147,25 +153,53 @@ export async function acquireAdmission(
       }
     }
 
-    const bucket = await client.query<BucketRow>(
-      `INSERT INTO api_admission_buckets (
-         owner_user_id, operation, window_started_at, window_expires_at, accepted_count
-       ) VALUES ($1,$2,$3,$4,1)
-       ON CONFLICT (owner_user_id, operation, window_started_at)
-       DO UPDATE SET accepted_count = api_admission_buckets.accepted_count + 1, updated_at = now()
-       WHERE api_admission_buckets.accepted_count < $5
-       RETURNING accepted_count, window_expires_at`,
-      [ownerUserId, policy.key, window.startedAt, window.expiresAt, policy.maxRequests]
+    // Keep the old bucket key and SQL contract for rollback binaries. accounted_count
+    // separates our timestamped events from history written by older binaries.
+    const history = await client.query<{window_started_at:Date;window_expires_at:Date;unknown_count:number}>(
+      `SELECT window_started_at, window_expires_at, accepted_count-accounted_count AS unknown_count
+       FROM api_admission_buckets WHERE owner_user_id=$1 AND operation=$2
+       AND window_expires_at>$3 AND accepted_count>accounted_count`,
+      [ownerUserId, policy.key, new Date(now.getTime()-3600000)]
     );
-    const accepted = bucket.rows[0];
-    if (!accepted) {
+    const unknownActive = history.rows.find(row => row.window_expires_at > now);
+    if (unknownActive) {
       await rollback(client);
       transactionOpen = false;
-      return {
-        allowed: false,
-        retryAfterSeconds: retryAfterSeconds(now, window.expiresAt)
-      };
+      return {allowed:false,retryAfterSeconds:retryAfterSeconds(now,unknownActive.window_expires_at)};
     }
+    await client.query(
+      `INSERT INTO api_admission_windows(owner_user_id,operation,window_started_at,window_expires_at,max_requests)
+       VALUES($1,$2,$3,$4,$5) ON CONFLICT(owner_user_id,operation,window_started_at,window_expires_at)
+       DO UPDATE SET max_requests=LEAST(api_admission_windows.max_requests,EXCLUDED.max_requests)`,
+      [ownerUserId,policy.key,window.startedAt,window.expiresAt,policy.maxRequests]
+    );
+    const budgets = await client.query<{window_started_at:Date;window_expires_at:Date;max_requests:number;accepted_count:number}>(
+      `SELECT w.window_started_at,w.window_expires_at,w.max_requests,
+        (SELECT count(*)::int FROM api_admission_events e WHERE e.owner_user_id=w.owner_user_id
+         AND e.operation=w.operation AND e.accepted_at>=w.window_started_at AND e.accepted_at<w.window_expires_at) AS accepted_count
+       FROM api_admission_windows w WHERE w.owner_user_id=$1 AND w.operation=$2 AND w.window_expires_at>$3`,
+      [ownerUserId,policy.key,now]
+    );
+    let remaining = policy.maxRequests;
+    for (const budget of budgets.rows) {
+      const unknown = history.rows.filter(row => row.window_expires_at>budget.window_started_at && row.window_started_at<budget.window_expires_at).reduce((sum,row)=>sum+row.unknown_count,0);
+      const available = budget.max_requests-budget.accepted_count-unknown;
+      if (available<=0) {
+        await rollback(client);
+        transactionOpen=false;
+        return {allowed:false,retryAfterSeconds:retryAfterSeconds(now,budget.window_expires_at)};
+      }
+      remaining=Math.min(remaining,available-1);
+    }
+    await client.query(`INSERT INTO api_admission_events(owner_user_id,operation,accepted_at) VALUES($1,$2,$3)`,[ownerUserId,policy.key,now]);
+    await client.query(
+      `INSERT INTO api_admission_buckets(owner_user_id,operation,window_started_at,window_expires_at,accepted_count,accounted_count)
+       VALUES($1,$2,$3,$4,1,1) ON CONFLICT(owner_user_id,operation,window_started_at)
+       DO UPDATE SET accepted_count=api_admission_buckets.accepted_count+1,
+       accounted_count=api_admission_buckets.accounted_count+1,
+       window_expires_at=GREATEST(api_admission_buckets.window_expires_at,EXCLUDED.window_expires_at),updated_at=now()`,
+      [ownerUserId,policy.key,window.startedAt,window.expiresAt]
+    );
 
     let leaseId: string | null = null;
     if (policy.maxConcurrent !== null) {
@@ -191,7 +225,7 @@ export async function acquireAdmission(
     transactionOpen = false;
     return {
       allowed: true,
-      remaining: Math.max(0, policy.maxRequests - accepted.accepted_count),
+      remaining,
       expiresAt: window.expiresAt,
       leaseId
     };

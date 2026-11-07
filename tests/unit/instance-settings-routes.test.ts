@@ -4,8 +4,8 @@ import { registerInstanceSettingsRoutes } from "../../services/api/src/instance-
 import { installRequestSecurity } from "../../services/api/src/request-security.js";
 import { bootstrap } from "../helpers/instance-settings-runtime.js";
 import { SettingsHttpError } from "../../services/api/src/settings-operator-session.js";
-function fixture(enabled=true,trustProxy=true,parentSecurity=false) {
- const app=Fastify({trustProxy});
+function fixture(enabled=true,trustProxy=true,parentSecurity=false,bodyLimit=1048576) {
+ const app=Fastify({trustProxy,bodyLimit});
  if(parentSecurity)installRequestSecurity(app,bootstrap());
  registerInstanceSettingsRoutes(app,{enabled:()=>enabled,resolveActor:async()=>"actor",settings:{read:async()=>({safe:true}),patch:async()=>({safe:true}),history:async()=>({events:[],nextCursor:null})},operatorSessions:{unlock:async()=>({token:"a".repeat(43),csrfToken:"csrf",expiresAt:new Date()}),authorize:async(token,_actor,csrf)=>{if(!token)throw new SettingsHttpError(401,"settings_unlock_required");if(csrf!==undefined&&csrf!=="csrf")throw new SettingsHttpError(403,"settings_csrf_invalid");return {id:"session"} as any;},restore:async(token)=>{if(!token)throw new SettingsHttpError(401,"settings_unlock_required");return {csrfToken:"csrf",expiresAt:new Date()};},revoke:async()=>{}}});return app;
 }
@@ -28,4 +28,15 @@ describe("protected installation routes",()=>{
  it("refuses a forged forwarded TLS header without trusted proxy configuration",async()=>{const app=fixture(true,false);expect((await app.inject({url:"/api/v1/settings/operator-session",headers})).statusCode).toBe(403);await app.close();});
  it("preserves forbidden status from production parent origin protection",async()=>{const app=fixture(true,true,true);const response=await app.inject({method:"POST",url:"/api/v1/settings/operator-session",headers:{...headers,origin:"https://evil.test"},payload:{managementKey:"planted-secret"}});expect(response.statusCode).toBe(403);expect(response.json()).toEqual({code:"settings_origin_invalid"});expect(response.body).not.toContain("planted-secret");await app.close();});
  it("reports disabled management",async()=>{const app=fixture(false);expect((await app.inject({url:"/api/v1/settings/operator-session",headers:{host:headers.host,"x-forwarded-proto":"https"}})).json()).toEqual({managementEnabled:false,unlocked:false});expect((await app.inject({url:"/api/v1/settings/instance",headers})).statusCode).toBe(503);await app.close();});
+ it("keeps the management limit at exactly 65536 bytes independently of the default limit",async()=>{
+  for (const bodyLimit of [1,1048576]) {
+   const app=fixture(true,true,false,bodyLimit);
+   const body=JSON.stringify({managementKey:"secret"});
+   const payload=body+" ".repeat(65536-Buffer.byteLength(body));
+   expect((await app.inject({method:"POST",url:"/api/v1/settings/operator-session",headers:{...headers,"content-type":"application/json"},payload})).statusCode).toBe(200);
+   expect((await app.inject({method:"POST",url:"/api/v1/settings/operator-session",headers:{...headers,"content-type":"application/json"},payload:payload+" "})).statusCode).toBe(413);
+   await app.close();
+  }
+ });
+
 });

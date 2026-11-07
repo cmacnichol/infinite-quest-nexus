@@ -103,3 +103,14 @@ export function resolveInstanceSettings(requested: InstanceSettings, policy: Dep
     source: "database", lockReason: locks.get(field.key) ?? null, applyMode: "restart"
   })) };
 }
+
+/** Only restart-active, policy-approved request resource settings reach ingress. */
+export type RequestPolicy = Pick<InstanceSettings,
+  "apiDefaultBodyLimitBytes" | "apiImportBodyLimitBytes" | "apiAssetBodyLimitBytes" |
+  "apiRateLimitWindowSeconds" | "apiRateLimitProviderRequests" | "apiRateLimitGenerationRequests" |
+  "apiRateLimitImportRequests" | "apiConcurrencyProviderRequests" | "apiConcurrencyImportRequests">;
+export function resolveRequestPolicy(settings: InstanceSettings, policy: DeploymentSettingsPolicy): RequestPolicy {
+  const resolved = resolveInstanceSettings(settings, policy, {role: "api", databaseMaxConnections: 12});
+  if (!resolved.ok) throw new Error("settings_request_policy_rejected");
+  return Object.fromEntries(Object.entries(resolved.effective).filter(([key]) => key.startsWith("api"))) as RequestPolicy;
+}

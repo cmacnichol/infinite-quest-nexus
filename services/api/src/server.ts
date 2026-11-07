@@ -1,3 +1,4 @@
+import { installRequestAdmission, type RequestAdmissionPort } from "./request-admission.js";
 import { registerInstanceSettingsRoutes } from "./instance-settings-routes.js";
 import { createInstanceSettingsHttpComposition } from "./instance-settings-composition.js";
 import { createCastContextPreview } from "../../runtime/src/campaign-cast-context-preview.js";
@@ -179,6 +180,7 @@ import {
 } from "../../../packages/application/src/imports/index.js";
 
 export type BuildServerOptions = {
+  requestAdmission?: RequestAdmissionPort;
   settingsBootstrap?: RuntimeConfig;
   settingsReadiness?: () => Promise<boolean>;
   config: RuntimeConfig;
@@ -684,6 +686,7 @@ async function generationLifecycleLogContext(
 }
 
 export async function buildServer({
+  requestAdmission,
   settingsBootstrap,
   settingsReadiness,
   config,
@@ -839,6 +842,7 @@ export async function buildServer({
   });
 
   installRequestSecurity(app, config);
+  installRequestAdmission(app, pool, config, requestAdmission);
   registerSystemImportGate(app, {
     pool,
     enabled: config.systemArchiveEnabled ?? false,
