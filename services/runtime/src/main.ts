@@ -3,7 +3,7 @@ import { migrateDatabase, waitForDatabaseMigrations } from "../../../packages/da
 import { buildServer } from "../../api/src/server.js";
 import { createApiCampaignCastApplication, createWorkerCampaignCastApplication } from "./campaign-cast-composition.js";
 import { runWorker } from "../../worker/src/worker.js";
-import { logger } from "../../../packages/logger/src/index.js";
+import { adoptRuntimeLoggerSettings, logger } from "../../../packages/logger/src/index.js";
 import { createProviderNetworkPolicy } from "../../../packages/security/src/provider-network-policy.js";
 import {
   configureDefaultProviderTransport,
@@ -29,6 +29,7 @@ import {
 import { createProviderApplicationAdapter } from "../../api/src/provider-application-adapter.js";
 import { loadSchemaVerificationFile } from "./provider-schema-verification.js";
 
+import { loadActiveRuntimeSettings, loadDeploymentSettingsPolicy, registerSettingsRuntime } from "./instance-settings.js";
 const config = loadRuntimeConfig();
 const schemaVerification = loadSchemaVerificationFile(process.env.TEXT_SCHEMA_VERIFICATION_FILE?.trim() || undefined);
 const abortController = new AbortController();
@@ -51,14 +52,33 @@ await runRuntimeLifecycle(config, abortController, {
   configureTransport: configureDefaultProviderTransport,
   createGenerationEvents: createRuntimeGenerationEventSource,
   dispatchRole: (roleConfig, pool, signal, providerTransport, generationEvents) => dispatchRuntimeRole(roleConfig, pool, signal, {
+    resolveSettings: async (pool, bootstrap, signal) => {
+      const policy = bootstrap.instanceSettingsPolicyFile ? loadDeploymentSettingsPolicy(bootstrap.instanceSettingsPolicyFile) : undefined;
+      const resolved = await loadActiveRuntimeSettings(pool, bootstrap, policy);
+      adoptRuntimeLoggerSettings(resolved.config);
+      logger.info({
+        event: "runtime_settings_active",
+        role: resolved.config.role,
+        activeRevision: resolved.activeRevision,
+        effectiveConfigurationDigest: resolved.effectiveDigest,
+        generationJobsPerWorker: resolved.config.workerGenerationConcurrency,
+        sharedTextRequestCapacity: resolved.config.castDiscoveryEnabled === true ? resolved.config.textProviderConcurrency : null,
+        sharedTextRequestCapacityScope: "cast_discovery_dependent_text_routes",
+        workerPollIntervalMs: resolved.config.workerPollIntervalMs
+      });
+      const registration = await registerSettingsRuntime(pool, resolved, signal, () => abortController.abort(), policy);
+      try { await registration.waitUntilCompatible(); }
+      catch (error) { await registration.dispose(); throw error; }
+      return { config: resolved.config, bootstrap, ...registration };
+    },
     migrateDatabase,
     waitForDatabaseMigrations,
-    createApiProviders: (pool, credentialSecret, transport) => createApiProviderApplicationComposition(
+    createApiProviders: (pool, credentialSecret, transport, config) => createApiProviderApplicationComposition(
       pool,
       { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest,
         nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, castAutoMatchEnabled: config.castAutoMatchEnabled === true, castContextEnabled: config.castContextEnabled === true, textProviderConcurrency: config.textProviderConcurrency ?? 2 }
     ),
-    createWorkerProviders: (pool, credentialSecret, transport) => createWorkerProviderApplicationComposition(
+    createWorkerProviders: (pool, credentialSecret, transport, config) => createWorkerProviderApplicationComposition(
       pool,
       { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest,
         nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, castAutoMatchEnabled: config.castAutoMatchEnabled === true, castContextEnabled: config.castContextEnabled === true, textProviderConcurrency: config.textProviderConcurrency ?? 2 }

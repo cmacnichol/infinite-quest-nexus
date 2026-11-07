@@ -1,3 +1,6 @@
+import { browserDeviceStorage } from "@infinite-quest/client-web";
+import { loadUserProfile } from "./user-profile-menu";
+import { parseSettingsRoute } from "./settings/sections";
 import "./styles.css";
 import { generateWorldPreview } from "./world-creation-api";
 import { createAuthoringJobsApi } from "./authoring-jobs-api";
@@ -26,20 +29,17 @@ let mountedPage: MountedPage | null = null;
 let pageDisposed = false;
 const startupController = new AbortController();
 
-function browserResumeStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> | null {
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
 async function start(): Promise<MountedPage | null> {
   if (uiImplementation() === "web-awesome") await ensureWebAwesome();
   if (pageDisposed) return null;
   if (isAppEntryPath(window.location.pathname)) {
     const result = await resumeStoredStoryCampaign({
-      store: createStoryResumeStore(browserResumeStorage()),
+      async store(signal) {
+        const storage = browserDeviceStorage(window);
+        const user = await loadUserProfile(signal);
+        if (!signal.aborted) storage.activate(user);
+        return createStoryResumeStore(storage);
+      },
       list(signal) {
         try {
           return createStoryPlayerComposition().api.campaigns.list(signal);
@@ -55,6 +55,11 @@ async function start(): Promise<MountedPage | null> {
     });
     if (result === "resumed") return null;
     if (pageDisposed) return null;
+  }
+  const settingsRoute = parseSettingsRoute(new URL(window.location.href));
+  if (settingsRoute) {
+    const { mountSettingsPage } = await import("./settings/page");
+    return pageDisposed ? null : mountSettingsPage(appRoot, settingsRoute);
   }
   const characterSessionKey = characterSessionKeyFromPath(window.location.pathname);
   const storyRoute = storyRouteFromLocation(window.location.pathname, window.location.search);

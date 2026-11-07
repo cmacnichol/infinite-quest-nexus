@@ -9,3 +9,7 @@ coverage
 .env.*
 *.story
 *.log
+.superpowers
+tmp
+test-results
+playwright-report

@@ -91,7 +91,7 @@ describe("World Library overview", () => {
 
   it("routes the reserved new path to the creation shell without loading a world", async () => {
     const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
-    window.location = { pathname: "/app/worlds/new" } as Location;
+    window.location = new URL("http://localhost/app/worlds/new") as unknown as Location;
     Object.defineProperty(window, "localStorage", { configurable: true, value: null });
     const fetch = vi.fn().mockResolvedValue(disabledAuthoringCapabilitiesResponse());
     const previousGlobals = new Map<PropertyKey, PropertyDescriptor | undefined>();
@@ -107,7 +107,8 @@ describe("World Library overview", () => {
       expect(window.document.querySelector('[data-page="world-editor"]')).toBeNull();
       expect(window.document.querySelector('[data-page="world-creation"] button:disabled')).not.toBeNull();
       expect(window.document.querySelector(".theme-toggle")).not.toBeNull();
-      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch).toHaveBeenCalledWith("/api/v1/session", expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(fetch).toHaveBeenCalledWith(
         "/api/v1/authoring/capabilities",
         expect.objectContaining({ signal: expect.any(AbortSignal) })
@@ -123,7 +124,7 @@ describe("World Library overview", () => {
 
   it("gives the character workspace route precedence over library and world routes", async () => {
     const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
-    window.location = { pathname: "/app/characters/opaque-key" } as Location;
+    window.location = new URL("http://localhost/app/characters/opaque-key") as unknown as Location;
     Object.defineProperty(window, "localStorage", { configurable: true, value: null });
     Object.defineProperty(window, "sessionStorage", { configurable: true, value: null });
     const fetch = vi.fn().mockResolvedValue(disabledAuthoringCapabilitiesResponse());
@@ -138,7 +139,8 @@ describe("World Library overview", () => {
       await import("../../apps/web-next/src/bootstrap.js");
       expect(window.document.querySelectorAll('[data-page="character-workspace-recovery"]')).toHaveLength(1);
       expect(window.document.querySelector('[data-page="world-library"], [data-page="world-editor"]')).toBeNull();
-      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch).toHaveBeenCalledWith("/api/v1/session", expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(fetch).toHaveBeenCalledWith(
         "/api/v1/authoring/capabilities",
         expect.objectContaining({ signal: expect.any(AbortSignal) })
@@ -154,7 +156,7 @@ describe("World Library overview", () => {
 
   it("keeps the mounted editor and theme control through BFCache transitions, then disposes on non-persisted pagehide", async () => {
     const { window } = parseHTML('<html><body><div id="app"></div></body></html>');
-    window.location = { pathname: "/app/worlds/22222222-2222-4222-8222-222222222222" } as Location;
+    window.location = new URL("http://localhost/app/worlds/22222222-2222-4222-8222-222222222222") as unknown as Location;
     Object.defineProperty(window, "localStorage", { configurable: true, value: null });
     let requestSignal: AbortSignal | undefined;
     const fetch = vi.fn((_url: string, init?: RequestInit) => {

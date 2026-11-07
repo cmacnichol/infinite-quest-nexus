@@ -1,3 +1,4 @@
+import { historicalArchivePolicy } from "../../packages/contracts/src/archive-policy.js";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import JSZip from "jszip";
@@ -190,6 +191,14 @@ async function* utf8(value: string): AsyncGenerator<Uint8Array> {
 }
 
 describe("Task 14e3d private portable composition contract", () => {
+  it.each(Object.keys(historicalArchivePolicy("campaign").limits) as (keyof ReturnType<typeof historicalArchivePolicy>["limits"])[])("enforces the configured campaign %s during streamed decoding", async (key) => {
+    const original = await currentCampaignArchive();
+    const zip = await JSZip.loadAsync(original);
+    const bytes = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+    const adapter = createPortableFamilyPreviewAdapter(providerAdapter, { async readTargetWorldVersion() { return null; } }, { ...historicalArchivePolicy("campaign").limits, [key]: 1 });
+    await expect(adapter.previewCampaignZip(chunks(bytes, 23), campaignCommand())).rejects.toThrow(key === "maxEntries" ? "archive_entry_limit_exceeded" : "archive_size_limit_exceeded");
+  });
+
   it("enumerates every import family without a generic parser escape hatch", () => {
     expect(PORTABLE_IMPORT_FAMILIES).toEqual([
       "campaign_zip",
@@ -359,7 +368,7 @@ describe("Task 14e3d private portable composition contract", () => {
     const source = await readFile(new URL("../../services/runtime/src/portable-import-export-composition.ts", import.meta.url), "utf8");
     expect(source).not.toContain("JSZip.loadAsync");
     expect(source).not.toContain("campaignZip(await boundedBytes");
-    expect(source).toContain("Readable.from(boundedArchiveSource(source, inspector))");
+    expect(source).toContain("Readable.from(boundedArchiveSource(source, inspector, Math.min(MAX_INPUT_BYTES, limits.maxCompressedBytes)))");
   });
 
   it("normalizes every non-ZIP import family through its explicit decoder", async () => {

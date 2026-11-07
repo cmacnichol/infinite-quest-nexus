@@ -1,3 +1,4 @@
+import { archivePolicySnapshotSchema, type ArchivePolicySnapshot } from "../../contracts/src/archive-policy.js";
 import { createHash, randomBytes } from "node:crypto";
 import {
   toPortableArchiveExportRetrieval,
@@ -274,6 +275,7 @@ export type CreateCanonicalPortablePreviewRequest<Command extends PortableImport
   CreatePortablePreviewRequest<Command> & Readonly<{
     authority: PortableCanonicalImportAuthority;
     authorityFingerprint: string;
+    policy?: ArchivePolicySnapshot;
   }>;
 
 export type CompletePortableImportRequest<Kind extends PortableImportKind> = Readonly<{
@@ -296,6 +298,7 @@ export type PortableImportCommitRepositoryCommand<
 }>;
 
 export type RegisterPortableExportRequest = PortableExportScope & Readonly<{
+  policy?: ArchivePolicySnapshot;
   filesystemOperationId: string;
   operationScopeId: string;
   contentType: PortableArchiveExportView["contentType"];
@@ -2071,6 +2074,7 @@ async function createPreview<Command extends PortableImportPreviewCommand>(
   privateAuthority?: Readonly<{
     authority: PortableCanonicalImportAuthority;
     authorityFingerprint: string;
+    policy?: ArchivePolicySnapshot;
   }>,
 ): Promise<PortableImportPreviewView<Command>> {
   const token = randomPreviewToken();
@@ -2145,10 +2149,10 @@ async function createPreview<Command extends PortableImportPreviewCommand>(
            destination_world_id,destination_world_version_id,
            source_installation_id,source_record_id,status,preview_projection,
            diagnostic_codes,expires_at,normalized_payload,authority_fingerprint,
-           provider_configuration_fingerprint,selected_character_id
+           provider_configuration_fingerprint,selected_character_id,policy_snapshot
          )
          SELECT staged.owner_user_id,staged.id,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-                'previewed',$12::jsonb,$13::text[],$14,$15::jsonb,$16,$17,$18
+                'previewed',$12::jsonb,$13::text[],LEAST($14::timestamptz,staged.expires_at),$15::jsonb,$16,$17,$18,$19::jsonb
            FROM portable_staged_inputs staged
           WHERE staged.owner_user_id=$1 AND staged.handle_token_hash=$2
             AND staged.status='staged' AND staged.expires_at > now()
@@ -2158,7 +2162,8 @@ async function createPreview<Command extends PortableImportPreviewCommand>(
           JSON.stringify(privateAuthority.authority.normalizedPayload),
           privateAuthority.authorityFingerprint,
           privateAuthority.authority.providerConfigurationFingerprint,
-          privateAuthority.authority.selectedCharacterId
+          privateAuthority.authority.selectedCharacterId,
+          privateAuthority.policy ? JSON.stringify(archivePolicySnapshotSchema.parse(privateAuthority.policy)) : null
         ]
       )
       : await client.query<{ id: string; expires_at: Date }>(
@@ -2170,7 +2175,7 @@ async function createPreview<Command extends PortableImportPreviewCommand>(
            diagnostic_codes,expires_at
          )
          SELECT staged.owner_user_id,staged.id,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-                'previewed',$12::jsonb,$13::text[],$14
+                'previewed',$12::jsonb,$13::text[],LEAST($14::timestamptz,staged.expires_at)
            FROM portable_staged_inputs staged
           WHERE staged.owner_user_id=$1 AND staged.handle_token_hash=$2
             AND staged.status='staged' AND staged.expires_at > now()
@@ -2318,6 +2323,12 @@ async function beginImport<Kind extends PortableImportKind, Destination extends 
     await client.query(
       "UPDATE portable_import_operations SET status='expired',updated_at=now() WHERE id=$1 AND status='previewed'",
       [row.id]
+    );
+    // A preview is capped at its staged input's expiry. Retire both when both
+    // have elapsed; a shorter preview must leave a still-valid input usable.
+    await client.query(
+      "UPDATE portable_staged_inputs SET status='expired',updated_at=now() WHERE id=$1 AND owner_user_id=$2 AND status='staged' AND expires_at<=clock_timestamp()",
+      [row.staged_input_id, command.ownerUserId]
     );
     throw repositoryError("archive_expired", 410);
   }
@@ -2529,12 +2540,14 @@ async function registerExportArtifact(
   const expectedHash = contentHash(request.contentHash);
   const expectedLength = byteLength(request.byteLength);
   const expiresAt = finiteFutureTimestamp(request.expiresAt, "archive_expired");
+  // Historical issuers omit policy; keep their pre-0123 INSERT shape.
+  const snapshot = request.policy ? archivePolicySnapshotSchema.parse(request.policy) : null;
   const inserted = await pool.query<{ byte_length: string }>(
     `INSERT INTO portable_export_artifacts (
        owner_user_id,retrieval_token_hash,filesystem_operation_id,export_kind,
-       campaign_id,world_id,world_version_id,content_type,content_hash,byte_length,status,expires_at
+       campaign_id,world_id,world_version_id,content_type,content_hash,byte_length,status,expires_at${snapshot ? ",policy_snapshot" : ""}
      )
-     SELECT operation.owner_user_id,$3,operation.id,$4,$5,$6,$7,$8,$9,$10,'ready',$11
+     SELECT operation.owner_user_id,$3,operation.id,$4,$5,$6,$7,$8,$9,$10,'ready',$11${snapshot ? ",$13::jsonb" : ""}
        FROM durable_filesystem_operations operation
        JOIN durable_filesystem_descriptors descriptor
          ON descriptor.operation_id=operation.id
@@ -2558,7 +2571,8 @@ async function registerExportArtifact(
       expectedHash,
       expectedLength,
       expiresAt,
-      sha256(request.operationScopeId)
+      sha256(request.operationScopeId),
+      ...(snapshot ? [JSON.stringify(snapshot)] : [])
     ]
   );
   const row = inserted.rows[0];
@@ -2653,7 +2667,8 @@ export function createPostgresImportRepository(pool: DatabasePool): PostgresPort
     createCanonicalPreview(request) {
       return safeRepositoryCall(() => createPreview(pool, request, {
         authority: request.authority,
-        authorityFingerprint: request.authorityFingerprint
+        authorityFingerprint: request.authorityFingerprint,
+        ...(request.policy ? { policy: request.policy } : {})
       }));
     },
     retrievePreviewPayload(owner, kind, previewHandle) {

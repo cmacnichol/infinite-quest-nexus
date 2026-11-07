@@ -1,3 +1,4 @@
+import type { ArchivePolicySnapshot } from "../../contracts/src/archive-policy.js";
 import {
   systemArchiveJobViewSchema,
   type SystemArchiveJobStatus,
@@ -101,7 +102,7 @@ function mapEnqueueError(error: unknown): never {
   throw error;
 }
 
-export function createPostgresSystemArchiveJobRepository(pool: DatabasePool): SystemArchiveJobRepository {
+export function createPostgresSystemArchiveJobRepository(pool: DatabasePool, policy?: ArchivePolicySnapshot): SystemArchiveJobRepository {
   async function enqueue(
     owner: OwnerScope,
     kind: "export" | "import",
@@ -115,12 +116,12 @@ export function createPostgresSystemArchiveJobRepository(pool: DatabasePool): Sy
     try {
       const result = await pool.query<SystemArchiveJobRow>(
         `INSERT INTO system_archive_jobs
-           (owner_user_id,kind,status,idempotency_key_hash,staged_input_id)
-         VALUES ($1,$2,'queued',$3,$4)
+           (owner_user_id,kind,status,idempotency_key_hash,staged_input_id,policy_snapshot)
+         VALUES ($1,$2,'queued',$3,$4,$5::jsonb)
          ON CONFLICT (owner_user_id,kind,idempotency_key_hash)
          DO UPDATE SET updated_at=system_archive_jobs.updated_at
          RETURNING ${JOB_COLUMNS}`,
-        [owner.ownerUserId, kind, idempotencyKeyHash, stagedInputId]
+        [owner.ownerUserId, kind, idempotencyKeyHash, stagedInputId, JSON.stringify(policy ?? null)]
       );
       const row = result.rows[0];
       if (!row) throw new Error("System Archive enqueue did not return a job.");

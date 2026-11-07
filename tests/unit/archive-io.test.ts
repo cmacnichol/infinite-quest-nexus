@@ -1,3 +1,5 @@
+import { runtimeArchivePolicy } from "../../services/runtime/src/archive-policy.js";
+import { bootstrap } from "../helpers/instance-settings-runtime.js";
 import { ZipArchive } from "archiver";
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -1713,5 +1715,18 @@ describe("archive artifact writing and cleanup", () => {
     await expectArchiveError(removeArchivePath(root, path), "archive-entry-unsafe");
 
     expect(await readFile(outside, "utf8")).toBe("outside");
+  });
+});
+
+describe("active asset request boundary in archive streams",()=>{
+  it("accepts exactly the active image byte limit and rejects one byte more",async()=>{
+    const root=await temporaryRoot();
+    const config=bootstrap();config.security.apiAssetBodyLimitBytes=1048576;
+    const limits=runtimeArchivePolicy(config,"campaign").limits;
+    for(const size of [1048576,1048577]){
+      const operation=writeArchiveArtifact(root,[{path:"assets/image.png",logicalType:"asset",mediaType:"image/png",source:Readable.from(randomBytes(size))}],systemManifest,limits);
+      if(size===1048576) await expect(operation).resolves.toMatchObject({byteLength:expect.any(Number)});
+      else await expect(operation).rejects.toMatchObject({code:"archive-limit-exceeded"});
+    }
   });
 });

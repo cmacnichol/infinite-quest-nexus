@@ -738,3 +738,5 @@ legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 80
 .management-boot-status[hidden], .management-boot-status [hidden] { display: none; }
 .management-boot-status p { margin-bottom: 0; color: var(--text); }
 .management-boot-status button:not([hidden]) { margin-top: 12px; }
+
+.retired-campaign-settings { display: none !important; }

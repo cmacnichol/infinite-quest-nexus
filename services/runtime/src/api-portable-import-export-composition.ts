@@ -1,3 +1,4 @@
+import { runtimeArchivePolicy } from "./archive-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import type { RuntimeConfig } from "../../../packages/database/src/config.js";
@@ -235,6 +236,8 @@ export async function createApiPortableImportExportComposition(
   const progress = factories.createProgress(input.pool);
   const portable = await factories.createComposition({
     pool: input.pool,
+    previewTtlSeconds: input.config.archivePreviewTtlSeconds,
+    policy: runtimeArchivePolicy(input.config, "campaign"),
     roots: {
       archiveRoot: input.config.archiveStorageRoot,
       assetRoot: input.config.assetStorageRoot,

@@ -49,10 +49,6 @@ describe("web-next campaign editor routing", () => {
     });
   }
 
-  function selectOverviewTurnStyle(select: HTMLSelectElement, value: "flexible_action" | "flexible_scene"): void {
-    for (const option of select.querySelectorAll<HTMLOptionElement>("option")) option.toggleAttribute("selected", option.value === value);
-  }
-
   it("loads, restricts, and saves the campaign-owned memory level", async () => {
     const { document } = parseHTML("<body><div id=app></div></body>");
     const root = document.querySelector<HTMLElement>("#app")!;
@@ -102,159 +98,26 @@ describe("web-next campaign editor routing", () => {
     mounted.dispose();
   });
 
-  it("saves the complete loaded overview payload with its original state fence and retained cost markup", async () => {
+  it("saves only title and status from Overview and leaves its draft intact after conflict", async () => {
     const { document } = parseHTML("<body><div id=app></div></body>");
     const root = document.querySelector<HTMLElement>("#app")!;
-    const overview = overviewFetch(new Response(JSON.stringify(overviewCampaign), { status: 200 }));
-    const { fetchMock } = overview;
-    vi.stubGlobal("fetch", fetchMock);
     installOverviewFormData();
-    const mounted = mountCampaignEditorPage(root, { campaignId: overviewCampaign.id, section: "overview" });
-    await vi.waitFor(() => expect(root.querySelector("#overview-form")).toBeTruthy());
-    await vi.waitFor(() => expect(overview.stateRequestCount()).toBe(1));
+    const {fetchMock} = overviewFetch(new Response(JSON.stringify({error:"Campaign changed."}),{status:409}));
+    vi.stubGlobal("fetch",fetchMock);
+    const mounted = mountCampaignEditorPage(root,{campaignId:overviewCampaign.id,section:"overview"});
+    await vi.waitFor(()=>expect(root.querySelector("#overview-form")).toBeTruthy());
     const form = root.querySelector<HTMLFormElement>("#overview-form")!;
-    expect(form.querySelector<HTMLSelectElement>("select[name='storyContextBudgetTokens']")?.value).toBe("64000");
+    const title = form.querySelector<HTMLInputElement>("[name=title]")!;
+    title.value = "Keep this draft";
     expect(root.textContent).toContain("Reported provider cost");
-    expect(root.textContent).toContain("Story text");
-    overview.setStateRevision(29);
-    const title = form.querySelector<HTMLInputElement>("input[name='title']")!;
-    title.value = "Renamed harbor";
-    form.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === "/api/v1/campaigns/campaign-1" && (init as RequestInit).method === "PATCH")).toBe(true));
-
-    const patch = fetchMock.mock.calls.find(([url, init]) => url === "/api/v1/campaigns/campaign-1" && (init as RequestInit).method === "PATCH");
-    const payload = JSON.parse(String((patch?.[1] as RequestInit).body));
-    expect(payload).toEqual({
-      title: "Renamed harbor",
-      status: "active",
-      textProviderProfileId: null,
-      turnControlStyle: "action_only",
-      storyLengthProfile: "standard",
-      storyContextBudgetTokens: 64000,
-      expectedTurnControlStyle: "action_only",
-      expectedActiveTurnNumber: 4,
-      expectedStateRevision: 11
-    });
-    expect(overview.stateRequestCount()).toBe(1);
-    mounted.dispose();
-  });
-
-  it("keeps the overview draft after a fenced settings conflict", async () => {
-    const { document } = parseHTML("<body><div id=app></div></body>");
-    const root = document.querySelector<HTMLElement>("#app")!;
-    const { fetchMock } = overviewFetch(new Response(JSON.stringify({ error: "Campaign changed." }), { status: 409 }));
-    vi.stubGlobal("fetch", fetchMock);
-    installOverviewFormData();
-    const mounted = mountCampaignEditorPage(root, { campaignId: overviewCampaign.id, section: "overview" });
-    await vi.waitFor(() => expect(root.querySelector("#overview-form")).toBeTruthy());
-    const form = root.querySelector<HTMLFormElement>("#overview-form")!;
-    const title = form.querySelector<HTMLInputElement>("input[name='title']")!;
-    title.value = "Keep this local title";
-    const turnStyle = form.querySelector<HTMLSelectElement>("select[name='turnControlStyle']")!;
-    selectOverviewTurnStyle(turnStyle, "flexible_scene");
-    form.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(root.textContent).toContain("Campaign changed."));
-    expect(title.value).toBe("Keep this local title");
-    expect(turnStyle.querySelector("option[selected]")?.getAttribute("value")).toBe("flexible_scene");
-    const patch = fetchMock.mock.calls.find(([url, init]) => url === "/api/v1/campaigns/campaign-1" && (init as RequestInit).method === "PATCH");
-    expect(JSON.parse(String((patch?.[1] as RequestInit).body))).toMatchObject({
-      title: "Keep this local title", turnControlStyle: "flexible_scene", expectedTurnControlStyle: "action_only",
-      expectedActiveTurnNumber: 4, expectedStateRevision: 11
-    });
-    mounted.dispose();
-  });
-
-  it.each([
-    { from: "flexible_action" as const, to: "flexible_scene" as const },
-    { from: "flexible_scene" as const, to: "flexible_action" as const }
-  ])("writes $from to $to with the loaded authority fences", async ({ from, to }) => {
-    const { document } = parseHTML("<body><div id=app></div></body>");
-    const root = document.querySelector<HTMLElement>("#app")!;
-    const campaign = { ...overviewCampaign, turnControlStyle: from };
-    const { fetchMock } = overviewFetch(new Response(JSON.stringify(campaign), { status: 200 }), campaign);
-    vi.stubGlobal("fetch", fetchMock);
-    installOverviewFormData();
-    const mounted = mountCampaignEditorPage(root, { campaignId: campaign.id, section: "overview" });
-    await vi.waitFor(() => expect(root.querySelector("#overview-form")).toBeTruthy());
-    const form = root.querySelector<HTMLFormElement>("#overview-form")!;
-    const turnStyle = form.querySelector<HTMLSelectElement>("select[name='turnControlStyle']")!;
-    selectOverviewTurnStyle(turnStyle, to);
-    form.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === "/api/v1/campaigns/campaign-1" && (init as RequestInit).method === "PATCH")).toBe(true));
-    const patch = fetchMock.mock.calls.find(([url, init]) => url === "/api/v1/campaigns/campaign-1" && (init as RequestInit).method === "PATCH");
-    expect(JSON.parse(String((patch?.[1] as RequestInit).body))).toMatchObject({
-      turnControlStyle: to, expectedTurnControlStyle: from, expectedActiveTurnNumber: 4, expectedStateRevision: 11
-    });
-    mounted.dispose();
-  });
-
-  it("carries the loaded refinement prompt unchanged when other illustration settings are saved", async () => {
-    const { document } = parseHTML("<body><div id=app></div></body>");
-    const root = document.querySelector<HTMLElement>("#app")!;
-    const storedRefinementPrompt = "Favor painterly fantasy lighting; never render text overlays.";
-    const illustrationConfig = {
-      enabled: true, sourcePolicy: "generate_only", matchingScope: "campaign", confidenceProfile: "balanced",
-      repetitionWindow: 5, providerProfileId: "provider-1", model: "illustrator", size: "1024x1024", aspectRatio: "1:1",
-      quality: "auto", outputFormat: "png", maxAttempts: 3, segmentWordCount: 500, imagesPerSegment: 1,
-      segmentPromptMode: "ai_refined", refinementPrompt: storedRefinementPrompt,
-      defaultRefinementPrompt: "Shipped default text.", updatedAt: null
-    };
-    let putBody: Record<string, unknown> | null = null;
-    const fetchMock = vi.fn(async (url: string, init: RequestInit = {}) => {
-      if (url === "/api/v1/campaigns") return new Response(JSON.stringify({ campaigns: [overviewCampaign] }), { status: 200 });
-      if (url === "/api/v1/providers") return new Response(JSON.stringify({ providers: [{ id: "provider-1", name: "Illustrator", providerRole: "image", providerType: "openai" }] }), { status: 200 });
-      if (url === "/api/v1/campaigns/campaign-1/illustration-config" && init.method === "PUT") {
-        putBody = JSON.parse(String(init.body));
-        return new Response(JSON.stringify(illustrationConfig), { status: 200 });
-      }
-      if (url === "/api/v1/campaigns/campaign-1/illustration-config") return new Response(JSON.stringify(illustrationConfig), { status: 200 });
-      throw new Error(`Unexpected request: ${url}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    installOverviewFormData();
-    const mounted = mountCampaignEditorPage(root, { campaignId: overviewCampaign.id, section: "illustrations" });
-    await vi.waitFor(() => expect(root.querySelector("#illustrations-form")).toBeTruthy());
-    const form = root.querySelector<HTMLFormElement>("#illustrations-form")!;
-    expect(form.textContent).not.toContain(storedRefinementPrompt);
-    const repetitionWindow = form.querySelector<HTMLInputElement>("input[name='repetitionWindow']")!;
-    repetitionWindow.value = "9";
-    form.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(putBody).not.toBeNull());
-    expect(putBody).toMatchObject({ repetitionWindow: 9, refinementPrompt: storedRefinementPrompt });
-    mounted.dispose();
-  });
-
-  it("edits the art style and exclusions without resetting them on save", async () => {
-    const { document } = parseHTML("<body><div id=app></div></body>");
-    const root = document.querySelector<HTMLElement>("#app")!;
-    const illustrationConfig = {
-      enabled: true, sourcePolicy: "generate_only", matchingScope: "campaign", confidenceProfile: "balanced",
-      repetitionWindow: 5, providerProfileId: "provider-1", model: "illustrator", size: "1024x1024", aspectRatio: "1:1",
-      quality: "auto", outputFormat: "png", maxAttempts: 3, segmentWordCount: 500, imagesPerSegment: 1,
-      segmentPromptMode: "direct", refinementPrompt: "Shipped default text.", defaultRefinementPrompt: "Shipped default text.",
-      artStyle: "Ink wash on rice paper", negativePrompt: "text, frame", defaultNegativePrompt: "text", updatedAt: null
-    };
-    let putBody: Record<string, unknown> | null = null;
-    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit = {}) => {
-      if (url === "/api/v1/campaigns") return new Response(JSON.stringify({ campaigns: [overviewCampaign] }), { status: 200 });
-      if (url === "/api/v1/providers") return new Response(JSON.stringify({ providers: [{ id: "provider-1", name: "Illustrator", providerRole: "image", providerType: "openai" }] }), { status: 200 });
-      if (url === "/api/v1/campaigns/campaign-1/illustration-config" && init.method === "PUT") {
-        putBody = JSON.parse(String(init.body));
-        return new Response(JSON.stringify(illustrationConfig), { status: 200 });
-      }
-      if (url === "/api/v1/campaigns/campaign-1/illustration-config") return new Response(JSON.stringify(illustrationConfig), { status: 200 });
-      throw new Error(`Unexpected request: ${url}`);
-    }));
-    installOverviewFormData();
-    const mounted = mountCampaignEditorPage(root, { campaignId: overviewCampaign.id, section: "illustrations" });
-    await vi.waitFor(() => expect(root.querySelector("#illustrations-form")).toBeTruthy());
-    const form = root.querySelector<HTMLFormElement>("#illustrations-form")!;
-    expect(form.querySelector<HTMLInputElement>("input[name='artStyle']")!.value).toBe("Ink wash on rice paper");
-    form.querySelector<HTMLInputElement>("input[name='negativePrompt']")!.value = "text, frame, signature";
-    form.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(putBody).not.toBeNull());
-    expect(putBody).toMatchObject({ artStyle: "Ink wash on rice paper", negativePrompt: "text, frame, signature" });
-    mounted.dispose();
+    expect(form.querySelector("[name=turnControlStyle]")).toBeNull();
+    expect(root.querySelector("[data-campaign-settings-group]")?.getAttribute("href")).toContain("section=campaign");
+    form.dispatchEvent(new document.defaultView!.Event("submit",{bubbles:true,cancelable:true}));
+    await vi.waitFor(()=>expect(root.textContent).toContain("Campaign changed."));
+    expect(title.value).toBe("Keep this draft");
+    const patch = fetchMock.mock.calls.find(([,init])=>init?.method === "PATCH")!;
+    expect(JSON.parse(String(patch[1]?.body))).toEqual({title:"Keep this draft",status:"active"});
+    mounted.dispose(); vi.unstubAllGlobals();
   });
 
   it("gives every confirmed editor section its own canonical subpage", () => {
@@ -700,8 +563,9 @@ describe("web-next campaign action feedback", () => {
 describe("web-next campaign editor API", () => {
   it("loads a selected campaign from the owner-scoped campaign list", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ campaigns: [{ id: "c-1", title: "Glass Harbor" }] }), { status: 200, headers: { "Content-Type": "application/json" } })));
-    await expect(loadCampaign("c-1")).resolves.toMatchObject({ title: "Glass Harbor" });
-    expect(fetch).toHaveBeenCalledWith("/api/v1/campaigns", expect.objectContaining({ signal: undefined }));
+    const signal = new AbortController().signal;
+    await expect(loadCampaign("c-1", signal)).resolves.toMatchObject({ title: "Glass Harbor" });
+    expect(fetch).toHaveBeenCalledWith("/api/v1/campaigns", expect.objectContaining({ signal }));
   });
 
   it("encodes campaign and child identifiers and preserves API failures", async () => {
@@ -726,7 +590,7 @@ describe("web-next campaign parity inventory", () => {
   it("exposes every legacy campaign-management backend seam", () => {
     for (const seam of [
       "/character-profile", "/state", "/turns?limit=100", "/memory/metrics", "/memory/embedding-config",
-      "/memory/context-preview", "/memory/reindex", "/memory/embeddings/reindex", "/illustration-config", "/illustration-backfill/preview",
+      "/memory/context-preview", "/memory/reindex", "/memory/embeddings/reindex", "/illustration-backfill/preview",
       "/illustration-backfill", "/migrate-world", "/transfer-world/preview", "/transfer-world",
       "/readable-export", "/export", "/branch", "/rewind", "/correction", "/generations/retry-latest",
       "/illustration-segments"
@@ -739,8 +603,9 @@ describe("web-next campaign parity inventory", () => {
   });
 
   it("uses owner-scoped selectors instead of exposing opaque configuration identifiers", () => {
-    expect(source).toContain('select name="textProviderProfileId"');
-    expect(source).toContain('select name="providerProfileId"');
+    const fields = readFileSync("apps/web-next/src/settings/campaign-fields.ts", "utf8");
+    expect(fields).toContain('select name="textProviderProfileId"');
+    expect(fields).toContain('select name="providerProfileId"');
     expect(source).toContain('select name="targetWorldVersionId"');
     expect(source).not.toContain("Target world-version ID");
     expect(source).toContain("No other published worlds available");
@@ -1050,7 +915,7 @@ describe("web-next campaign parity inventory", () => {
 
   it("wires every Chronicle enqueue response into durable job monitoring and metrics refresh", () => {
     expect(source).toContain('/api/v1/jobs/${encodeURIComponent(jobId)}');
-    expect(source).toContain('await monitorAndRefreshChronicle(saved.jobId, "Semantic Retrieval indexing")');
+    expect(source).not.toContain('if(form.id==="chronicle-form")');
     expect(source).toContain('await monitorAndRefreshChronicle(queued.jobId, "Chronicle rebuild")');
     expect(source).toContain('await monitorAndRefreshChronicle(queued.jobId, "Semantic Retrieval reindex")');
     expect(source).toContain('campaignApi.get<JsonRecord>(campaign.id,"/memory/metrics",controller.signal)');

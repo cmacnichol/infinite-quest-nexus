@@ -793,7 +793,9 @@ test("existing_routes_and_contracts_compatible: /nexus, /story and /app read the
   expect(directTurns.turns.at(-1)?.narration).toContain("synthetic station remains quiet in scene 2.");
   expect(requests.requests.filter(request => request.path === turnPath)).toHaveLength(1);
   await page.goto(`${webNextOrigin}/app/story/${fixture.campaignId}`);
-  await expect(page.getByRole("textbox", { name: "What happens next?", exact: true })).toBeVisible();
+  const composerName = await page.locator(".app-shell").getAttribute("data-ui-implementation") === "web-awesome"
+    ? "Custom Action" : "What happens next?";
+  await expect(page.getByRole("textbox", { name: composerName, exact: true })).toBeVisible();
   await expect(page.locator(".story-narration")).toContainText("synthetic station remains quiet in scene 2.");
 
   expect(requests.requests.filter(request => request.path === `/api/v1/campaigns/${fixture.campaignId}/sync-status`).length).toBeGreaterThanOrEqual(2);

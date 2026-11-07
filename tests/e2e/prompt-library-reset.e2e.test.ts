@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 
-const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
+const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}`;
 
 test("Prompt Library confirms campaign resets and accepts longer writer instructions", async ({ page }) => {
   const writes: unknown[] = [];
@@ -25,7 +25,7 @@ test("Prompt Library confirms campaign resets and accepts longer writer instruct
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
   });
-  await page.goto(`${origin}/nexus/index.html#prompt-library`);
+  await page.goto(`${origin}/app/settings?section=prompts`);
   await expect(page.getByRole("heading", { name: "Story writer", exact: true })).toBeVisible();
   const content = page.locator("#promptLibraryContent");
   await expect(content).toHaveAttribute("maxlength", "64000");

@@ -66,3 +66,12 @@
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+
+.reader-profile-fields > label, .native-device-preferences > label { display: grid; gap: .35rem; margin-block: .65rem; }
+.reader-profile-fields select, .native-device-preferences select { min-height: 44px; font: inherit; color: var(--text-primary); background: var(--surface-entry); border: 1px solid var(--rule); }
+.native-device-preferences > [hidden] { display: none; }
+.user-profile-dialog { max-height: 88dvh; overflow: auto; }
+
+dialog.device-profile-dialog, dialog.user-profile-dialog { background: var(--surface-entry-hover); }
+.device-profile-dialog .app-dialog__header, .user-profile-dialog header { position: sticky; top: 0; z-index: 2; background: var(--surface-entry-hover); }
+@media (max-width: 720px) { dialog.device-profile-dialog { width: 100%; max-width: 100%; box-sizing: border-box; } }

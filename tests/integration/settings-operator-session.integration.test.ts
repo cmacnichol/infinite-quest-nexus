@@ -1,0 +1,68 @@
+import {beforeAll,afterAll,describe,it,expect} from "vitest";
+import Fastify from "fastify";
+import {resolve} from "node:path";
+import {mkdtempSync,writeFileSync,rmSync} from "node:fs";
+import {tmpdir} from "node:os";
+import {createDatabasePool,initialOwnerId,type DatabasePool} from "../../packages/database/src/pool.js";
+import {migrateDatabase} from "../../packages/database/src/migrate.js";
+import {loadRuntimeConfig} from "../../packages/database/src/config.js";
+import {createInstanceSettingsRepository} from "../../packages/database/src/instance-settings-repository.js";
+import {createInstanceSettingsHttpComposition} from "../../services/api/src/instance-settings-composition.js";
+import {registerInstanceSettingsRoutes} from "../../services/api/src/instance-settings-routes.js";
+import {settingsDigest, loadDeploymentSettingsPolicy, projectRuntimeSettings} from "../../services/runtime/src/instance-settings.js";
+import {settingsFixture} from "../fixtures/instance-settings.js";
+import {INSTANCE_SETTINGS_NUMERIC_BOUNDS} from "../../packages/contracts/src/instance-settings.js";
+const url=process.env.TEST_DATABASE_URL;
+(url?describe:describe.skip)("operator HTTP PostgreSQL composition",()=>{
+ let pool:DatabasePool,otherPool:DatabasePool;const directory=mkdtempSync(resolve(tmpdir(),"iq-settings-http-"));
+ beforeAll(async()=>{pool=createDatabasePool(url!);otherPool=createDatabasePool(url!);await migrateDatabase(pool,resolve("database/migrations"));});
+ afterAll(async()=>{await pool?.end();await otherPool?.end();rmSync(directory,{recursive:true,force:true});});
+ it("protects two replicas, stages changes, restores CSRF, rotates keys and projects sanitized audit",async()=>{
+  const snapshot=settingsFixture();snapshot.castEditingEnabled=true;
+  const policy={version:1,installationId:"00000000-0000-4000-8000-000000000123",minimumSettingsProtocolVersion:1,featureGates:{aiAuthoringJobsEnabled:true,aiStorySourceAuthoringEnabled:true,castEditingEnabled:true,castDiscoveryEnabled:true,castAutoMatchEnabled:true,castContextEnabled:true,castBackfillEnabled:true,worldSharingEnabled:true,systemArchiveEnabled:true},numericBounds:INSTANCE_SETTINGS_NUMERIC_BOUNDS,approvedRateTuples:[{windowSeconds:snapshot.apiRateLimitWindowSeconds,providerRequests:snapshot.apiRateLimitProviderRequests,generationRequests:snapshot.apiRateLimitGenerationRequests,importRequests:snapshot.apiRateLimitImportRequests}],expectedRoles:[{role:"worker",databaseMaxConnections:20,replicas:1}],systemArchiveAllowLimitIncrease:false};
+  const policyFile=resolve(directory,"policy.json"),keyFile=resolve(directory,"operator.key"),key="planted-management-key-".repeat(3);
+  writeFileSync(policyFile,JSON.stringify(policy));writeFileSync(keyFile,key);
+  const before=process.env;let config;try{process.env={DATABASE_URL:url,APP_ROLE:"worker"};config=loadRuntimeConfig();}finally{process.env=before;}
+  Object.assign(config,{...snapshot,security:{...config.security,...Object.fromEntries(Object.entries(snapshot).filter(([key])=>key in config.security))},castEditingEnabled:true,settingsManagementEnabled:true,settingsManagementKeyFile:keyFile,instanceSettingsPolicyFile:policyFile,databaseMaxConnections:20});
+  const actor=await initialOwnerId(pool);
+  await createInstanceSettingsRepository(pool).seed({snapshot:{...snapshot,castEditingEnabled:false},installationId:policy.installationId,seedDigest:"1".repeat(64),policyDigest:settingsDigest(policy),actor:{userId:actor,cliReference:"http-test"}});
+  const apps=[pool,otherPool].map(db=>{const app=Fastify({trustProxy:true});registerInstanceSettingsRoutes(app,{...createInstanceSettingsHttpComposition(db,config,config,{loadDeploymentSettingsPolicy,projectRuntimeSettings,settingsDigest}),resolveActor:async()=>actor});return app;});
+  const headers={host:"nexus.test","x-forwarded-proto":"https",origin:"https://nexus.test"};
+  try{
+   for(let i=0;i<5;i++)expect((await apps[i%2]!.inject({method:"POST",url:"/api/v1/settings/operator-session",headers,payload:{managementKey:"wrong"}})).statusCode).toBe(401);
+   expect((await apps[1]!.inject({method:"POST",url:"/api/v1/settings/operator-session",headers,payload:{managementKey:key}})).statusCode).toBe(429);
+   await pool.query("DELETE FROM settings_unlock_attempts");
+   const unlocked=await apps[0]!.inject({method:"POST",url:"/api/v1/settings/operator-session",headers,payload:{managementKey:key}});expect(unlocked.statusCode).toBe(200);
+   const cookie=String(unlocked.headers["set-cookie"]).split(";")[0]!,csrf=unlocked.json().csrfToken;
+   expect(String(unlocked.headers["set-cookie"])).toContain("HttpOnly; Secure; SameSite=Strict; Max-Age=900");
+   const restored=await apps[1]!.inject({url:"/api/v1/settings/operator-session",headers:{host:headers.host,"x-forwarded-proto":"https",cookie}});expect(restored.json().csrfToken).toBe(csrf);expect(restored.json().expiresAt).toBe(unlocked.json().expiresAt);
+   const auth={...headers,cookie,"x-settings-csrf":csrf};
+   const environment=(await apps[0]!.inject({url:"/api/v1/settings/instance",headers:auth})).json();
+   expect(environment.resetDefaults).toEqual({...snapshot,castEditingEnabled:false});expect(environment.activeRevision).toBeNull();expect(environment.fields.every((field:any)=>field.source==="environment")).toBe(true);
+   await createInstanceSettingsRepository(pool,{activationGuard:async()=>{}}).activate({expectedActiveRevision:null,expectedRequestedRevision:"1",policyDigest:settingsDigest(policy),maintenanceReference:"http-test-maintenance",actor:{userId:actor,cliReference:"http-test"}});
+   await Promise.all(apps.map(app=>app.close()));
+   const running={...config,castEditingEnabled:false};
+   apps.splice(0,apps.length,...[pool,otherPool].map(db=>{const app=Fastify({trustProxy:true});registerInstanceSettingsRoutes(app,{...createInstanceSettingsHttpComposition(db,config,running,{loadDeploymentSettingsPolicy,projectRuntimeSettings,settingsDigest}),resolveActor:async()=>actor});return app;}));
+   const body={expectedRequestedRevision:"1",changes:{castEditingEnabled:true,campaignArchiveLimits:{maxEntries:snapshot.campaignArchiveLimits.maxEntries-1}},reason:"planted provider secret"};
+   const edits=await Promise.all(apps.map(app=>app.inject({method:"PATCH",url:"/api/v1/settings/instance",headers:auth,payload:body})));expect(edits.map(result=>result.statusCode).sort()).toEqual([200,409]);
+   const saved=edits.find(result=>result.statusCode===200)!.json();expect(saved.resetDefaults.campaignArchiveLimits.maxEntries).toBe(snapshot.campaignArchiveLimits.maxEntries);expect(saved.resetDefaults.castEditingEnabled).toBe(false);expect(saved.active.castEditingEnabled).toBe(false);expect(saved.activeRevision).toBe("1");expect(saved.requestedRevision).toBe("2");expect(saved.fields.every((field:any)=>field.source==="database")).toBe(true);
+   const history=await apps[1]!.inject({url:"/api/v1/settings/instance/history?limit=1",headers:auth});expect(history.statusCode).toBe(200);expect(history.json().events[0].changedKeys).toEqual(expect.arrayContaining(["castEditingEnabled","campaignArchiveLimits.maxEntries"]));expect(history.json().nextCursor).not.toBeNull();
+   expect(history.body).not.toContain("planted");expect(history.body).not.toContain(url!);
+   await pool.query("INSERT INTO instance_settings_events(kind,revision,actor_user_id,cli_reference,reason_code) SELECT 'proposal',2,$1,'pagination-test','operator_change' FROM generate_series(1,11)",[actor]);
+   const page=(await apps[0]!.inject({url:"/api/v1/settings/instance/history?limit=2",headers:auth})).json();
+   expect(BigInt(page.events[0].id)>BigInt(page.events[1].id)).toBe(true);
+   const next=(await apps[0]!.inject({url:`/api/v1/settings/instance/history?limit=2&cursor=${page.nextCursor}`,headers:auth})).json();expect(BigInt(next.events[0].id)<BigInt(page.nextCursor)).toBe(true);
+   config.castEditingEnabled=false;
+   expect((await apps[0]!.inject({method:"PATCH",url:"/api/v1/settings/instance",headers:auth,payload:{expectedRequestedRevision:"2",changes:{castEditingEnabled:true},reason:"change"}})).statusCode).toBe(422);
+   await expect(pool.query("INSERT INTO instance_settings_events(kind,revision,actor_user_id,cli_reference,reason_code,changed_keys) VALUES('proposal',2,$1,'test','operator_change',ARRAY['apiKey'])",[actor])).rejects.toThrow();
+   writeFileSync(keyFile,"rotated-management-key-".repeat(3));expect((await apps[0]!.inject({url:"/api/v1/settings/instance",headers:auth})).statusCode).toBe(401);
+   const rotated=await apps[0]!.inject({method:"POST",url:"/api/v1/settings/operator-session",headers,payload:{managementKey:"rotated-management-key-".repeat(3)}});
+   const rotatedAuth={...headers,cookie:String(rotated.headers["set-cookie"]).split(";")[0]!,"x-settings-csrf":rotated.json().csrfToken};
+   expect((await apps[1]!.inject({method:"DELETE",url:"/api/v1/settings/operator-session",headers:rotatedAuth})).statusCode).toBe(204);
+   expect((await apps[0]!.inject({url:"/api/v1/settings/instance",headers:rotatedAuth})).statusCode).toBe(401);
+   const expiring=await apps[0]!.inject({method:"POST",url:"/api/v1/settings/operator-session",headers,payload:{managementKey:"rotated-management-key-".repeat(3)}});
+   await pool.query("UPDATE settings_operator_sessions SET created_at=clock_timestamp()-interval '20 minutes',expires_at=clock_timestamp()-interval '10 minutes'");
+   expect((await apps[1]!.inject({url:"/api/v1/settings/instance",headers:{...headers,cookie:String(expiring.headers["set-cookie"]).split(";")[0]!}})).statusCode).toBe(401);
+  }finally{await Promise.all(apps.map(app=>app.close()));}
+ });
+});

@@ -111,7 +111,7 @@ export type RuntimeProviderAdapter = Readonly<{
   ): Promise<ProviderModelInventory>;
   discoverCandidatePresetsWithCredential(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number; signal?: AbortSignal }>, credential: string | null): Promise<ProviderPresetInventory>;
   resolveCandidatePresetWithCredential(candidate: ProviderCandidate, slug: string, credential: string | null, signal?: AbortSignal): Promise<ProviderPresetDetail>;
-  presetSaveAuthoritySnapshot(ownerUserId: string, providerProfileId: string, lock: boolean): Promise<Readonly<{ candidate: ProviderCandidate; readSavedCredential(): string | null; revision: string }> | null>;
+  presetSaveAuthoritySnapshot(ownerUserId: string, providerProfileId: string, lock: boolean): Promise<Readonly<{ candidate: ProviderCandidate; hasCredential: boolean; readSavedCredential(): string | null; revision: string }> | null>;
 }>;
 
 function diagnostic(error: unknown): ProviderHealthDiagnosticCode {
@@ -469,7 +469,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       const readSavedCredential = () => capturedCredential
         ? decryptCredential(capturedCredential, options.credentialSecret)
         : null;
-      return Object.freeze({ candidate, readSavedCredential, revision: createHash("sha256").update(JSON.stringify(row)).digest("hex") });
+      return Object.freeze({ candidate, hasCredential: Boolean(capturedCredential), readSavedCredential, revision: createHash("sha256").update(JSON.stringify(row)).digest("hex") });
     },
     async storeCredential(ownerUserId, providerProfileId, credential) {
       const encrypted = credential?.trim()

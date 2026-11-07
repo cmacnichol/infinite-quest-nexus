@@ -1,6 +1,10 @@
+import type { UserProfile } from "@infinite-quest/contracts";
+import type { ProfilePort } from "./preferences/profile-editor";
+import { mountDevicePreferenceFields } from "../../shared-ui/profile/device-profile-controls.js";
 import { initializeAppTheme, renderAppShell, type AppNavigation, type AppShellOptions } from "./app-shell";
 import { createDisplayPreferences, DISPLAY_PREFERENCES_STORAGE_KEY, type DisplayPreferencesStore } from "./preferences/display-preferences";
-import type { ThemeController } from "./theme";
+import { createDeviceStorage } from "./preferences/device-storage";
+import { THEME_STORAGE_KEY, type ThemeController } from "./theme";
 import { initializeUserProfileMenu } from "./user-profile-menu";
 import { loadUserProfile, updateUserProfile } from "./user-profile-menu";
 import type { MenuItem } from "./ui/menu";
@@ -35,12 +39,34 @@ export function mountAppShell(
   const implementation = options.uiImplementation ?? uiImplementation();
   renderAppShell(root, pageMarkup, navigation, options);
   root.querySelector<HTMLElement>(".app-shell")?.setAttribute("data-ui-implementation", implementation);
-  const theme = initializeAppTheme(root);
+  const storage = createDeviceStorage(browserStorage(root));
+  const identity = new AbortController();
+  const theme = initializeAppTheme(root, storage);
   const borrowedDisplay = options.displayPreferences !== undefined;
-  const display = options.displayPreferences ?? createDisplayPreferences(browserStorage(root));
-  const disposeProfile = implementation === "native" ? initializeUserProfileMenu(root) : () => undefined;
+  const display = options.displayPreferences ?? createDisplayPreferences(storage);
+  if (borrowedDisplay) display.bindStorage?.(storage);
+  let currentOwner: string | null = null;
+  const acceptProfile = (user: UserProfile): UserProfile => {
+    if (identity.signal.aborted) throw new DOMException("Profile session closed", "AbortError");
+    if (currentOwner !== null && currentOwner !== user.id) {
+      root.ownerDocument.defaultView?.dispatchEvent(new Event("app-identity-changed"));
+      throw new DOMException("Profile session changed", "AbortError");
+    }
+    if (currentOwner !== user.id) {
+      currentOwner = user.id;
+      storage.activate(user);
+      theme.reload?.();
+      display.reload();
+      if (deviceFields) deviceFields.element.disabled = false;
+    }
+    return user;
+  };
+  const profile: ProfilePort = {
+    load: signal => loadUserProfile(signal).then(acceptProfile),
+    save: (request, signal) => updateUserProfile(request, signal).then(acceptProfile)
+  };
+  const disposeProfile = implementation === "native" ? initializeUserProfileMenu(root, profile) : () => undefined;
   const coreMenus = implementation === "web-awesome" ? mountShellMenus(root, { theme, display }) : null;
-  const profileToggle = root.querySelector<HTMLButtonElement>(".user-profile-toggle");
   let preferences: PreferencesDialog | null = null;
   let preferenceCampaignId: string | null = null;
   const openPreferences = (): void => {
@@ -49,20 +75,43 @@ export function mountAppShell(
       preferences = mountPreferencesDialog(root, {
         theme,
         display,
-        profile: { load: loadUserProfile, save: updateUserProfile },
+        profile,
         campaignId: preferenceCampaignId
       });
     }
     void preferences.open();
   };
+  const deviceFields = implementation === "native" ? mountDevicePreferenceFields(root.ownerDocument, theme, display) : null;
+  if (deviceFields) {
+    deviceFields.element.disabled = true;
+    root.querySelector(".user-profile-dialog form")?.append(deviceFields.element);
+  }
   const onOpenPreferences = () => openPreferences();
   if (implementation === "web-awesome") root.addEventListener("app-shell-open-preferences", onOpenPreferences);
   const view = root.ownerDocument.defaultView;
   let disposed = false;
   let storyCampaignId: string | null = null;
 
+  void profile.load(identity.signal).catch(() => undefined);
+  const onIdentityChange = () => {
+    identity.abort();
+    storage.activate(null);
+    theme.reload?.();
+    display.reload();
+    disposeProfile();
+    preferences?.dispose();
+    preferences = null;
+    coreMenus?.dispose();
+    if (navigation !== "settings") {
+      root.replaceChildren();
+      view?.location?.reload();
+    }
+  };
+  view?.addEventListener("app-identity-changed", onIdentityChange);
   const onStorage = (event: StorageEvent): void => {
-    if (!disposed && event.key === DISPLAY_PREFERENCES_STORAGE_KEY) display.reload();
+    if (disposed || !event.key) return;
+    if (event.key === storage.key(DISPLAY_PREFERENCES_STORAGE_KEY)) display.reload();
+    if (event.key === storage.key(THEME_STORAGE_KEY)) theme.reload?.();
   };
   view?.addEventListener("storage", onStorage);
 
@@ -77,8 +126,15 @@ export function mountAppShell(
       if (disposed || storyCampaignId === campaignId) return;
       storyCampaignId = campaignId;
       root.dataset.storyCampaignId = campaignId ?? "";
+      const settings = root.querySelector<HTMLAnchorElement>("[data-settings-link]");
+      if (settings && navigation === "story") {
+        const current = view?.location;
+        const returnTo = current ? current.pathname + current.search : "/app/story";
+        settings.href = campaignId ? "/app/settings?" + new URLSearchParams({section:"campaign",campaignId,returnTo}) : "/app/settings?section=campaign";
+      }
       const preferenceContextChanged = preferenceCampaignId !== campaignId;
       preferenceCampaignId = campaignId;
+      deviceFields?.setCampaign(campaignId);
       coreMenus?.setStoryContext(campaignId);
       if (implementation === "web-awesome" && preferences && preferenceContextChanged) {
         preferences.close();
@@ -90,9 +146,12 @@ export function mountAppShell(
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      identity.abort();
+      view?.removeEventListener("app-identity-changed", onIdentityChange);
       view?.removeEventListener("storage", onStorage);
       root.removeEventListener("app-shell-open-preferences", onOpenPreferences);
       preferences?.dispose();
+      deviceFields?.dispose();
       coreMenus?.dispose();
       disposeProfile();
       theme.dispose();

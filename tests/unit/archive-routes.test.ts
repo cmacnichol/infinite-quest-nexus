@@ -47,6 +47,20 @@ function campaignArchiveMultipart(boundary: string, archive: Buffer): Buffer {
 }
 
 describe("campaign archive route helpers", () => {
+  it("asks for a fresh preview when retained transfer policy is incompatible", async () => {
+    const app = Fastify();
+    await app.register(fastifyMultipart);
+    await app.register(registerArchiveRoutes, {
+      pool: {} as never, config: { security: { apiImportBodyLimitBytes: 1024 } } as never,
+      assetStore: {} as never, memory: {} as never,
+      portable: { commit: async () => { throw Object.assign(new Error("archive-preview-policy-changed"), { statusCode: 409, code: "archive-preview-stale" }); } } as never,
+      resolveOwner: async () => ({ ownerUserId: "44444444-4444-4444-8444-444444444444" }),
+    });
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/v1/imports/campaign-archive", payload: { previewToken: "a".repeat(43), destination: { kind: "embedded" } } });
+      expect(response.statusCode).toBe(409); expect(response.json().message).toContain("fresh preview");
+    } finally { await app.close(); }
+  });
   it("routes direct Legacy Story imports through the durable private composition", async () => {
     const app = Fastify();
     await app.register(fastifyMultipart);

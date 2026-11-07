@@ -63,7 +63,7 @@ function submitHarness(overrides: Record<string, unknown> = {}) {
     api,
     loadCampaigns,
     worldMessage: vi.fn(),
-    localStorage: { setItem },
+    ownerDevice: { setItem },
     window: { location: { assign } },
     ...overrides
   };
@@ -106,7 +106,7 @@ describe("legacy campaign creation dialog", () => {
   });
 
   it("records the committed ID before storage and refresh errors and never posts again", async () => {
-    const harness = submitHarness({ localStorage: { setItem: vi.fn(() => { throw new Error("Storage unavailable."); }) } });
+    const harness = submitHarness({ ownerDevice: { setItem: vi.fn(() => { throw new Error("Storage unavailable."); }) } });
     harness.loadCampaigns.mockRejectedValue(new Error("Connection lost."));
 
     await harness.create(submitEvent(harness.elements, "create"));

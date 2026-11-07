@@ -99,7 +99,8 @@ This page summarizes behavior implemented in the current repository. It is not a
 ## Illustrations
 
 - Optional accepted-turn image jobs and provisional streaming illustration jobs; see the [lifecycle and open validation-boundary conflict](../concepts/illustration-pipeline.md#provisional-streaming-path-and-open-contract-conflict)
-- Independent campaign image provider, model, format, size, aspect, quality, and retry settings
+- Direct turn illustrations use the requested image profile or the campaign image assignment, including before a campaign saves segment settings.
+- Segment settings keep their own image profile and model, format, size, aspect, quality, retry policy and image count. Automatic generation requires an explicit segment provider. Before the first save, the campaign editor uses the effective image provider’s default count.
 - Durable world-cover generation through the default image provider from new-world and edit-world workflows
 - Adapter-specific Sogni profile defaults and recovery: Creative Workflow uses caller-controlled idempotency; Supernet SDK adds network/model controls and has a documented submit-boundary recovery limitation. See [Sogni configuration](../nexus-guide/providers/sogni.md).
 - Replica-safe retries that never rerun or reject story narration

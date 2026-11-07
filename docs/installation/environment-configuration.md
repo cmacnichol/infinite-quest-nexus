@@ -1,5 +1,14 @@
 # Effective runtime configuration
 
+In environment mode, the process reads the effective settings listed below. After explicit activation, the 40 reviewed feature and resource preferences come from the active installation revision. Retained deployment gates, bootstrap credentials, and security exceptions still apply. The [inventory and classifications](../review/2026-11-06-environment-settings-gui-review.md) list every reviewed variable. The [operator runbook](../runbooks/instance-settings.md) describes installation-only policy, management key and optional mounts. Existing environment values remain supported as seed and rollback inputs. Editing a value in a Compose interpolation file cannot seed a value the manifest never forwards.
+
+| Additional deployment setting | Classification | Purpose |
+| --- | --- | --- |
+| `INSTANCE_SETTINGS_POLICY_FILE` | Operator bootstrap and ceiling | Versioned nonsecret policy path, identical on all runtime roles |
+| `SETTINGS_MANAGEMENT_ENABLED` | Permanent deployment gate | Explicitly enables browser unlock on an API with a policy and a separate key |
+| `SETTINGS_MANAGEMENT_KEY_FILE` | Bootstrap secret path | Separate management key accessible only to intended API/combined processes |
+| `INSTANCE_SETTINGS_SWARM_CONFIG`, `INSTANCE_SETTINGS_SWARM_SECRET` | Deployment references | External versioned names used only by the optional Swarm override |
+
 The application supports the following runtime settings, but a deployment manifest must explicitly pass them into the container.
 
 | Setting | Default | Purpose |

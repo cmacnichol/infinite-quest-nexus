@@ -1,3 +1,4 @@
+import { runtimeArchivePolicy } from "../../runtime/src/archive-policy.js";
 import type { ClaimedSystemArchiveJob, SystemArchiveJobRepository } from "../../../packages/database/src/system-archive-job-repository.js";
 import { createPostgresSystemArchiveJobRepository } from "../../../packages/database/src/system-archive-job-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
@@ -187,6 +188,7 @@ export async function createProductionSystemArchiveWorkerLane(input: Readonly<{
       limits: input.config.systemArchiveLimits,
       destinationApplicationVersion: applicationVersion,
       uploadTtlSeconds,
+      policy: runtimeArchivePolicy(input.config, "system"),
       chunkBytes,
       maximumUploadBytes: input.config.systemArchiveLimits.maxCompressedBytes,
       leaseOwner: input.workerId,

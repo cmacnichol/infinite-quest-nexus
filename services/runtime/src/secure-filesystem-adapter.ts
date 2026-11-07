@@ -1,3 +1,4 @@
+import type { ArchivePolicySnapshot } from "../../../packages/contracts/src/archive-policy.js";
 // Role-neutral private adapter. API compatibility is a re-export only.
 import { createHash } from "node:crypto";
 import { constants as filesystemConstants } from "node:fs";
@@ -223,6 +224,7 @@ export type SecureFilesystemAdapter = Readonly<{
     claim: Readonly<{ leaseOwner: string; leaseSeconds: number }>;
   }>): Promise<void>;
   publishPortableExport(input: Readonly<{
+    policy?: ArchivePolicySnapshot;
     exportScope: PortableExportScope;
     operationScopeId: string;
     leaseOwner: string;
@@ -1759,7 +1761,7 @@ export async function createSecureFilesystemAdapter(
     try {
       issued = await options.transactions.run((database) => options.atomicPortable!.issueExportRetrieval(
         database,
-        bindPrivateAtomicExportIssuance(input.exportScope, input.contentType, prepared.attachment),
+        bindPrivateAtomicExportIssuance(input.exportScope, input.contentType, prepared.attachment, input.policy),
       ));
     } catch (error) {
       await prepared.rollback().catch(() => undefined);

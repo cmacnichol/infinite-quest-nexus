@@ -123,8 +123,6 @@ test("saved campaign fields survive a selection cycle and later saves use the pe
   await openWorkspace(page);
   await page.locator("#campaignTitle").fill("Committed Alpha title");
   await page.locator("#campaignTabStory").click();
-  await page.locator("#campaignStoryLengthProfile").selectOption("long");
-  await page.locator("#campaignStoryContextBudgetTokens").selectOption("64000");
   await page.locator("#saveCampaign").click();
   await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "saved");
   await expect(page.locator("#campaignList [data-campaign-id=\"campaign-a\"] strong")).toHaveText("Committed Alpha title");
@@ -132,8 +130,6 @@ test("saved campaign fields survive a selection cycle and later saves use the pe
   await expect(page.locator("#memoryTitle")).toHaveText("Campaign Beta");
   await page.locator("#campaignList [data-campaign-id=\"campaign-a\"]").click();
   await expect(page.locator("#campaignTitle")).toHaveValue("Committed Alpha title");
-  await expect(page.locator("#campaignStoryLengthProfile")).toHaveValue("long");
-  await expect(page.locator("#campaignStoryContextBudgetTokens")).toHaveValue("64000");
   await page.screenshot({ path: resolve(evidenceDirectory, "campaign-edits-save-select-cycle.png") });
   await page.locator("#campaignTabOverview").click();
   await page.locator("#campaignTitle").fill("Second Alpha title");
@@ -143,7 +139,7 @@ test("saved campaign fields survive a selection cycle and later saves use the pe
   expect(patches).toHaveLength(2);
   expect(patches[0]?.requestBody).toContain("Committed Alpha title");
   expect(patches[1]?.requestBody).toContain("Second Alpha title");
-  expect(campaignRecords.get("campaign-a")?.storyContextBudgetTokens).toBe(64000);
+  expect(JSON.parse(patches[1]!.requestBody!)).not.toHaveProperty("storyContextBudgetTokens");
 });
 test("stays on the campaign and preserves fields after save failure", async ({ page }) => {
   await openWorkspace(page, { patchStatus: 500 });
@@ -169,12 +165,10 @@ test("active-turn conflict explains how to recover without exposing server detai
   });
   await page.locator("#campaignTitle").fill("Retained Alpha title");
   await page.locator("#campaignTabStory").click();
-  await page.locator("#campaignStoryLengthProfile").selectOption("long");
   await page.locator('#campaignList [data-campaign-id="campaign-b"]').click();
   await page.locator("#saveCampaignEditsDecision").click();
 
   await expect(page.locator("#campaignTitle")).toHaveValue("Retained Alpha title");
-  await expect(page.locator("#campaignStoryLengthProfile")).toHaveValue("long");
   await expect(page.locator("#memoryTitle")).toHaveText("Campaign Alpha");
   await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "error");
   await expect(page.locator("#campaignStatusMessage")).toHaveText(
@@ -185,7 +179,7 @@ test("active-turn conflict explains how to recover without exposing server detai
   const writes = apiLog.filter((entry) => ["POST", "PUT", "PATCH", "DELETE"].includes(entry.method));
   expect(writes).toHaveLength(1);
   expect(writes[0]).toMatchObject({ method: "PATCH", path: "/campaigns/campaign-a", status: 409 });
-  expect(JSON.parse(writes[0]?.requestBody ?? "{}")).toMatchObject({ title: "Retained Alpha title", storyLengthProfile: "long" });
+  expect(JSON.parse(writes[0]?.requestBody ?? "{}")).toEqual({ title: "Retained Alpha title", status: "active" });
   expect(campaignRecords.get("campaign-a")).toMatchObject({ title: "Campaign Alpha", storyLengthProfile: "standard" });
   await page.screenshot({ path: testInfo.outputPath("campaign-active-turn-conflict.png"), fullPage: true });
 });

@@ -230,8 +230,7 @@ test("provider and world dismissal hide Save, then campaign metadata Save remain
   await expect(page.locator("#saveCampaignEditsDecision")).toBeHidden();
   await page.locator('#discardChangesDialog button[value="discard"]').click();
 
-  await page.locator("#navSetup").click();
-  await page.locator("#navWorlds").click();
+  await page.goto(`${origin}/nexus/index.html#world-library`);
   await page.locator("#newWorld").click();
   await page.locator("#worldTitle").fill("Synthetic staged world");
   await page.locator("#cancelWorldAuthor").click();

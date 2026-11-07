@@ -16,7 +16,7 @@ function adapter(responseFormatCapabilities?: object) {
   };
   const runtime = { storeCredential: vi.fn(), discoverCandidateModelsWithCredential: vi.fn(),
     resolveCandidatePresetWithCredential: vi.fn(async (_candidate: { baseUrl: string }, _slug: string, _credential: string | null) => ({ preset: {} })),
-    presetSaveAuthoritySnapshot: vi.fn(async (_ownerUserId: string, _providerProfileId: string, _lock: boolean): Promise<Readonly<{ candidate: unknown; readSavedCredential(): string | null; revision: string }> | null> => null) };
+    presetSaveAuthoritySnapshot: vi.fn(async (_ownerUserId: string, _providerProfileId: string, _lock: boolean): Promise<Readonly<{ candidate: unknown; hasCredential: boolean; readSavedCredential(): string | null; revision: string }> | null> => null) };
   return { application, runtime, adapter: createProviderApplicationAdapter({ application, runtime, responseFormatCapabilities, transaction: async (work: (binding: never) => Promise<unknown>) => work({ application, runtime } as never) } as never) };
 }
 
@@ -158,7 +158,7 @@ describe("provider API configuration boundary", () => {
     expect(result.configuration).toEqual({ textResponseFormatPolicy: "legacy" });
   });
 
-  it("validates a preset PATCH from one authority snapshot when the profile changes after the initial list read", async () => {
+  it("validates a preset PATCH from one authority snapshot without an earlier profile list lookup", async () => {
     const value = adapter();
     const staleProfile = { ...input, id, baseUrl: "https://endpoint-a.example/v1", textSelection: { kind: "model" as const, modelId: "model" } };
     const authorityProfile = {
@@ -168,7 +168,7 @@ describe("provider API configuration boundary", () => {
     const readSavedCredential = vi.fn(() => "rotated-secret");
     value.application.listProfiles.mockResolvedValue([staleProfile]);
     value.runtime.presetSaveAuthoritySnapshot.mockResolvedValue({
-      candidate: authorityProfile, readSavedCredential, revision: "authority-b"
+      candidate: authorityProfile, hasCredential: true, readSavedCredential, revision: "authority-b"
     });
     value.runtime.resolveCandidatePresetWithCredential.mockImplementation(async (candidate, _slug, credential) => {
       if (candidate.baseUrl !== authorityProfile.baseUrl || credential !== "rotated-secret") {
@@ -186,6 +186,7 @@ describe("provider API configuration boundary", () => {
     } as never);
 
     expect(result).toMatchObject({ baseUrl: authorityProfile.baseUrl, textSelection: { kind: "openrouter_preset", slug: "night-shift" } });
+    expect(value.application.listProfiles).not.toHaveBeenCalled();
     expect(readSavedCredential).toHaveBeenCalledOnce();
   });
 

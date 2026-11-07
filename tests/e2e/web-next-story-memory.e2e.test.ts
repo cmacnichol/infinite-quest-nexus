@@ -1,8 +1,20 @@
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test, type Route, type Page } from "@playwright/test";
 import { installStoryApi } from "../fixtures/quiet-leaf-api.js";
 import { storyMemorySettingsUpdateSchema } from "../../packages/contracts/src/story-memory-policy.js";
 
 type MemoryLevel = "off" | "standard" | "enhanced" | "max";
+
+const webAwesome = process.env.VITE_UI_COMPONENTS === "web-awesome";
+const draftField = (page: Page) => webAwesome ? page.getByRole("textbox",{name:"Custom Action",exact:true}) : page.locator("[data-story-draft]");
+async function openMemory(page: Page) {
+  if (webAwesome) {
+    await page.getByRole("button",{name:"Campaign settings",exact:true}).click();
+    await page.getByRole("menuitem",{name:"Campaign Memory",exact:true}).click();
+  } else {
+    await page.locator("[data-campaign-tools] summary").click();
+    await page.getByRole("button",{name:"Campaign Memory",exact:true}).click();
+  }
+}
 
 test.use({ baseURL: process.env.STORY_MEMORY_TEST_BASE_URL ?? `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}` });
 
@@ -49,10 +61,9 @@ test("campaign editor and Story Campaign Tools save and reload the same memory s
   await expect(page.locator("#memory-settings-form input[name='continuityReviewEnabled']")).toBeChecked();
   await page.goto(`/app/story/${api.campaignId}`);
   await expect(page.locator("[data-story-composer]")).toBeVisible();
-  const draft = page.locator("[data-story-draft]");
+  const draft = draftField(page);
   await draft.fill("Keep this unsent draft.");
-  await page.locator("[data-campaign-tools] summary").click();
-  await page.getByRole("button", { name: "Campaign Memory", exact: true }).click();
+  await openMemory(page);
   const dialog = page.getByRole("dialog", { name: "Campaign Memory", exact: true });
   await expect(dialog).toBeVisible();
   await expect(dialog.locator("[data-story-memory-level]")).toHaveValue("max");
@@ -69,8 +80,7 @@ test("campaign editor and Story Campaign Tools save and reload the same memory s
 
   await page.reload();
   await expect(page.locator("[data-story-composer]")).toBeVisible();
-  await page.locator("[data-campaign-tools] summary").click();
-  await page.getByRole("button", { name: "Campaign Memory", exact: true }).click();
+  await openMemory(page);
   await expect(page.getByRole("dialog", { name: "Campaign Memory", exact: true }).locator("[data-story-memory-level]")).toHaveValue("standard");
 });
 
@@ -78,10 +88,9 @@ test("Story keeps the composer draft when campaign memory cannot load", async ({
   const api = await installStoryApi(page);
   await page.route(`**/api/v1/campaigns/${api.campaignId}/story-memory`, route => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Unavailable" }) }));
   await page.goto(`/app/story/${api.campaignId}`);
-  const draft = page.locator("[data-story-draft]");
+  const draft = draftField(page);
   await draft.fill("Keep this draft when memory is unavailable.");
-  await page.locator("[data-campaign-tools] summary").click();
-  await page.getByRole("button", { name: "Campaign Memory", exact: true }).click();
+  await openMemory(page);
   const dialog = page.getByRole("dialog", { name: "Campaign Memory", exact: true });
   await expect(dialog).toContainText("Campaign memory settings could not be loaded. Your story draft is preserved.");
   await expect(draft).toHaveValue("Keep this draft when memory is unavailable.");
@@ -99,10 +108,9 @@ test("Story retains the memory selection and draft after a failed save and allow
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ level, reviewMode: level === "max" ? "enforce" : "off", availableLevels: ["off", "standard", "enhanced", "max"] }) });
   });
   await page.goto(`/app/story/${api.campaignId}`);
-  const draft = page.locator("[data-story-draft]");
+  const draft = draftField(page);
   await draft.fill("Keep this draft through a failed save.");
-  await page.locator("[data-campaign-tools] summary").click();
-  await page.getByRole("button", { name: "Campaign Memory", exact: true }).click();
+  await openMemory(page);
   const dialog = page.getByRole("dialog", { name: "Campaign Memory", exact: true });
   await dialog.locator("[data-story-memory-level]").selectOption("enhanced");
   await dialog.getByRole("button", { name: "Save Campaign Memory", exact: true }).click();
@@ -128,8 +136,7 @@ test("Story ignores a late campaign-memory response after navigation", async ({ 
   });
   await page.route("**/api/v1/providers", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ providers: [] }) }));
   await page.goto(`/app/story/${api.campaignId}`);
-  await page.locator("[data-campaign-tools] summary").click();
-  await page.getByRole("button", { name: "Campaign Memory", exact: true }).click();
+  await openMemory(page);
   await requestStarted;
   await page.goto(`/app/campaigns/${api.campaignId}/overview`);
   release();

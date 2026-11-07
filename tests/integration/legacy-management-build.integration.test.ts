@@ -437,6 +437,10 @@ describe("legacy management served runtime bundle contract", () => {
       await page.locator("#cancelProviderEdit").click();
       await providerDialog.waitFor({ state: "hidden" });
 
+      // Providers opens the dedicated Settings application. Return to the dashboard for its Data Transfer menu.
+      expect(page.url()).toContain("providers");
+      await page.goto(`${productionBaseUrl}/nexus/#dashboard`, { waitUntil: "domcontentloaded" });
+      await page.locator("#dashboardTitle").waitFor({ state: "visible" });
       await openSetupRoute("#navDataTransfer");
       await page.locator("#dataTransferTitle").waitFor({ state: "visible", timeout: 5_000 });
       await captureRuntimeEvidence(page, "fastify-built-data-transfer", {

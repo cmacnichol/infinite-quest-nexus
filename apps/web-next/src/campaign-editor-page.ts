@@ -1,3 +1,5 @@
+import { field, option, record, text, storyMemoryGuidance, storyMemorySettingsMarkup, chronicleMarkup, illustrationsMarkup, type JsonRecord } from "./settings/campaign-fields";
+export { chronicleEmbeddingConfigPayload, chronicleMarkup, illustrationsMarkup, semanticRetrievalHealthView } from "./settings/campaign-fields";
 import { createCharacterProfileForm } from "./character-profile-form";
 import type { CampaignCharacterProfile } from "@infinite-quest/contracts";
 import { mountAppShell } from "./app-shell-lifecycle";
@@ -10,8 +12,6 @@ import { storyPlayerPath } from "./story-route";
 import { createCampaignContinuityEditor, type CampaignContinuityEditor } from "./campaign-continuity-editor";
 import type { MountedPage } from "./world-library-page";
 
-type JsonRecord = Record<string, unknown>;
-interface ProviderSummary extends JsonRecord { id: string; name: string; providerType: string; providerRole: string; enabled?: boolean; isDefault?: boolean; }
 interface TransferTarget { id: string; label: string; }
 const svg = (path: string) => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${path}" /></svg>`;
 const icons: Record<CampaignSection, string> = {
@@ -32,12 +32,6 @@ const actionWorkingLabels: Record<string, string> = {
   "preview-transfer": "Checking transfer…", "archive-campaign": "Archiving…", "delete-campaign": "Deleting…"
 };
 
-function field(label: string, control: string): string { return `<label class="campaign-field"><span>${label}</span>${control}</label>`; }
-function option(value: string, label: string, selected: string): string { return `<option value="${escapeCampaignText(value)}"${value === selected ? " selected" : ""}>${escapeCampaignText(label)}</option>`; }
-function disabledOption(value: string, label: string, selected = false): string { return `<option value="${escapeCampaignText(value)}"${selected ? " selected" : ""} disabled>${escapeCampaignText(label)}</option>`; }
-function record(value: unknown): JsonRecord { return value && typeof value === "object" ? value as JsonRecord : {}; }
-function text(value: unknown): string { return escapeCampaignText(value); }
-
 export function buildRetryLatestGenerationRequest(action: string, idempotencyKey: string, expectedCurrentTurnNumber: number) {
   return {
     action,
@@ -50,83 +44,11 @@ export function buildRetryLatestGenerationRequest(action: string, idempotencyKey
   };
 }
 
-function providerOptions(providers: ProviderSummary[], role: string, selected: unknown, fallbackLabel: string): string {
-  const selectedId = String(selected ?? "");
-  const available = providers.filter((provider) => provider.providerRole === role && (provider.enabled !== false || provider.id === selectedId));
-  const fallback = available.find((provider) => provider.isDefault);
-  const emptyLabel = available.length ? (fallback ? `Use default · ${fallback.name}` : fallbackLabel) : `No ${role} provider profiles available`;
-  return option("", emptyLabel, selectedId) + available.map((provider) => option(provider.id, `${provider.name} · ${provider.providerType}${provider.enabled === false ? " · unavailable" : provider.isDefault ? " · default" : ""}`, selectedId)).join("");
-}
-function embeddingProviderOptions(providers: ProviderSummary[], selected: unknown, campaignTextProviderProfileId: unknown): string {
-  const selectedId = String(selected ?? "");
-  const configuredProvider = selectedId ? providers.find((provider) => provider.id === selectedId) : undefined;
-  const configuredTextProvider = configuredProvider?.providerRole === "text" ? configuredProvider : undefined;
-  const incompatibleOptions = (eligible: ProviderSummary[], role: "embedding" | "text"): string => {
-    const label = configuredTextProvider
-      ? `Configured text provider is no longer eligible · ${configuredTextProvider.name}`
-      : configuredProvider
-        ? `Configured provider is no longer eligible · ${configuredProvider.name}`
-        : "Configured provider is no longer available";
-    return disabledOption("", "Choose an eligible embedding provider", true)
-      + disabledOption(selectedId, label)
-      + eligible.map((provider) => option(
-        provider.id,
-        role === "embedding"
-          ? `${provider.name} · ${provider.providerType}${provider.isDefault ? " · default" : ""}`
-          : `Text fallback · ${provider.name} · ${provider.providerType}${provider.isDefault ? " · default" : ""}`,
-        ""
-      )).join("");
-  };
-  const dedicated = providers.filter((provider) => provider.providerRole === "embedding" && provider.enabled !== false);
-  if (dedicated.length) {
-    const selectedDedicated = dedicated.find((provider) => provider.id === selectedId);
-    if (selectedId && !selectedDedicated) return incompatibleOptions(dedicated, "embedding");
-    const effectiveDedicated = selectedDedicated
-      ?? (!selectedId ? dedicated.find((provider) => provider.isDefault) ?? (dedicated.length === 1 ? dedicated[0] : undefined) : undefined);
-    return providerOptions(dedicated, "embedding", effectiveDedicated?.id ?? "", "Select an embedding provider");
-  }
-  const campaignTextId = String(campaignTextProviderProfileId ?? "");
-  const textProviders = providers.filter((provider) => provider.providerRole === "text" && provider.enabled !== false);
-  const selectedTextProvider = textProviders.find((provider) => provider.id === selectedId);
-  if (selectedId && !selectedTextProvider) return incompatibleOptions(textProviders, "text");
-  const textFallback = selectedTextProvider
-    ?? textProviders.find((provider) => provider.id === campaignTextId)
-    ?? textProviders.find((provider) => provider.isDefault)
-    ?? (textProviders.length === 1 ? textProviders[0] : undefined);
-  return textFallback
-    ? option(textFallback.id, `Text fallback · ${textFallback.name} · ${textFallback.providerType}`, textFallback.id)
-    : option("", "No text or embedding provider configured", "");
-}
 function formatCost(value: unknown, currency: unknown): string {
   const amount = Number(value);
   if (!Number.isFinite(amount)) return "—";
   const code = typeof currency === "string" && /^[A-Z]{3}$/.test(currency) ? currency : "USD";
   return new Intl.NumberFormat(undefined, { style: "currency", currency: code, minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(amount);
-}
-
-const STORY_MEMORY_LEVELS = ["off", "standard", "enhanced", "max"] as const;
-const STORY_MEMORY_LEVEL_LABELS: Record<(typeof STORY_MEMORY_LEVELS)[number], string> = {
-  off: "Off",
-  standard: "Standard",
-  enhanced: "Enhanced",
-  max: "Max"
-};
-
-function storyMemoryGuidance(settings: StoryMemorySettings | null): string {
-  return settings?.reviewMode !== "off" && settings
-    ? "Continuity review checks each new draft before acceptance. It adds a model request and may pause a turn for your decision."
-    : "Continuity review is disabled. Story structure and safety validation still apply.";
-}
-
-function storyMemorySettingsMarkup(settings: StoryMemorySettings | null, unavailable: boolean): string {
-  const selected = settings?.level ?? "off";
-  const available = new Set(settings?.availableLevels ?? []);
-  const disabled = unavailable ? " disabled" : "";
-  const options = STORY_MEMORY_LEVELS.map((level) => `<option value="${level}"${level === selected ? " selected" : ""}${unavailable || !available.has(level) ? " disabled" : ""}>${STORY_MEMORY_LEVEL_LABELS[level]}</option>`).join("");
-  const status = unavailable
-    ? '<p class="campaign-error" role="status">Campaign memory settings could not be loaded. Reload the page before changing them.</p>'
-    : `<p data-story-memory-guidance class="campaign-field-hint">${storyMemoryGuidance(settings)}</p>`;
-  return `<form id="memory-settings-form" class="campaign-form" aria-busy="false"><section><h3>Campaign memory</h3>${field("Memory level", `<select name="storyMemoryLevel" aria-describedby="story-memory-help"${disabled}>${options}</select>`)}<label class="campaign-checkbox"><input type="checkbox" name="continuityReviewEnabled"${settings && settings.reviewMode !== "off" ? " checked" : ""}${unavailable || selected !== "max" ? " disabled" : ""}><span>Enable continuity review</span></label><p class="campaign-field-hint">Optional with Max memory. Disabled by default.</p><p id="story-memory-help" class="campaign-field-hint">This applies to newly queued turns. Existing jobs keep their saved memory policy. Accepted turns and the current draft are unchanged.</p>${status}</section><div class="campaign-action-ledger"><span>Selection is restricted by this server's available memory levels.</span><button class="primary-action" type="submit"${disabled}>Save memory level</button></div></form>`;
 }
 
 function campaignListMarkup(): string {
@@ -135,18 +57,17 @@ function campaignListMarkup(): string {
 
 function shellMarkup(campaign: CampaignSummary, section: CampaignSection): string {
   const nav = CAMPAIGN_SECTIONS.map((item) => `<a href="${campaignEditorPath(campaign.id, item)}"${item === section ? ' aria-current="page"' : ""}>${icons[item]}<span>${CAMPAIGN_SECTION_LABELS[item]}</span></a>`).join("");
-  return `<main id="main-content" data-page="campaign-editor" data-section="${section}"><header class="campaign-command-row"><a href="/app/campaigns" class="campaign-back">${svg("m15 18-6-6 6-6")}<span>Back to campaigns</span></a><div class="campaign-identity"><h1>${text(campaign.title)}</h1><span class="campaign-status">${text(campaign.status)}</span><span>Turn ${campaign.activeTurnNumber}</span><span>${text(campaign.worldTitle)} v${campaign.worldVersionNumber}</span></div><a class="campaign-enter-story" href="${storyPlayerPath(campaign.id)}">Enter story ${svg("M7 17 17 7M8 7h9v9")}</a></header><div class="campaign-workspace"><aside class="campaign-spine" aria-label="Campaign editor sections"><div class="campaign-coordinate" aria-hidden="true"><span>Campaign folio</span><strong>${String(campaign.activeTurnNumber).padStart(3, "0")}</strong></div><nav>${nav}</nav></aside><section class="campaign-leaf"><div id="campaign-message" class="campaign-message" role="status" aria-live="polite"></div><div id="campaign-section" aria-busy="true"><div class="campaign-loading">Loading ${CAMPAIGN_SECTION_LABELS[section]}…</div></div></section></div></main>`;
+  return `<main id="main-content" data-page="campaign-editor" data-section="${section}"><header class="campaign-command-row"><a href="/app/campaigns" class="campaign-back">${svg("m15 18-6-6 6-6")}<span>Back to campaigns</span></a><div class="campaign-identity"><h1>${text(campaign.title)}</h1><span class="campaign-status">${text(campaign.status)}</span><span>Turn ${campaign.activeTurnNumber}</span><span>${text(campaign.worldTitle)} v${campaign.worldVersionNumber}</span></div><a class="campaign-enter-story" href="${storyPlayerPath(campaign.id)}">Enter story ${svg("M7 17 17 7M8 7h9v9")}</a></header><div class="campaign-workspace"><aside class="campaign-spine" aria-label="Campaign editor sections"><div class="campaign-coordinate" aria-hidden="true"><span>Campaign folio</span><strong>${String(campaign.activeTurnNumber).padStart(3, "0")}</strong></div><nav>${nav}<a href="/app/settings?section=campaign&amp;campaignId=${text(campaign.id)}">Campaign settings</a></nav></aside><section class="campaign-leaf"><div id="campaign-message" class="campaign-message" role="status" aria-live="polite"></div><div id="campaign-section" aria-busy="true"><div class="campaign-loading">Loading ${CAMPAIGN_SECTION_LABELS[section]}…</div></div></section></div></main>`;
 }
 
-function overviewMarkup(c: CampaignSummary, providers: ProviderSummary[], stateRevision: number, storyMemorySettings: StoryMemorySettings | null, storyMemoryUnavailable: boolean): string {
+function overviewMarkup(c: CampaignSummary, storyMemorySettings: StoryMemorySettings | null, storyMemoryUnavailable: boolean): string {
   const cost = record(c.costInformation?.[0]);
   const currency = String(cost.currency ?? "USD");
   const metrics = c.costInformation?.length ? [
     [cost.amount, `Total ${currency}`], [cost.textGenerationAmount, "Story text"],
     [cost.imageGenerationAmount, "Illustrations"], [cost.memoryAmount, "Chronicle"]
   ] : [["—", "No provider-reported cost"]];
-  const visibleTurnControlStyle = c.turnControlStyle === "flexible_scene" ? "flexible_scene" : "flexible_action";
-  return `<header class="campaign-section-heading"><h2>Campaign overview</h2><p>Configure campaign identity and the Story Engine defaults used for future turns.</p></header><form id="overview-form" class="campaign-form" data-original-turn-control-style="${text(c.turnControlStyle)}" data-state-revision="${stateRevision}"><section><h3>Identity</h3><div class="campaign-field-grid">${field("Campaign title", `<input name="title" maxlength="200" required value="${text(c.title)}">`)}${field("Status", `<select name="status">${option("active", "Active", c.status)}${option("archived", "Archived", c.status)}</select>`)}</div></section><section><h3>Story Engine</h3><div class="campaign-field-grid three">${field("Text provider profile", `<select name="textProviderProfileId">${providerOptions(providers, "text", c.textProviderProfileId, "Select a text provider")}</select>`)}${field("Turn input style", `<select name="turnControlStyle">${option("flexible_action", "Action", visibleTurnControlStyle)}${option("flexible_scene", "Story Direction", visibleTurnControlStyle)}</select>`)}${field("Response length", `<select name="storyLengthProfile">${["brief", "standard", "long", "extended"].map((v) => option(v, v[0].toUpperCase() + v.slice(1), c.storyLengthProfile)).join("")}</select>`)}${field("Story context", `<select name="storyContextBudgetTokens" title="Target context for future Story generation. Provider limits still apply.">${[[32000, "32k"], [64000, "64k"], [128000, "128k"], [256000, "256k"], [1000000, "1m"], [2000000, "2m"], [4000000, "4m"]].map(([value, label]) => option(String(value), String(label), String(c.storyContextBudgetTokens))).join("")}</select>`)}</div></section><section><h3>Reported provider cost</h3><div class="campaign-metrics">${metrics.map(([value, label]) => `<div><strong>${formatCost(value, currency)}</strong><span>${text(label)}</span></div>`).join("")}</div></section><div class="campaign-action-ledger"><span>Accepted turns and Chronicle memory are unchanged by these settings.</span><button class="primary-action" type="submit">Save campaign</button></div></form>${storyMemorySettingsMarkup(storyMemorySettings, storyMemoryUnavailable)}`;
+  return `<header class="campaign-section-heading"><h2>Campaign overview</h2><p>Manage campaign identity and review reported costs.</p></header><form id="overview-form" class="campaign-form"><section><h3>Identity</h3><div class="campaign-field-grid">${field("Campaign title", `<input name="title" maxlength="200" required value="${text(c.title)}">`)}${field("Status", `<select name="status">${option("active", "Active", c.status)}${option("archived", "Archived", c.status)}</select>`)}</div></section><section><h3>Reported provider cost</h3><div class="campaign-metrics">${metrics.map(([value, label]) => `<div><strong>${formatCost(value, currency)}</strong><span>${text(label)}</span></div>`).join("")}</div></section><div class="campaign-action-ledger"><span>Accepted turns and Chronicle memory are unchanged by these settings.</span><button class="primary-action" type="submit">Save campaign</button></div></form>${storyMemorySettingsMarkup(storyMemorySettings, storyMemoryUnavailable)}`;
 }
 
 function characterMarkup(value: JsonRecord): string {
@@ -177,62 +98,6 @@ export function historyMarkup(value: JsonRecord, campaign: CampaignSummary): str
   return `<header class="campaign-section-heading"><h2>History</h2><p>Scan every accepted prompt and its opening story sentence. Read complete turns in Story.</p></header><div class="turn-ledger">${turns.length ? turns.map((turn)=>`<article data-turn-id="${text(turn.id)}" data-turn-number="${text(turn.turnNumber)}"><header><h3>Turn ${text(turn.turnNumber)}</h3><time datetime="${text(turn.acceptedAt)}" title="${text(turn.acceptedAt)}">${text(String(turn.acceptedAt ?? "").slice(0,10))}</time></header><div class="turn-content"><p class="turn-action"><span>Prompt</span>${text(turn.action)}</p><p class="turn-narration">${text(firstNarrationSentence(turn.narration))}</p>${chronicleRetrievalAuditMarkup(turn.chronicleRetrieval)}<div class="turn-row-actions"><a href="${storyPlayerPath(String(value.campaignId ?? ""), Number(turn.turnNumber))}">Open in story</a><details class="turn-operations"><summary>Manage turn</summary><div class="turn-actions"><button type="button" data-action="inspect-turn">Inspect state</button><button type="button" data-action="edit-narration">Edit narration</button>${Number(turn.turnNumber)===campaign.activeTurnNumber?`<button type="button" data-action="retry-turn">Retry edited prompt</button>`:""}<button type="button" data-action="rebuild-turn-images">Rebuild illustrations</button><button type="button" data-action="branch-turn">Branch</button><button type="button" data-action="rewind-turn">Rewind</button></div></details></div><p class="turn-feedback" role="status" aria-live="polite"></p></div></article>`).join("") : `<p class="campaign-empty">No accepted turns yet.</p>`}</div><dialog id="turn-state-dialog" class="turn-state-dialog" aria-labelledby="turn-state-title"><header><h3 id="turn-state-title" tabindex="-1">Turn state</h3><button type="button" data-action="close-turn-state" aria-label="Close turn state">Close</button></header><div class="turn-state-dialog-body"></div></dialog>${narrationCorrectionDialogMarkup()}`;
 }
 
-export function semanticRetrievalHealthView(health: JsonRecord): Record<string, string> {
-  const labels: Record<string, string> = {
-    chronicle_available: "Chronicle available",
-    semantic_disabled: "Semantic Retrieval off",
-    indexing: "Indexing",
-    healthy: "Ready",
-    partially_indexed: "Partially indexed",
-    provider_degraded: "Provider degraded",
-    provider_unavailable: "Provider unavailable",
-    fallback_active: "Fallback active",
-    chunk_protocol_outdated: "Chunk protocol outdated",
-    rebuild_required: "Rebuild required"
-  };
-  const status = typeof health.status === "string" && Object.hasOwn(labels, health.status) ? health.status : "";
-  const coverageValue = Number(health.coveragePercent);
-  const coveragePercent = Number.isFinite(coverageValue) ? Math.min(100, Math.max(0, Math.round(coverageValue))) : null;
-  const implementations: Record<string, string> = { legacy_hybrid: "Legacy hybrid", chunked_hybrid: "Chunked hybrid" };
-  const implementation = typeof health.retrievalImplementation === "string" ? implementations[health.retrievalImplementation] : undefined;
-  const shadow = typeof health.retrievalShadowEnabled === "boolean" ? health.retrievalShadowEnabled ? "On" : "Off" : "Unavailable";
-  const fallbackCode = typeof health.fallbackCode === "string" && /^[a-z0-9][a-z0-9_.:-]{0,199}$/u.test(health.fallbackCode)
-    ? health.fallbackCode.replace(/[_:.-]+/gu, " ")
-    : health.fallbackCode ? "Unavailable" : "None";
-  const jobStatuses: Record<string, string> = { queued: "Queued", running: "Running", completed: "Completed", failed: "Failed" };
-  const jobStatus = typeof health.jobStatus === "string" && Object.hasOwn(jobStatuses, health.jobStatus) ? jobStatuses[health.jobStatus] : "No active job";
-  const progress = record(health.progress);
-  const processedParents = Number(progress.processedParents ?? progress.embedded);
-  const totalParents = Number(progress.totalParents ?? progress.total);
-  const embeddedChunks = Number(progress.embeddedChunks);
-  const skippedChunks = Number(progress.skippedChunks);
-  const progressParts: string[] = [];
-  if (Number.isFinite(processedParents) && Number.isFinite(totalParents) && totalParents >= 0) progressParts.push(`${Math.max(0, processedParents)} of ${Math.max(0, totalParents)} memories`);
-  if (Number.isFinite(embeddedChunks) || Number.isFinite(skippedChunks)) progressParts.push(`${Math.max(0, Number.isFinite(embeddedChunks) ? embeddedChunks : 0)} embedded chunks · ${Math.max(0, Number.isFinite(skippedChunks) ? skippedChunks : 0)} skipped`);
-  return {
-    status,
-    label: status ? labels[status] : "Status unavailable",
-    coverageLabel: coveragePercent === null ? "Coverage unavailable" : `${coveragePercent}% compatible vector coverage`,
-    productionLabel: `Production · ${implementation || "Unavailable"}`,
-    shadowLabel: `Shadow comparison · ${shadow}`,
-    fallbackLabel: fallbackCode,
-    jobLabel: progressParts.length ? `${jobStatus} · ${progressParts.join(" · ")}` : jobStatus
-  };
-}
-
-export function chronicleEmbeddingConfigPayload(values: Record<string, string>): Record<string, unknown> {
-  return {
-    enabled: values.enabled === "true",
-    providerProfileId: values.providerProfileId || null,
-    model: values.model,
-    batchSize: Number(values.batchSize),
-    documentPrefix: values.documentPrefix || null,
-    queryPrefix: values.queryPrefix || null,
-    retrievalImplementation: values.retrievalImplementation,
-    retrievalShadowEnabled: values.retrievalShadowEnabled === "on"
-  };
-}
-
 interface ChronicleJobMonitorDependencies {
   loadJob: (jobId: string) => Promise<unknown>;
   refresh: (job: JsonRecord) => Promise<void>;
@@ -252,31 +117,6 @@ export async function monitorChronicleJob(jobId: string, dependencies: Chronicle
     await dependencies.wait();
   }
   throw new Error("Chronicle indexing is still running. Refresh this page to resume monitoring.");
-}
-
-export function chronicleMarkup(metrics: JsonRecord, config: JsonRecord, providers: ProviderSummary[], campaignTextProviderProfileId: unknown = null): string {
-  const health = record(metrics.semanticHealth);
-  const healthView = semanticRetrievalHealthView(health);
-  const statusAttribute = healthView.status ? ` data-state="${healthView.status}"` : "";
-  const enabled = typeof config.enabled === "boolean" ? String(config.enabled) : "";
-  const implementation = typeof config.retrievalImplementation === "string" ? config.retrievalImplementation : "";
-  const enabledOptions = `${enabled ? "" : '<option value="" selected disabled>Configuration unavailable</option>'}${option("false", "Off", enabled)}${option("true", "On", enabled)}`;
-  const implementationOptions = `${implementation ? "" : '<option value="" selected disabled>Configuration unavailable</option>'}${option("legacy_hybrid", "Legacy hybrid", implementation)}${option("chunked_hybrid", "Chunked hybrid", implementation)}`;
-  const healthDetails = [
-    ["Coverage", healthView.coverageLabel],
-    ["Production", healthView.productionLabel],
-    ["Shadow comparison", healthView.shadowLabel],
-    ["Index job", healthView.jobLabel],
-    ...(health.providerName ? [["Provider", `${String(health.providerName)} · ${String(health.providerHealth ?? "unknown")}${health.model ? ` · ${String(health.model)}` : ""}`]] : []),
-    ...(health.fallbackCode ? [["Fallback reason", healthView.fallbackLabel]] : [])
-  ];
-  const metricsMarkup = [
-    [metrics.turns, "Accepted turns"],
-    [metrics.estimatedCompleteHistoryTokens, "Complete-history tokens"],
-    [metrics.memoryCount, "Chronicle memories"],
-    [health.indexedMemories ?? metrics.embeddedMemories, "Current embeddings"]
-  ].map(([value, label]) => `<div><strong>${text(value ?? "—")}</strong><span>${label}</span></div>`).join("");
-  return `<header class="campaign-section-heading"><h2>Chronicle</h2><p>Manage derived memory and preview the fiction-only context selected for generation.</p></header><div class="campaign-metrics chronicle-metrics">${metricsMarkup}</div><section class="chronicle-health"${statusAttribute} role="status" aria-live="polite" aria-atomic="true"><header><span class="chronicle-health-badge">${healthView.label}</span><div><h3>${healthView.label}</h3><p>${text(health.message ?? "Semantic Retrieval status is unavailable.")}</p></div></header><dl>${healthDetails.map(([label, value]) => `<div><dt>${text(label)}</dt><dd>${text(value)}</dd></div>`).join("")}</dl><p class="chronicle-availability-note">Chronicle local memory remains available when semantic retrieval is off.</p></section><form id="chronicle-form" class="campaign-form chronicle-form"><fieldset class="chronicle-retrieval-settings"><legend>Semantic Retrieval</legend>${field("Semantic Retrieval", `<select name="enabled" required>${enabledOptions}</select>`)}${field("Production implementation", `<select name="retrievalImplementation" required>${implementationOptions}</select>`)}<label class="campaign-field chronicle-toggle"><span>Shadow comparison</span><span><input type="checkbox" name="retrievalShadowEnabled"${config.retrievalShadowEnabled === true ? " checked" : ""}> Compare retrieval implementations</span></label><p>Shadow comparison records safe diagnostics only. It never changes production selection.</p></fieldset><div class="campaign-field-grid three chronicle-provider-grid">${field("Embedding provider", `<select name="providerProfileId">${embeddingProviderOptions(providers,config.providerProfileId,campaignTextProviderProfileId)}</select>`)}${field("Embedding model", `<input name="model" value="${text(config.model ?? "")}">`)}${field("Batch size", `<input type="number" min="1" max="128" name="batchSize" value="${text(config.batchSize ?? "")}">`)}${field("Document prefix", `<input name="documentPrefix" value="${text(config.documentPrefix ?? "")}">`)}${field("Query prefix", `<input name="queryPrefix" value="${text(config.queryPrefix ?? "")}">`)}</div><section class="chronicle-preview"><h3>Context preview</h3><div class="campaign-field-grid three">${field("Budget tokens", `<input name="budgetTokens" type="number" min="512" value="32000">`)}${field("Compression", `<select name="compression">${["auto","full","balanced","compact","summary"].map(v=>option(v,v,"auto")).join("")}</select>`)}${field("Retrieval query", `<input name="query" maxlength="4000">`)}</div><pre id="context-preview" tabindex="0">Build a preview to inspect selected memory.</pre></section><div class="campaign-action-ledger chronicle-action-ledger"><button type="button" data-action="rebuild-memory" title="Reconstruct derived Chronicle memories from accepted turns and campaign state, then queue semantic indexing. Use only when memory is stale or inconsistent.">Rebuild memory</button><button type="button" data-action="reindex-embeddings" title="Re-run the legacy memory-vector embedding job using the saved provider and model. This does not save form changes or rebuild chunked vectors."${config.enabled === true ? "" : " disabled"}>Reindex Semantic Retrieval</button><button type="button" data-action="preview-context">Build context preview</button><button class="primary-action" type="submit" title="Save these Semantic Retrieval settings and queue the chunked vector index. Use this after changing the provider, model, prefixes, or retrieval implementation.">Save & index</button></div></form>`;
 }
 
 export function refreshChronicleStatusProjection(target: HTMLElement, markup: string): void {
@@ -299,11 +139,6 @@ export function setChronicleOperationBusy(target: HTMLElement, busy: boolean, se
   if (save) save.disabled = busy;
   if (rebuild) rebuild.disabled = busy;
   if (reindex) reindex.disabled = busy || !semanticEnabled;
-}
-
-export function illustrationsMarkup(c: JsonRecord, providers: ProviderSummary[]): string {
-  const source = String(c.sourcePolicy ?? (c.enabled ? "generate_only" : "off"));
-  return `<header class="campaign-section-heading"><h2>Illustrations</h2><p>Configure optional child jobs independently from accepted story turns.</p></header><form id="illustrations-form" class="campaign-form"><div class="campaign-field-grid three">${field("Automatic source", `<select name="sourcePolicy">${["off","library_only","library_then_generate","generate_only"].map(v=>option(v,v.replaceAll("_"," "),source)).join("")}</select>`)}${field("Matching scope", `<select name="matchingScope">${["campaign","world","owner_library"].map(v=>option(v,v,String(c.matchingScope))).join("")}</select>`)}${field("Confidence", `<select name="confidenceProfile">${["strict","balanced","broad"].map(v=>option(v,v,String(c.confidenceProfile))).join("")}</select>`)}${field("Repetition window", `<input name="repetitionWindow" type="number" min="0" max="100" value="${text(c.repetitionWindow ?? 5)}">`)}${field("Provider profile", `<select name="providerProfileId">${providerOptions(providers,"image",c.providerProfileId,"Select an image provider")}</select>`)}${field("Image model", `<input name="model" value="${text(c.model)}">`)}${field("Size", `<input name="size" value="${text(c.size ?? "1024x1024")}">`)}${field("Aspect ratio", `<input name="aspectRatio" value="${text(c.aspectRatio ?? "1:1")}">`)}${field("Quality", `<select name="quality">${["auto","low","medium","high"].map(v=>option(v,v,String(c.quality))).join("")}</select>`)}${field("Format", `<select name="outputFormat">${["png","jpeg","webp"].map(v=>option(v,v,String(c.outputFormat))).join("")}</select>`)}${field("Attempts", `<input name="maxAttempts" type="number" min="1" max="10" value="${text(c.maxAttempts ?? 3)}">`)}${field("Words per segment", `<input name="segmentWordCount" type="number" min="100" max="5000" value="${text(c.segmentWordCount ?? 500)}">`)}${field("Images per segment", `<input name="imagesPerSegment" type="number" min="1" max="2" value="${text(c.imagesPerSegment ?? 1)}">`)}${field("Segment prompt mode", `<select name="segmentPromptMode">${option("direct","Accepted segment text",String(c.segmentPromptMode))}${option("ai_refined","AI-refined prompt",String(c.segmentPromptMode))}</select>`)}${field("Art style", `<input name="artStyle" maxlength="500" value="${text(c.artStyle ?? "")}">`)}${field("Exclude from images", `<input name="negativePrompt" maxlength="500" value="${text(c.negativePrompt ?? c.defaultNegativePrompt ?? "")}">`)}</div><p class="campaign-field-note">The art style is added to every generated image. Exclusions are sent as a negative prompt when the image provider supports one. The AI refinement prompt is edited in the Prompt Library (Illustration refinement), where campaign overrides apply to every segment job.</p><div class="campaign-action-ledger"><button type="button" data-action="backfill-images">Generate missing history</button><button type="button" data-action="rebuild-images">Rebuild historical segments</button><button class="primary-action" type="submit">Save illustration settings</button></div></form>`;
 }
 
 function worldTransferMarkup(c: CampaignSummary, world: JsonRecord, targets: TransferTarget[]): string {
@@ -330,7 +165,7 @@ function parseJsonField(form: HTMLFormElement, name: string, label: string): unk
 }
 
 export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute): MountedPage {
-  let shell = mountAppShell(root, route.campaignId ? `<main id="main-content"><p class="campaign-loading">Loading campaign…</p></main>` : campaignListMarkup(), "campaigns"); const controller = new AbortController(); const storyMemoryApi = createStoryMemoryApi(); let disposed = false; let campaign: CampaignSummary | null = null; let storyMemorySettings: StoryMemorySettings | null = null; let storyMemoryUnavailable = false; let transferPreview: JsonRecord | null = null; let chronicleConfig: JsonRecord = {}; let chronicleProviders: ProviderSummary[] = []; let chronicleOperationActive = false; let illustrationConfig: JsonRecord = {}; let stateBase: CampaignRuntimeStateResponse | null = null; let continuityEditor: CampaignContinuityEditor | null = null; let stateGenerationLocked = false; let stateConflictLocked = false; let stateReloadInFlight = false; let stateSaveInFlight = false; let stateSessionId = 0; let profileForm: ReturnType<typeof createCharacterProfileForm> | null = null;
+  let shell = mountAppShell(root, route.campaignId ? `<main id="main-content"><p class="campaign-loading">Loading campaign…</p></main>` : campaignListMarkup(), "campaigns"); const controller = new AbortController(); const storyMemoryApi = createStoryMemoryApi(); let disposed = false; let campaign: CampaignSummary | null = null; let storyMemorySettings: StoryMemorySettings | null = null; let storyMemoryUnavailable = false; let transferPreview: JsonRecord | null = null; let chronicleConfig: JsonRecord = {}; let chronicleOperationActive = false; let stateBase: CampaignRuntimeStateResponse | null = null; let continuityEditor: CampaignContinuityEditor | null = null; let stateGenerationLocked = false; let stateConflictLocked = false; let stateReloadInFlight = false; let stateSaveInFlight = false; let stateSessionId = 0; let profileForm: ReturnType<typeof createCharacterProfileForm> | null = null;
   const setStateFormBusy = (form: HTMLFormElement, busy: boolean) => {
     form.setAttribute("aria-busy", String(busy));
     form.querySelectorAll<HTMLButtonElement | HTMLTextAreaElement | HTMLInputElement | HTMLSelectElement>("button, textarea, input, select")
@@ -403,7 +238,7 @@ export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute)
         progress: job.progress
       };
     }
-    refreshChronicleStatusProjection(target, chronicleMarkup(metrics,chronicleConfig,chronicleProviders,campaign.textProviderProfileId));
+    refreshChronicleStatusProjection(target, chronicleMarkup(metrics,chronicleConfig,[],null,true));
   }
   async function monitorAndRefreshChronicle(jobId: unknown, label: string): Promise<void> {
     if (!campaign || typeof jobId !== "string" || !jobId) throw new Error(`${label} did not return a job identifier.`);
@@ -424,17 +259,36 @@ export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute)
   }
   async function showSection(): Promise<void> {
     if (!route.campaignId) return; campaign=await loadCampaign(route.campaignId,controller.signal); if(disposed)return; shell.dispose(); shell=mountAppShell(root,shellMarkup(campaign,route.section),"campaigns"); const target=root.querySelector<HTMLElement>("#campaign-section")!;
-    const loadProviders = async () => { const response=record(await campaignApi.general("/api/v1/providers",controller.signal)); return (Array.isArray(response.providers)?response.providers:[]).map(record).filter((value)=>typeof value.id==="string"&&typeof value.name==="string"&&typeof value.providerRole==="string"&&typeof value.providerType==="string") as ProviderSummary[]; };
-    if(route.section==="overview") { const [providers, state, memory] = await Promise.all([loadProviders(), campaignApi.get<CampaignRuntimeStateResponse>(campaign.id, "/state", controller.signal), storyMemoryApi.get(campaign.id, controller.signal).then((settings) => ({ settings, unavailable: false }), () => ({ settings: null, unavailable: true }))]); if(disposed) return; storyMemorySettings=memory.settings; storyMemoryUnavailable=memory.unavailable; target.innerHTML=overviewMarkup(campaign, providers, state.revision, storyMemorySettings, storyMemoryUnavailable); }
+    if (route.section === "overview") {
+      const memory = await storyMemoryApi.get(campaign.id, controller.signal).catch(() => null);
+      if (disposed) return;
+      storyMemorySettings = memory;
+      storyMemoryUnavailable = !memory;
+      target.innerHTML = overviewMarkup(campaign, memory, !memory);
+    }
     else if(route.section==="character") { const profile = await campaignApi.get<CampaignCharacterProfile & { revision: number }>(campaign.id,"/character-profile",controller.signal); if (disposed) return; target.innerHTML=characterMarkup(record(profile)); profileForm=createCharacterProfileForm(target.querySelector<HTMLElement>("[data-character-profile-fields]")!, profile); }
     else if(route.section==="state") { const [loadedState,sync]=await loadCurrentState(); if(disposed)return; replaceCurrentStateEditor(target,loadedState,sync); }
     else if(route.section==="history") target.innerHTML=historyMarkup(record(await campaignApi.get(campaign.id,"/turns?limit=100",controller.signal)),campaign);
-    else if(route.section==="chronicle") { const [m,c,p]=await Promise.all([campaignApi.get<JsonRecord>(campaign.id,"/memory/metrics",controller.signal),campaignApi.get<JsonRecord>(campaign.id,"/memory/embedding-config",controller.signal),loadProviders()]);chronicleConfig=record(c);chronicleProviders=p;target.innerHTML=chronicleMarkup(record(m),chronicleConfig,chronicleProviders,campaign.textProviderProfileId); }
-    else if(route.section==="illustrations") { const [config,providers]=await Promise.all([campaignApi.get(campaign.id,"/illustration-config",controller.signal),loadProviders()]);illustrationConfig=record(config);target.innerHTML=illustrationsMarkup(illustrationConfig,providers); }
+    else if (route.section === "chronicle") {
+      const [metrics, config] = await Promise.all([campaignApi.get<JsonRecord>(campaign.id,"/memory/metrics",controller.signal), campaignApi.get<JsonRecord>(campaign.id,"/memory/embedding-config",controller.signal)]);
+      if (disposed) return;
+      chronicleConfig = config;
+      target.innerHTML = chronicleMarkup(metrics, config, [], null, true);
+    }
+    else if (route.section === "illustrations") target.innerHTML = illustrationsMarkup({},[],true);
     else if(route.section==="world-transfer") { const [world,response]=await Promise.all([campaignApi.general(`/api/v1/worlds/${encodeURIComponent(campaign.worldId)}`,controller.signal),campaignApi.general("/api/v1/worlds",controller.signal)]);const worlds=record(response).worlds;const targets=(Array.isArray(worlds)?worlds:[]).map(record).filter((candidate)=>candidate.id!==campaign!.worldId&&typeof candidate.latestVersionId==="string").map((candidate)=>({id:String(candidate.latestVersionId),label:`${String(candidate.title)} · Version ${String(candidate.latestVersionNumber)}`}));target.innerHTML=worldTransferMarkup(campaign,record(world),targets); }
     else target.innerHTML=dataMarkup(campaign); target.setAttribute("aria-busy","false"); bindActions(target);
   }
   function bindActions(target: HTMLElement): void {
+    if (campaign && ["overview","chronicle","illustrations"].includes(route.section)) {
+      const group = route.section === "overview" ? "story" : route.section;
+      const link = root.ownerDocument.createElement("a");
+      link.dataset.campaignSettingsGroup = group;
+      const params = new URLSearchParams({section:"campaign",campaignId:campaign.id,returnTo:campaignEditorPath(campaign.id,route.section)});
+      link.href = "/app/settings?" + params + "#" + group;
+      link.textContent = "Open " + (group === "story" ? "Story behavior" : group === "chronicle" ? "Chronicle" : "illustration") + " settings";
+      target.prepend(link);
+    }
     target.querySelector<HTMLSelectElement>("select[name='storyMemoryLevel']")?.addEventListener("change", (event) => {
       const select = event.target as HTMLSelectElement;
       const checkbox = target.querySelector<HTMLInputElement>("input[name='continuityReviewEnabled']");
@@ -442,7 +296,11 @@ export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute)
     });
     target.addEventListener("submit",async(event)=>{event.preventDefault();if(!campaign)return;const form=event.target as HTMLFormElement;try{
       if(form.id==="narration-correction-form"){const dialog=form.closest<HTMLDialogElement>("dialog")!;const error=dialog.querySelector<HTMLElement>(".narration-correction-error")!;const narration=(form.elements.namedItem("narration") as HTMLTextAreaElement).value.trim();if(!narration){error.textContent="Enter the corrected narration before saving.";error.hidden=false;(form.elements.namedItem("narration") as HTMLTextAreaElement).focus();return;}const submit=form.querySelector<HTMLButtonElement>('button[type="submit"]')!;await withCampaignActionState(submit,"Saving correction…",async()=>campaignApi.patch(campaign!.id,`/turns/${encodeURIComponent(form.dataset.turnId??"")}/correction`,{narration,expectedCorrectionRevision:Number(form.dataset.correctionRevision??0),expectedActiveTurnNumber:campaign!.activeTurnNumber,source:"user_edit"}));const article=Array.from(target.querySelectorAll<HTMLElement>("article[data-turn-id]")).find((candidate)=>candidate.dataset.turnId===form.dataset.turnId);const feedback=article?.querySelector<HTMLElement>(".turn-feedback");dialog.close();message("Accepted narration corrected; dependent Chronicle context was rebuilt.");if(feedback){feedback.textContent="Narration saved. Chronicle context was rebuilt.";delete feedback.dataset.state;}return;}
-      if(form.id==="overview-form"){const v=formObject(form);const originalTurnControlStyle=form.dataset.originalTurnControlStyle;const expectedStateRevision=Number(form.dataset.stateRevision);if(!Number.isSafeInteger(expectedStateRevision)||expectedStateRevision<0)throw new Error("Campaign settings need to be reloaded before saving.");const turnControlStyle=v.turnControlStyle==="flexible_action"&&originalTurnControlStyle==="action_only"?"action_only":v.turnControlStyle;await campaignApi.patch(campaign.id,"",{...v,turnControlStyle,expectedTurnControlStyle:originalTurnControlStyle,expectedActiveTurnNumber:campaign.activeTurnNumber,expectedStateRevision,textProviderProfileId:v.textProviderProfileId||null,storyContextBudgetTokens:Number(v.storyContextBudgetTokens)});message("Campaign settings saved.");}
+      if (form.id === "overview-form") {
+        const {title,status} = formObject(form);
+        await campaignApi.saveSettings(campaign.id,"behavior",{title,status},controller.signal);
+        if (!disposed) message("Campaign settings saved.");
+      }
       if (form.id === "memory-settings-form") {
         const select = form.querySelector<HTMLSelectElement>("select[name='storyMemoryLevel']");
         const checkbox = form.querySelector<HTMLInputElement>("input[name='continuityReviewEnabled']");
@@ -475,8 +333,6 @@ export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute)
       }
       if(form.id==="character-form"){if(!profileForm)throw new Error("Profile unavailable.");const saved=await campaignApi.put<CampaignCharacterProfile & { revision: number }>(campaign.id,"/character-profile",profileForm.update());const fields=target.querySelector<HTMLElement>("[data-character-profile-fields]")!;fields.replaceChildren();profileForm=createCharacterProfileForm(fields,saved);message("Campaign character profile saved.");}
       if(form.id==="state-form"){if(stateSaveInFlight||stateReloadInFlight)return;if(stateGenerationLocked)throw new Error("Current-state editing is unavailable while a story generation needs attention.");if(stateConflictLocked)throw new Error("Current state changed while you were editing. Reload before saving; your draft is still available.");const base=stateBase;const editor=continuityEditor;if(!base||!editor)throw new Error("Current campaign state is unavailable. Reload before saving.");const sessionId=stateSessionId;const trackers=parseJsonField(form,"trackers","Trackers") as CampaignRuntimeStateUpdate["trackers"];const request=buildCurrentStateUpdate(base,editor.readDraft(),{trackers});stateSaveInFlight=true;setStateFormBusy(form,true);editor.setDisabled(true);try{const saved=await campaignApi.patch<CampaignRuntimeStateResponse>(campaign.id,"/state",request);if(disposed||sessionId!==stateSessionId||stateBase!==base||continuityEditor!==editor)return;stateBase=saved;editor.dispose();continuityEditor=createCampaignContinuityEditor(root.ownerDocument,createCampaignContinuityDraft(saved),{idPrefix:"campaign-current-state",onChange:()=>undefined});target.querySelector("[data-campaign-continuity-editor]")?.replaceChildren(continuityEditor.element);message("Current campaign state saved.");}catch(error){if(error instanceof CampaignEditorApiError&&error.status===409)stateConflictLocked=true;throw error;}finally{if(!disposed&&sessionId===stateSessionId){stateSaveInFlight=false;setStateFormBusy(form,false);if(continuityEditor===editor)editor.setDisabled(stateGenerationLocked||stateConflictLocked);}}}
-      if(form.id==="chronicle-form"){await runChronicleOperation(target,async()=>{const v=formObject(form);const payload=chronicleEmbeddingConfigPayload(v);if(payload.enabled===true&&!payload.providerProfileId)throw new Error("Choose an eligible embedding provider before enabling Semantic Retrieval.");const saved=record(await campaignApi.put(campaign!.id,"/memory/embedding-config",payload));chronicleConfig=saved;if(saved.enabled===true&&!saved.jobId)throw new Error("Semantic Retrieval was enabled, but indexing did not return a job identifier.");if(saved.jobId)await monitorAndRefreshChronicle(saved.jobId, "Semantic Retrieval indexing");else{await refreshChronicleMetrics(target);message("Semantic Retrieval disabled. Chronicle local lexical retrieval and retained rollback embeddings remain available.");}});}
-      if(form.id==="illustrations-form"){const v=formObject(form);await campaignApi.put(campaign.id,"/illustration-config",{...v,providerProfileId:v.providerProfileId||null,repetitionWindow:Number(v.repetitionWindow),maxAttempts:Number(v.maxAttempts),segmentWordCount:Number(v.segmentWordCount),imagesPerSegment:Number(v.imagesPerSegment),refinementPrompt:illustrationConfig.refinementPrompt});message("Illustration settings saved.");}
       if(form.id==="migration-form"){if(!confirmAction("Migrate this campaign to the selected published world version?"))return;await campaignApi.post(campaign.id,"/migrate-world",formObject(form));message("Campaign world version migrated.");}
       if(form.id==="transfer-form"){if(!transferPreview)throw new Error("Preview compatibility before transferring this campaign.");if(!confirmAction("Transfer this campaign while preserving its character, state, and accepted history?"))return;await campaignApi.post(campaign.id,"/transfer-world",{...formObject(form),idempotencyKey:crypto.randomUUID(),expectedActiveTurnNumber:transferPreview.expectedActiveTurnNumber,expectedStateRevision:transferPreview.expectedStateRevision,sourceFingerprint:transferPreview.sourceFingerprint,note:"Explicit cross-world transfer from the Complete Campaign Editor."});message("Campaign transferred.");}
     }catch(error){const copy=form.id==="state-form"&&error instanceof CampaignEditorApiError&&error.status===409?"Current state changed while you were editing. Reload before saving; your draft is still available.":error instanceof Error?error.message:String(error);message(copy,true);if(form.id==="narration-correction-form"){const modalError=form.querySelector<HTMLElement>(".narration-correction-error");if(modalError){modalError.textContent=copy;modalError.hidden=false;}(form.elements.namedItem("narration") as HTMLTextAreaElement | null)?.focus();}}});
@@ -500,5 +356,22 @@ export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute)
     });}catch(error){const copy=error instanceof Error?error.message:String(error);message(copy,true);if(feedback){feedback.textContent=copy;feedback.dataset.state="error";}}});
   }
   (route.campaignId?showSection():showList()).catch((error)=>{const main=root.querySelector("#main-content");if(main)main.innerHTML=`<section class="campaign-failure"><h1>Campaign editor unavailable</h1><p>${text(error instanceof Error?error.message:error)}</p><a href="/nexus/#campaigns">Open legacy campaign management</a></section>`;});
-  return {dispose(){disposed=true;controller.abort();shell.dispose();}};
+  const win = root.ownerDocument.defaultView;
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    controller.abort();
+    continuityEditor?.dispose();
+    shell.dispose();
+    win?.removeEventListener("app-identity-changed", identityChanged);
+  }
+  function identityChanged() {
+    dispose();
+    root.replaceChildren();
+    const notice = root.ownerDocument.createElement("p");
+    notice.textContent = "Your account changed. Reload the campaign editor to continue.";
+    root.append(notice);
+  }
+  win?.addEventListener("app-identity-changed", identityChanged);
+  return {dispose};
 }

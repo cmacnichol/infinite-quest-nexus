@@ -1,6 +1,6 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
-const screenshots = "docs/review/assets/illustration-accuracy-2026-10-13";
+const screenshots = "test-results";
 const worldId = "33333333-3333-4333-8333-333333333333";
 const worldVersionId = "44444444-4444-4444-8444-444444444444";
 const campaignId = "11111111-1111-4111-8111-111111111111";
@@ -40,10 +40,12 @@ async function installApi(page: Page) {
     }
     if (path === "/api/v1/session") return send(route, { user: { id: worldId, displayName: "Fixture owner", settings: { autoSubmitTurnChoices: true, continuousReading: false, defaultTurnControlStyle: "flexible_action" } }, authentication: "deferred" });
     if (path === "/api/v1/meta") return send(route, { application: { name: "Nexus", version: "test", commit: null, builtAt: null }, capabilities: { systemArchive: false } });
-    if (path === "/api/v1/providers") return send(route, { providers: [
-      { id: "44444444-4444-4444-8444-444444444444", name: "Fixture text", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: true },
-      { id: imageProviderId, name: "Fixture images", providerType: "openai_compatible", providerRole: "image", enabled: true, isDefault: true, configuration: {} }
-    ] });
+    if (path === "/api/v1/providers") return send(route,{providers:[{
+      id:imageProviderId,name:"Fixture images",providerType:"openai_compatible",providerRole:"image",baseUrl:"https://images.invalid",
+      defaultModel:"fixture-image",contextWindowTokens:32000,maxOutputTokens:2048,temperature:1,requestTimeoutMs:30000,configuration:{},
+      enabled:true,isDefault:true,healthStatus:"unknown",consecutiveFailures:0,lastHealthCheckAt:null,lastHealthError:null,hasApiKey:false,
+      createdAt:campaign.createdAt,updatedAt:campaign.updatedAt
+    }]});
     if (path === "/api/v1/worlds") return send(route, { worlds: [] });
     if (path === "/api/v1/campaigns") return send(route, { campaigns: [campaign] });
     if (path === `/api/v1/campaigns/${campaignId}` && request.method() === "PATCH") return send(route, campaign);
@@ -64,19 +66,20 @@ async function openIllustrationSettings(page: Page) {
   await page.locator(`#campaignList [data-campaign-id="${campaignId}"]`).click();
   await expect(page.locator("#campaignTabIllustrations")).toBeEnabled();
   await page.locator("#campaignTabIllustrations").click();
-  await expect(page.locator("#illustrationArtStyle")).toHaveValue("Ink and watercolor storybook, muted palette");
+  await page.locator('#campaignPanelIllustrations a[data-campaign-settings-group]').click();
+  await expect(page.getByLabel("Art style",{exact:true})).toHaveValue("Ink and watercolor storybook, muted palette");
 }
 
 test("legacy illustration settings edit the art style and exclusions and send both on save", async ({ page }) => {
   const api = await installApi(page);
   await page.setViewportSize({ width: 1440, height: 1100 });
   await openIllustrationSettings(page);
-  await expect(page.locator("#illustrationStyleSettings")).toBeVisible();
-  await expect(page.locator("#illustrationNegativePrompt")).toHaveValue("text, captions, watermark");
+  await expect(page.locator("#illustrations")).toBeVisible();
+  await expect(page.getByLabel("Exclude from images")).toHaveValue("text, captions, watermark");
 
-  await page.locator("#illustrationNegativePrompt").fill("text, captions, watermark, picture frame");
-  await page.locator("#campaignPanelIllustrations").screenshot({ path: `${screenshots}/legacy-illustration-style-desktop.png` });
-  await page.locator("#saveIllustrationConfig").click();
+  await page.getByLabel("Exclude from images").fill("text, captions, watermark, picture frame");
+  await page.locator("#illustrations").screenshot({ path: `${screenshots}/legacy-illustration-style-desktop.png` });
+  await page.getByRole("button",{name:"Save illustration settings"}).click();
 
   await expect.poll(() => api.writes.length).toBe(1);
   expect(api.writes[0]).toMatchObject({
@@ -84,16 +87,15 @@ test("legacy illustration settings edit the art style and exclusions and send bo
     negativePrompt: "text, captions, watermark, picture frame"
   });
 
-  // Library-only matching reuses existing images, so style controls do not apply.
-  await page.locator("#illustrationSourcePolicy").selectOption("library_only");
-  await expect(page.locator("#illustrationStyleSettings")).toBeHidden();
+  await page.reload();
+  await expect(page.getByLabel("Exclude from images")).toHaveValue("text, captions, watermark, picture frame");
 });
 
 test("legacy illustration style settings fit a phone-width panel", async ({ page }) => {
   await installApi(page);
   await page.setViewportSize({ width: 390, height: 900 });
   await openIllustrationSettings(page);
-  const group = page.locator("#illustrationStyleSettings");
+  const group = page.locator("#illustrations");
   await group.scrollIntoViewIfNeeded();
   const box = await group.boundingBox();
   expect(box!.width).toBeLessThanOrEqual(390);

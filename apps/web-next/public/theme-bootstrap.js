@@ -1,18 +1,8 @@
 (() => {
-  const key = "infinite-quest.theme";
-  let stored = null;
+  let theme = "light";
   try {
-    stored = localStorage.getItem(key);
+    if (matchMedia("(prefers-color-scheme: dark)").matches) theme = "dark";
   } catch {}
-  const explicit = stored === "light" || stored === "dark" ? stored : null;
-  let systemDark = false;
-  if (!explicit) {
-    try {
-      systemDark = typeof matchMedia === "function"
-        && matchMedia("(prefers-color-scheme: dark)").matches;
-    } catch {}
-  }
-  const theme = explicit || (systemDark ? "dark" : "light");
   const root = document.documentElement;
   root.dataset.theme = theme;
   root.style.colorScheme = theme;

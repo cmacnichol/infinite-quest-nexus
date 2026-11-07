@@ -13,6 +13,7 @@ import type { DatabaseClient, DatabasePool } from "./pool.js";
 
 type AuthorityRow = Readonly<{
   operation_id: string;
+  upload_ttl_seconds: number | null;
   owner_user_id: string;
   operation_scope_hash: string;
   purpose: "portable_staging";
@@ -122,6 +123,7 @@ async function selectAuthority(
 ): Promise<AuthorityRow> {
   const selected = await client.query<AuthorityRow>(
     `SELECT operation.id AS operation_id,operation.owner_user_id,
+            (upload.policy_snapshot->>'uploadTtlSeconds')::integer AS upload_ttl_seconds,
             operation.operation_scope_hash,operation.purpose,operation.lifecycle,
             operation.expires_at AS operation_expires_at,operation.lease_id,
             operation.lease_owner,operation.work_version,operation.lease_expires_at,
@@ -177,7 +179,7 @@ async function acquireLease(
         SET lease_id=gen_random_uuid(),lease_owner=$2,
             work_version=operation.work_version+1,
             lease_expires_at=clock_timestamp()+make_interval(secs=>$3),
-            expires_at=clock_timestamp()+make_interval(secs=>$4),
+            expires_at=CASE WHEN $4::integer IS NULL THEN operation.expires_at ELSE GREATEST(operation.expires_at,clock_timestamp()+make_interval(secs=>$4)) END,
             updated_at=clock_timestamp()
       WHERE operation.id=$1
         AND operation.lifecycle IN ('reserved','finalized')
@@ -185,7 +187,7 @@ async function acquireLease(
       RETURNING operation.id AS operation_id,operation.expires_at AS operation_expires_at,
                 operation.lease_id,operation.lease_owner,operation.work_version,
                 operation.lease_expires_at`,
-    [row.operation_id, input.leaseOwner, input.leaseSeconds, input.activitySeconds],
+    [row.operation_id, input.leaseOwner, input.leaseSeconds, row.upload_ttl_seconds],
   );
   const renewedRow = renewed.rows[0];
   if (!renewedRow) throw storageError("System Archive upload storage is busy.", 409);
@@ -241,13 +243,13 @@ function startRenewableLease(
       await client.query("BEGIN");
       const upload = await client.query<{ expires_at: Date }>(
         `UPDATE system_archive_uploads
-            SET expires_at=clock_timestamp()+make_interval(secs=>$3),
+            SET expires_at=CASE WHEN policy_snapshot IS NULL THEN expires_at ELSE GREATEST(expires_at,clock_timestamp()+make_interval(secs=>(policy_snapshot->>'uploadTtlSeconds')::integer)) END,
                 updated_at=clock_timestamp()
           WHERE id=$1 AND owner_user_id=$2
             AND status IN ('created','uploading','completed')
             AND expires_at>clock_timestamp()
           RETURNING expires_at`,
-        [input.uploadId, input.ownerUserId, input.activitySeconds],
+        [input.uploadId, input.ownerUserId],
       );
       const uploadExpiry = upload.rows[0]?.expires_at;
       if (!uploadExpiry) throw new Error("system_archive_storage_lease_lost");

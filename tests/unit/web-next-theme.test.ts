@@ -170,17 +170,17 @@ describe("web theme integration", () => {
     renderAppShell(root, '<main id="main-content">Page</main>', "world-library");
 
     expect(document.querySelector<HTMLAnchorElement>('a[href="/app/campaigns"]')?.textContent).toBe("Campaigns");
-    expect(document.querySelector<HTMLAnchorElement>('a[href="/nexus/#providers"]')?.textContent).toBe("Setup");
+    expect(document.querySelector<HTMLAnchorElement>('a[href="/app/settings"]')?.textContent).toBe("Settings");
   });
 
-  it("keeps a valid stored choice authoritative when matchMedia access throws", () => {
+  it("uses a neutral pre-identity theme when matchMedia access throws", () => {
     const root = runPreRenderThemeBootstrap({
       stored: "dark",
       matchMedia: { get: () => { throw new Error("blocked"); } }
     });
 
-    expect(root.dataset.theme).toBe("dark");
-    expect(root.style.colorScheme).toBe("dark");
+    expect(root.dataset.theme).toBe("light");
+    expect(root.style.colorScheme).toBe("light");
   });
 
   it("falls back to light when matchMedia access throws", () => {
@@ -214,18 +214,18 @@ describe("web theme integration", () => {
     expect(root.style.colorScheme).toBe("light");
   });
 
-  it("uses a valid stored choice instead of the opposite system choice", () => {
+  it("uses the system theme before identity even when an unscoped choice exists", () => {
     const root = runPreRenderThemeBootstrap({
       stored: "light",
       matchMedia: { value: () => ({ matches: true }) }
     });
 
-    expect(root.dataset.theme).toBe("light");
-    expect(root.style.colorScheme).toBe("light");
+    expect(root.dataset.theme).toBe("dark");
+    expect(root.style.colorScheme).toBe("dark");
   });
 
   it("matches application vendor classes before the application renders", () => {
-    const darkRoot = runPreRenderThemeBootstrap({ stored: "dark" });
+    const darkRoot = runPreRenderThemeBootstrap({ matchMedia: {value: () => ({matches:true})} });
     const lightRoot = runPreRenderThemeBootstrap({ stored: "light" });
 
     expect(darkRoot.classList.contains("wa-dark")).toBe(true);

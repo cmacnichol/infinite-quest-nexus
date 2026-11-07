@@ -1,3 +1,4 @@
+import { archivePolicySnapshotSchema, historicalArchivePolicy, requireCompatibleArchivePreview, type ArchivePolicySnapshot } from "../../contracts/src/archive-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { ILLUSTRATION_NEGATIVE_PROMPT_DEFAULT } from "../../contracts/src/illustration-refinement-default.js";
 import {
@@ -68,6 +69,7 @@ type ProgressRow = WorkRow & Readonly<{
 }>;
 
 type AuthorityRow = Readonly<{
+  policy_snapshot: unknown;
   operation_id: string;
   normalized_payload: unknown;
   authority_fingerprint: string | null;
@@ -227,6 +229,7 @@ export function createPostgresPortableImportAuthorityRepository(
       input: Readonly<{ operationId: string; ownerUserId: string }>,
     ): Promise<void>;
   }>,
+  policy?: ArchivePolicySnapshot,
 ): PostgresPortableImportAuthorityRepository {
   const readPreviewAuthority = async (input: Readonly<{
     command: PortableImportCommitCommand;
@@ -238,7 +241,7 @@ export function createPostgresPortableImportAuthorityRepository(
     const destination = destinationParameters(input.command.destination);
     const selected = await pool.query<AuthorityRow>(
       `SELECT id AS operation_id,normalized_payload,authority_fingerprint,provider_configuration_fingerprint,
-              selected_character_id,source_installation_id,source_record_id
+              selected_character_id,source_installation_id,source_record_id,policy_snapshot
          FROM portable_import_operations
         WHERE owner_user_id=$1 AND import_kind=$2 AND preview_token_hash=$3
           AND destination_kind=$4
@@ -254,6 +257,7 @@ export function createPostgresPortableImportAuthorityRepository(
     );
     const row = selected.rows[0];
     if (!row?.authority_fingerprint || row.normalized_payload === null) return null;
+    if (policy) requireCompatibleArchivePreview(row.policy_snapshot ? archivePolicySnapshotSchema.parse(row.policy_snapshot) : historicalArchivePolicy("campaign"), policy);
     const authority: PortableCanonicalImportAuthority = {
       kind: input.command.kind,
       destination: input.command.destination,
@@ -286,7 +290,8 @@ export function createPostgresPortableImportAuthorityRepository(
     contentFingerprint: input.authorityFingerprint,
     projection: input.projection,
     diagnostics: input.diagnostics,
-    expiresAt: input.expiresAt
+    expiresAt: input.expiresAt,
+    ...(policy ? { policy } : {})
   });
 
   const claimPreviewAuthority = async (
@@ -305,7 +310,7 @@ export function createPostgresPortableImportAuthorityRepository(
     if (begun.outcome === "replay") return begun;
     const selected = await database.query<AuthorityRow>(
       `SELECT id AS operation_id,normalized_payload,authority_fingerprint,provider_configuration_fingerprint,
-              selected_character_id,source_installation_id,source_record_id
+              selected_character_id,source_installation_id,source_record_id,policy_snapshot
          FROM portable_import_operations
         WHERE id=$1 AND owner_user_id=$2 AND import_kind=$3 AND status='consuming'
         FOR UPDATE`,
@@ -313,6 +318,7 @@ export function createPostgresPortableImportAuthorityRepository(
     );
     const row = selected.rows[0];
     if (!row || !row.authority_fingerprint) throw new Error("portable_import_authority_unavailable");
+    if (policy) requireCompatibleArchivePreview(row.policy_snapshot ? archivePolicySnapshotSchema.parse(row.policy_snapshot) : historicalArchivePolicy("campaign"), policy);
     const authority: PortableCanonicalImportAuthority = {
       kind: input.command.kind,
       destination: input.command.destination,

@@ -88,12 +88,13 @@ async function waitForNextSceneTurn(page: Page, before: number, id = campaignId)
 }
 
 async function saveNewTurnControlStyle(page: Page, style: "flexible_action" | "flexible_scene"): Promise<void> {
-  await page.goto(`/app/campaigns/${campaignId}/overview`);
-  const form = page.locator("#overview-form");
+  await page.goto(`/app/settings?section=campaign&campaignId=${campaignId}#story`);
+  const form = page.locator("#story form");
   await expect(form).toBeVisible();
+  if (await form.locator('select[name="turnControlStyle"]').inputValue() === style) return;
   await form.locator('select[name="turnControlStyle"]').selectOption(style);
   await form.locator('button[type="submit"]').click();
-  await expect(page.locator("#campaign-message")).toContainText(/saved/i);
+  await expect(page.locator("#story [role=status]")).toContainText(/saved/i);
 }
 
 async function waitForProfilePatch(page: Page, mutate: () => Promise<void>): Promise<void> {
@@ -119,7 +120,7 @@ async function setAutomaticChoiceSubmission(page: Page, enabled: boolean): Promi
       await expect(page.locator("[data-profile-status]")).toContainText(/saved/i);
       changed = true;
     }
-    await page.getByRole("button", { name: "Close Preferences" }).click();
+    await page.getByRole("button", { name: "Close User Profile" }).click();
     if (changed) {
       await page.reload();
       await expect(page.locator("[data-story-composer]")).toBeVisible();
@@ -169,22 +170,23 @@ async function selectWebAwesomeProfileTurnStyle(page: Page, value: "flexible_act
 test.describe.configure({ mode: "serial" });
 
 test("new UI saves Story Direction without Auto", async ({ page }, testInfo) => {
-  await page.goto(`/app/campaigns/${campaignId}/overview`);
+  await saveNewTurnControlStyle(page, "flexible_action");
+  await page.goto(`/app/settings?section=campaign&campaignId=${campaignId}#story`);
   const renderer = await page.locator(".app-shell").getAttribute("data-ui-implementation") ?? "native";
-  const form = page.locator("#overview-form");
+  const form = page.locator("#story form");
   await expect(form).toBeVisible();
   await expect(form.locator('select[name="turnControlStyle"] option')).toHaveCount(2);
   await expect(form.locator('select[name="turnControlStyle"]')).toHaveValue(/flexible_(action|scene)/);
   await form.locator('select[name="turnControlStyle"]').selectOption("flexible_scene");
   await form.locator('button[type="submit"]').click();
-  await expect(page.locator("#campaign-message")).toContainText(/saved/i);
+  await expect(page.locator("#story [role=status]")).toContainText(/saved/i);
   await expect(form.locator('select[name="turnControlStyle"]')).toHaveValue("flexible_scene");
   await page.screenshot({ path: screenshotPath("management", renderer, testInfo.project.name), fullPage: true });
   await page.reload();
   await expect(form.locator('select[name="turnControlStyle"]')).toHaveValue("flexible_scene");
   await form.locator('select[name="turnControlStyle"]').selectOption("flexible_action");
   await form.locator('button[type="submit"]').click();
-  await expect(page.locator("#campaign-message")).toContainText(/saved/i);
+  await expect(page.locator("#story [role=status]")).toContainText(/saved/i);
   await page.goto(`/app/story/${campaignId}`);
   await expect(page.locator("[data-story-composer]")).toBeVisible();
   const restoredModes = page.locator("[data-story-input-modes] [data-input-mode], [data-story-composer] wa-radio");
@@ -201,8 +203,8 @@ test("new action-only campaign keeps Action locked", async ({ page }) => {
   await title.fill("Action-only title save");
   await form.locator("button[type='submit']").click();
   await expect(page.locator("#campaign-message")).toContainText(/saved/i);
-  await page.reload();
-  await expect(form.locator("select[name='turnControlStyle']")).toHaveValue("flexible_action");
+  await page.goto(`/app/settings?section=campaign&campaignId=${actionOnlyCampaignId}#story`);
+  await expect(page.locator("#story select[name=turnControlStyle]")).toHaveValue("flexible_action");
   await page.goto(`/app/story/${actionOnlyCampaignId}`);
   await expect(page.locator("[data-story-composer]")).toBeVisible();
   const modes = page.locator("[data-story-input-modes] [data-input-mode], [data-story-composer] wa-radio");
@@ -218,11 +220,11 @@ test("new UI profile persists Story Direction without Auto", async ({ page }, te
     await page.locator("wa-button.command-menu__trigger").filter({ hasText: "Profile" }).click();
     await page.locator("wa-dropdown-item[value='preferences']").click();
     const turnStyle = page.locator("[data-profile='turn-control-style']");
-    await expect(turnStyle.locator("wa-option[value='flexible_auto']")).toHaveCount(0);
+    expect(await turnStyle.locator("wa-option").evaluateAll(options => options.map(option => option.getAttribute("value")).sort())).toEqual(["action_only","flexible_action","flexible_scene"]);
     await selectWebAwesomeProfileTurnStyle(page, "flexible_action");
     await selectWebAwesomeProfileTurnStyle(page, "flexible_scene");
     await expect(page.locator("[data-profile-status]")).toContainText(/saved/i);
-    await page.getByRole("button", { name: "Close Preferences" }).click();
+    await page.getByRole("button", { name: "Close User Profile" }).click();
     await page.reload();
     await page.locator("wa-button.command-menu__trigger").filter({ hasText: "Profile" }).click();
     await page.locator("wa-dropdown-item[value='preferences']").click();
@@ -247,7 +249,7 @@ test("new UI profile persists Story Direction without Auto", async ({ page }, te
   const dialog = page.locator(".user-profile-dialog");
   await expect(dialog).toHaveAttribute("open", "");
   const turnStyle = "#user-profile-turn-style";
-  await expect(page.locator(`${turnStyle} option`)).toHaveCount(2);
+  expect(await page.locator(`${turnStyle} option`).evaluateAll(options => options.map(option => option.getAttribute("value")).sort())).toEqual(["action_only","flexible_action","flexible_scene"]);
   await expect(page.locator("[data-user-profile-fields]")).toBeEnabled();
   const nativeTurnStyle = page.locator(turnStyle);
   if (await nativeTurnStyle.inputValue() !== "flexible_action") {
@@ -339,37 +341,38 @@ test("new flexible controls submit explicit Action then Story Direction without 
 });
 
 test("the same campaign saves Story Direction from legacy management and Action from the new editor", async ({ page }) => {
+  await saveNewTurnControlStyle(page, "flexible_action");
   await page.goto("/nexus/#campaigns");
   const legacyCampaign = page.locator(`#campaignList .campaign-button[data-campaign-id="${campaignId}"]`);
   await expect(legacyCampaign).toBeVisible();
   await legacyCampaign.click();
   await page.locator("#campaignTabStory").click();
-  await page.locator("#campaignTurnControlStyle").selectOption("flexible_scene");
-  await page.locator("#saveCampaign").click();
-  await expect(page.locator("#campaignStatusMessage")).toContainText(/saved/i);
+  await page.locator("#campaignPanelStory a[data-campaign-settings-group]").click();
+  await page.locator("#story select[name=turnControlStyle]").selectOption("flexible_scene");
+  await page.locator("#story button[type=submit]").click();
+  await expect(page.locator("#story [role=status]")).toContainText(/saved/i);
 
   await page.goto(`/app/story/${campaignId}`);
   await expect(page.locator("[data-story-composer]")).toBeVisible();
   await expect(page.locator("[data-story-composer] [data-input-mode], [data-story-composer] wa-radio-group")).toHaveCount(0);
 
-  await page.goto(`/app/campaigns/${campaignId}/overview`);
-  const form = page.locator("#overview-form");
+  await page.goto(`/app/settings?section=campaign&campaignId=${campaignId}#story`);
+  const form = page.locator("#story form");
   await expect(form.locator('select[name="turnControlStyle"]')).toHaveValue("flexible_scene");
   await form.locator('select[name="turnControlStyle"]').selectOption("flexible_action");
   await form.locator('button[type="submit"]').click();
-  await expect(page.locator("#campaign-message")).toContainText(/saved/i);
+  await expect(page.locator("#story [role=status]")).toContainText(/saved/i);
 
   await page.goto(`/story/${campaignId}`);
   await expect(page.locator("#turnInputModeField")).toBeVisible();
   await expect(page.locator('[data-turn-input-mode="action"]')).toBeChecked();
 });
 
-test("new editor preserves an unsaved Action style and title after a real concurrent Story Direction turn", async ({ page }) => {
+test("new editor preserves an unsaved Action style and response length after a real concurrent Story Direction turn", async ({ page }) => {
   await saveNewTurnControlStyle(page, "flexible_scene");
-  await page.goto(`/app/campaigns/${campaignId}/overview`);
-  const form = page.locator("#overview-form");
-  const draftTitle = `New UI stale style ${Date.now()}`;
-  await form.locator('input[name="title"]').fill(draftTitle);
+  await page.goto(`/app/settings?section=campaign&campaignId=${campaignId}#story`);
+  const form = page.locator("#story form");
+  await form.locator('select[name="storyLengthProfile"]').selectOption("long");
   await form.locator('select[name="turnControlStyle"]').selectOption("flexible_action");
 
   const story = await page.context().newPage();
@@ -378,14 +381,14 @@ test("new editor preserves an unsaved Action style and title after a real concur
     await expect(story.locator("[data-story-composer]")).toBeVisible();
     await expect(story.locator("[data-story-composer] [data-input-mode], [data-story-composer] wa-radio-group")).toHaveCount(0);
     const before = await activeTurnNumber(story);
-  await (await storyDraft(story)).fill("Advance the authoritative Story Direction campaign state.");
+    await (await storyDraft(story)).fill("Advance the authoritative Story Direction campaign state.");
     await (await continueStoryButton(story)).click();
     await waitForNextSceneTurn(story, before);
 
     await form.locator('button[type="submit"]').click();
-    await expect(page.locator("#campaign-message")).toContainText(/409|conflict|changed/i);
+    await expect(page.locator("#story [role=status]")).toContainText(/409|conflict|changed/i);
     await expect(form.locator('select[name="turnControlStyle"]')).toHaveValue("flexible_action");
-    await expect(form.locator('input[name="title"]')).toHaveValue(draftTitle);
+    await expect(form.locator('select[name="storyLengthProfile"]')).toHaveValue("long");
   } finally {
     await story.close();
   }

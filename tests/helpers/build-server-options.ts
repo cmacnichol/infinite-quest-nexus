@@ -35,7 +35,7 @@ import {
 
 export type ServerOptionsOverrides = Readonly<
   Pick<BuildServerOptions, "config" | "pool"> &
-  Partial<Pick<BuildServerOptions, "generation" | "illustration" | "memory" | "generationEvents" | "worldCampaign" | "providers" | "infiniteWorldsProviders" | "authoring" | "createApiAssets" | "createApiPortable">>
+  Partial<Pick<BuildServerOptions, "requestAdmission" | "generation" | "illustration" | "memory" | "generationEvents" | "worldCampaign" | "providers" | "infiniteWorldsProviders" | "authoring" | "createApiAssets" | "createApiPortable">>
 >;
 
 async function unexpectedPortableCall(): Promise<never> {
@@ -551,6 +551,7 @@ export function serverOptions(overrides: ServerOptionsOverrides): BuildServerOpt
   const providerGraph = apiProviderGraph(overrides.pool, overrides.config.credentialEncryptionKey);
   return {
     ...overrides,
+    requestAdmission: overrides.requestAdmission ?? {acquire:async()=>({allowed:true,leaseId:null,remaining:1,expiresAt:new Date()}),release:async()=>undefined},
     generation: overrides.generation ?? createApiGenerationApplication(overrides.pool, providerGraph.generation),
     illustration: overrides.illustration ?? createApiIllustrationApplication(overrides.pool, providerGraph.illustration),
     memory: overrides.memory ?? createApiMemoryApplication(overrides.pool, providerGraph.chronicle),

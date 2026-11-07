@@ -1,3 +1,5 @@
+import type { ProfilePort } from "./preferences/profile-editor";
+import { mountReaderPreferenceFields } from "../../shared-ui/profile/profile-controls.js";
 import {
   userProfileSchema,
   userProfileUpdateSchema,
@@ -36,14 +38,15 @@ async function profileRequest(path: string, init?: RequestInit): Promise<UserPro
   return userProfileSchema.parse(value?.user);
 }
 
-export async function loadUserProfile(): Promise<UserProfile> {
-  return profileRequest("/api/v1/session");
+export async function loadUserProfile(signal?: AbortSignal): Promise<UserProfile> {
+  return profileRequest("/api/v1/session", signal ? {signal} : {});
 }
 
-export async function updateUserProfile(request: UserProfileUpdate): Promise<UserProfile> {
+export async function updateUserProfile(request: UserProfileUpdate, signal?: AbortSignal): Promise<UserProfile> {
   const payload = userProfileUpdateSchema.parse(request);
   return profileRequest("/api/v1/users/me/profile", {
     method: "PATCH",
+    ...(signal ? {signal} : {}),
     body: JSON.stringify(payload)
   });
 }
@@ -75,7 +78,7 @@ function controlValue(control: HTMLInputElement | HTMLSelectElement): string {
   return value || control.getAttribute("value") || "";
 }
 
-export function initializeUserProfileMenu(root: HTMLElement): () => void {
+export function initializeUserProfileMenu(root: HTMLElement, port: ProfilePort = {load: loadUserProfile, save: updateUserProfile}): () => void {
   const button = root.querySelector<HTMLButtonElement>(".user-profile-toggle");
   const dialog = root.querySelector<HTMLDialogElement>(".user-profile-dialog");
   const displayName = root.querySelector<HTMLInputElement>("#user-profile-display-name");
@@ -89,7 +92,11 @@ export function initializeUserProfileMenu(root: HTMLElement): () => void {
     throw new Error("The user profile menu could not be initialized.");
   }
 
+  const reader = mountReaderPreferenceFields(root.ownerDocument);
+  fields.append(reader.element);
+  const controller = new AbortController();
   let profile: UserProfile | null = null;
+  let revision = 0;
   let saveQueue = Promise.resolve();
 
   const setStatus = (message: string, state: "idle" | "saving" | "error") => {
@@ -100,10 +107,11 @@ export function initializeUserProfileMenu(root: HTMLElement): () => void {
   const applyProfile = (nextProfile: UserProfile) => {
     if (disposed) return;
     profile = nextProfile;
+    reader.set(profile.settings.readerPreferences);
     setControlValue(displayName, nextProfile.displayName);
     autoSubmit.checked = nextProfile.settings.autoSubmitTurnChoices;
     continuousReading.checked = nextProfile.settings.continuousReading;
-    setControlValue(turnStyle, nextProfile.settings.defaultTurnControlStyle === "flexible_scene" ? "flexible_scene" : "flexible_action");
+    setControlValue(turnStyle, nextProfile.settings.defaultTurnControlStyle);
   };
   const draft = (): UserProfileUpdate | null => {
     const nextDisplayName = controlValue(displayName).trim();
@@ -118,17 +126,20 @@ export function initializeUserProfileMenu(root: HTMLElement): () => void {
       settings: {
         autoSubmitTurnChoices: autoSubmit.checked,
         continuousReading: continuousReading.checked,
-        defaultTurnControlStyle: controlValue(turnStyle)
+        defaultTurnControlStyle: controlValue(turnStyle),
+        readerPreferences: reader.get()
       }
     });
   };
   const save = () => {
     const nextDraft = draft();
     if (disposed || !nextDraft || !profile) return;
+    const currentRevision = ++revision;
     saveQueue = saveQueue.catch(() => undefined).then(async () => {
+      if (disposed) return;
       try {
-        const saved = await updateUserProfile(nextDraft);
-        if (!disposed) applyProfile(saved);
+        const saved = await port.save(nextDraft, controller.signal);
+        if (!disposed && currentRevision === revision) applyProfile(saved);
       } catch (error) {
         if (!disposed) setStatus(error instanceof Error ? error.message : "Profile settings could not be saved. Try again.", "error");
       }
@@ -140,7 +151,7 @@ export function initializeUserProfileMenu(root: HTMLElement): () => void {
     fields.disabled = true;
     setStatus("Loading profile…", "saving");
     try {
-      const loaded = await loadUserProfile();
+      const loaded = await port.load(controller.signal);
       if (!disposed) {
         applyProfile(loaded);
         setStatus("", "idle");
@@ -159,17 +170,23 @@ export function initializeUserProfileMenu(root: HTMLElement): () => void {
   displayName.addEventListener("input", save);
   autoSubmit.addEventListener("change", save);
   continuousReading.addEventListener("change", save);
+  reader.element.addEventListener("change", save);
   turnStyle.addEventListener("change", save);
 
   return () => {
     if (disposed) return;
     disposed = true;
+    controller.abort();
+    profile = null;
+    if (dialog.open) closeDialog(dialog);
+    displayName.value = "";
     button.removeEventListener("click", onOpen);
     closeButton.removeEventListener("click", onClose);
     displayName.removeEventListener("input", save);
     autoSubmit.removeEventListener("change", save);
     continuousReading.removeEventListener("change", save);
     turnStyle.removeEventListener("change", save);
+    reader.element.remove();
     fields.disabled = true;
   };
 }

@@ -4,7 +4,7 @@ import type { RuntimeRoleDependencies } from "../../services/runtime/src/runtime
 import { authoringResult, authoringRuntimeFixture } from "../helpers/authoring-runtime.js";
 import { createWorkerProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
 
-const seams = vi.hoisted(() => ({ lifecycle: vi.fn(), dispatch: vi.fn(), repository: vi.fn(), claim: vi.fn(async () => null) }));
+const seams = vi.hoisted(() => ({ settings: vi.fn(), registration: vi.fn(), lifecycle: vi.fn(), dispatch: vi.fn(), repository: vi.fn(), claim: vi.fn(async () => null) }));
 vi.mock("../../packages/database/src/index.js", async (original) => ({
   ...await original<typeof import("../../packages/database/src/index.js")>(),
   loadRuntimeConfig: () => ({ role: "worker" })
@@ -15,6 +15,12 @@ vi.mock("../../packages/database/src/authoring-job-repository.js", async (origin
 }));
 vi.mock("../../services/runtime/src/lifecycle.js", () => ({ runRuntimeLifecycle: seams.lifecycle }));
 vi.mock("../../services/runtime/src/runtime-role.js", () => ({ dispatchRuntimeRole: seams.dispatch }));
+
+vi.mock("../../services/runtime/src/instance-settings.js", async (original) => ({
+  ...await original<typeof import("../../services/runtime/src/instance-settings.js")>(),
+  loadActiveRuntimeSettings: seams.settings,
+  registerSettingsRuntime: seams.registration
+}));
 
 describe("production main authoring binding", () => {
   it("exposes the shared prepared-text plans with the worker authoring capabilities", () => {
@@ -27,6 +33,28 @@ describe("production main authoring binding", () => {
     expect(graph).not.toHaveProperty("application");
     expect(graph).not.toHaveProperty("transaction");
     expect(graph.worldGeneration.resolution).not.toHaveProperty("createProfile");
+  });
+  it("adopts active logging before startup registration and compatibility", async () => {
+    const { logger } = await import("../../packages/logger/src/index.js");
+    const previous = logger.level;
+    const listeners = new Map(["SIGINT", "SIGTERM"].map((signal) => [signal, process.listeners(signal)]));
+    try {
+      const active = { role: "worker", logLevel: "warn", workerGenerationConcurrency: 4, workerPollIntervalMs: 250, textProviderConcurrency: 2, castDiscoveryEnabled: false };
+      seams.settings.mockResolvedValue({ config: active, activeRevision: "1", effectiveDigest: "d".repeat(64) });
+      const waitUntilCompatible = vi.fn(async () => { expect(logger.level).toBe("warn"); });
+      seams.registration.mockImplementation(async () => { expect(logger.level).toBe("warn"); return { waitUntilCompatible, dispose: vi.fn() }; });
+      await import("../../services/runtime/src/main.js");
+      const dependencies = seams.lifecycle.mock.calls[0]![2] as RuntimeLifecycleDependencies;
+      await dependencies.dispatchRole({ role: "worker" } as never, {} as never, new AbortController().signal, {} as never, undefined);
+      const roles = seams.dispatch.mock.calls.at(-1)![3] as RuntimeRoleDependencies;
+      const result = await roles.resolveSettings!({} as never, { role: "worker" } as never, new AbortController().signal);
+      expect(result.config).toBe(active);
+      expect(waitUntilCompatible).toHaveBeenCalledOnce();
+    } finally {
+      logger.level = previous;
+      for (const signal of ["SIGINT", "SIGTERM"]) for (const listener of process.listeners(signal)) if (!listeners.get(signal)!.includes(listener)) process.removeListener(signal, listener);
+      seams.dispatch.mockClear();
+    }
   });
   it("passes the main graph's pool, provider collaborator and shutdown signal to the real runtime application", async () => {
     const before = new Map(["SIGINT", "SIGTERM"].map((signal) => [signal, process.listeners(signal)]));

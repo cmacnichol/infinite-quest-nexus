@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  infinitequest-api:
+    environment:
+      INSTANCE_SETTINGS_POLICY_FILE: /run/configs/infinitequest_settings_policy
+      SETTINGS_MANAGEMENT_ENABLED: "true"
+      SETTINGS_MANAGEMENT_KEY_FILE: /run/secrets/infinitequest_settings_management_key
+    configs:
+      - source: infinitequest_settings_policy
+        target: /run/configs/infinitequest_settings_policy
+    secrets:
+      - infinitequest_settings_management_key
+  infinitequest-worker:
+    environment:
+      INSTANCE_SETTINGS_POLICY_FILE: /run/configs/infinitequest_settings_policy
+    configs:
+      - source: infinitequest_settings_policy
+        target: /run/configs/infinitequest_settings_policy
+
+configs:
+  infinitequest_settings_policy:
+    external: true
+    name: ${INSTANCE_SETTINGS_SWARM_CONFIG:?Choose the reviewed versioned Settings config}
+
+secrets:
+  infinitequest_settings_management_key:
+    external: true
+    name: ${INSTANCE_SETTINGS_SWARM_SECRET:?Choose the separate Settings management secret}

@@ -10,3 +10,4 @@ export * from "./system-archives/index.js";
 export * from "./authoring/index.js";
 export * from "./campaign-cast/index.js";
 export * from "./activity.js";
+export * from "./settings/index.js";
