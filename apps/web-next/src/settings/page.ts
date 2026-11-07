@@ -34,7 +34,24 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
   const session = createSettingsSession(options.api ?? createInstanceSettingsApi());
   let ownerEditor: { dispose(): void } | null = null;
   let editing = false;
+  let pendingTextEdit = false;
+  function guardInstallationDraft(event: BeforeUnloadEvent) {
+    const { view, draft } = session.state;
+    if (!view || !draft) return;
+    const saved = view.requested ?? view.active;
+    if (pendingTextEdit || view.fields.some(({ key }) => settingsValue(draft, key) !== settingsValue(saved, key))) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+  }
   let disposed = false; let review = false; let resetPreview = false; let validation: string[] = []; let reason = "";
+  function clearDraftDetails() {
+    reason = "";
+    validation = [];
+    review = false;
+    resetPreview = false;
+    pendingTextEdit = false;
+  }
   let campaigns: CampaignSummary[] | null = null; let campaignFailed = false;
   const controller = new AbortController();
   const ownerApi = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort() });
@@ -51,6 +68,7 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
     if (disposed) return;
     if (ownerEditor) return;
     const focus = (document.activeElement as HTMLElement | null)?.dataset?.focus;
+    pendingTextEdit = false;
     content.replaceChildren();
     const title = node(document, "h2", SETTINGS_SECTIONS.find(([key]) => key === route.section)![1]); title.id = "settings-section-title"; content.append(title);
     if (["providers", "prompts", "campaign"].includes(route.section)) {
@@ -75,6 +93,7 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
     content.append(node(document, "p", "Save stages a requested revision. Only an operator's coordinated restart can activate it. Story and campaign records are unchanged.", "settings-help"));
     if (state.message) { const message = node(document, "p", state.message, "settings-status"); message.setAttribute("role", state.conflict ? "alert" : "status"); content.append(message); }
     if (!state.unlocked) {
+      clearDraftDetails();
       if (state.busy) content.append(node(document, "p", "Checking installation access…"));
       else if (!state.managementEnabled) content.append(node(document, "p", "Installation management is locked. It requires HTTPS and deployment-provisioned operator access. Your personal and campaign settings remain available."));
       else {
@@ -85,7 +104,7 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
       }
       return;
     }
-    content.append(button("Lock installation settings", () => { reason = ""; validation = []; review = false; resetPreview = false; void session.logout(); }));
+    content.append(button("Lock installation settings", () => { void session.logout(); }));
     if (!state.view || !state.draft) { content.append(node(document, "p", state.busy ? "Loading installation settings…" : "Installation values are unavailable.")); return; }
     const { view, draft } = state;
     const revisions = node(document, "dl", undefined, "settings-revisions");
@@ -112,7 +131,12 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
       input.id = id; input.dataset.focus = id; input.disabled = state.busy || view.requestedRevision === null || field.lockReason === "deployment_disabled";
       const help = node(document, "p", undefined, "settings-help"); help.id = `${id}-help`; input.setAttribute("aria-describedby", help.id);
       help.textContent = field.lockReason === "deployment_disabled" ? "Blocked by deployment policy. Settings cannot enable this capability." : field.lockReason === "dependency_disabled" ? "Currently blocked by a disabled dependency. A saved preference will not bypass that dependency." : field.kind === "integer" && field.permittedRange ? `Permitted: ${readableRangeValue(field, field.permittedRange.min)} – ${readableRangeValue(field, field.permittedRange.max)}.` : "Applies after an operator activates the saved revision and restarts the deployment.";
+      if (field.kind === "integer") {
+        const displayedValue = input.value;
+        input.addEventListener("input", () => { pendingTextEdit = input.value !== displayedValue; });
+      }
       input.addEventListener("change", () => {
+        pendingTextEdit = false;
         try {
           const next = field.kind === "boolean" ? (input as HTMLInputElement).checked : field.kind === "enum" ? input.value : fromDisplayUnit(input.value, unit.factor);
           if (typeof next === "number" && field.permittedRange && (next < field.permittedRange.min || next > field.permittedRange.max)) throw new Error("Outside the permitted range.");
@@ -185,7 +209,10 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
   }
   const unsubscribe = session.subscribe(() => { if (!editing) render(); });
   const installation = !["providers", "prompts", "campaign"].includes(route.section);
-  if (installation) void session.load();
+  if (installation) {
+    window.addEventListener("beforeunload", guardInstallationDraft);
+    void session.load();
+  }
   if (route.section === "campaign") void ownerApi.campaigns.list(controller.signal).then(value => { if (!disposed) { campaigns = value.campaigns; render(); } }).catch(() => { if (!disposed) { campaignFailed = true; render(); } });
   if (route.section === "diagnostics") void ownerApi.meta.get(controller.signal).then(value => { if (!disposed) { meta = value; render(); } }).catch(() => undefined);
   function disposePage(): void {
@@ -194,14 +221,12 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
     campaigns = null;
     campaignFailed = false;
     meta = null;
-    reason = "";
-    validation = [];
-    review = false;
-    resetPreview = false;
+    clearDraftDetails();
     ownerEditor?.dispose();
     ownerEditor = null;
     controller.abort();
     window.clearInterval(expiryTimer);
+    window.removeEventListener("beforeunload", guardInstallationDraft);
     window.removeEventListener("app-identity-changed", onIdentityChange);
     unsubscribe();
     session.dispose();

@@ -57,6 +57,31 @@ for (const width of [1440, 390]) {
     await page.reload(); await expect(polling).toHaveValue("1.5");
   });
 }
+test(`${mode} guards installation drafts before leaving Settings`, async ({ page }) => {
+  const fixture = await api(page);
+  await page.goto(`${base}/app/settings?section=performance`);
+  const polling = page.getByRole("textbox", { name: "Queue polling interval", exact: true });
+  await polling.fill("1.5");
+  // Reload while the textbox still has focus, before its change event fires.
+  const reloadDialog = page.waitForEvent("dialog");
+  await page.evaluate(() => { setTimeout(() => location.reload(), 0); });
+  const reload = await reloadDialog;
+  expect(reload.type()).toBe("beforeunload");
+  await reload.dismiss();
+  const diagnostics = page.getByRole("link", { name: "Diagnostics and Deployment" });
+  const sectionDialog = page.waitForEvent("dialog");
+  const click = diagnostics.click({ noWaitAfter: true });
+  const section = await sectionDialog;
+  expect(section.type()).toBe("beforeunload");
+  await section.dismiss();
+  await click;
+  await expect(polling).toHaveValue("1.5");
+  await page.screenshot({ path: `docs/review/assets/settings-panel/${mode}-retained-installation-draft.png` });
+  await page.getByRole("button", { name: "Discard section draft" }).click();
+  await diagnostics.click();
+  await expect(page).toHaveURL(/section=diagnostics/);
+  expect(fixture.patches()).toBe(0);
+});
 test(`${mode} exposes all 40 fields with dependencies and reset preview`, async ({ page }) => {
   await api(page); let count = 0;
   for (const section of ["characters", "sharing", "performance", "diagnostics"]) {
@@ -171,3 +196,32 @@ test(`${mode} save reason recovery preserves the draft and other validation`, as
   await expect(page.getByRole("status")).toHaveText("Saved — restart required");
   expect(fixture.patches()).toBe(1);
 });
+
+for (const lockCause of ["expiry", "rejected save"] as const) {
+  test(`${mode} clears operator draft details after ${lockCause} and re-unlock`, async ({ page }) => {
+    await api(page);
+    await page.goto(`${base}/app/settings?section=performance`);
+    const reason = page.getByLabel("Reason for this change");
+    const polling = page.getByLabel("Queue polling interval", { exact: true });
+    await polling.fill("1.5");
+    await polling.press("Tab");
+    await reason.fill("Previous operator's draft reason");
+    await page.getByRole("button", { name: "Save section", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Review staged policy changes" })).toBeVisible();
+
+    if (lockCause === "expiry") {
+      await page.clock.setFixedTime(new Date("2099-01-01T00:00:01Z"));
+    } else {
+      await page.route("**/api/v1/settings/instance", route =>
+        route.fulfill({ status: 401, json: { code: "settings_unlock_required" } }), { times: 1 });
+      await page.getByRole("button", { name: "Confirm staged Save" }).click();
+    }
+    await expect(page.getByLabel("Operator management key")).toBeVisible();
+    if (lockCause === "expiry") await page.clock.setFixedTime(new Date("2098-12-31T00:00:00Z"));
+    await page.getByLabel("Operator management key").fill("fixture-key");
+    await page.getByRole("button", { name: "Unlock installation settings" }).click();
+    await expect(reason).toHaveValue("");
+    await expect(page.getByRole("heading", { name: "Review staged policy changes" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Save section", exact: true })).toBeDisabled();
+  });
+}
