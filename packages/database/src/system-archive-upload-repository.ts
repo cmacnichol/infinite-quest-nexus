@@ -14,7 +14,7 @@ type SystemArchiveUploadRow = Readonly<{
   status: "created" | "uploading" | "completed" | "expired" | "failed";
   byte_length: string | number;
   received_bytes: string | number;
-  next_chunk_index: string | number;
+  next_chunk_index: string | number | null;
   content_hash: string;
   staged_input_id: string | null;
   expires_at: Date;
@@ -105,11 +105,31 @@ type SystemArchiveUploadRepositoryOptions = Readonly<{
   policy?: ArchivePolicySnapshot;
 }>;
 
-const UPLOAD_COLUMNS = `id,owner_user_id,filesystem_operation_id,status,byte_length,
-  received_bytes,content_hash,staged_input_id,expires_at,policy_snapshot,
-  (SELECT COALESCE(max(chunk_index)::bigint+1,0) FROM system_archive_upload_chunks
-    WHERE upload_id=system_archive_uploads.id) AS next_chunk_index`;
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
+
+/** Fast max+1 normally; overflow examines existing chunk boundaries, never the integer range. */
+function nextChunkIndexSql(uploadReference: string): string {
+  return `(SELECT CASE
+    WHEN COALESCE(max(chunk_index),-1) < ${POSTGRES_INTEGER_MAX}
+      THEN COALESCE(max(chunk_index)::bigint+1,0)
+    ELSE (
+      SELECT min(candidate.next_index) FROM (
+        SELECT 0::bigint AS next_index
+        UNION ALL
+        SELECT saved.chunk_index::bigint+1 FROM system_archive_upload_chunks saved
+          WHERE saved.upload_id=${uploadReference}.id AND saved.chunk_index < ${POSTGRES_INTEGER_MAX}
+      ) candidate
+      WHERE NOT EXISTS (SELECT 1 FROM system_archive_upload_chunks occupied
+        WHERE occupied.upload_id=${uploadReference}.id AND occupied.chunk_index=candidate.next_index)
+    ) END FROM system_archive_upload_chunks WHERE upload_id=${uploadReference}.id)`;
+}
+
+function uploadColumns(uploadReference = "system_archive_uploads"): string {
+  return `id,owner_user_id,filesystem_operation_id,status,byte_length,
+    received_bytes,content_hash,staged_input_id,expires_at,policy_snapshot,
+    ${nextChunkIndexSql(uploadReference)} AS next_chunk_index`;
+}
+const UPLOAD_COLUMNS = uploadColumns();
 
 function repositoryError(
   message: string,
@@ -144,6 +164,9 @@ function requireChunkIndex(value: number): void {
 }
 
 function toView(row: SystemArchiveUploadRow, currentChunkBytes: number): SystemArchiveUploadView {
+  if (row.next_chunk_index === null) {
+    throw repositoryError("System Archive chunk indices are exhausted; restart this transfer.", 409, "system-archive-upload-restart-required");
+  }
   return systemUploadViewSchema.parse({
     id: row.id,
     status: row.status,
@@ -379,7 +402,7 @@ export function createPostgresSystemArchiveUploadRepository(
                      'authoritative_committed','rebuilding','cancelling'
                    )
               )
-          RETURNING ${UPLOAD_COLUMNS}`,
+          RETURNING ${uploadColumns("upload")}`,
           [uploadId, owner.ownerUserId]
         );
         const row = result.rows[0];
@@ -534,7 +557,7 @@ export function createPostgresSystemArchiveUploadRepository(
         `SELECT upload.id,upload.owner_user_id,upload.filesystem_operation_id,upload.status,
                 upload.byte_length,upload.received_bytes,upload.content_hash,
                 upload.staged_input_id,upload.expires_at,upload.policy_snapshot,
-                (SELECT COALESCE(max(chunk_index)::bigint+1,0) FROM system_archive_upload_chunks WHERE upload_id=upload.id) AS next_chunk_index
+                ${nextChunkIndexSql("upload")} AS next_chunk_index
            FROM system_archive_uploads upload
            JOIN system_archive_upload_chunks chunk
              ON chunk.upload_id=upload.id
@@ -626,7 +649,7 @@ export function createPostgresSystemArchiveUploadRepository(
         `SELECT upload.id,upload.owner_user_id,upload.filesystem_operation_id,upload.status,
                 upload.byte_length,upload.received_bytes,upload.content_hash,
                 upload.staged_input_id,upload.expires_at,upload.policy_snapshot,
-                (SELECT COALESCE(max(chunk_index)::bigint+1,0) FROM system_archive_upload_chunks WHERE upload_id=upload.id) AS next_chunk_index
+                ${nextChunkIndexSql("upload")} AS next_chunk_index
            FROM system_archive_uploads upload
            JOIN portable_staged_inputs staged
              ON staged.id=upload.staged_input_id

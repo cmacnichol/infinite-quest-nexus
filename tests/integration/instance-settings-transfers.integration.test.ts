@@ -289,4 +289,43 @@ describe("durable transfer settings across restart", () => {
     expect(fresh.jobId).not.toBe(issued.jobId);
   });
 
+  it.each(["created", "uploading"])("cancels owner-scoped %s uploads through the production API projection", async (status) => {
+    const cap = 1024 * 1024, policy = { ...historicalArchivePolicy("system"), chunkBytes: cap, uploadTtlSeconds: 600 };
+    const operation = await portableOperation("portable_staging");
+    const id = (await pool.query("INSERT INTO system_archive_uploads(owner_user_id,handle_token_hash,filesystem_operation_id,byte_length,content_hash,expires_at,policy_snapshot) VALUES($1,$2,$3,4,$4,clock_timestamp()+interval '10 minutes',$5::jsonb) RETURNING id", [owner.ownerUserId, hash(randomUUID()), operation.id, hash("abcd"), JSON.stringify(policy)])).rows[0].id;
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 600, policy });
+    if (status === "uploading") await uploads.recordChunk(owner, { uploadId: id, index: 3, offset: 0, bytes: 2, sha256: hash("ab") });
+    const before = (await pool.query("SELECT expires_at FROM system_archive_uploads WHERE id=$1", [id])).rows[0].expires_at;
+    const api = createApiSystemArchiveComposition({ pool, config: { ...bootstrap(), systemArchiveChunkBytes: cap }, storage: { adapter: {} } as never });
+    const foreign = (await pool.query("INSERT INTO users(display_name) VALUES('Foreign cancel') RETURNING id")).rows[0].id;
+    try {
+      await expect(api.application.cancelUpload({ ownerUserId: foreign, uploadId: id })).rejects.toMatchObject({ statusCode: 404 });
+      expect((await pool.query("SELECT status,expires_at FROM system_archive_uploads WHERE id=$1", [id])).rows[0]).toEqual({ status, expires_at: before });
+      const cancelled = await api.application.cancelUpload({ ownerUserId: owner.ownerUserId, uploadId: id });
+      expect(cancelled).toMatchObject({ id, status: "expired", receivedBytes: status === "uploading" ? 2 : 0, chunkBytes: cap, nextChunkIndex: status === "uploading" ? 4 : 0 });
+      expect(new Date(cancelled.expiresAt).getTime()).toBeLessThanOrEqual(Date.now());
+      expect((await pool.query("SELECT expires_at<=clock_timestamp() AS expired FROM durable_filesystem_operations WHERE id=$1", [operation.id])).rows[0].expired).toBe(true);
+      await expect(api.application.cancelUpload({ ownerUserId: owner.ownerUserId, uploadId: id })).rejects.toMatchObject({ statusCode: 409 });
+      await expect(api.application.cancelUpload({ ownerUserId: owner.ownerUserId, uploadId: randomUUID() as never })).rejects.toMatchObject({ statusCode: 404 });
+    } finally { await pool.query("DELETE FROM users WHERE id=$1", [foreign]); }
+  });
+  it("continues a sparse upload after its first chunk uses the maximum PostgreSQL index", async () => {
+    const policy = { ...historicalArchivePolicy("system"), uploadTtlSeconds: 600 };
+    const operation = await portableOperation("portable_staging");
+    const id = (await pool.query("INSERT INTO system_archive_uploads(owner_user_id,handle_token_hash,filesystem_operation_id,byte_length,content_hash,expires_at,policy_snapshot) VALUES($1,$2,$3,4,$4,clock_timestamp()+interval '10 minutes',$5::jsonb) RETURNING id", [owner.ownerUserId, hash(randomUUID()), operation.id, hash("abcd"), JSON.stringify(policy)])).rows[0].id;
+    const uploads = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 600, policy });
+    const first = { uploadId: id, index: 2147483647, offset: 0, bytes: 2, sha256: hash("ab") };
+    const recorded = await uploads.recordChunk(owner, first);
+    expect(recorded.nextChunkIndex).toBe(0);
+    expect((await uploads.getUpload(owner, id)).nextChunkIndex).toBe(0);
+    expect((await uploads.reconcileChunk(owner, first))?.nextChunkIndex).toBe(0);
+    const continued = await uploads.recordChunk(owner, { uploadId: id, index: recorded.nextChunkIndex!, offset: 2, bytes: 2, sha256: hash("cd") });
+    expect(continued).toMatchObject({ receivedBytes: 4, nextChunkIndex: 1 });
+    expect((await uploads.getAssembly(owner, id)).chunks.map(chunk => chunk.index)).toEqual([2147483647, 0]);
+    const staged = (await pool.query("INSERT INTO portable_staged_inputs(owner_user_id,handle_token_hash,filesystem_operation_id,content_hash,byte_length,expires_at) VALUES($1,$2,$3,$4,4,clock_timestamp()+interval '1 day') RETURNING id", [owner.ownerUserId, hash(randomUUID()), operation.id, hash("abcd")])).rows[0].id;
+    const completion = { uploadId: id, stagedInputId: staged };
+    expect(await uploads.completeUpload(owner, completion)).toMatchObject({ status: "completed", receivedBytes: 4, nextChunkIndex: 1 });
+    expect(await uploads.reconcileCompletion(owner, completion)).toMatchObject({ status: "completed", receivedBytes: 4, nextChunkIndex: 1 });
+  });
+
 });
