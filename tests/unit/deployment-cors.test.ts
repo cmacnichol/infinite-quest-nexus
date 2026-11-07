@@ -142,12 +142,13 @@ describe("deployment security configuration", () => {
     }
   });
 
-  it("documents both built web roots in the example environment", () => {
-    const environment = readFileSync(".env.example", "utf8");
-
-    expect(environment).toContain("LEGACY_WEB_ROOT=/app/apps/web/dist");
-    expect(environment).toContain("NEXT_WEB_ROOT=/app/apps/web-next/dist");
-    expect(environment).not.toMatch(/^WEB_ROOT=/mu);
+  it("lists only the required Compose inputs in the local environment example", () => {
+    const example = readFileSync(".env.example", "utf8");
+    const compose = readFileSync("compose.yaml", "utf8");
+    const assignments = [...example.matchAll(/^([A-Z_][A-Z_0-9]*)=/gmu)].map(match => match[1]);
+    const required = [...compose.matchAll(/\$\{([A-Z_][A-Z_0-9]*):\?/gu)].map(match => match[1]);
+    expect(assignments.sort()).toEqual([...new Set(required)].sort());
+    expect(example).toMatch(/^POSTGRES_PASSWORD=$/mu);
   });
 
   it.each([
@@ -167,13 +168,6 @@ describe("deployment security configuration", () => {
     expect(environment).toContain("stop_grace_period: 10m");
   });
 
-  it("documents worker concurrency and role-safe pool capacity in the example environment", () => {
-    const environment = readFileSync(".env.example", "utf8");
-
-    expect(environment).toContain("WORKER_GENERATION_CONCURRENCY=1");
-    expect(environment).toContain("DATABASE_MAX_CONNECTIONS=12");
-  });
-
   it("bootstraps a persistent local credential key without changing the Swarm secret contract", () => {
     const compose = serviceEnvironment(readFileSync("compose.yaml", "utf8"), "infinitequest-app");
     const stack = readFileSync("deploy/swarm/stack.yaml", "utf8");
@@ -189,11 +183,9 @@ describe("deployment security configuration", () => {
   });
 
   it("documents that local Compose generates the key once while production requires an operator secret", () => {
-    const exampleEnvironment = readFileSync(".env.example", "utf8");
     const readme = readFileSync("README.md", "utf8");
     const composeGuide = readFileSync("docs/installation/docker-compose.md", "utf8");
 
-    expect(exampleEnvironment).toContain("Local Docker Compose generates and persists this key on first start when left empty.");
     expect(readme).toContain("Docker Compose generates and persists a local credential-encryption key on its first start.");
     expect(composeGuide).toContain("Docker Compose generates and persists a local credential-encryption key on first start.");
   });
