@@ -134,3 +134,40 @@ test(`${mode} identity change ignores a late campaign response`, async ({ page }
   await expect(page.getByRole("combobox", { name: "Campaign", exact: true })).toHaveCount(0);
   await expect(page.getByText("Fixture Story", { exact: true })).toHaveCount(0);
 });
+
+test(`${mode} save reason recovery preserves the draft and other validation`, async ({ page }) => {
+  const fixture = await api(page);
+  await page.goto(`${base}/app/settings?section=performance`);
+  const polling = page.getByLabel("Queue polling interval", { exact: true });
+  const capacity = page.getByLabel("Text provider capacity", { exact: true });
+  const reason = page.getByLabel("Reason for this change");
+  const save = page.getByRole("button", { name: "Save section", exact: true });
+  const alert = page.getByRole("alert");
+
+  await polling.fill("1.5");
+  await polling.press("Tab");
+  await save.click();
+  await expect(alert).toContainText("Enter a reason before saving.");
+  await reason.fill(" ");
+  await expect(save).toBeDisabled();
+  await reason.pressSequentially("Review polling");
+  await expect(save).toBeEnabled();
+  await expect(alert).toHaveCount(0);
+  await expect(reason).toBeFocused();
+  await expect(polling).toHaveValue("1.5");
+
+  await page.locator(".settings-actions").screenshot({ path: `docs/review/assets/settings-panel/${mode}-save-reason-recovery.png` });
+  await capacity.fill("-1");
+  await capacity.press("Tab");
+  await reason.fill("Updated polling reason");
+  await expect(alert).toContainText("Text provider capacity");
+  await expect(save).toBeDisabled();
+  await capacity.fill("3");
+  await capacity.press("Tab");
+  await save.click();
+  await expect(page.getByRole("heading", { name: "Review staged policy changes" })).toBeVisible();
+  expect(fixture.patches()).toBe(0);
+  await page.getByRole("button", { name: "Confirm staged Save" }).click();
+  await expect(page.getByRole("status")).toHaveText("Saved — restart required");
+  expect(fixture.patches()).toBe(1);
+});

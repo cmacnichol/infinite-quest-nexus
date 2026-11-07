@@ -13,6 +13,7 @@ import "./settings.css";
 export { parseSettingsRoute } from "./sections";
 export type { SettingsRoute } from "./sections";
 
+const MISSING_REASON = "Enter a reason before saving.";
 const LABELS: Record<string, string> = {
   workerPollIntervalMs: "Queue polling interval", textProviderConcurrency: "Text provider capacity", workerGenerationConcurrency: "Story generation capacity",
   archivePreviewTtlSeconds: "Import preview retention", systemArchiveArtifactTtlSeconds: "Archive download retention", systemArchiveUploadTtlSeconds: "Archive upload retention", systemArchiveChunkBytes: "Archive transfer chunk size",
@@ -95,6 +96,12 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
       content.append(node(document, "p", meta ? `Application version: ${meta.application.version}${meta.application.builtAt ? ` · Built ${new Date(meta.application.builtAt).toLocaleDateString()}` : ""}` : "Application build information unavailable.", "settings-help"));
     }
     const fields = view.fields.filter(field => field.section === route.section);
+    function saveDisabled() {
+      const current = session.state;
+      const draft = current.draft;
+      return current.busy || current.conflict || view.requestedRevision === null || validation.length > 0 ||
+        !draft || !fields.some(field => settingsValue(draft, field.key) !== settingsValue(view.requested ?? view.active, field.key));
+    }
     if (validation.length) { const summary = node(document, "div", undefined, "settings-validation"); summary.setAttribute("role", "alert"); summary.tabIndex = -1; summary.append(node(document, "h3", "Check these values")); const list = node(document, "ul"); for (const error of validation) list.append(node(document, "li", error)); summary.append(list); content.append(summary); }
     const list = node(document, "div", undefined, "settings-fields");
     for (const field of fields) {
@@ -117,7 +124,7 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
           const saveButton = content.querySelector<HTMLButtonElement>("[data-settings-save]");
           if (saveButton && session.state.draft) {
             saveButton.textContent = "Save section";
-            saveButton.disabled = session.state.busy || session.state.conflict || !fields.some(item => settingsValue(session.state.draft!, item.key) !== settingsValue(view.requested ?? view.active, item.key));
+            saveButton.disabled = saveDisabled();
           }
         } catch (error) { validation = [`${fieldLabel(field)}: ${error instanceof Error ? error.message : "Invalid value."}`]; render(); content.querySelector<HTMLElement>(".settings-validation")?.focus(); }
       });
@@ -148,10 +155,18 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
     content.append(list);
     const changed = fields.filter(field => settingsValue(draft, field.key) !== settingsValue(view.requested ?? view.active, field.key));
     const footer = node(document, "div", undefined, "settings-actions");
-    const reasonLabel = node(document, "label", "Reason for this change"); const reasonInput = node(document, "input"); reasonInput.maxLength = 1000; reasonInput.value = reason; reasonInput.dataset.focus = "reason"; reasonInput.addEventListener("input", () => { reason = reasonInput.value; }); reasonLabel.append(reasonInput); footer.append(reasonLabel);
-    const save = () => { if (!reason.trim()) { validation = ["Enter a reason before saving."]; render(); content.querySelector<HTMLElement>(".settings-validation")?.focus(); return; } if (!review && (route.section === "sharing" || route.section === "performance")) { review = true; render(); content.querySelector<HTMLElement>(".settings-review")?.focus(); return; } review = false; void session.save(fields.map(field => field.key), reason); };
-    const saveButton = button(review ? "Confirm staged Save" : "Save section", save, state.busy || state.conflict || !changed.length || !!validation.length || view.requestedRevision === null);
+    const reasonLabel = node(document, "label", "Reason for this change"); const reasonInput = node(document, "input"); reasonInput.maxLength = 1000; reasonInput.value = reason; reasonInput.dataset.focus = "reason"; reasonLabel.append(reasonInput); footer.append(reasonLabel);
+    const save = () => { if (!reason.trim()) { validation = [MISSING_REASON]; render(); content.querySelector<HTMLElement>(".settings-validation")?.focus(); return; } if (!review && (route.section === "sharing" || route.section === "performance")) { review = true; render(); content.querySelector<HTMLElement>(".settings-review")?.focus(); return; } review = false; void session.save(fields.map(field => field.key), reason); };
+    const saveButton = button(review ? "Confirm staged Save" : "Save section", save, saveDisabled());
     saveButton.dataset.settingsSave = "";
+    reasonInput.addEventListener("input", () => {
+      reason = reasonInput.value;
+      if (reason.trim() && validation.length === 1 && validation[0] === MISSING_REASON) {
+        validation = [];
+        content.querySelector(".settings-validation")?.remove();
+        saveButton.disabled = saveDisabled();
+      }
+    });
     footer.append(saveButton);
     footer.append(button(state.conflict ? "Discard all drafts and reload" : "Discard section draft", () => { validation = []; review = false; resetPreview = false; session.discard(fields.map(field => field.key)); if (state.conflict) void session.load(); }, state.busy));
     footer.append(button("Preview safe defaults", () => { resetPreview = !resetPreview; review = false; render(); }, state.busy || !view.resetDefaults));
