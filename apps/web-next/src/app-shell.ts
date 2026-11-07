@@ -38,7 +38,7 @@ export function renderAppShell(
           <a href="/app/campaigns"${currentAttribute(currentNavigation, "campaigns")}>Campaigns</a>
           <a href="${storyHref}"${currentAttribute(currentNavigation, "story")}>Story</a>
           <a href="/app/data-transfer"${currentAttribute(currentNavigation, "data-transfer")}>Data Transfer</a>
-          <a href="/app/settings"${currentAttribute(currentNavigation, "settings")}>Settings</a>
+          <a data-settings-link href="/app/settings"${currentAttribute(currentNavigation, "settings")}>Settings</a>
         </nav>
         <a class="story-link" href="${storyHref}">
           Enter story

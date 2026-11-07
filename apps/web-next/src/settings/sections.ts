@@ -16,3 +16,11 @@ export function parseSettingsRoute(url: URL): SettingsRoute | null {
     ...(section === "prompts" && campaignId !== null && !validCampaign ? {campaignSelectionRequired: true} : {})
   };
 }
+
+export function safeSettingsReturn(value: string | null): string | null {
+  if (!value) return null;
+  const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+  if (new RegExp(`^/(?:app/)?story(?:/${uuid})?(?:[?]turn=[1-9][0-9]*)?$`, "i").test(value)) return value;
+  if (new RegExp(`^/app/campaigns/${uuid}/(?:overview|chronicle|illustrations)$`, "i").test(value)) return value;
+  return value === "/nexus/#campaigns" ? value : null;
+}

@@ -22,6 +22,10 @@ test("the Story chooser enters the selected sanitized campaign without leaving t
     await campaign.click();
     await expect(page).toHaveURL(`/app/story/${api.campaignId}`);
     await expectLoadedFixtureStory(page);
+    const destination = new URL(await page.locator("[data-settings-link]").getAttribute("href") ?? "",page.url());
+    expect(destination.pathname).toBe("/app/settings");
+    expect(destination.searchParams.get("campaignId")).toBe(api.campaignId);
+    expect(destination.searchParams.get("returnTo")).toBe("/app/story/" + api.campaignId);
   } finally {
     api.assertNoUnexpectedRequests();
   }

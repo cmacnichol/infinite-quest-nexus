@@ -32,14 +32,13 @@ describe("legacy campaign story-memory controls", () => {
     const memorySave = nexusScript.slice(memorySaveStart, memorySaveEnd);
 
     expect(snapshot).toContain("title: elements.campaignTitle.value");
-    expect(snapshot).toContain("storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)");
+    expect(snapshot).not.toContain("storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)");
     expect(snapshot).not.toContain("campaignStoryMemoryLevel");
-    expect(memorySave).toContain('method: "PUT"');
-    expect(memorySave).toContain('JSON.stringify({ level, continuityReviewEnabled })');
+    expect(memorySave).toContain('campaignMemoryApi.update(campaignId, { level, continuityReviewEnabled })');
     expect(memorySave).not.toContain("campaignEditGuard.markSaved");
     expect(nexusHtml).toContain("Story Memory saves immediately when changed");
-    expect(nexusHtml).toContain("Illustration settings save with their own button and status");
-    expect(nexusHtml).toContain("Embedding settings save independently from campaign metadata.");
+    expect(nexusHtml).toContain("Open illustration settings to configure future segments.");
+    expect(nexusHtml).toContain("Use Chronicle settings to configure retrieval and embedding providers.");
   });
   it("offers the current campaign's memory level from Story settings", () => {
     const { document } = parseHTML(storyHtml);

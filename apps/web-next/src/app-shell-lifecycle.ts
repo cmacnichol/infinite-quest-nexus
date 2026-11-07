@@ -126,6 +126,12 @@ export function mountAppShell(
       if (disposed || storyCampaignId === campaignId) return;
       storyCampaignId = campaignId;
       root.dataset.storyCampaignId = campaignId ?? "";
+      const settings = root.querySelector<HTMLAnchorElement>("[data-settings-link]");
+      if (settings && navigation === "story") {
+        const current = view?.location;
+        const returnTo = current ? current.pathname + current.search : "/app/story";
+        settings.href = campaignId ? "/app/settings?" + new URLSearchParams({section:"campaign",campaignId,returnTo}) : "/app/settings?section=campaign";
+      }
       const preferenceContextChanged = preferenceCampaignId !== campaignId;
       preferenceCampaignId = campaignId;
       deviceFields?.setCampaign(campaignId);

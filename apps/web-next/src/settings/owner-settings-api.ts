@@ -43,6 +43,10 @@ export function createOwnerSettingsApis(fetchImpl: typeof fetch = fetch) {
       },
       remove: (id: string, signal: AbortSignal) => http.request({method: "DELETE", path: providerPath(id), responseKind: "empty", signal}),
       makeDefault: (id: string, signal: AbortSignal) => http.request({method: "PUT", path: providerPath(id) + "/default", body: json({}), responseKind: "empty", signal}),
+      campaignModels: (id: string, role: "embedding" | "image", signal: AbortSignal) => http.request({
+        method: "GET", path: providerPath(id) + "/models" + (role === "embedding" ? "?providerRole=embedding" : ""),
+        responseSchema: inventory, signal
+      }),
       models: (id: string, signal: AbortSignal) => http.request({method: "GET", path: providerPath(id) + "/models?refresh=true", responseSchema: inventory, signal}),
       discover: (candidate: unknown, signal: AbortSignal) => http.request({method: "POST", path: "/providers/discover-models",
         body: json(providerProfileInputSchema.parse(candidate)), responseSchema: inventory, signal})

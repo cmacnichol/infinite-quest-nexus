@@ -1,3 +1,4 @@
+import { writeCampaignSettings } from "../../packages/client-web/src/campaign-settings-writes.js";
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
@@ -41,6 +42,7 @@ function managementFunctions<T extends Record<string, (...args: never[]) => unkn
     return splitEditorFunctions.slice(definitionStart, end);
   });
   const resolvedBindings = {
+    writeCampaignSettings,
     campaignSectionLoader: { setSelection: vi.fn(), invalidate: vi.fn() },
     loadCampaignSettingsSectionForPanel: vi.fn(),
     setCampaignSettingsSectionContentVisibility: vi.fn(),
@@ -579,6 +581,7 @@ describe("Nexus management UI contracts", () => {
       STORY_MEMORY_LEVELS: ["off", "standard", "enhanced", "max"],
       elements,
       api,
+      campaignMemoryApi: { update: () => pendingSave.promise },
       readCampaignStoryMemorySettings: (settings: typeof oldSettings) => settings,
       renderCampaignStoryMemorySettings,
       campaignMessage: vi.fn()
@@ -587,10 +590,8 @@ describe("Nexus management UI contracts", () => {
 
     functions.setCampaignSettingsSectionFeedback("story", "loading", "Loading Story behavior…", 1, campaignId);
     const saving = functions.saveCampaignStoryMemory();
-    await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(1));
-    expect(api).toHaveBeenCalledWith(`/api/v1/campaigns/${campaignId}/story-memory`, expect.objectContaining({ method: "PUT" }));
     const sectionRead = campaignSectionLoader.loadSection("story").catch((error: unknown) => error);
-    await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(1));
     pendingSave.resolve(savedSettings);
     await saving;
     expect(renderCampaignStoryMemorySettings).toHaveBeenCalledWith(savedSettings);
@@ -925,12 +926,12 @@ describe("Nexus management UI contracts", () => {
     const snapshotSource = managementScript.slice(snapshotStart, snapshotEnd);
     expect(snapshotSource).toContain("title: elements.campaignTitle.value");
     expect(snapshotSource).toContain("status: elements.campaignStatus.value");
-    expect(snapshotSource).toContain("textProviderProfileId: elements.campaignTextProvider.value || null");
-    expect(snapshotSource).toContain("turnControlStyle: elements.campaignTurnControlStyle.value");
-    expect(snapshotSource).toContain("storyLengthProfile: elements.campaignStoryLengthProfile.value");
-    expect(snapshotSource).toContain("storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)");
-    expect(saveSource).toContain("...snapshot");
-    expect(saveSource).toContain("savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle)");
+    expect(snapshotSource).not.toContain("textProviderProfileId: elements.campaignTextProvider.value || null");
+    expect(snapshotSource).not.toContain("turnControlStyle: elements.campaignTurnControlStyle.value");
+    expect(snapshotSource).not.toContain("storyLengthProfile: elements.campaignStoryLengthProfile.value");
+    expect(snapshotSource).not.toContain("storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)");
+    expect(saveSource).toContain("title:snapshot.title,status:snapshot.status");
+    expect(saveSource).not.toContain("savedTurnControlStyle(");
     expect(saveSource).not.toContain("campaignWorldVersion");
   });
 
@@ -1615,11 +1616,11 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('value="flexible_scene">Story Direction');
     expect(managementHtml).toContain('value="brief">Brief — 250–450 words');
     expect(managementHtml).toContain('value="extended">Extended — 1,200–2,000 words');
-    expect(managementScript).toContain('storyLengthProfile: elements.campaignStoryLengthProfile.value');
+    expect(managementHtml).toContain('data-campaign-settings-group="story"');
     expect(managementScript).toContain('turnControlStyle: normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value)');
     expect(managementScript).toContain("function campaignSettingsSnapshot()");
-    expect(managementScript).toContain("...snapshot");
-    expect(managementScript).toContain("savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle)");
+    expect(managementScript).toContain("title:snapshot.title,status:snapshot.status");
+    expect(managementScript).not.toContain("savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle)");
     const applyViewStart = managementScript.indexOf("function applyManagementView(hash");
     const applyViewEnd = managementScript.indexOf("\nfunction isManagementRouteHash", applyViewStart);
     const applyViewSource = managementScript.slice(applyViewStart, applyViewEnd);
@@ -1663,7 +1664,7 @@ describe("Nexus management UI contracts", () => {
     expect(normalize("flexible_scene")).toBe("flexible_scene");
   });
 
-  it("saves a stale legacy Auto settings value as Action through the campaign handler", async () => {
+  it("preserves a legacy Auto style through an unrelated campaign title edit", async () => {
     const { document } = parseHTML(managementHtml);
     const api = vi.fn().mockResolvedValue({});
     const campaignMessage = vi.fn();
@@ -1694,12 +1695,7 @@ describe("Nexus management UI contracts", () => {
 
     await saveSelectedCampaign({ preventDefault: vi.fn() });
 
-    expect(JSON.parse(api.mock.calls[0]?.[1].body)).toMatchObject({
-      turnControlStyle: "flexible_action",
-      expectedTurnControlStyle: "flexible_auto",
-      expectedActiveTurnNumber: 4,
-      expectedStateRevision: 7
-    });
+    expect(JSON.parse(api.mock.calls[0]?.[1].body)).toEqual({title:"Campaign",status:"active"});
     expect(api).toHaveBeenCalledTimes(1);
   });
 
@@ -1805,7 +1801,8 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="illustrationConfidenceProfile"');
     expect(managementScript).toContain('elements.illustrationSourcePolicy.disabled = !selectedCampaign');
     expect(managementScript).toContain('function illustrationPolicyUsesProvider');
-    expect(managementScript).toContain('body: JSON.stringify({ imageProviderProfileId: elements.campaignImageProvider.value || null })');
+    expect(managementScript).not.toContain('writeCampaignSettings(api, campaignId, "behavior", { imageProviderProfileId:');
+    expect(managementScript).toContain('elements.campaignImageProvider.value = config.providerProfileId || ""');
   });
 
   it("keeps segment prompt preferences editable when automatic illustrations are off", () => {

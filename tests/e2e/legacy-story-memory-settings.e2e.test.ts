@@ -26,6 +26,8 @@ const turn = {
   chronicleRetrieval: null, reportedCost: null
 };
 
+const send = (route: Route, value: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
+
 async function installApi(page: Page) {
   const settings = new Map([
     [campaignAId, { level: "standard", reviewMode: "observe", availableLevels: ["off", "standard", "enhanced", "max"] }],
@@ -38,7 +40,6 @@ async function installApi(page: Page) {
   let delayedRoute: Route | null = null;
   let delayedRequested!: () => void;
   const delayedRequest = new Promise<void>((resolve) => { delayedRequested = resolve; });
-  const send = (route: Route, value: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
 
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
@@ -172,6 +173,10 @@ test("legacy Story settings loads and persists the saved Story Memory level on m
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/story/${campaignBId}`);
   await expect(page.locator("#storyTitle")).toHaveText("Selected campaign");
+  await expect(page.locator("#storyCampaignSettings")).toHaveAttribute("href",/section=campaign/);
+  const destination = new URL((await page.locator("#storyCampaignSettings").getAttribute("href"))!,page.url());
+  expect(destination.searchParams.get("campaignId")).toBe(campaignBId);
+  expect(destination.searchParams.get("returnTo")).toBe("/story/" + campaignBId);
   await expect.poll(() => api.memoryGets()).toBe(1);
   await expect.poll(() => api.memoryResponses()).toBe(1);
   await expect(page.locator("#storyMemoryStatus")).not.toContainText("Loading the saved");
@@ -186,4 +191,20 @@ test("legacy Story settings loads and persists the saved Story Memory level on m
   await page.reload();
   await page.locator("#btnOpenUserProfile").click();
   await expect(page.locator("#storyMemoryLevel")).toHaveValue("off");
+});
+test("legacy campaign operational tabs link to the canonical selected settings instead of duplicating editors", async ({page}) => {
+  await installApi(page);
+  await page.route("**/campaigns/"+campaignBId+"/image-jobs",route=>send(route,{jobs:[]}));
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/nexus/index.html#campaigns`);
+  await page.locator(`#campaignList [data-campaign-id="${campaignBId}"]`).click();
+  for (const [tab,group,form] of [["Story","story","campaignTurnControlStyle"],["Illustrations","illustrations","illustrationForm"],["Chronicle","chronicle","embeddingForm"]]) {
+    await page.locator("#campaignTab"+tab).click();
+    const link = page.locator("#campaignPanel"+tab+" a[data-campaign-settings-group]");
+    await expect(link).toBeVisible();
+    const url = new URL((await link.getAttribute("href"))!,page.url());
+    expect(url.pathname).toBe("/app/settings");
+    expect(url.searchParams.get("campaignId")).toBe(campaignBId);
+    expect(url.hash).toBe("#"+group);
+    await expect(page.locator("#"+form)).toBeHidden();
+  }
 });

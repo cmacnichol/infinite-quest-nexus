@@ -1018,6 +1018,12 @@ function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialog
       dialog.append(fields, status, save);
     }
   } else if (active === "story-memory") {
+    const campaignId = state.projection.campaign?.id;
+    if (campaignId) {
+      const link = element(document, "a", undefined, "Campaign settings");
+      link.href = "/app/settings?" + new URLSearchParams({section:"campaign",campaignId,returnTo:storyPlayerPath(campaignId, state.route.turnNumber ?? undefined)});
+      dialog.append(link);
+    }
     const settings = state.storyMemorySettings;
     if (settings === null) dialog.append(element(document, "p", "story-status", state.storyMemoryError ?? "Loading campaign memory settings…"));
     else {

@@ -64,3 +64,17 @@ main[data-page="settings"] { padding: var(--edge, 32px); max-width: 1440px; marg
 .settings-owner-editor dialog, .settings-owner-editor .provider-dialog-header { background: var(--surface-entry-hover); }
 .settings-owner-editor .provider-dialog-header { position: sticky; inset-block-start: calc(-1 * clamp(.75rem, 2vw, 2rem)); z-index: 2; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--rule); padding-block: .5rem; margin: 0; }
 .settings-owner-editor .provider-dialog-header h2 { margin: 0; }
+
+.settings-campaign-editor { display: grid; gap: 1rem; }
+.settings-campaign-panels { display: grid; gap: 1.5rem; min-width: 0; }
+.settings-campaign-panels > section { border-top: 1px solid var(--rule); padding-top: 1rem; min-width: 0; }
+.settings-campaign-panels :is(form, fieldset, .campaign-field-grid) { min-width: 0; }
+.settings-campaign-panels .campaign-field-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%, 15rem),1fr)); gap: 1rem; }
+.settings-campaign-panels :is(.campaign-field-grid, fieldset, .campaign-field-note) { grid-column: 1 / -1; }
+.settings-campaign-panels :is(input:not([type=checkbox]),select) { width: 100%; min-width: 0; box-sizing: border-box; }
+.settings-campaign-panels .campaign-field { display: grid; gap: .4rem; }
+.settings-campaign-panels .campaign-action-ledger { position: static; inset: auto; margin: 1rem 0 0; padding: .75rem 0; border: 0; border-top: 1px solid var(--rule); background: transparent; box-shadow: none; }
+.settings-campaign-panels .campaign-form { gap: .75rem; }
+.settings-campaign-panels .campaign-form h3 { font-size: 1.1rem; }
+.settings-campaign-panels nav { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; padding: 1rem 0; border-top: 1px solid var(--rule); }
+.settings-campaign-panels [role=status]:empty { display: none; }

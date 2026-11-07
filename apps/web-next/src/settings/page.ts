@@ -3,11 +3,12 @@ import { createInstanceSettingsApi, createNexusApiClient, createNoopSessionPort 
 import { type CampaignSummary, type MetaResponse, type SettingsFieldDescriptor } from "@infinite-quest/contracts";
 import { mountAppShell } from "../app-shell-lifecycle";
 import type { MountedPage } from "../world-library-page";
-import { SETTINGS_SECTIONS, type SettingsRoute } from "./sections";
+import { safeSettingsReturn, SETTINGS_SECTIONS, type SettingsRoute } from "./sections";
 import { displayUnit, fromDisplayUnit, readableValue, readableRangeValue } from "./instance-editor";
 import { createOwnerSettingsApis } from "./owner-settings-api";
 import { mountProviderEditor } from "./provider-editor.js";
 import { mountPromptEditor } from "./prompt-editor.js";
+import { mountCampaignSettings } from "./campaign-editor";
 import "./settings.css";
 export { parseSettingsRoute } from "./sections";
 export type { SettingsRoute } from "./sections";
@@ -40,10 +41,11 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
   for (const [key, title] of SETTINGS_SECTIONS) {
     const link = node(document, "a", title); const url = new URL("/app/settings", window.location.origin);
     url.searchParams.set("section", key); if (route.campaignId) url.searchParams.set("campaignId", route.campaignId);
+    const back = safeSettingsReturn(new URL(window.location.href).searchParams.get("returnTo"));
+    if (back) url.searchParams.set("returnTo", back);
     link.href = url.pathname + url.search; if (key === route.section) link.setAttribute("aria-current", "page"); nav.append(link);
   }
   const button = (text: string, action: () => void, disabled = false) => { const element = node(document, "button", text); element.type = "button"; element.disabled = disabled; element.addEventListener("click", action); return element; };
-  const appendLink = (text: string, href: string) => { const link = node(document, "a", text, "settings-editor-link"); link.href = href; content.append(link); };
   function render() {
     if (disposed) return;
     if (ownerEditor) return;
@@ -61,15 +63,9 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
       } else if (!campaigns) {
         content.append(node(document, "p", campaignFailed ? "Your campaigns could not be loaded. Reload to retry." : "Loading your campaigns…", "settings-status"));
       } else {
-        const label = node(document, "label", "Campaign", "settings-campaign-selector"); const select = node(document, "select"); select.setAttribute("aria-label", "Campaign");
-        select.append(new Option("Choose a campaign", ""));
-        for (const campaign of campaigns) select.append(new Option(campaign.title, campaign.id));
-        const selected = campaigns.find((campaign) => campaign.id === route.campaignId);
-        select.value = selected?.id ?? "";
-        select.addEventListener("change", () => { const url = new URL(window.location.href); if (select.value) url.searchParams.set("campaignId", select.value); else url.searchParams.delete("campaignId"); window.location.assign(url.pathname + url.search); });
-        label.append(select); content.append(label);
-        if (selected) { content.append(node(document, "p", "Open the campaign editor for Story Memory, context, illustrations and provider assignments. Each change applies only to this campaign.")); appendLink("Open campaign editor", `/app/campaigns/${selected.id}`); }
-        else content.append(node(document, "p", route.campaignId ? "This campaign is unavailable to your account. Choose one of your campaigns." : "Choose a campaign before editing its settings."));
+        const host = node(document, "div", undefined, "settings-campaign-editor");
+        content.append(host);
+        ownerEditor = mountCampaignSettings(host, campaigns, route.campaignId);
       }
       return;
     }

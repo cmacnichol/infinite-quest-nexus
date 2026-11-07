@@ -1,5 +1,5 @@
 import { settingsBookmarkDestination } from "./settings-bookmark.js";
-import { browserDeviceStorage, mountLegacyDeviceProfile, mountReaderPreferenceFields } from "@infinite-quest/client-web";
+import { createStoryMemoryApi, writeCampaignSettings, browserDeviceStorage, mountLegacyDeviceProfile, mountReaderPreferenceFields } from "@infinite-quest/client-web";
 import {
   buildCampaignCreateRequest,
   createCampaignCreationDraft,
@@ -12,6 +12,7 @@ import { bindEditDialogDismissal, requestEditDismissal } from "./legacy-edit-ses
 import { createLegacySectionLoader } from "./legacy-section-loader.js";
 import { bindLegacyTabGroup } from "./legacy-tabs.js";
 const ownerDevice = browserDeviceStorage(window);
+const campaignMemoryApi = createStoryMemoryApi();
 
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
 const campaignSectionLoader = createLegacySectionLoader({
@@ -38,11 +39,7 @@ let campaignLeavePrompt = null;
 function campaignSettingsSnapshot() {
   return {
     title: elements.campaignTitle.value,
-    status: elements.campaignStatus.value,
-    textProviderProfileId: elements.campaignTextProvider.value || null,
-    turnControlStyle: elements.campaignTurnControlStyle.value,
-    storyLengthProfile: elements.campaignStoryLengthProfile.value,
-    storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)
+    status: elements.campaignStatus.value
   };
 }
 
@@ -379,6 +376,15 @@ function handleCampaignSettingsRailKeydown(event) {
 }
 
 function setCampaignSettingsAvailability(available) {
+  const settings = document.getElementById("openCampaignSettings");
+  if (settings) {
+    const params = new URLSearchParams({section:"campaign",returnTo:"/nexus/#campaigns"});
+    if (available && selectedCampaign) params.set("campaignId",selectedCampaign.id);
+    settings.href = "/app/settings?" + params;
+    for (const link of document.querySelectorAll("[data-campaign-settings-group]")) {
+      link.href = settings.href + "#" + link.dataset.campaignSettingsGroup;
+    }
+  }
   elements.campaignSettingsRail.querySelectorAll("[role=tab]").forEach((tab) => {
     tab.disabled = !available;
   });
@@ -497,9 +503,7 @@ async function saveCampaignStoryMemory() {
   const continuityReviewEnabled = level === "max" && elements.campaignContinuityReviewEnabled.checked;
   renderCampaignStoryMemorySettings({ ...campaignStoryMemorySettings, reviewMode: continuityReviewEnabled ? "enforce" : "off" }, { draftLevel: level, disabled: true, message: "Saving Story Memory level…" });
   try {
-    const settings = readCampaignStoryMemorySettings(await api(`/api/v1/campaigns/${campaignId}/story-memory`, {
-      method: "PUT", body: JSON.stringify({ level, continuityReviewEnabled })
-    }));
+    const settings = readCampaignStoryMemorySettings(await campaignMemoryApi.update(campaignId, { level, continuityReviewEnabled }));
     if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     campaignStoryMemorySettings = settings;
     renderCampaignStoryMemorySettings(settings);
@@ -5029,7 +5033,7 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   elements.campaignTitle.value = campaign.title;
   elements.campaignStatus.value = campaign.status;
   elements.campaignTextProvider.value = campaign.textProviderProfileId || "";
-  elements.campaignImageProvider.value = campaign.imageProviderProfileId || "";
+  elements.campaignImageProvider.value = "";
   elements.campaignTurnControlStyle.value = normalizedTurnControlStyle(campaign.turnControlStyle);
   elements.campaignStoryLengthProfile.value = campaign.storyLengthProfile || "standard";
   elements.campaignStoryContextBudgetTokens.value = String(campaign.storyContextBudgetTokens || 32_000);
@@ -5092,16 +5096,7 @@ async function saveSelectedCampaign(event = null, { snapshot = campaignSettingsS
   elements.saveCampaign.disabled = true;
   renderCampaignSaveFeedback("saving");
   try {
-    const updatedCampaign = await api(`/api/v1/campaigns/${campaignId}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        ...snapshot,
-        turnControlStyle: savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle),
-        expectedTurnControlStyle: campaign.turnControlStyle,
-        expectedActiveTurnNumber: campaign.activeTurnNumber,
-        expectedStateRevision: campaign.stateRevision
-      })
-    });
+    const updatedCampaign = await writeCampaignSettings(api, campaignId, "behavior", {title:snapshot.title,status:snapshot.status});
     if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return false;
     selectedCampaign = { ...campaign, ...updatedCampaign };
     campaigns = campaigns.map((item) => item.id === campaignId ? selectedCampaign : item);
@@ -5602,6 +5597,7 @@ async function loadIllustrationConfig(selectionRequest = campaignSelectionReques
   const config = await api(`/api/v1/campaigns/${campaignId}/illustration-config`, { signal });
   if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
   illustrationConfig = config;
+  elements.campaignImageProvider.value = config.providerProfileId || "";
   elements.illustrationSourcePolicy.value = illustrationConfig.sourcePolicy || (illustrationConfig.enabled ? "generate_only" : "off");
   elements.illustrationMatchingScope.value = illustrationConfig.matchingScope || "world";
   elements.illustrationConfidenceProfile.value = illustrationConfig.confidenceProfile || "balanced";
@@ -5625,7 +5621,7 @@ async function loadIllustrationConfig(selectionRequest = campaignSelectionReques
   syncIllustrationProviderAvailability(true);
   const provider = effectiveCampaignProvider("image");
   elements.campaignImageProviderSummary.textContent = provider
-    ? `Using ${provider.name}${selectedCampaign?.imageProviderProfileId ? " for this campaign" : " as the default image profile"}.`
+    ? elements.campaignImageProvider.value ? `Segment image provider: ${provider.name}.` : "Choose a segment provider for automatic generation. Manage the separate direct image assignment in Campaign settings."
     : enabledProviders("image").length
       ? "Select an image provider for this campaign before enabling illustrations."
       : "Add and enable an illustration provider in Provider Management before images can be enabled.";
@@ -5721,7 +5717,7 @@ function populateProviderSelect(select, role, label) {
   const current = select.value;
   const available = enabledProviders(role);
   const fallback = defaultProvider(role);
-  const emptyLabel = fallback
+  const emptyLabel = role === "image" ? "No segment override" : fallback
     ? `Use default · ${fallback.name}`
     : available.length
       ? `Select a ${label} provider`
@@ -5808,7 +5804,6 @@ async function loadProviders(preselectId = "", { preserveWorkflowFeedback = fals
   }
   if (selectedCampaign) {
     elements.campaignTextProvider.value = selectedCampaign.textProviderProfileId || "";
-    elements.campaignImageProvider.value = selectedCampaign.imageProviderProfileId || "";
     syncIllustrationProviderAvailability(true);
   }
   populateEmbeddingProviderSelect();
@@ -6124,9 +6119,7 @@ async function saveEmbeddingConfig(event) {
     if (elements.embeddingEnabled.checked && !elements.embeddingProvider.value) {
       throw new Error("Choose an eligible embedding provider before enabling Semantic Retrieval.");
     }
-    const saved = await api(`/api/v1/campaigns/${campaignId}/memory/embedding-config`, {
-      method: "PUT",
-      body: JSON.stringify(embeddingConfigPayload({
+    const saved = await writeCampaignSettings(api, campaignId, "chronicle", embeddingConfigPayload({
         enabled: elements.embeddingEnabled.checked,
         providerProfileId: elements.embeddingProvider.value || null,
         model: elements.embeddingModel.value,
@@ -6135,8 +6128,7 @@ async function saveEmbeddingConfig(event) {
         queryPrefix: elements.embeddingQueryPrefix.value || null,
         retrievalImplementation: elements.embeddingRetrievalImplementation.value,
         retrievalShadowEnabled: elements.embeddingRetrievalShadowEnabled.checked
-      }))
-    });
+      }));
     if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     embeddingConfig = saved;
     campaignSectionLoader.invalidate("chronicle");
@@ -6211,7 +6203,7 @@ elements.campaignImageProvider.addEventListener("change", () => {
     elements.illustrationMaxAttempts.value = String(config.maximumAttempts);
   }
   elements.campaignImageProviderSummary.textContent = provider
-    ? `Using ${provider.name} for this campaign.`
+    ? elements.campaignImageProvider.value ? `Segment image provider: ${provider.name}.` : "Choose a segment provider for automatic generation."
     : "Select an image provider before saving enabled illustrations.";
   syncIllustrationProviderAvailability();
 });
@@ -6247,7 +6239,7 @@ async function saveIllustrationConfig(event) {
   const selectionRequest = campaignSelectionRequest;
   const provider = effectiveCampaignProvider("image");
   const sourcePolicy = elements.illustrationSourcePolicy.value;
-  if (illustrationPolicyUsesProvider(sourcePolicy) && !provider) {
+  if (illustrationPolicyUsesProvider(sourcePolicy) && (!elements.campaignImageProvider.value || !provider)) {
     elements.illustrationStatus.className = "status error";
     elements.illustrationStatus.textContent = enabledProviders("image").length
       ? "Select an image provider for this campaign before enabling illustrations."
@@ -6265,22 +6257,12 @@ async function saveIllustrationConfig(event) {
   elements.illustrationStatus.className = "status";
   elements.illustrationStatus.textContent = "Saving independent illustration configuration…";
   try {
-    if (illustrationPolicyUsesProvider(sourcePolicy)) {
-      const updatedCampaign = await api(`/api/v1/campaigns/${campaignId}`, {
-        method: "PATCH",
-        body: JSON.stringify({ imageProviderProfileId: elements.campaignImageProvider.value || null })
-      });
-      if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
-      selectedCampaign = { ...selectedCampaign, ...updatedCampaign };
-    }
-    const savedConfig = await api(`/api/v1/campaigns/${campaignId}/illustration-config`, {
-      method: "PUT",
-      body: JSON.stringify({
+    const savedConfig = await writeCampaignSettings(api, campaignId, "illustrations", {
         sourcePolicy,
         matchingScope: elements.illustrationMatchingScope.value,
         confidenceProfile: elements.illustrationConfidenceProfile.value,
         repetitionWindow: elements.illustrationRepetitionWindow.value,
-        providerProfileId: illustrationPolicyUsesProvider(sourcePolicy) ? provider?.id || null : null,
+        providerProfileId: elements.campaignImageProvider.value || null,
         model: elements.illustrationModel.value,
         size: elements.illustrationSize.value,
         aspectRatio: elements.illustrationAspectRatio.value,
@@ -6293,8 +6275,7 @@ async function saveIllustrationConfig(event) {
         refinementPrompt: illustrationRefinementPromptValue,
         artStyle: elements.illustrationArtStyle.value,
         negativePrompt: elements.illustrationNegativePrompt.value
-      })
-    });
+      });
     if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     illustrationConfig = savedConfig;
     campaignSectionLoader.invalidate("illustrations");
@@ -7513,8 +7494,8 @@ elements.embeddingModel.addEventListener("click", () => { void openEmbeddingMode
 elements.embeddingModel.addEventListener("keydown", (event) => {
   if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openEmbeddingModelPicker(); }
 });
-elements.embeddingForm.addEventListener("submit", saveEmbeddingConfig);
-elements.illustrationForm.addEventListener("submit", saveIllustrationConfig);
+
+
 elements.openIllustrationPromptEditor.addEventListener("click", openIllustrationPromptEditor);
 elements.illustrationSourcePolicy.addEventListener("change", () => {
   if (illustrationPolicyUsesProvider() && !enabledProviders("image").length) {

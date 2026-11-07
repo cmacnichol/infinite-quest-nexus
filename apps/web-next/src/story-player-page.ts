@@ -1528,7 +1528,11 @@ export function mountStoryPlayerPage(
   root.addEventListener("click", onClick);
   toolsDisclosure?.addEventListener("click", onToolsClick);
   render();
-  void load();
+  void load().then(() => {
+    if (!disposed && root.ownerDocument.defaultView?.location?.hash === "#characters" && projection.campaign) {
+      charactersWorkspace.open(projection.campaign.id, toolsDisclosure?.querySelector<HTMLElement>("summary"));
+    }
+  });
 
   return {
     dispose() {

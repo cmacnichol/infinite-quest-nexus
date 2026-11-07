@@ -185,6 +185,7 @@
             <p class="eyebrow">Campaign workspace</p>
             <h2 id="memoryTitle">Select a campaign</h2>
             <p id="campaignEditorSummary" class="campaign-editor-summary"></p>
+            <a id="openCampaignSettings" class="campaign-world-link" href="/app/settings?section=campaign">Campaign settings</a>
             <a id="campaignWorldLink" class="campaign-world-link" href="#world-library" hidden>Open this campaign's authored world</a>
           </div>
           <div class="campaign-editor-actions">
@@ -222,9 +223,10 @@
             </section>
 
             <section id="campaignPanelStory" role="tabpanel" aria-labelledby="campaignTabStory" data-campaign-settings-content="story" hidden>
+              <p><a data-campaign-settings-group="story" class="button secondary" href="/app/settings?section=campaign#story">Open Story behavior settings</a></p>
               <div data-campaign-section-body="story">
               <div class="campaign-panel-fields campaign-controls">
-                <label>Text provider profile<select id="campaignTextProvider" form="campaignForm" disabled><option value="">Use default text provider</option></select></label>
+                <div hidden inert class="retired-campaign-settings"><label>Text provider profile<select id="campaignTextProvider" form="campaignForm" disabled><option value="">Use default text provider</option></select></label>
                 <label title="Action preserves RPG mechanics. Story Direction continues the narrative without turn classification.">
                   Turn input style
                   <select id="campaignTurnControlStyle" form="campaignForm" disabled>
@@ -251,6 +253,7 @@
                     <option value="1000000">1m tokens</option>
                   </select>
                 </label>
+                </div>
                 <label title="Sets the durable Story Memory review level for future generated turns. Story context budget remains independent.">
                   Story memory level
                   <select id="campaignStoryMemoryLevel" disabled>
@@ -270,17 +273,18 @@
 
             <section id="campaignPanelIllustrations" role="tabpanel" aria-labelledby="campaignTabIllustrations" data-campaign-settings-content="illustrations" hidden>
 
+        <p><a data-campaign-settings-group="illustrations" class="button secondary" href="/app/settings?section=campaign#illustrations">Open illustration settings</a></p>
         <div data-campaign-section-body="illustrations">
         <section id="campaignIllustrationSection" class="campaign-settings-section illustration-settings-section" aria-labelledby="campaignIllustrationTitle">
           <div class="campaign-settings-heading">
             <div>
               <p class="eyebrow">Optional output</p>
               <h3 id="campaignIllustrationTitle">Campaign illustrations</h3>
-              <p class="field-note">Illustration settings save with their own button and status; they do not affect campaign metadata.</p>
-              <p>Configure independent image jobs that run only after a story turn is accepted.</p>
+              <p class="field-note">Open illustration settings to configure future segments.</p>
+              <p>Review historical illustration jobs for this campaign.</p>
             </div>
           </div>
-          <form id="illustrationForm" class="illustration-controls illustration-panel-stack">
+          <form hidden inert id="illustrationForm" class="retired-campaign-settings illustration-controls illustration-panel-stack">
             <div id="illustrationSourceGroup" class="illustration-settings-group illustration-source-group">
               <div class="illustration-group-heading">
                 <h3>Illustration source</h3>
@@ -333,8 +337,8 @@
                   <h3>Image provider</h3>
                   <p>Configure the independent image endpoint used only when generation is selected.</p>
                 </div>
-                <label>Image provider profile<select id="campaignImageProvider" disabled><option value="">Use default image provider</option></select></label>
-                <p id="campaignImageProviderSummary" class="field-note">Image generation uses the campaign image profile, or the default image profile when left empty.</p>
+                <label>Segment image provider<select id="campaignImageProvider" disabled><option value="">No segment override</option></select></label>
+                <p id="campaignImageProviderSummary" class="field-note">Automatic generation requires a saved segment provider. Manage the direct image assignment in Campaign settings.</p>
                 <label>Image model<input id="illustrationModel" maxlength="500" list="illustrationModels" placeholder="Select an image-capable model" disabled><datalist id="illustrationModels"></datalist></label>
                 <label>Size<input id="illustrationSize" maxlength="20" value="1024x1024" pattern="[0-9]{2,5}x[0-9]{2,5}" disabled></label>
                 <label>Aspect ratio<input id="illustrationAspectRatio" maxlength="10" value="1:1" pattern="[0-9]{1,3}:[0-9]{1,3}" disabled></label>
@@ -362,11 +366,12 @@
 
             <section id="campaignPanelChronicle" role="tabpanel" aria-labelledby="campaignTabChronicle" data-campaign-settings-content="chronicle" hidden>
 
+        <p><a data-campaign-settings-group="chronicle" class="button secondary" href="/app/settings?section=campaign#chronicle">Open Chronicle settings</a></p>
         <section id="campaignContextSection" class="campaign-settings-section chronicle-settings-section" aria-labelledby="campaignContextTitle">
           <div class="campaign-settings-heading">
             <div>
               <h3 id="campaignContextTitle">Chronicle</h3>
-              <p>Monitor local memory health, preview story context, and manage optional Semantic Retrieval. Embedding settings save independently from campaign metadata.</p>
+              <p>Monitor local memory health, preview story context, and manage optional Semantic Retrieval. Use Chronicle settings to configure retrieval and embedding providers.</p>
             </div>
           </div>
 
@@ -446,7 +451,7 @@
               <p>Optional vector search layered over Chronicle local retrieval.</p>
             </div>
           </header>
-          <form id="embeddingForm" class="embedding-controls">
+          <form hidden inert id="embeddingForm" class="retired-campaign-settings embedding-controls">
             <label class="toggle-field"><input id="embeddingEnabled" type="checkbox"> Enable Semantic Retrieval for this campaign</label>
             <label title="Selects the endpoint used to create Chronicle vectors. If no embedding profile is enabled, this automatically uses the campaign's effective text provider.">Embedding provider<select id="embeddingProvider"><option value="">Choose an eligible embedding provider</option></select></label>
             <label class="model-discovery-field" title="Names the embedding model sent to the selected endpoint. Refresh to load the selected provider's model inventory."><span class="field-label-row"><span>Embedding model</span><button id="discoverEmbeddingModels" class="mini-icon-button" type="button" aria-label="Refresh embedding models from endpoint" title="Refresh active and inactive models from the selected embedding endpoint">↻</button></span><input id="embeddingModel" maxlength="500" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose an embedding model"></label>

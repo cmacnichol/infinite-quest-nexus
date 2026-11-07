@@ -6198,6 +6198,8 @@ async function init() {
     if (navStoryLink) navStoryLink.href = `/story/${encodeURIComponent(campaignId)}`;
     await checkOnboarding();
     if (!await loadCampaign(campaignId)) return;
+    const settings = $("storyCampaignSettings");
+    if (settings) settings.href = "/app/settings?" + new URLSearchParams({section:"campaign",campaignId,returnTo:location.pathname + location.search});
     await reconcileCampaignStartup(campaignId);
   } else {
     await checkOnboarding();
