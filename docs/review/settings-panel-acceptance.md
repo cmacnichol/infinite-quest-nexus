@@ -82,3 +82,32 @@ New admissions now enforce already configured budgets on these production paths;
 Old buckets with no historical maximum conservatively block new admissions until their existing expiry. Existing accepts can continue to count in overlapping longer windows. An idempotent in-flight duplicate keeps its existing lease when supported. HTTP provider/import reservations remain pinned until actual handler and stream work finish; a stale clock or disconnected client cannot free a live slot. A pre-Settings image cannot enforce those new route and window protections, even with matching environment values. The [rollback procedure](../runbooks/instance-settings.md#return-to-a-pre-settings-binary) therefore requires shutdown, resolved pins and expired new policy windows before transition, with affected traffic kept drained unless equivalent external enforcement is verified.
 
 The [archive round-trip](../../tests/integration/system-archive.integration.test.ts) placed distinctive installation, revision/audit, heartbeat, session and attempt values in the exporting database. The real ZIP excluded them. The destination held a different requested revision; production import preserved all six Settings tables byte-for-byte at the row level, restored providers disabled and issued zero observed fetch calls. The supported Linux suite passed 53/53. Management sessions and attempt buckets no longer make an otherwise empty owner destination appear populated. Other security authority, owner records and live-work exclusions continue to protect restore.
+
+## Final branch checks
+
+The final application changes at `195cbf38` built from a clean Git archive into a production image. The operator in that image exported the role seed. The complete packaged upgrade/rollback rehearsal above was run at its stated earlier checkpoint. The repository checks and both web builds passed. The full unit run passed 5,450 tests (44 skipped). The Settings module is loaded on demand: 30.8 KiB compressed; the main entry is 245.5 KiB, still over the report-only 200 KiB target (the original main entry was 238.4 KiB).
+
+The final Settings, provider, prompt, campaign and User Profile browser selection passed 33/33 with native controls and 33/33 with Web Awesome. The built dashboard integration passed 8/8. The synthetic-provider Story runtime selection passed 42/42 in each renderer. The final Linux image passed all 21 import repository tests and all seven historical adapter matrix tests. Expired imports are refused by timestamp. If a rejected import rolls back its transaction, persisted status retirement is left to cleanup.
+
+The earlier full browser runs were not green. After correcting stale navigation and fixture assumptions, six distinct legacy Story cases also failed on the unchanged starting commit: typing while initial sync is held, keeping the saved turn offset, retaining the pinned resumed turn, two sparse-history draft cases, and intermittent keyboard focus while paging history. These are not covered by the green Settings-only totals.
+
+## Implementation decisions and tradeoffs
+
+| Decision | Consequence |
+| --- | --- |
+| A deployment veto can suppress a feature; out-of-range numbers reject activation. | Operators must revise invalid settings; numbers never silently change. |
+| Rehearse activation only in the disposable installation. | Production activation still needs the operator's maintenance procedure. |
+| Keep all personal and device preferences in the user-icon menu. | Users visit a second destination for shared controls; scope stays clear. |
+| Work in an isolated Git worktree. | Changes stay on a separate branch until deliberately integrated. |
+| Classify each new Settings table in the portability registry immediately. | A transfer cannot silently start carrying installation authority. |
+| Use separate disposable PostgreSQL storage. | The rehearsal does not establish compatibility with a particular existing deployment. |
+| Require a guard inside the locked activation transaction. | Offline operations must also establish drain and compatibility. |
+| A changed policy digest needs a new revision even with identical values. | Revalidating policy can create another history entry. |
+| Reuse the domain policy resolver through the application boundary. | New consumers must supply that dependency; there is only one validator. |
+| Reset drafts from the original seed under current policy. | Reset can be unavailable if policy no longer allows the original numbers. |
+| Apply configured preview lifetime to new portable previews only. | The default changes from the old 900-second fallback to 1,800 seconds; existing expiries stay intact. |
+| Validate enabled System Archive chunk size against upload capacity. | Some combinations of individually valid values cannot activate. |
+| Block new admissions on old unexpired buckets with unknown maxima. | Some requests may wait through the old window after upgrade. |
+| Enforce approved limits on the enumerated production operations. | Previously unmetered requests can now return HTTP 429; cleanup and management remain available. |
+| Hold slots for outstanding upstream work; recover a single orphan only after verified shutdown. | Recovery may require operator intervention; a disconnected browser cannot free a running slot. |
+| Replace duplicate legacy editors with links to their canonical editors. | Bookmarks continue to work but some workflows navigate to Settings. |
