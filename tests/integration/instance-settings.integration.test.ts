@@ -17,7 +17,7 @@ const url = process.env.TEST_DATABASE_URL;
     expect(await repository.findSession({ tokenDigest: session.tokenDigest, actorUserId: "00000000-0000-4000-8000-000000000099", keyFingerprint: session.keyFingerprint })).toBeNull();
     expect(await repository.findSession({ tokenDigest: session.tokenDigest, actorUserId, keyFingerprint: "4".repeat(64) })).toBeNull();
     await expect(repository.createSession({ ...session, expiresAt: new Date(Date.now()+3600000) })).rejects.toThrow();
-    const attempts = await Promise.all(Array.from({ length: 12 }, () => repository.recordUnlockAttempt("5".repeat(64))));
+    const attempts = await Promise.all(Array.from({ length: 12 }, () => repository.recordUnlockAttempt("5".repeat(64), "failure")));
     expect(attempts.filter(Boolean)).toHaveLength(5);
     expect((await pool.query("SELECT count(*)::int AS n FROM settings_unlock_attempts")).rows[0].n).toBe(2);
     await repository.revokeSession(session.id);
@@ -27,9 +27,43 @@ const url = process.env.TEST_DATABASE_URL;
     expect(await repository.findSession({ tokenDigest: expiring.tokenDigest, actorUserId, keyFingerprint: expiring.keyFingerprint })).toBeNull();
     await repository.cleanup();
     expect((await pool.query("SELECT count(*)::int AS n FROM settings_operator_sessions")).rows[0].n).toBe(0);
-    await pool.query("UPDATE settings_unlock_attempts SET attempts=1000 WHERE bucket='global'");
-    expect(await repository.recordUnlockAttempt("9".repeat(64))).toBe(false);
+    await pool.query("UPDATE settings_unlock_attempts SET attempts=50 WHERE bucket='global'");
+    expect(await repository.recordUnlockAttempt("9".repeat(64), "failure")).toBe(false);
     expect((await pool.query("SELECT count(*)::int AS n FROM settings_unlock_attempts")).rows[0].n).toBe(2);
+  });
+  it("counts only failures and retains the five-client failure lock for fifteen minutes", async () => {
+    await pool.query("DELETE FROM settings_unlock_attempts");
+    const { createSettingsOperatorRepository } = await import("../../packages/database/src/settings-operator-repository.js");
+    const repository = createSettingsOperatorRepository(pool);
+    const client = "a".repeat(64);
+    for (let index = 0; index < 8; index++) expect(await repository.recordUnlockAttempt(client, "success")).toBe(true);
+    expect((await pool.query("SELECT count(*)::int AS n FROM settings_unlock_attempts")).rows[0].n).toBe(0);
+    const attempts = await Promise.all(Array.from({ length: 12 }, () => repository.recordUnlockAttempt(client, "failure")));
+    expect(attempts.filter(Boolean)).toHaveLength(5);
+    expect((await pool.query("SELECT attempts FROM settings_unlock_attempts WHERE bucket='global'")).rows[0].attempts).toBe(5);
+    await pool.query("UPDATE settings_unlock_attempts SET window_start=clock_timestamp()-interval '14 minutes 59 seconds'");
+    expect(await repository.recordUnlockAttempt(client, "failure")).toBe(false);
+    expect(await repository.recordUnlockAttempt(client, "success")).toBe(false);
+    await pool.query("UPDATE settings_unlock_attempts SET window_start=clock_timestamp()-interval '15 minutes 1 second'");
+    expect(await repository.recordUnlockAttempt(client, "success")).toBe(true);
+    expect(await repository.recordUnlockAttempt(client, "failure")).toBe(true);
+    expect((await pool.query("SELECT attempts FROM settings_unlock_attempts WHERE bucket='global'")).rows[0].attempts).toBe(1);
+  });
+  it("atomically admits at most fifty global failures across repositories and denies valid keys while exhausted", async () => {
+    await pool.query("DELETE FROM settings_unlock_attempts");
+    const { createSettingsOperatorRepository } = await import("../../packages/database/src/settings-operator-repository.js");
+    const otherPool = createDatabasePool(url!);
+    try {
+      const repositories = [createSettingsOperatorRepository(pool), createSettingsOperatorRepository(otherPool)];
+      const admitted = await Promise.all(Array.from({ length: 65 }, (_, index) => repositories[index % 2]!.recordUnlockAttempt(index.toString(16).padStart(64, "0"), "failure")));
+      expect(admitted.filter(Boolean)).toHaveLength(50);
+      const repository = repositories[0]!;
+      expect(await repository.recordUnlockAttempt("f".repeat(64), "success")).toBe(false);
+      expect((await pool.query("SELECT attempts FROM settings_unlock_attempts WHERE bucket='global'")).rows[0].attempts).toBe(50);
+      expect((await pool.query("SELECT count(*)::int AS n FROM settings_unlock_attempts")).rows[0].n).toBe(51);
+      await pool.query("UPDATE settings_unlock_attempts SET window_start=clock_timestamp()-interval '15 minutes 1 second'");
+      expect(await repository.recordUnlockAttempt("f".repeat(64), "success")).toBe(true);
+    } finally { await otherPool.end(); }
   });
   it("creates only environment mode during migration", async () => {
     const result = await pool.query("SELECT mode,active_revision,requested_revision FROM instance_settings_state");

@@ -4,7 +4,7 @@ import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 async function prune(client: DatabaseClient): Promise<void> {
   await client.query("DELETE FROM settings_operator_sessions WHERE id IN (SELECT id FROM settings_operator_sessions WHERE expires_at<=clock_timestamp() LIMIT 1000)");
-  await client.query("DELETE FROM settings_unlock_attempts WHERE bucket IN (SELECT bucket FROM settings_unlock_attempts WHERE window_start<=clock_timestamp()-interval '1 minute' LIMIT 1001)");
+  await client.query("DELETE FROM settings_unlock_attempts WHERE bucket IN (SELECT bucket FROM settings_unlock_attempts WHERE window_start<=clock_timestamp()-interval '15 minutes' LIMIT 1001)");
 }
 type SessionRow = { id: string; actor_user_id: string; token_digest: string; csrf_digest: string; key_fingerprint: string; expires_at: Date };
 function session(row: SessionRow): SettingsOperatorSession {
@@ -29,17 +29,24 @@ export function createSettingsOperatorRepository(pool: DatabasePool): SettingsOp
       return row ? session(row) : null;
     },
     async revokeSession(id) { z.string().uuid().parse(id); await pool.query("DELETE FROM settings_operator_sessions WHERE id=$1", [id]); },
-    recordUnlockAttempt(clientDigest) {
+    recordUnlockAttempt(clientDigest, outcome) {
       digest.parse(clientDigest);
+      z.enum(["success", "failure"]).parse(outcome);
       return withTransaction(pool, async (client) => {
-        await client.query("SELECT pg_advisory_xact_lock(1936942452)"); await prune(client);
-        const bump = async (bucket: string) => {
-          const { rows: [row] } = await client.query(`INSERT INTO settings_unlock_attempts(bucket,window_start,attempts) VALUES($1,date_trunc('minute',clock_timestamp()),1)
-            ON CONFLICT(bucket) DO UPDATE SET attempts=LEAST(settings_unlock_attempts.attempts+1,1001) RETURNING attempts`, [bucket]);
-          return row.attempts as number;
-        };
-        if (await bump("global") > 1000) return false;
-        return await bump(clientDigest) <= 5;
+        await client.query("SELECT pg_advisory_xact_lock(1936942452)");
+        await prune(client);
+        const { rows } = await client.query<{ bucket: string; attempts: number }>(
+          "SELECT bucket,attempts FROM settings_unlock_attempts WHERE bucket=ANY($1::text[])", [["global", clientDigest]]
+        );
+        const counts = new Map(rows.map((row) => [row.bucket, row.attempts]));
+        if ((counts.get("global") ?? 0) >= 50 || (counts.get(clientDigest) ?? 0) >= 5) return false;
+        // A successful comparison consumes no failure budget, but cannot bypass a lockout.
+        if (outcome === "failure") {
+          await client.query(`INSERT INTO settings_unlock_attempts(bucket,window_start,attempts)
+            SELECT bucket,clock_timestamp(),1 FROM unnest($1::text[]) AS bucket
+            ON CONFLICT(bucket) DO UPDATE SET attempts=settings_unlock_attempts.attempts+1`, [["global", clientDigest]]);
+        }
+        return true;
       });
     },
     cleanup: () => withTransaction(pool, async (client) => { await client.query("SELECT pg_advisory_xact_lock(1936942452)"); await prune(client); })
