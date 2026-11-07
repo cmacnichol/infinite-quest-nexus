@@ -1,8 +1,9 @@
 import { expect, test, type Page, type BrowserContext, type TestInfo } from "@playwright/test";
+import { characterProfileSchema } from "../../packages/contracts/src/world-library.js";
 import type { AuthoringJobView, AuthoringSubmit } from "../../packages/contracts/src/authoring.js";
 
 const base = "http://127.0.0.1:43174";
-const character = (id = "hero", name = "Ilyra") => ({ id, name, characterText: "A patient guide through reflected starlight.", rpgStats: [], defaultTriggers: [], source: {} });
+const character = (id = "hero", name = "Ilyra") => ({ id, name, characterText: "A patient guide through reflected starlight.", profile: characterProfileSchema.parse({ story: { role: "Guide", personality: "Patient" } }), rpgStats: [], defaultTriggers: [], source: {} });
 const content = (title = "Glass Atlas") => ({ schemaVersion: 5, world: { title, genre: "Fantasy", tone: "Hopeful", premise: "Follow a migrating star.", backgroundStory: "An ancient observatory.", firstAction: "Open the observatory.", rules: "Reflections remember." }, playableCharacters: [character("companion", "Companion")], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {}, preservedLore: "A promise" });
 const worldJob = (): AuthoringJobView => ({ id: "world-job", revision: 1, kind: "world_concept", status: "recoverable", target: { kind: "new_world" }, request: { kind: "world_concept", idempotencyKey: "world-request", target: { kind: "new_world" }, prompt: "A city under glass" }, stages: [{ id: "outline-stage", key: "world", status: "validated", generation: 0, attemptCount: 1 }, { id: "failed-child", key: "character:hero", status: "recoverable", generation: 0, attemptCount: 1 }], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: true, canApply: false, result: content() });
 const characterJob = (): AuthoringJobView => ({ id: "character-job", revision: 1, kind: "character", status: "awaiting_review", target: { kind: "new_world" }, request: { kind: "character", idempotencyKey: "character-request", target: { kind: "new_world" }, prompt: "A patient guide", content: content() }, stages: [{ id: "character-stage", key: "character:hero", status: "validated", generation: 0, attemptCount: 1 }], expiresAt: "2026-09-13T00:00:00.000Z", incomplete: false, canApply: false, result: character() });
@@ -155,6 +156,7 @@ test("character lost-session recovery explicitly restores parent and returns the
   await expect(page.getByRole("button", { name: "Add to world draft" })).toHaveCount(0);
   await page.getByRole("button", { name: "Restore parent draft", exact: true }).click();
   await page.getByRole("button", { name: "Review available results" }).click();
+  await page.getByRole("button", { name: "Edit identity", exact: true }).click();
   await expect(page.locator('[name="candidate.id"]')).toHaveValue("hero");
   await page.locator('[name="candidate.name"]').fill("Reviewed Ilyra");
   await expect.poll(() => server.saves()).toBe(1);
@@ -162,11 +164,10 @@ test("character lost-session recovery explicitly restores parent and returns the
   await page.reload();
   await page.getByRole("button", { name: "Restore parent draft", exact: true }).click();
   await page.getByRole("button", { name: "Review available results" }).click();
-  await expect(page.locator('[name="candidate.name"]')).toHaveValue("Reviewed Ilyra");
-  for (let index = 0; index < 4; index += 1) await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.locator("[data-character-review]")).toContainText("Reviewed Ilyra");
   await page.getByRole("button", { name: "Add to world draft" }).click();
   await expect(page).toHaveURL(/\/app\/worlds\/new\?authoringCharacter=character-job/);
-  await page.getByRole("button", { name: "Restore reviewed parent draft" }).click();
+  await expect(page.getByText("Reviewed character added to this draft. Review the world before saving.", { exact: true })).toBeVisible();
   await expect(page.locator("[data-character-roster-item]")).toHaveCount(2);
   await expect(page.locator("[data-character-roster]")).toContainText("Reviewed Ilyra");
   await expect(page.locator("[data-character-roster]")).toContainText("Companion");
@@ -201,7 +202,7 @@ test("character actual Generate submits a durable proposal with stable retry ide
   await page.getByRole("button", { name: "Generate character", exact: true }).click();
   await expect(page).toHaveURL(/authoringJob=character-job/);
   await page.getByRole("button", { name: "Review available results" }).click();
-  await expect(page.locator('[name="candidate.name"]')).toHaveValue("Ilyra");
+  await expect(page.locator("[data-character-review]")).toContainText("Ilyra");
   expect(attempts).toHaveLength(2); expect(attempts[0]).toBe(attempts[1]); expect(legacyCalls).toBe(0); expect(server.submissions).toHaveLength(1);
 });
 
@@ -330,7 +331,7 @@ test(`P2-F4 normal editor launch preserves parent edits and allows durable apply
   await page.locator('[data-character-prompt="compact"]').fill("A patient guide");
   await page.getByRole("button", { name: "Generate character", exact: true }).click();
   await page.getByRole("button", { name: "Review available results", exact: true }).click();
-  for (let index = 0; index < 4; index += 1) await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.locator("[data-character-review]")).toBeVisible();
   await page.getByRole("button", { name: "Add to world draft", exact: true }).click();
   await expect(page).toHaveURL(/authoringCharacter=character-job/);
   const apply = page.getByRole("button", { name: "Apply reviewed character", exact: true }); await expect(apply).toBeVisible();

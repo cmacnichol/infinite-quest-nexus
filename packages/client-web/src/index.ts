@@ -130,6 +130,7 @@ export { createActivityApi, type ActivityApi } from "./activity-api.js";
 export { createIndexedDbActivityCache, type IndexedDbActivityCacheOptions } from "./activity/indexeddb-cache.js";
 export { canonicalActivityApiBase, createActivityVisibilitySource, createActivityConnectivitySource, createActivityTabNotifications } from "./activity/platform.js";
 export * from "./characters-workspace-session.js";
+export { buildReviewQueue, type ReviewItem } from "./cast-review-queue.js";
 export * from "./instance-settings-api.js";
 
 export * from "./device-storage.js";

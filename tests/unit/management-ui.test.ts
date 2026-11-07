@@ -1168,7 +1168,7 @@ describe("Nexus management UI contracts", () => {
 
   it("explains every structured character field and the AI organizer on hover", () => {
     expect(managementHtml).toContain('id="organizeCharacterProfile"');
-    expect(managementHtml).toContain("Manually asks AI to propose evidence-backed field assignments from the current profile, legacy guidance, and world lore");
+    expect(managementHtml).toContain("Asks AI to propose evidence-backed field assignments from the current profile, legacy guidance, and world lore");
     for (const fieldId of [
       "characterName", "characterGuidance", "characterAliases", "characterPronouns",
       "characterRole", "characterBackground", "characterPersonality", "characterMotivations",
@@ -1483,6 +1483,83 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('elements.infiniteWorldsCharacterField.classList.add("hidden");');
   });
 
+  it("lets organization use notes before story fields are completed, while save targets missing fields", () => {
+    const elements = { characterName: { value: "Mira" }, characterGuidance: { value: "" }, characterRole: {}, characterUnclassifiedNotes: {} };
+    const profile = { story: { role: "" }, unclassifiedNotes: "A patient guide" };
+    const { characterFromForm } = managementFunctions<{ characterFromForm: (options?: { forOrganization: boolean }) => unknown }>(["characterFromForm"], {
+      elements, profileFromForm: () => profile, profileHasGuidance: () => false,
+      characterModalWorkingCharacter: { id: "mira", extension: "preserved" }, opaqueCharacterId: () => "new", characterRowsFromForm: () => []
+    });
+    expect(characterFromForm({ forOrganization: true })).toMatchObject({ name: "Mira", profile, extension: "preserved" });
+    try { characterFromForm(); throw new Error("Expected validation"); } catch (error) {
+      expect(error).toMatchObject({ control: elements.characterRole });
+    }
+    elements.characterName.value = "";
+    try { characterFromForm(); throw new Error("Expected validation"); } catch (error) {
+      expect(error).toMatchObject({ control: elements.characterName });
+    }
+    elements.characterName.value = "Mira";
+    profile.unclassifiedNotes = "   ";
+    expect(() => characterFromForm({ forOrganization: true })).toThrow(/notes|source/i);
+  });
+
+  it("shows manual fallback when text generation is unavailable and hides it for campaign editing", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, HTMLInputElement & HTMLDetailsElement>;
+    for (const [scope, provider, fallbackVisible, generatorVisible] of [
+      ["world", null, true, false], ["world", {}, false, true], ["campaign", null, false, false]
+    ] as const) {
+      const { updateCharacterGeneratorAvailability } = managementFunctions<{ updateCharacterGeneratorAvailability: () => boolean }>(["updateCharacterGeneratorAvailability"], {
+        elements, characterModalScope: scope, configuredDefaultTextProvider: () => provider, worldAuthorWorkingContent: {}, worldAuthorMode: "create", characterModalBusy: false
+      });
+      expect(updateCharacterGeneratorAvailability()).toBe(generatorVisible);
+      expect(elements.characterGeneratorUnavailable!.classList.contains("hidden")).toBe(!fallbackVisible);
+      expect(elements.generateCharacter!.disabled).toBe(!generatorVisible);
+    }
+  });
+
+  it("keeps AI drafting and notes reachable before optional character detail", () => {
+    const dialog = managementDocument.querySelector("#characterDialog")!;
+    const generator = dialog.querySelector("#characterGenerator")!;
+    expect(generator.parentElement?.id).toBe("characterForm");
+    expect(dialog.querySelector("#characterStoryDetails #characterMotivations")).not.toBeNull();
+    expect(dialog.querySelector("#characterStoryDetails #characterRole")).toBeNull();
+    expect(dialog.querySelector("#characterGeneratorUnavailable")?.textContent).toMatch(/Provider Setup.*manually/s);
+    expect(dialog.querySelector("#characterImportedGuidance")?.tagName).toBe("SECTION");
+  });
+
+  it("asks before generation replaces a filled character and preserves a declined draft", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, HTMLInputElement & HTMLDetailsElement>;
+    elements.characterName!.value = "Mira";
+    elements.characterGeneratorPrompt!.value = "A traveler";
+    let requested = false;
+    const { generateCharacterFromPrompt } = managementFunctions<{ generateCharacterFromPrompt: () => Promise<void> }>(["generateCharacterFromPrompt"], {
+      elements, worldAuthorBusy: false, characterModalScope: "world", worldAuthorWorkingContent: {}, characterModalBusy: false,
+      configuredDefaultTextProvider: () => ({}), window: { confirm: () => false }, CHARACTER_PROFILE_FIELDS: {},
+      profileFromForm: () => ({}), setCharacterModalControls: () => {}, setCharacterStatus: () => {},
+      worldContentFromForm: () => ({}), editingCharacterId: "", api: async () => { requested = true; return {}; }
+    });
+    await generateCharacterFromPrompt();
+    expect(requested).toBe(false);
+    expect(elements.characterName!.value).toBe("Mira");
+  });
+
+  it("hides campaign mechanics as a complete disclosure", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, HTMLInputElement & HTMLDetailsElement>;
+    elements.characterName!.focus = () => {};
+    const { openCampaignCharacterDialog } = managementFunctions<{ openCampaignCharacterDialog: () => Promise<void> }>(["openCampaignCharacterDialog"], {
+      elements, selectedCampaign: { id: "campaign" }, api: async () => ({ name: "Mira", profile: {} }),
+      characterModalScope: "world", campaignCharacterProfileRevision: 0, editingCharacterId: "",
+      characterProfileOrganizationResult: null, characterProfileOrganizationApplied: false,
+      populateCharacterForm: () => {}, setCharacterStatus: () => {}, setCharacterModalControls: () => {}, openEditDialog: () => {},
+      campaignMessage: (message: string) => { throw new Error(message); }
+    });
+    await openCampaignCharacterDialog();
+    expect(elements.characterMechanics!.classList.contains("hidden")).toBe(true);
+  });
+
   it("uses one reviewed character modal for adding, editing, generating, and deleting", () => {
     expect(managementHtml.match(/id="characterDialog"/g)).toHaveLength(1);
     expect(managementHtml).toContain('id="characterForm"');
@@ -1512,8 +1589,8 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("async function saveCharacterFromModal(event)");
     expect(managementScript).toContain("async function deleteCharacterFromModal()");
     expect(managementScript).toContain("Published versions and existing campaigns remain unchanged.");
-    expect(managementScript).toContain("if (!name) throw new Error(\"Enter a character name.\");");
-    expect(managementScript).toContain("if (!profileHasGuidance(profile) && !characterText)");
+    expect(managementScript).toContain("error.control = elements.characterName;");
+    expect(managementScript).toContain("error.control = forOrganization ? elements.characterUnclassifiedNotes : elements.characterRole;");
     expect(managementScript).toContain("must be a whole number from 1 to 99");
   });
 
@@ -1527,7 +1604,7 @@ describe("Nexus management UI contracts", () => {
     expect(mechanics.querySelector("#characterTrackers")).not.toBeNull();
     expect(imported.querySelector("#characterGuidance")?.hasAttribute("readonly")).toBe(true);
     expect(imported.querySelector("#characterUnclassifiedNotes")).not.toBeNull();
-    expect(imported.querySelector("#organizeCharacterProfile")?.textContent).toContain("manual");
+    expect(imported.querySelector("#organizeCharacterProfile")?.textContent).toContain("Organize notes with AI");
     expect(characterDialog.querySelector(".character-playable-context")?.textContent).toContain("Playable character");
     expect(managementDocument.querySelector("#world-author-overview #worldTitle")).not.toBeNull();
     expect(managementDocument.querySelector("#worldGenreToneDisclosure #worldGenre")).not.toBeNull();

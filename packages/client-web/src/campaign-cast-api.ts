@@ -10,6 +10,7 @@ import { castSnapshotSchema, castDetailSchema, castListQuerySchema, createCastCh
   type CastListQuery, type CreateCastCharacter, type EditCastCharacter } from "@infinite-quest/contracts";
 import { createNexusHttpClient, type NexusHttpClientOptions } from "./http-client.js";
 import { validatedRequest } from "./api-client.js";
+import { readerTurnResponseSchema, readerTurnNumberSchema } from "@infinite-quest/contracts";
 import { castBackfillRequestSchema, castBackfillPreviewSchema, castBackfillProgressSchema, castBackfillRetrySchema,
   type CastBackfillRequest, type CastBackfillRetry } from "@infinite-quest/contracts";
 
@@ -23,6 +24,9 @@ export function createCampaignCastApi(options: NexusHttpClientOptions = {
   const http = createNexusHttpClient(options);
   const pathFor = (campaignId: string) => `/campaigns/${encodeURIComponent(campaignId)}/cast`;
   return {
+    sourceTurn: (campaignId: string, turnNumber: number) => http.request({ method: "GET",
+      path: `/campaigns/${encodeURIComponent(campaignId)}/reader/turns/${readerTurnNumberSchema.parse(turnNumber)}?sourceHash=1`,
+      responseSchema: readerTurnResponseSchema.extend({ sourceHash: z.string().regex(/^[a-f0-9]{64}$/u).optional() }) }),
     async contextPreview(campaignId: string, input: Partial<CastContextPreviewRequest> = {}, signal?: AbortSignal) {
       const value = castContextPreviewRequestSchema.parse(input);
       const search = new URLSearchParams({ view: "characters", query: value.query, inputMode: value.inputMode });

@@ -176,8 +176,8 @@ importers:
         specifier: workspace:*
         version: link:packages/contracts
       '@sogni-ai/sogni-client':
-        specifier: 5.23.0
-        version: 5.23.0
+        specifier: 5.70.0
+        version: 5.70.0
       archiver:
         specifier: ^8.0.0
         version: 8.0.0
@@ -186,10 +186,10 @@ importers:
         version: 5.12.5
       node-pg-migrate:
         specifier: 9.0.0
-        version: 9.0.0(@types/pg@8.23.1)(pg@8.23.0)
+        version: 9.0.0(@types/pg@8.23.1)(pg@8.23.1)
       pg:
-        specifier: ^8.23.0
-        version: 8.23.0
+        specifier: ^8.23.1
+        version: 8.23.1
       photoswipe:
         specifier: ^5.4.4
         version: 5.4.4
@@ -206,8 +206,8 @@ importers:
         specifier: ^0.35.5
         version: 0.35.5(@types/node@26.4.0)
       undici:
-        specifier: ^8.11.2
-        version: 8.11.2
+        specifier: ^8.12.3
+        version: 8.12.3
       unzipper:
         specifier: 0.12.5
         version: 0.12.5
@@ -240,8 +240,8 @@ importers:
         specifier: ^3.10.2
         version: 3.10.2
       linkedom:
-        specifier: 0.18.13
-        version: 0.18.13
+        specifier: 0.18.14
+        version: 0.18.14
       tsx:
         specifier: ^4.23.12
         version: 4.23.12
@@ -277,8 +277,8 @@ importers:
   apps/web-next:
     dependencies:
       '@awesome.me/webawesome':
-        specifier: 3.12.0
-        version: 3.12.0(@floating-ui/utils@0.2.12)(@types/node@26.4.0)(@types/react@19.2.18)
+        specifier: 3.14.0
+        version: 3.14.0(@floating-ui/utils@0.2.12)(@types/node@26.4.0)(@types/react@19.2.18)
       '@infinite-quest/client-core':
         specifier: workspace:*
         version: link:../../packages/client-core
@@ -333,6 +333,9 @@ importers:
         version: 4.4.3
 
 packages:
+
+  '@acemir/cssom@0.9.32':
+    resolution: {integrity: sha512-OijrAUu7rrJhSIoHNg6LMPS5e344nwUHA+1EFYYjrh64D+GmytUsfBQjci45TjT+rd5Spsp8B5xsZDT+TgyXXQ==}
 
   '@adraffy/ens-normalize@1.11.1':
     resolution: {integrity: sha512-nhCBV3quEgesuf7c7KYfperqSS14T8bYuvJ8PcLJp6znkZpFc0AuW4qBtr8eKVyPPe/8RSr7sglCWPU5eaxwKQ==}
@@ -416,8 +419,8 @@ packages:
   '@antfu/install-pkg@1.1.0':
     resolution: {integrity: sha512-MGQsmw10ZyI+EJo45CdSER4zEb+p31LpDAFp2Z3gkSd1yqVZGi0Ebx++YTEMonJy4oChEMLsxZ64j8FH6sSqtQ==}
 
-  '@awesome.me/webawesome@3.12.0':
-    resolution: {integrity: sha512-cO/vSvlyZqiki1upynxpk9q2N48U2+nflIj40OtCKYOs6ZXa4zXhW6+asXKOfeNw1AnD4nzsSIdZSt/Ti9QONA==}
+  '@awesome.me/webawesome@3.14.0':
+    resolution: {integrity: sha512-m5rTGLK/iOvaVFOkYxRjiBOp8lwrBap5tv+zz1gsqLgAxlfwdvElB7BVGjs+Lf9gDps7bWRPTkG0FwZk40mk2A==}
     engines: {node: '>=14.17.0'}
 
   '@babel/helper-string-parser@7.29.7':
@@ -1341,12 +1344,12 @@ packages:
   '@shoelace-style/localize@3.2.3':
     resolution: {integrity: sha512-pWoZywizMilenLfQcpE9bjaqi7WKiQXJB42cxvmSPwYS76U776wJ7B5QQ0P28yVit1vpHuFZzq1CtfVFv32jaQ==}
 
-  '@sogni-ai/sogni-client@5.23.0':
-    resolution: {integrity: sha512-YUDIJj+BFz9nqZYNe109vbthGYyDLfSRp3no/zH09rvv+dC430IEESPqhuRk0SBqWEGtysrZZ3D7F91t/kebnw==}
+  '@sogni-ai/sogni-client@5.70.0':
+    resolution: {integrity: sha512-tkg3tfrgMnmg/zXIo8lTuXJBAoFtfjI9AcdZqYrHdXdrz+gcHwr2uT0XvmF0RkmrTXwfy8DBi5PTb/QznOHCIA==}
     engines: {node: '>=22'}
 
-  '@sogni-ai/sogni-protocol@1.0.0-alpha.30':
-    resolution: {integrity: sha512-GUfjHhSalcJ5uOqP9010jeumYZSjjp6ZEHRHfVy/52jL0bNlxvk/U0f9Lmy0nhEO4iWeYlzWPhcWUvg4VJ8+Mg==}
+  '@sogni-ai/sogni-protocol@1.0.0-alpha.55':
+    resolution: {integrity: sha512-gjZWpzCwpuZuQ1XJtW1ffqyWq+96ixginK2wOs5sUm+9mlQoQuI84MSKRTJkiu8j5VknNPczHwH/ev7PyDNwSw==}
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
@@ -1969,9 +1972,6 @@ packages:
     resolution: {integrity: sha512-DH0Bqq3DNp5tdOReuNyAA+Ev4Y2GS5FMbZpeTLP6C4CDi0h5nL0BmUPChXw3o/qbHLDWHl49sbNqQVY7bMSDdw==}
     engines: {node: '>=20.19.0'}
 
-  cssom@0.5.0:
-    resolution: {integrity: sha512-iKuQcq+NdHqlAcwUY0o/HL69XQrUaQdMjmStJ8JFmUaiiQErlhrmuigkg/CU4E2J0IyUKUrMAgl36TvN67MqTw==}
-
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
 
@@ -2558,8 +2558,8 @@ packages:
     resolution: {integrity: sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==}
     engines: {node: '>= 12.0.0'}
 
-  linkedom@0.18.13:
-    resolution: {integrity: sha512-ES/o9qotMpzpN2MHs+Iq/JcVoOj8Fa5wiQYrTdFpvAnwXL0g66XHHUc9WUMk6nAlBtGsFQ24ne+SYnvnaQ2FSw==}
+  linkedom@0.18.14:
+    resolution: {integrity: sha512-BRUnkOm4YR5vo+qI3j0EbungB0vZPSCue5AdnTQRaxAGSbsOZiBFRO0rh4zlo8qXUhli8pxvnpEXDklMnlq2Rg==}
     engines: {node: '>=16'}
     peerDependencies:
       canvas: '>= 2'
@@ -2645,11 +2645,6 @@ packages:
   mitt@3.0.1:
     resolution: {integrity: sha512-vKivATfr97l2/QBCYAkXYDbrIWPM2IIKEl7YPhjCvKlG3kE2gm+uBo6nEXK3M5/Ffh/FLpKExzOQ3JJoJGFKBw==}
 
-  nanoid@3.3.16:
-    resolution: {integrity: sha512-bzlKTyNJ7+LdGIIwy8ijFpIqEQIvafahV7eYykJ8Cvh42EdJeODoJ6gUJXpQJvej1BddH8OqTXZNE/KfbWAu8Q==}
-    engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
-    hasBin: true
-
   nanoid@3.3.19:
     resolution: {integrity: sha512-Y2tUNy4ouw6tq5oDSKeQYGOyhkUBhNOcGV/02KC+6kd9eDGqdZd++mjMiIDilrBYvjEnCYvVtsuHCuP+okSfug==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
@@ -2730,11 +2725,11 @@ packages:
   perfect-debounce@1.0.0:
     resolution: {integrity: sha512-xCy9V055GLEqoFaHoC1SoLIaLmWctgCUaBaWxDZ7/Zx4CTyX7cJQLJOok/orfjZAh9kEYpjJa4d0KcJmCbctZA==}
 
-  pg-cloudflare@1.4.0:
-    resolution: {integrity: sha512-Vo7z/6rrQYxpNRylp4Tlob2elzbh+N/MOQbxFVWCxS7oEx6jF53GTJFxK2WWpKuBRkmiin4Mt+xofFDjx09R0A==}
+  pg-cloudflare@1.4.1:
+    resolution: {integrity: sha512-6PQbsFWZcp9EmJEwy5cGQ2La+AMWpP46lgbb8X+U/XsHIUweYDNCpeuKck5RxL2MdVFi7krbbEi5nX4Zh7JhrQ==}
 
-  pg-connection-string@2.14.0:
-    resolution: {integrity: sha512-XwWDGcLRGCXAR8F/AM5bG7Q+A3Wm2s6QeEjlOKZLlH3UYcguiqCWKyWXVag5TLTIjR7oOJUY8kcADaZgWPyLeg==}
+  pg-connection-string@2.14.1:
+    resolution: {integrity: sha512-qR3kGNPBLpCNtz0evbKA0Y/MRFXwSSdT+pTJvYp/bXTcReZbvX1kzF0IyTc1QnxqF7AZbOeBhNL8R5mYQZV/MA==}
 
   pg-int8@1.0.1:
     resolution: {integrity: sha512-WCtabS6t3c8SkpDBUlb1kjOs7l66xsGdKpIPZsg4wR+B3+u9UAum2odSsF9tnvxg80h4ZxLWMy4pRjOsFIqQpw==}
@@ -2748,12 +2743,15 @@ packages:
   pg-protocol@1.16.0:
     resolution: {integrity: sha512-sILXutLVjCLjcDuOmvhX5e2Z4cS5qG/6Bu3VkpFwdf/633ElGLpEh9bgmuI5I4sqKqkifQiGyiCcx1HdtrK7tg==}
 
+  pg-protocol@1.16.1:
+    resolution: {integrity: sha512-p9VOFMiHB/ZbJATetbg+99PxssTVSQRnyuPSQ67mN1+1KBOjZaZ83ZQzltnxPhJwSsC3nwVjJ10DVJlerbFzLg==}
+
   pg-types@2.2.0:
     resolution: {integrity: sha512-qTAAlrEsl8s4OiEQY69wDvcMIdQN6wdz5ojQiOy6YRMuynxenON0O5oCpJI6lshc6scgAY8qvJ2On/p+CXY0GA==}
     engines: {node: '>=4'}
 
-  pg@8.23.0:
-    resolution: {integrity: sha512-Ip2EQCngowJLGOfCwkFhPXU7/ljlhn6Rxlmy4XYfL2Y+vyRM59+8uR2xqRWKdYmbXmxCFOAmKxBuSUCdF34qLg==}
+  pg@8.23.1:
+    resolution: {integrity: sha512-aL96AHANtWjPLDOLqnhx+ngp9+UK7ETEU8VJrDCGvsSSi/mGLcWYsS6Herg7lmaBJe4uwrfqsa7gTEFaSizDoQ==}
     engines: {node: '>= 16.0.0'}
     peerDependencies:
       pg-native: '>=3.0.1'
@@ -3119,8 +3117,8 @@ packages:
   undici-types@8.3.0:
     resolution: {integrity: sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==}
 
-  undici@8.11.2:
-    resolution: {integrity: sha512-u4UB2/IrKdU6lFxumHmmo1a3fCQO5tzQllRorfoRS63txhrB7xTpSn1PftwC4qEHkOaqP95fCWW4lJzwErwzhQ==}
+  undici@8.12.3:
+    resolution: {integrity: sha512-+fdndUTwBP86cVjihTp21hZHo7d6oj1c/47XPA3lL8mM0XHs+C4EkcjmgRsFnFk2f/UONGDy9ItBItmXsLOQHw==}
     engines: {node: '>=22.19.0'}
 
   unist-util-is@6.0.1:
@@ -3367,6 +3365,8 @@ packages:
 
 snapshots:
 
+  '@acemir/cssom@0.9.32': {}
+
   '@adraffy/ens-normalize@1.11.1': {}
 
   '@algolia/abtesting@1.22.0':
@@ -3486,7 +3486,7 @@ snapshots:
       package-manager-detector: 1.7.0
       tinyexec: 1.3.0
 
-  '@awesome.me/webawesome@3.12.0(@floating-ui/utils@0.2.12)(@types/node@26.4.0)(@types/react@19.2.18)':
+  '@awesome.me/webawesome@3.14.0(@floating-ui/utils@0.2.12)(@types/node@26.4.0)(@types/react@19.2.18)':
     dependencies:
       '@ctrl/tinycolor': 4.1.0
       '@floating-ui/dom': 1.8.0
@@ -4148,10 +4148,10 @@ snapshots:
 
   '@shoelace-style/localize@3.2.3': {}
 
-  '@sogni-ai/sogni-client@5.23.0':
+  '@sogni-ai/sogni-client@5.70.0':
     dependencies:
       '@lukeed/uuid': 2.0.1
-      '@sogni-ai/sogni-protocol': 1.0.0-alpha.30
+      '@sogni-ai/sogni-protocol': 1.0.0-alpha.55
       '@types/js-cookie': 3.0.6
       '@types/lodash': 4.17.24
       '@types/ws': 8.18.1
@@ -4165,7 +4165,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@sogni-ai/sogni-protocol@1.0.0-alpha.30': {}
+  '@sogni-ai/sogni-protocol@1.0.0-alpha.55': {}
 
   '@standard-schema/spec@1.1.0': {}
 
@@ -4766,8 +4766,6 @@ snapshots:
 
   css-what@8.0.0: {}
 
-  cssom@0.5.0: {}
-
   csstype@3.2.3: {}
 
   cytoscape-cose-bilkent@4.1.0(cytoscape@3.34.0):
@@ -5188,9 +5186,9 @@ snapshots:
     dependencies:
       reusify: 1.1.0
 
-  fdir@6.5.0(picomatch@4.0.5):
+  fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
-      picomatch: 4.0.5
+      picomatch: 4.0.7
 
   fetch-blob@3.2.0:
     dependencies:
@@ -5406,10 +5404,10 @@ snapshots:
       lightningcss-win32-arm64-msvc: 1.33.0
       lightningcss-win32-x64-msvc: 1.33.0
 
-  linkedom@0.18.13:
+  linkedom@0.18.14:
     dependencies:
+      '@acemir/cssom': 0.9.32
       css-select: 7.0.0
-      cssom: 0.5.0
       html-escaper: 3.0.3
       htmlparser2: 10.1.0
       uhyphen: 0.2.0
@@ -5514,8 +5512,6 @@ snapshots:
 
   mitt@3.0.1: {}
 
-  nanoid@3.3.16: {}
-
   nanoid@3.3.19: {}
 
   nanoid@5.1.16: {}
@@ -5530,11 +5526,11 @@ snapshots:
 
   node-int64@0.4.0: {}
 
-  node-pg-migrate@9.0.0(@types/pg@8.23.1)(pg@8.23.0):
+  node-pg-migrate@9.0.0(@types/pg@8.23.1)(pg@8.23.1):
     dependencies:
       glob: 13.0.6
       jiti: 2.7.0
-      pg: 8.23.0
+      pg: 8.23.1
       yargs: 18.0.0
     optionalDependencies:
       '@types/pg': 8.23.1
@@ -5581,18 +5577,20 @@ snapshots:
 
   perfect-debounce@1.0.0: {}
 
-  pg-cloudflare@1.4.0:
+  pg-cloudflare@1.4.1:
     optional: true
 
-  pg-connection-string@2.14.0: {}
+  pg-connection-string@2.14.1: {}
 
   pg-int8@1.0.1: {}
 
-  pg-pool@3.14.0(pg@8.23.0):
+  pg-pool@3.14.0(pg@8.23.1):
     dependencies:
-      pg: 8.23.0
+      pg: 8.23.1
 
   pg-protocol@1.16.0: {}
+
+  pg-protocol@1.16.1: {}
 
   pg-types@2.2.0:
     dependencies:
@@ -5602,15 +5600,15 @@ snapshots:
       postgres-date: 1.0.7
       postgres-interval: 1.2.0
 
-  pg@8.23.0:
+  pg@8.23.1:
     dependencies:
-      pg-connection-string: 2.14.0
-      pg-pool: 3.14.0(pg@8.23.0)
-      pg-protocol: 1.16.0
+      pg-connection-string: 2.14.1
+      pg-pool: 3.14.0(pg@8.23.1)
+      pg-protocol: 1.16.1
       pg-types: 2.2.0
       pgpass: 1.0.5
     optionalDependencies:
-      pg-cloudflare: 1.4.0
+      pg-cloudflare: 1.4.1
 
   pgpass@1.0.5:
     dependencies:
@@ -5677,7 +5675,7 @@ snapshots:
 
   postcss@8.5.19:
     dependencies:
-      nanoid: 3.3.16
+      nanoid: 3.3.19
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
@@ -6000,8 +5998,8 @@ snapshots:
 
   tinyglobby@0.2.17:
     dependencies:
-      fdir: 6.5.0(picomatch@4.0.5)
-      picomatch: 4.0.5
+      fdir: 6.5.0(picomatch@4.0.7)
+      picomatch: 4.0.7
 
   tinyrainbow@3.1.1: {}
 
@@ -6053,7 +6051,7 @@ snapshots:
 
   undici-types@8.3.0: {}
 
-  undici@8.11.2: {}
+  undici@8.12.3: {}
 
   unist-util-is@6.0.1:
     dependencies:

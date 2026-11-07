@@ -62,6 +62,7 @@ const PROHIBITED_ROOT_KEYS = new Set(["user_id", "userId", "owner_user_id", "own
 const ID_FACTORY_RETRIES = 10;
 const MAX_CHARACTER_NAME_LENGTH = 200;
 const MAX_CHARACTER_TEXT_LENGTH = 200_000;
+const STORY_FIELD_KEYS = Object.keys(characterProfileSchema.parse({}).story);
 
 function clone<T>(value: T): T {
   if (value === undefined) return value;
@@ -259,9 +260,11 @@ export function validateCharacterStage(
     issues.push(...profileContractIssues(state, "identity"));
   }
   if (includes("story")) {
-    if (typeof state.candidate.characterText !== "string" || !state.candidate.characterText.trim()) {
-      issues.push(issue("story", "candidate.characterText", "Narrative guidance is required."));
-    } else if (state.candidate.characterText.length > MAX_CHARACTER_TEXT_LENGTH) {
+    const story = recordValue(recordValue(state.candidate.profile).story);
+    if (!STORY_FIELD_KEYS.some(key => typeof story[key] === "string" && story[key].trim())) {
+      issues.push(issue("story", "candidate.profile.story.role", "Add at least one structured story detail."));
+    }
+    if (typeof state.candidate.characterText !== "string" || state.candidate.characterText.length > MAX_CHARACTER_TEXT_LENGTH) {
       issues.push(issue("story", "candidate.characterText", "Narrative guidance must contain 200000 characters or fewer."));
     }
     issues.push(...profileContractIssues(state, "story"));

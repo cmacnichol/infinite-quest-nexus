@@ -290,7 +290,7 @@ export async function discoverSogniSdkModels(profile: TextProviderProfile): Prom
           description: "Mac workers that generate images more slowly at a lower cost."
         }
       ],
-      media: model.media,
+      media: "image" as const,
       ...(imageOptions ? { imageOptions } : {})
     };
   }));

@@ -2871,6 +2871,7 @@ function updateCharacterGeneratorAvailability() {
     && Boolean(worldAuthorWorkingContent)
     && (worldAuthorMode === "create" || selectedWorld?.status !== "archived");
   elements.characterGenerator.classList.toggle("hidden", !available);
+  elements.characterGeneratorUnavailable.classList.toggle("hidden", available || characterModalScope !== "world");
   if (!available) elements.characterGenerator.open = false;
   elements.generateCharacter.disabled = !available || characterModalBusy;
   return available;
@@ -2991,6 +2992,7 @@ function populateCharacterForm(character, readOnly = false) {
   elements.characterDialog.querySelectorAll(".character-advanced-disclosure").forEach((disclosure) => { disclosure.open = false; });
   elements.characterName.value = String(character.name || "");
   elements.characterGuidance.value = String(character.characterText || "");
+  elements.characterGuidanceSource.classList.toggle("hidden", !elements.characterGuidance.value.trim());
   const profile = character.profile || emptyCharacterProfile();
   for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
     const value = profileValue(profile, path);
@@ -3067,11 +3069,14 @@ function openCharacterDialog(characterId = "") {
   elements.deleteCharacter.classList.toggle("hidden", !character || readOnly);
   elements.cancelCharacter.textContent = readOnly ? "Close" : "Cancel";
   elements.characterMechanicsFields.classList.remove("hidden");
+  elements.characterMechanics.classList.remove("hidden");
   elements.characterDialog.querySelector(".eyebrow").textContent = "World Library";
   setCharacterStatus();
   setCharacterModalControls(readOnly);
+  elements.characterGenerator.open = !character && updateCharacterGeneratorAvailability();
   openEditDialog(elements.characterDialog);
-  if (!readOnly) elements.characterName.focus();
+  if (elements.characterGenerator.open) elements.characterGeneratorPrompt.focus();
+  else if (!readOnly) elements.characterName.focus();
 }
 
 function characterRowsFromForm(kind, characterId) {
@@ -3110,13 +3115,21 @@ function characterRowsFromForm(kind, characterId) {
   return result;
 }
 
-function characterFromForm() {
+function characterFromForm({ forOrganization = false } = {}) {
   const name = elements.characterName.value.trim();
   const characterText = elements.characterGuidance.value.trim();
   const profile = profileFromForm();
-  if (!name) throw new Error("Enter a character name.");
-  if (!profileHasGuidance(profile) && !characterText) {
-    throw new Error("Enter targeted character profile details or retain valid legacy guidance.");
+  if (!name) {
+    const error = new Error("Enter a character name. Saving also needs at least one story detail, such as a role or background.");
+    error.control = elements.characterName;
+    throw error;
+  }
+  if (!profileHasGuidance(profile) && !characterText && !(forOrganization && String(profile.unclassifiedNotes || "").trim())) {
+    const error = new Error(forOrganization
+      ? "Add notes, imported source guidance, or story details to organize."
+      : "Add at least one story detail, such as a role or background, before saving.");
+    error.control = forOrganization ? elements.characterUnclassifiedNotes : elements.characterRole;
+    throw error;
   }
   const base = characterModalWorkingCharacter || {};
   const id = String(base.id || opaqueCharacterId());
@@ -4021,6 +4034,9 @@ async function generateCharacterFromPrompt() {
     setCharacterStatus("Configure an enabled default text provider and model before generating a character.", "error");
     return;
   }
+  const hasAuthoredContent = [...elements.characterDialog.querySelectorAll("input, textarea")]
+    .some((control) => control !== elements.characterGeneratorPrompt && String(control.value || "").trim());
+  if (hasAuthoredContent && !window.confirm("Replace the current character fields with an AI draft? Your current entries will be replaced. Nothing is saved until you apply the draft.")) return;
   const previousName = elements.characterName.value;
   const previousGuidance = elements.characterGuidance.value;
   const previousProfile = profileFromForm();
@@ -4104,7 +4120,7 @@ async function organizeCharacterProfile() {
   if ((worldAuthorBusy && characterModalScope === "world") || characterModalBusy) return;
   let character;
   try {
-    character = characterFromForm();
+    character = characterFromForm({ forOrganization: true });
   } catch (error) {
     setCharacterStatus(error.message || String(error), "error");
     const control = error.control;
@@ -4181,6 +4197,7 @@ async function openCampaignCharacterDialog() {
     elements.characterDialogDescription.textContent = "This editable campaign copy can diverge without changing its immutable world-version snapshot.";
     elements.characterGenerator.classList.add("hidden");
     elements.characterMechanicsFields.classList.add("hidden");
+    elements.characterMechanics.classList.add("hidden");
     elements.deleteCharacter.classList.add("hidden");
     elements.saveCharacter.classList.remove("hidden");
     elements.saveCharacter.textContent = "Save campaign profile";

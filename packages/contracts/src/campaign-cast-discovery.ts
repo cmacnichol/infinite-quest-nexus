@@ -61,12 +61,12 @@ export type RetryCastDiscovery = z.infer<typeof retryCastDiscoverySchema>;
 export type CastDiscoveryRetryResult = z.infer<typeof castDiscoveryRetryResultSchema>;
 
 export const castCandidateQuerySchema = z.object({ cursor: z.uuid().optional(), limit: z.coerce.number().int().min(1).max(50).default(20),
-  view: z.enum(["all", "matches", "details"]).default("all") }).strict();
+  view: z.enum(["all", "matches", "details", "review"]).default("all") }).strict();
 export const castPendingCandidateSchema = z.object({ id: z.uuid(), reason: z.string().min(1).max(100), proposal: castDiscoveryCandidateSchema,
-  resolvedCharacterId: z.uuid().optional(),
+  resolvedCharacterId: z.uuid().optional(), suggestedCharacterId: z.uuid().optional(),
   details: z.array(z.object({ observationIndex: z.number().int().min(0).max(19), field: castFieldSchema,
-    value: z.string().max(2000), quote: z.string().max(1000), reason: z.string(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict()).optional(),
-  source: z.object({ turnId: z.uuid(), turnNumber: z.number().int().positive(), narrationRevision: z.number().int().nonnegative() }).strict() }).strict();
+    value: z.string().max(2000), quote: z.string().max(1000), reason: z.string(), canAcceptObservation: z.boolean().optional(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict()).optional(),
+  source: z.object({ turnId: z.uuid(), turnNumber: z.number().int().positive(), narrationRevision: z.number().int().nonnegative(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u).optional() }).strict() }).strict();
 export const castCandidateListSchema = z.object({ revision: z.number().int().nonnegative(), boundary: castBoundarySchema,
   candidates: z.array(castPendingCandidateSchema).max(50), nextCursor: z.uuid().nullable() }).strict();
 export const resolveCastCandidateSchema = z.discriminatedUnion("action", [
@@ -84,8 +84,9 @@ const reviewDetailBase = { ...castWriteBase, expectedCharacterRevision: z.number
   observationIndex: z.number().int().min(0).max(19), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u) };
 export const reviewCastDetailSchema = z.discriminatedUnion("action", [
   z.object({ ...reviewDetailBase, action: z.literal("confirm"), confirmedValue: z.string().max(2000).optional() }).strict(),
+  z.object({ ...reviewDetailBase, action: z.literal("accept") }).strict(),
   z.object({ ...reviewDetailBase, action: z.literal("dismiss") }).strict()
 ]);
-export const reviewCastDetailResultSchema = castWriteResultSchema.extend({ candidateId: z.uuid(), observationIndex: z.number().int().min(0).max(19), disposition: z.enum(["confirm", "dismiss"]) });
+export const reviewCastDetailResultSchema = castWriteResultSchema.extend({ candidateId: z.uuid(), observationIndex: z.number().int().min(0).max(19), disposition: z.enum(["confirm", "accept", "dismiss"]), observationId: z.uuid().optional() });
 export type ReviewCastDetail = z.infer<typeof reviewCastDetailSchema>;
 export type ReviewCastDetailResult = z.infer<typeof reviewCastDetailResultSchema>;

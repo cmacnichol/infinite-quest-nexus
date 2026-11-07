@@ -171,6 +171,7 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
         const job = (await client.query("SELECT * FROM campaign_cast_discovery_jobs WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3 FOR UPDATE",
           [id, scope.campaignId, scope.ownerUserId])).rows[0];
         if (!job) throw new CampaignCastError("cast_not_found");
+        if (job.scan_id && !transactionClient) throw new CampaignCastError("cast_revision_conflict");
         if (job.scan_id && !scansEnabled()) throw new CampaignCastError("cast_discovery_disabled");
         const turn = (await client.query("SELECT turn_number,correction_revision,effective_narration FROM effective_turn_narrations WHERE turn_id=$1 AND campaign_id=$2 AND owner_user_id=$3",
           [job.turn_id, scope.campaignId, scope.ownerUserId])).rows[0];
@@ -310,6 +311,22 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
         await client.query(`UPDATE campaign_cast_discovery_jobs SET status=$2,chunk_ordinal=chunk_ordinal+1,attempt=0,checkpoint=NULL,identity_snapshot=NULL,
           lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,diagnostic_code=NULL,available_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1`,
         [current.id, complete ? "complete" : "queued"]);
+        // A history scan may have stopped on this forward job before the player
+        // retried it from character tracking. Both paths share the published result.
+        if (complete && !live.row.scan_id && current.retryGeneration) {
+          const recovered = await client.query(`UPDATE campaign_cast_scan_sources p SET status='complete'
+            FROM campaign_cast_scans s WHERE s.id=p.scan_id AND s.status IN ('failed','paused','queued','running')
+              AND p.campaign_id=$1 AND p.owner_user_id=$2 AND p.turn_number=$3 AND p.status='failed'
+              AND p.source->>'turnId'=$4 AND (p.source->>'narrationRevision')::int=$5
+              AND (p.source->>'timelineRevision')::int=$6 AND p.source->>'sourceHash'=$7
+            RETURNING p.scan_id`, [current.scope.campaignId, current.scope.ownerUserId, current.source.turnNumber,
+            current.source.turnId, current.source.narrationRevision, current.source.timelineRevision, current.source.sourceHash]);
+          if (recovered.rows.length) {
+            await client.query(`UPDATE campaign_cast_scans SET status='queued',updated_at=clock_timestamp()
+              WHERE id=$1 AND status='failed' AND NOT EXISTS (
+                SELECT 1 FROM campaign_cast_scan_sources WHERE scan_id=$1 AND status='failed')`, [recovered.rows[0].scan_id]);
+          }
+        }
         return complete ? "complete" as const : "next_chunk" as const;
       });
     }

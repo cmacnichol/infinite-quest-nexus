@@ -1127,7 +1127,9 @@ function syncInputState() {
 
   const lastTurnHasAction = turnCount > 0 && Boolean(state.turns[turnCount - 1] && state.turns[turnCount - 1].action);
 
-  const previousDisabled = generationLocked || turnCount === 0 || Boolean(state.readerPinnedTurn) || (curr <= 0 && !state.historyNextCursor);
+  const previousDisabled = generationLocked || turnCount === 0 || (state.readerPinnedTurn
+    ? currentViewTurnNumber() <= 1
+    : curr <= 0 && !state.historyNextCursor);
   const nextDisabled = generationLocked || turnCount === 0 || isLatest;
   if (btnPrev) {
     btnPrev.disabled = previousDisabled;
@@ -4046,7 +4048,11 @@ async function loadOlderTurnPage() {
 async function goToPrevious() {
   const curr = viewedTurnIndex();
   if (state.busy || state.turns.length === 0) return;
-  if (state.readerPinnedTurn) return;
+  if (state.readerPinnedTurn) {
+    const target = currentViewTurnNumber() - 1;
+    if (target >= 1) return loadExactHistoryTurn(target);
+    return;
+  }
   if (curr <= 0) {
     if (!await loadOlderTurnPage()) return;
     const viewedIndex = viewedTurnIndex();
