@@ -65,7 +65,7 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
       } else {
         const host = node(document, "div", undefined, "settings-campaign-editor");
         content.append(host);
-        ownerEditor = mountCampaignSettings(host, campaigns, route.campaignId);
+        ownerEditor = mountCampaignSettings(host, campaigns, route.campaignId, async signal => (await ownerApi.campaigns.list(signal)).campaigns);
       }
       return;
     }

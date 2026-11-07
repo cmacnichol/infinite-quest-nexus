@@ -5,10 +5,12 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
-import { apiProviderGraph } from "../helpers/provider-application-fixtures.js";
+import { apiProviderGraph, createProvider } from "../helpers/provider-application-fixtures.js";
 import { inertStorageServerOptions } from "../helpers/build-server-options.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { createApiWorldCampaignApplication } from "../../services/runtime/src/world-campaign-composition.js";
+import { getIllustrationConfig, setIllustrationConfig, enqueueIllustration } from "../../services/runtime/src/illustration-image-job-adapter.js";
+import { illustrationConfigSchema, illustrationRequestSchema } from "../../packages/contracts/src/generation.js";
 import { bootstrap } from "../helpers/instance-settings-runtime.js";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -23,13 +25,44 @@ const url = process.env.TEST_DATABASE_URL;
       config:{...bootstrap(),role:"api",databaseUrl:url!,storyMemoryCapability:"r1",storyMemoryEnforceEnabled:false}}));
   });
   afterAll(async () => {await app?.close();await pool?.end();});
+  async function make() {
+    const story = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"),"utf8"));
+    story.world.title = "Campaign Settings " + crypto.randomUUID();
+    return importLegacyStory(pool,storyImportRequestSchema.parse({sourceName:"fixture.story",story}));
+  }
+
+  async function imageProvider(model: string) {
+    return createProvider(pool,{
+      name: model + crypto.randomUUID(), providerRole: "image", providerType: "openai_compatible",
+      baseUrl: "http://127.0.0.1:9811", defaultModel: model, temperature:0, contextWindowTokens:32768,
+      maxOutputTokens:4096, enabled:true, configuration:{}
+    },"campaign-settings-fixture-secret");
+  }
+  it("setting and clearing a direct image assignment preserves an explicit segment profile, model and image count", async () => {
+    const {campaignId} = await make();
+    const segment = await imageProvider("segment-model");
+    const direct = await imageProvider("direct-model");
+    const original = await setIllustrationConfig(pool,campaignId,illustrationConfigSchema.parse({
+      sourcePolicy:"generate_only", providerProfileId:segment.id, model:"explicit-segment-model", imagesPerSegment:2
+    }));
+    for (const imageProviderProfileId of [direct.id, null]) {
+      const response = await app.inject({method:"PATCH",url:"/api/v1/campaigns/"+campaignId,payload:{imageProviderProfileId}});
+      expect(response.statusCode).toBe(200);
+      expect(await getIllustrationConfig(pool,campaignId)).toEqual(original);
+    }
+  });
+  it("resolves an assigned image profile for a direct job before any segment settings exist", async () => {
+    const {campaignId} = await make();
+    const direct = await imageProvider("assigned-direct-model");
+    const response = await app.inject({method:"PATCH",url:"/api/v1/campaigns/"+campaignId,payload:{imageProviderProfileId:direct.id}});
+    expect(response.statusCode).toBe(200);
+    expect((await getIllustrationConfig(pool,campaignId)).updatedAt).toBeNull();
+    const turn = await pool.query("SELECT id FROM turns WHERE campaign_id=$1 ORDER BY turn_number LIMIT 1",[campaignId]);
+    const job = await enqueueIllustration(pool,turn.rows[0].id,illustrationRequestSchema.parse({prompt:"Lanterns glow beneath the stone arch."}),apiProviderGraph(pool,"campaign-settings-fixture-secret").illustration);
+    expect(job).toMatchObject({providerProfileId:direct.id, model:"assigned-direct-model"});
+  });
   it("updates one campaign, enforces server limits, and preserves the profile, other campaigns and immutable world", async () => {
     const a = await initialOwnerId(pool);
-    const make = async () => {
-      const story = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"),"utf8"));
-      story.world.title = "Campaign Settings " + crypto.randomUUID();
-      return importLegacyStory(pool,storyImportRequestSchema.parse({sourceName:"fixture.story",story}));
-    };
     const first = await make();
     const second = await make();
     const b = (await pool.query("INSERT INTO users(display_name) VALUES('Other reader') RETURNING id")).rows[0].id;

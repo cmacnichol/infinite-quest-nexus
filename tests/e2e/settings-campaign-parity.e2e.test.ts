@@ -10,6 +10,7 @@ const foreign = "99999999-9999-4999-8999-999999999999";
 const rows = [fixture.campaigns.campaigns[0]!, {...fixture.campaigns.campaigns[0]!, id:b, title:"Second story"}];
 const level = {level:"standard", reviewMode:"off", availableLevels:["off","standard","max"]};
 const config = {enabled:false, providerProfileId:null, model:"fixture", batchSize:16, documentPrefix:null, queryPrefix:null, retrievalImplementation:"legacy_hybrid", retrievalShadowEnabled:false};
+const profileRow = {baseUrl:"https://fixture.invalid",providerType:"openai_compatible",defaultModel:"fixture",contextWindowTokens:32000,maxOutputTokens:2048,temperature:1,requestTimeoutMs:30000,configuration:{},enabled:true,isDefault:true,healthStatus:"unknown",consecutiveFailures:0,lastHealthCheckAt:null,lastHealthError:null,hasApiKey:false,createdAt:"2026-11-01T00:00:00.000Z",updatedAt:"2026-11-01T00:00:00.000Z"};
 async function setup(page: Page) {
   const writes: {path:string; body:Record<string, unknown>}[] = [];
   const reads: string[] = [];
@@ -106,9 +107,8 @@ test("keeps inherited assignments distinct from explicit campaign choices and ex
   const textId = "44444444-4444-4444-8444-444444444444";
   const imageId = "55555555-5555-4555-8555-555555555555";
   const secondImage = "66666666-6666-4666-8666-666666666666";
-  const row = {baseUrl:"https://fixture.invalid",providerType:"openai_compatible",defaultModel:"fixture",contextWindowTokens:32000,maxOutputTokens:2048,temperature:1,requestTimeoutMs:30000,configuration:{},enabled:true,isDefault:true,healthStatus:"unknown",consecutiveFailures:0,lastHealthCheckAt:null,lastHealthError:null,hasApiKey:false,createdAt:"2026-11-01T00:00:00.000Z",updatedAt:"2026-11-01T00:00:00.000Z"};
   await page.route("**/api/v1/providers",route=>route.fulfill({json:{providers:[
-    {...row,id:textId,name:"House text",providerRole:"text"}, {...row,id:imageId,name:"House image",providerRole:"image"}, {...row,id:secondImage,isDefault:false,name:"Segment art",providerRole:"image"}
+    {...profileRow,id:textId,name:"House text",providerRole:"text"}, {...profileRow,id:imageId,name:"House image",providerRole:"image"}, {...profileRow,id:secondImage,isDefault:false,name:"Segment art",providerRole:"image"}
   ]}}));
   let inventories=0;
   await page.route("**/providers/"+imageId+"/models*",route=>{inventories++;return route.fulfill({json:{models:[{id:"image-model",displayName:"Image model"}]}});});
@@ -206,4 +206,89 @@ test("saves Chronicle retrieval independently and reports the queued indexing jo
   expect(saved).toMatchObject({queryPrefix:"question:",retrievalImplementation:"chunked_hybrid",model:"fixture",enabled:false});
   expect(writes).toEqual([]);
   await expect(page.getByRole("link",{name:"Chronicle indexing and context preview"})).toHaveAttribute("href","/app/campaigns/"+a+"/chronicle");
+});
+
+test("returning to A reloads a committed save whose response was delayed during A to B", async ({page}) => {
+  await setup(page);
+  let length = rows[0]!.storyLengthProfile;
+  let committed = false;
+  let release!: () => void;
+  await page.route("**/api/v1/campaigns", route => route.fulfill({json:{campaigns:[{...rows[0],storyLengthProfile:length},rows[1]]}}));
+  await page.route("**/api/v1/campaigns/"+a, async route => {
+    length = route.request().postDataJSON().storyLengthProfile;
+    committed = true;
+    await new Promise<void>(resolve => {release=resolve;});
+    await route.fulfill({json:{...rows[0],storyLengthProfile:length}}).catch(()=>undefined);
+  });
+  await page.goto(url(a));
+  const picker = page.getByRole("combobox",{name:"Campaign",exact:true});
+  await page.getByLabel("Response length").selectOption("extended");
+  await page.getByRole("button",{name:"Save story behavior"}).click();
+  await expect.poll(()=>committed).toBe(true);
+  page.once("dialog",dialog=>dialog.accept());
+  await picker.selectOption(b);
+  await expect(page.getByLabel("Art style",{exact:true})).toHaveValue("B watercolor");
+  await picker.selectOption(a);
+  release();
+  await expect(page.getByLabel("Response length")).toHaveValue("extended");
+  await expect(page.getByRole("button",{name:"Save story behavior"})).toBeDisabled();
+});
+
+test("assignment saves refresh inherited provider options, image counts and inventories while retaining section drafts", async ({page})=>{
+  const {writes} = await setup(page);
+  const img1 = "44444444-4444-4444-8444-444444444440";
+  const img2 = "44444444-4444-4444-8444-444444444441";
+  const txt1 = "44444444-4444-4444-8444-444444444442";
+  const txt2 = "44444444-4444-4444-8444-444444444443";
+  const profiles = [[img1,"image",2],[img2,"image",1],[txt1,"text",1],[txt2,"text",1]] as const;
+  await page.route("**/api/v1/providers",route=>route.fulfill({json:{providers:profiles.map(([id,providerRole,count])=>({
+    ...profileRow,id,providerRole,name:id,isDefault:id === txt1,configuration:{defaultImageCount:count}
+  }))}}));
+  await page.route("**/api/v1/campaigns/"+a+"/illustration-config",route=>route.request().method() === "GET"
+    ? route.fulfill({json:{...fixture.illustrationConfig,updatedAt:null,providerProfileId:null,imagesPerSegment:1}}) : route.fallback());
+  await page.route("**/api/v1/providers/*/models*",route=>route.fulfill({json:{models:[{id:"old-model",displayName:"Old model"}]}}));
+  await page.goto(url(a));
+  const images = page.getByLabel("Image provider assignment");
+  const text = page.getByLabel("Text provider assignment");
+  const save = page.getByRole("button",{name:"Save provider assignments"});
+  const inventory = page.getByRole("button",{name:"Load image models"});
+  const count = page.getByLabel("Images per segment");
+  const embedding = page.getByLabel("Embedding provider");
+  await expect(inventory).toBeDisabled();
+  await expect(embedding).toHaveValue(txt1);
+  await page.getByLabel("Art style",{exact:true}).fill("Draft ink");
+  await page.getByLabel("Query prefix").fill("Draft query");
+  await images.selectOption(img1);
+  await text.selectOption(txt2);
+  await save.click();
+  await expect(inventory).toBeEnabled();
+  await expect(count).toHaveValue("2");
+  await expect(embedding).toHaveValue(txt2);
+  await expect(page.getByLabel("Query prefix")).toHaveValue("Draft query");
+  await expect(page.getByLabel("Art style",{exact:true})).toHaveValue("Draft ink");
+  await inventory.click();
+  await expect(page.locator("#campaign-image-models option")).toHaveCount(1);
+  await images.selectOption(img2);
+  await save.click();
+  await expect(page.locator("#campaign-image-models option")).toHaveCount(0);
+  await expect(count).toHaveValue("1");
+  await page.getByRole("button",{name:"Save illustration settings"}).click();
+  await expect.poll(()=>writes.length).toBe(3);
+  await images.selectOption(img1);
+  await save.click();
+  await expect(save).toBeDisabled();
+  await expect(count).toHaveValue("1");
+  await expect(page.getByRole("button",{name:"Save illustration settings"})).toBeDisabled();
+});
+
+test("initial missing segment configuration uses the owner's image count while a saved count stays explicit",async({page})=>{
+  await setup(page);
+  const id = "44444444-4444-4444-8444-444444444440";
+  await page.route("**/api/v1/providers",route=>route.fulfill({json:{providers:[{...profileRow,id,providerRole:"image",name:"Illustrations",configuration:{defaultImageCount:2}}]}}));
+  await page.route("**/campaigns/"+a+"/illustration-config",route=>route.fulfill({json:{...fixture.illustrationConfig,updatedAt:null,providerProfileId:null,imagesPerSegment:1}}));
+  await page.route("**/campaigns/"+b+"/illustration-config",route=>route.fulfill({json:{...fixture.illustrationConfig,providerProfileId:null,imagesPerSegment:1}}));
+  await page.goto(url(a));
+  await expect(page.getByLabel("Images per segment")).toHaveValue("2");
+  await page.getByRole("combobox",{name:"Campaign",exact:true}).selectOption(b);
+  await expect(page.getByLabel("Images per segment")).toHaveValue("1");
 });

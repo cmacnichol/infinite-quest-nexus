@@ -18,7 +18,7 @@ export function providerOptions(providers: ProviderSummary[], role: string, sele
   const emptyLabel = available.length ? (fallback ? `Use default · ${fallback.name}` : fallbackLabel) : `No ${role} provider profiles available`;
   return option("", emptyChoice ?? emptyLabel, selectedId) + (selectedId && !available.some(provider => provider.id === selectedId) ? option(selectedId,"Saved provider unavailable",selectedId) : "") + available.map((provider) => option(provider.id, `${provider.name} · ${provider.providerType}${provider.enabled === false ? " · unavailable" : provider.isDefault ? " · default" : ""}`, selectedId)).join("");
 }
-function embeddingProviderOptions(providers: ProviderSummary[], selected: unknown, campaignTextProviderProfileId: unknown): string {
+export function embeddingProviderOptions(providers: ProviderSummary[], selected: unknown, campaignTextProviderProfileId: unknown): string {
   const selectedId = String(selected ?? "");
   const configuredProvider = selectedId ? providers.find((provider) => provider.id === selectedId) : undefined;
   const configuredTextProvider = configuredProvider?.providerRole === "text" ? configuredProvider : undefined;

@@ -403,10 +403,11 @@ export async function enqueueIllustration(
     const turnResult = await client.query<{
       campaign_id: string;
       image_prompt: string;
+      image_provider_profile_id: string | null;
       character_profile: Record<string, unknown> | null;
       character_snapshot: Record<string, unknown> | null;
     }>(
-      `SELECT turns.campaign_id, turns.image_prompt, campaigns.character_profile, campaigns.character_snapshot
+      `SELECT turns.campaign_id, turns.image_prompt, campaigns.image_provider_profile_id, campaigns.character_profile, campaigns.character_snapshot
          FROM turns JOIN campaigns
            ON campaigns.id = turns.campaign_id AND campaigns.owner_user_id = turns.owner_user_id
         WHERE turns.id = $1 AND turns.owner_user_id = $2 FOR UPDATE OF turns`,
@@ -420,17 +421,15 @@ export async function enqueueIllustration(
     if (existing.rows[0] && (!request.replace || ["queued", "generating", "provider_pending", "downloading"].includes(existing.rows[0].status))) {
       return { ...publicJob(existing.rows[0]), duplicate: true };
     }
-    const configResult = await client.query<IllustrationConfigRow & { campaign_provider_profile_id: string | null }>(
+    const configResult = await client.query<IllustrationConfigRow>(
       `SELECT config.enabled, config.provider_profile_id, config.model, config.size, config.aspect_ratio, config.quality,
-              config.output_format, config.max_attempts, config.art_style, config.negative_prompt,
-              campaign.image_provider_profile_id AS campaign_provider_profile_id
+              config.output_format, config.max_attempts, config.art_style, config.negative_prompt
          FROM campaign_illustration_configs config
-         JOIN campaigns campaign ON campaign.id = config.campaign_id AND campaign.owner_user_id = config.owner_user_id
         WHERE config.campaign_id = $1 AND config.owner_user_id = $2`,
       [turn.campaign_id, ownerUserId]
     );
     const config = publicConfig(configResult.rows[0]);
-    const selectedProviderProfileId = request.providerProfileId || configResult.rows[0]?.campaign_provider_profile_id;
+    const selectedProviderProfileId = request.providerProfileId || turn.image_provider_profile_id;
     const resolution = await providers.resolution.resolveDirect({
       ownerUserId,
       providerRole: "image",

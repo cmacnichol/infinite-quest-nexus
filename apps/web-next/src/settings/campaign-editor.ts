@@ -1,12 +1,13 @@
 import { campaignEmbeddingConfigSchema, illustrationConfigResponseSchema, illustrationConfigSchema, type CampaignSummary } from "@infinite-quest/contracts";
 import { createStoryMemoryApi } from "@infinite-quest/client-web";
 import { campaignApi, createCampaignSettingsScope, type CampaignSettingsContext } from "../campaign-editor-api";
-import { chronicleEmbeddingConfigPayload, chronicleFields, illustrationFields, illustrationPayload, providerOptions, storyBehaviorFields, storyMemorySettingsMarkup, storyMemoryGuidance } from "./campaign-fields";
+import { chronicleEmbeddingConfigPayload, chronicleFields, embeddingProviderOptions, illustrationFields, illustrationPayload, providerOptions, storyBehaviorFields, storyMemorySettingsMarkup, storyMemoryGuidance } from "./campaign-fields";
 import { createOwnerSettingsApis } from "./owner-settings-api";
 import { safeSettingsReturn } from "./sections";
 
 type Values = Record<string,string>;
 type Save = (values: Values) => Promise<string>;
+type UpdateInherited = (control: HTMLInputElement | HTMLSelectElement, update: () => void) => void;
 function valuesOf(form: HTMLFormElement): Values {
   return Object.fromEntries(new FormData(form).entries()) as Values;
 }
@@ -14,7 +15,7 @@ function sectionForm(title: string, fields: string, submit: string): string {
   return `<form class="campaign-form"><h3>${title}</h3><div class="campaign-field-grid">${fields}</div><div class="campaign-action-ledger"><button class="primary-action" type="submit">${submit}</button></div></form>`;
 }
 
-export function mountCampaignSettings(host: HTMLElement, campaigns: CampaignSummary[], requestedId: string | null) {
+export function mountCampaignSettings(host: HTMLElement, campaigns: CampaignSummary[], requestedId: string | null, reloadCampaigns: (signal: AbortSignal) => Promise<CampaignSummary[]>) {
   const doc = host.ownerDocument;
   const win = doc.defaultView!;
   const scope = createCampaignSettingsScope(campaigns);
@@ -42,22 +43,34 @@ export function mountCampaignSettings(host: HTMLElement, campaigns: CampaignSumm
     link.href = back; link.textContent = back.startsWith("/nexus/") || back.startsWith("/app/campaigns/") ? "Return to Campaign Management" : "Return to Story";
     host.prepend(link);
   }
-  function choose(id: string) {
+  async function choose(id: string, refresh = true) {
     const context = scope.select(id);
     selected = context?.campaignId ?? "";
     picker.value = selected;
     dirty.clear();
     panels.replaceChildren();
-    const campaign = campaigns.find(item => item.id === selected);
-    if (!context || !campaign) {
+    if (!context) {
       panels.textContent = id ? "This campaign is unavailable to your account. Choose one of your campaigns." : "Choose a campaign before editing its settings.";
       return;
     }
-    loadSections(context, campaign);
+    try {
+      panels.textContent = "Loading campaign…";
+      const available = refresh ? await reloadCampaigns(context.signal) : campaigns;
+      if (!context.current()) return;
+      const campaign = available.find(item => item.id === id);
+      if (!campaign) {
+        panels.textContent = "This campaign is unavailable to your account. Choose one of your campaigns.";
+        return;
+      }
+      panels.replaceChildren();
+      loadSections(context, campaign);
+    } catch {
+      if (context.current()) panels.textContent = "Campaign settings could not be loaded. Select the campaign again to retry.";
+    }
   }
   picker.addEventListener("change", () => {
     if (dirty.size && !win.confirm("Discard unsaved changes to this campaign?")) { picker.value = selected; return; }
-    choose(picker.value);
+    void choose(picker.value);
     const url = new URL(win.location.href);
     if (selected) url.searchParams.set("campaignId", selected); else url.searchParams.delete("campaignId");
     win.history.replaceState(null,"",url.pathname + url.search);
@@ -69,6 +82,7 @@ export function mountCampaignSettings(host: HTMLElement, campaigns: CampaignSumm
   });
   function loadSections(ctx: CampaignSettingsContext, campaign: CampaignSummary) {
     const { campaignId: id, signal } = ctx;
+    const assignments = new EventTarget();
     const providers = owner.providers.list(signal).then(response => response.providers);
     const path = "/app/campaigns/" + id;
     const links = doc.createElement("nav");
@@ -80,7 +94,7 @@ export function mountCampaignSettings(host: HTMLElement, campaigns: CampaignSumm
     ]) {
       const link = doc.createElement("a"); link.href = destination!; link.textContent = name!; links.append(link);
     }
-    function section(name: string, build: (container: HTMLElement) => Promise<Save>) {
+    function section(name: string, build: (container: HTMLElement, updateInherited: UpdateInherited) => Promise<Save>) {
       const container = doc.createElement("section");
       const groupIds: Record<string,string> = {"Story behavior":"story","Story Memory":"memory","Provider assignments":"assignments","Chronicle":"chronicle","Illustrations":"illustrations"};
       container.id = groupIds[name]!;
@@ -91,20 +105,29 @@ export function mountCampaignSettings(host: HTMLElement, campaigns: CampaignSumm
       async function load() {
         status.textContent = "Loading " + name + "…";
         try {
-          const save = await build(container);
+          let baseline: Values | undefined;
+          let syncDraft: (() => void) | undefined;
+          const updateInherited: UpdateInherited = (control, update) => {
+            if (baseline && control.value !== baseline[control.name]) return;
+            update();
+            if (baseline) baseline[control.name] = control.value;
+            syncDraft?.();
+          };
+          const save = await build(container, updateInherited);
           if (!ctx.current()) return;
           const form = container.querySelector("form")!;
           form.append(status);
           if (win.location.hash === "#" + container.id) container.scrollIntoView();
           status.textContent = "";
           const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
-          let baseline = JSON.stringify(valuesOf(form));
+          baseline = valuesOf(form);
           let busy = false;
           function sync() {
-            const changed = JSON.stringify(valuesOf(form)) !== baseline;
+            const changed = JSON.stringify(valuesOf(form)) !== JSON.stringify(baseline);
             if (changed) dirty.add(form); else dirty.delete(form);
             submit.disabled = busy || !changed;
           }
+          syncDraft = sync;
           form.addEventListener("input", sync);
           form.addEventListener("change",sync);
           sync();
@@ -116,7 +139,7 @@ export function mountCampaignSettings(host: HTMLElement, campaigns: CampaignSumm
             try {
               const result = await save(submitted);
               if (!ctx.current()) return;
-              baseline = JSON.stringify(submitted);
+              baseline = submitted;
               status.textContent = result;
             } catch (error) {
               if (ctx.current()) status.textContent = error instanceof Error ? error.message : "Save failed.";
@@ -164,6 +187,7 @@ export function mountCampaignSettings(host: HTMLElement, campaigns: CampaignSumm
         } finally { if (ctx.current() && revision === epoch) load.disabled = !providerId(); }
       });
       field.parentElement!.after(choices,load,status);
+      return refresh;
     }
     section("Story behavior", async container => {
       const state = await campaignApi.get<{revision:number}>(id, "/state",signal);
@@ -217,24 +241,37 @@ export function mountCampaignSettings(host: HTMLElement, campaigns: CampaignSumm
           if (campaign[key] !== value) patch[key] = value;
         }
         await campaignApi.saveSettings(id,"behavior",patch,signal);
-        if (ctx.current()) Object.assign(campaign,patch);
+        if (ctx.current()) {
+          Object.assign(campaign,patch);
+          for (const key of Object.keys(patch)) assignments.dispatchEvent(new Event(key));
+        }
         return "Campaign provider assignments saved.";
       };
     });
-    section("Chronicle",async container => {
+    section("Chronicle",async (container, updateInherited) => {
       const [raw,list] = await Promise.all([campaignApi.get<Record<string,unknown>>(id,"/memory/embedding-config",signal),providers]);
       if (typeof raw.enabled !== "boolean" || typeof raw.retrievalImplementation !== "string") throw new Error("Reload the saved retrieval configuration.");
       const config = campaignEmbeddingConfigSchema.parse(raw);
       container.innerHTML = sectionForm("Chronicle",chronicleFields(config,list,campaign.textProviderProfileId),"Save &amp; index");
-      modelInventory(container,"embedding",() => container.querySelector<HTMLSelectElement>("[name=providerProfileId]")!.value || null);
+      const provider = container.querySelector<HTMLSelectElement>("[name=providerProfileId]")!;
+      const refreshInventory = modelInventory(container,"embedding",() => provider.value || null);
+      let savedProvider = config.providerProfileId;
+      assignments.addEventListener("textProviderProfileId", () => {
+        if (savedProvider || list.some(item => item.enabled && item.providerRole === "embedding")) return;
+        updateInherited(provider, () => {
+          provider.innerHTML = embeddingProviderOptions(list,null,campaign.textProviderProfileId);
+          refreshInventory();
+        });
+      });
       return async values => {
         const payload = campaignEmbeddingConfigSchema.parse(chronicleEmbeddingConfigPayload(values));
         if (payload.enabled && !payload.providerProfileId) throw new Error("Choose an eligible embedding provider.");
         const saved = await campaignApi.saveSettings<{jobId:string|null}>(id,"chronicle",payload,signal);
+        savedProvider = payload.providerProfileId;
         return saved.jobId ? "Semantic Retrieval saved. Indexing queued." : "Semantic Retrieval saved.";
       };
     });
-    section("Illustrations",async container => {
+    section("Illustrations",async (container, updateInherited) => {
       const [raw,list] = await Promise.all([campaignApi.get(id,"/illustration-config",signal), providers]);
       const config = illustrationConfigResponseSchema.parse(raw);
       container.innerHTML = sectionForm("Illustrations",illustrationFields(config,list,true),"Save illustration settings");
@@ -242,21 +279,39 @@ export function mountCampaignSettings(host: HTMLElement, campaigns: CampaignSumm
       note.textContent = "Illustration segments use their saved provider first, then the campaign image assignment. Automatic generation requires a saved segment provider.";
       container.querySelector("h3")!.after(note);
       const imageProviders = list.filter(provider => provider.enabled && provider.providerRole === "image");
-      const imageProvider = () => container.querySelector<HTMLSelectElement>("[name=providerProfileId]")!.value
-        || imageProviders.find(provider => provider.id === campaign.imageProviderProfileId)?.id
-        || imageProviders.find(provider => provider.isDefault)?.id || null;
-      modelInventory(container,"image",imageProvider);
+      const provider = container.querySelector<HTMLSelectElement>("[name=providerProfileId]")!;
+      const count = container.querySelector<HTMLInputElement>("[name=imagesPerSegment]")!;
+      const imageProvider = () => imageProviders.find(item => item.id === (provider.value || campaign.imageProviderProfileId))
+        ?? imageProviders.find(item => item.isDefault) ?? (imageProviders.length === 1 ? imageProviders[0] : undefined);
+      const refreshInventory = modelInventory(container,"image",() => imageProvider()?.id ?? null);
+      let savedConfig = config.updatedAt !== null;
+      let effectiveProviderId = imageProvider()?.id;
+      function updateCount() {
+        if (!savedConfig) updateInherited(count, () => {
+          count.value = imageProvider()?.configuration.defaultImageCount === 2 ? "2" : "1";
+        });
+      }
+      function updateImageOptions() {
+        if (effectiveProviderId === imageProvider()?.id) return;
+        effectiveProviderId = imageProvider()?.id;
+        refreshInventory();
+        updateCount();
+      }
+      updateCount();
+      provider.addEventListener("change", updateImageOptions);
+      assignments.addEventListener("imageProviderProfileId", updateImageOptions);
       return async values => {
         const generating = ["generate_only","library_then_generate"].includes(values.sourcePolicy);
         const fields = illustrationPayload(values,config.refinementPrompt);
         if (generating && !fields.providerProfileId) throw new Error("Choose a segment image provider before enabling automatic generation.");
         const payload = illustrationConfigSchema.parse(fields);
         await campaignApi.saveSettings(id,"illustrations",payload,signal);
+        savedConfig = true;
         return "Illustration settings saved.";
       };
     });
     panels.append(links);
   }
-  choose(requestedId ?? "");
+  void choose(requestedId ?? "", false);
   return {dispose() { scope.dispose(); dirty.clear(); win.removeEventListener("beforeunload",beforeUnload); host.replaceChildren(); }};
 }

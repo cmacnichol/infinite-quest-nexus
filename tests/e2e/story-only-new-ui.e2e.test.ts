@@ -220,7 +220,7 @@ test("new UI profile persists Story Direction without Auto", async ({ page }, te
     await page.locator("wa-button.command-menu__trigger").filter({ hasText: "Profile" }).click();
     await page.locator("wa-dropdown-item[value='preferences']").click();
     const turnStyle = page.locator("[data-profile='turn-control-style']");
-    await expect(turnStyle.locator("wa-option[value='flexible_auto']")).toHaveCount(0);
+    expect(await turnStyle.locator("wa-option").evaluateAll(options => options.map(option => option.getAttribute("value")).sort())).toEqual(["action_only","flexible_action","flexible_scene"]);
     await selectWebAwesomeProfileTurnStyle(page, "flexible_action");
     await selectWebAwesomeProfileTurnStyle(page, "flexible_scene");
     await expect(page.locator("[data-profile-status]")).toContainText(/saved/i);
@@ -249,7 +249,7 @@ test("new UI profile persists Story Direction without Auto", async ({ page }, te
   const dialog = page.locator(".user-profile-dialog");
   await expect(dialog).toHaveAttribute("open", "");
   const turnStyle = "#user-profile-turn-style";
-  await expect(page.locator(`${turnStyle} option`)).toHaveCount(2);
+  expect(await page.locator(`${turnStyle} option`).evaluateAll(options => options.map(option => option.getAttribute("value")).sort())).toEqual(["action_only","flexible_action","flexible_scene"]);
   await expect(page.locator("[data-user-profile-fields]")).toBeEnabled();
   const nativeTurnStyle = page.locator(turnStyle);
   if (await nativeTurnStyle.inputValue() !== "flexible_action") {

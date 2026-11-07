@@ -424,6 +424,8 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
     const runtimeConfig = Object.freeze({
       APP_ROLE: "all", APP_HOST: "0.0.0.0", APP_PORT: docker ? "8080" : String(port), DATABASE_URL: docker ? dockerDatabaseUrl(databaseUrl, postgresContainer) : databaseUrl,
       DATABASE_MAX_CONNECTIONS: "12", CREDENTIAL_ENCRYPTION_KEY: CREDENTIAL_SECRET,
+      // Desktop and mobile scenarios share one synthetic owner and exercise generation and retry within the same minute.
+      API_RATE_LIMIT_GENERATION_REQUESTS: "120",
       PROVIDER_NETWORK_ALLOWLIST: docker ? dockerProvider : "127.0.0.1", LEGACY_WEB_ROOT: docker ? "/app/apps/web/dist" : resolve(root, "apps/web/dist"), NEXT_WEB_ROOT: docker ? "/app/apps/web-next/dist" : resolve(root, "apps/web-next/dist"),
       ASSET_STORAGE_ROOT: docker ? "/tmp/story-only/assets" : assetRoot, ARCHIVE_STORAGE_ROOT: docker ? "/tmp/story-only/archives" : archiveRoot, LOG_LEVEL: "silent"
     });
