@@ -603,6 +603,9 @@ main[data-ui-implementation="web-awesome"] .quiet-leaf[data-story-width="full"] 
 .characters-workspace header { display: flex; justify-content: space-between; align-items: center; }
 .characters-workspace form, .character-profile-fields, .story-character-profile-fields { display: grid; gap: .8rem; }
 .characters-workspace label, .character-profile-field, .story-character-profile-field { display: grid; gap: .3rem; }
+.characters-editor-group { border: 1px solid var(--border, #625e50); padding: .8rem; }
+.characters-editor-group summary { cursor: pointer; font-weight: 600; }
+.characters-editor-group > label { margin-top: .8rem; }
 .characters-workspace textarea, .character-profile-field textarea, .story-character-profile-field textarea { min-height: 4rem; width: 100%; }
 .characters-workspace { color: var(--text, #e5e1d7); background: var(--surface, #242523); border-color: var(--border, #625e50); }
 .characters-workspace::backdrop { background: rgb(0 0 0 / 68%); }

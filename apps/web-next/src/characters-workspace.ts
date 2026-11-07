@@ -1,6 +1,6 @@
 import { renderLegacyCastScan } from "./campaign-cast-scan-panel";
 import { createCharacterProfileForm } from "./character-profile-form";
-import { buildCharacterSheet, createCastEditor, changeCastEditor, setCastEditorField, canSaveCastEditor, prepareCastSubmission, failCastSubmission, reapplyCastDraft, SUPPORTING_FIELDS, characterProvenanceLabel, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
+import { buildCharacterSheet, createCastEditor, changeCastEditor, setCastEditorField, canSaveCastEditor, prepareCastSubmission, failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, SUPPORTING_FIELDS, characterProvenanceLabel, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
 import { createCampaignCastApi, createCharactersWorkspaceSession, type CharactersWorkspaceState } from "@infinite-quest/client-web";
 import type { CampaignCharacterProfile, CampaignCharacterProfileUpdate, CastCharacter, CharacterFilter, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
 
@@ -147,26 +147,63 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     } catch { dialog.replaceChildren(node("h2", "Character review"), node("p", "Could not load review items."), button("Retry", () => { void review(view); }), button("Back to characters", () => { reviewing = false; render(); })); }
   }
   function renderEditor() {
-    if (!editor) return; dialog.classList.remove("characters-sheet-layout"); dialog.replaceChildren(); dialog.append(node("h2", editor.characterId ? "Edit character" : "Add character")); const form = node("form"), save = node("button", "Save character"); save.type = "submit";
-    const input = (label: string, value: string, change: (value: string) => void) => { const wrap = node("label", label), control = node("textarea"); control.value = value; control.setAttribute("aria-label", label); control.disabled = generationActive() || editor!.saving; control.addEventListener("input", () => { change(control.value); save.disabled = !canSaveCastEditor(editor!); }); wrap.append(control); form.append(wrap); return wrap; };
-    input("Name", editor.draft.name, value => { editor = changeCastEditor(editor!, { name: value }); });
+    if (!editor) return;
+    const expanded = new Map([...dialog.querySelectorAll<HTMLDetailsElement>("[data-cast-group]")].map(group => [group.dataset.castGroup!, group.open]));
+    dialog.classList.remove("characters-sheet-layout"); dialog.replaceChildren(); dialog.append(node("h2", editor.characterId ? "Edit character" : "Add character")); const form = node("form"), save = node("button", "Save character"); save.type = "submit";
+    form.append(node("p", editor.characterId ? "Saved facts are filled in. Edit only what needs changing." : "Only a name is required. Add details you know, or review story matches to fill characters from evidence."));
+    const syncSave = () => { save.disabled = !canSaveCastEditor(editor!) || generationActive() || state.changedWhileEditing; };
+    const input = (label: string, value: string, change: (value: string) => void, multiline = true) => { const wrap = node("label", label), control = multiline ? node("textarea") : node("input"); control.value = value; control.maxLength = label === "Name" ? 200 : label.startsWith("Aliases") ? 4020 : 2000; control.setAttribute("aria-label", label); control.disabled = generationActive() || editor!.saving; control.addEventListener("input", () => { change(control.value); syncSave(); }); wrap.append(control); form.append(wrap); return wrap; };
+    input("Name", editor.draft.name, value => { editor = changeCastEditor(editor!, { name: value }); }, false);
     input("Aliases (one per line)", editor.draft.aliases.join("\n"), value => { editor = changeCastEditor(editor!, { aliases: value.split("\n").map(v => v.trim()).filter(Boolean) }); });
+    const groups = new Map<string, HTMLDetailsElement>();
+    for (const [key, title] of [["story", "Story profile"], ["appearance", "Appearance details"], ["state", "Current state"]]) {
+      const group = node("details"); group.className = "characters-editor-group"; group.dataset.castGroup = key!;
+      group.open = expanded.get(key!) ?? (key === "story" || Boolean(editor.characterId) && key === "appearance");
+      group.append(node("summary", title)); groups.set(key!, group); form.append(group);
+    }
     for (const field of SUPPORTING_FIELDS) {
-      const wrap = input(field.label, editor.draft.profile[field.path as keyof typeof editor.draft.profile] ?? "", value => { editor = setCastEditorField(editor!, field.path as Parameters<typeof setCastEditorField>[1], value); });
-      if (editor.characterId) wrap.append(button(`Use discovered value for ${field.label.toLowerCase()}`, () => { editor = setCastEditorField(editor!, field.path as Parameters<typeof setCastEditorField>[1], null); renderEditor(); }, generationActive()));
+      const path = field.path as Parameters<typeof setCastEditorField>[1];
+      const wrap = input(field.label, editor.draft.profile[path] ?? "", value => { editor = setCastEditorField(editor!, path, value); }, field.input !== "text");
+      const fieldStatus = node("span"); wrap.append(fieldStatus);
+      function syncFieldStatus() {
+        const overriding = Object.hasOwn(editor!.setOverrides, path) || editor!.loaded?.overrides.some(override => override.field === path);
+        fieldStatus.replaceChildren();
+        if (editor!.clearOverrides.includes(path)) fieldStatus.append(node("small", "Will use the discovered value after saving."));
+        else if (overriding) fieldStatus.append(node("small", "Your override"));
+        if (editor!.characterId && overriding && !editor!.clearOverrides.includes(path)) fieldStatus.append(button(`Use discovered value for ${field.label.toLowerCase()}`, () => { editor = setCastEditorField(editor!, path, null); renderEditor(); }, generationActive() || editor!.saving));
+      }
+      wrap.querySelector("textarea, input")!.addEventListener("input", syncFieldStatus); syncFieldStatus();
+      groups.get(field.path.split(".")[0]!)?.append(wrap);
     }
     if (editor.characterId) for (const [key, label] of [["pinned", "Pin character"], ["ignored", "Ignore character"]] as const) {
-      const wrap = node("label", label), control = node("input"); control.type = "checkbox"; control.checked = editor.draft[key]; control.addEventListener("change", () => { editor = changeCastEditor(editor!, { [key]: control.checked }); save.disabled = !canSaveCastEditor(editor!); }); wrap.prepend(control); form.append(wrap);
+      const wrap = node("label", label), control = node("input"); control.type = "checkbox"; control.checked = editor.draft[key]; control.disabled = generationActive() || editor.saving; control.addEventListener("change", () => { editor = changeCastEditor(editor!, { [key]: control.checked }); syncSave(); }); wrap.prepend(control); form.append(wrap);
     }
+    if (editor.characterId) form.append(node("small", "Pin prioritizes this character in story context. Ignore excludes this supporting character from story context."));
     if (editor.error) form.append(node("p", editor.error));
     if (editor.conflict || state.changedWhileEditing) {
       form.append(node("p", "The saved character changed. Your edits are still here."));
       form.append(button("Compare latest", async () => {
-        if (!editor?.characterId || !state.campaignId) return;
-        const latest = await api.detail(state.campaignId, editor.characterId);
+        if (!editor || !state.campaignId) return;
+        const draft = editor, campaign = state.campaignId, epoch = openEpoch;
+        try {
+        if (!draft.characterId) {
+          const latest = await api.list(campaign);
+          if (epoch !== openEpoch || editor !== draft || state.campaignId !== campaign) return;
+          const comparison = node("section");
+          comparison.append(node("p", "Your new character has not been saved. Your draft is preserved."));
+          comparison.append(node("p", `Latest characters: ${latest.characters.map(person => person.name).join(", ") || "None"}`));
+          comparison.append(button("Reapply my changes", () => {
+            if (editor !== draft || generationActive()) return;
+            editor = reapplyNewCastDraft(editor, latest); session.setDraft(null); session.setDraft(editor); renderEditor();
+          }, !latest.capabilities.castEditing || generationActive()));
+          form.append(comparison); return;
+        }
+        const latest = await api.detail(campaign, draft.characterId);
+        if (epoch !== openEpoch || editor !== draft || state.campaignId !== campaign) return;
         const comparison = node("section"); comparison.append(node("h3", "Latest saved character"), node("p", `Name: ${latest.character.name}`));
         for (const field of SUPPORTING_FIELDS) comparison.append(node("p", `${field.label}: ${latest.character.profile[field.path as keyof typeof latest.character.profile] ?? "Unknown"}`));
-        comparison.append(button("Reapply my changes", () => { editor = reapplyCastDraft(editor!, latest); session.setDraft(null); session.setDraft(editor); renderEditor(); })); form.append(comparison);
+        comparison.append(button("Reapply my changes", () => { if (editor !== draft || generationActive()) return; editor = reapplyCastDraft(editor!, latest); session.setDraft(null); session.setDraft(editor); renderEditor(); }, !latest.capabilities.castEditing || generationActive())); form.append(comparison);
+        } catch { if (epoch === openEpoch && editor === draft) form.append(node("p", "Could not load the latest characters. Your draft is kept; try Compare latest again.")); }
       }));
     }
     save.disabled = !canSaveCastEditor(editor) || generationActive() || state.changedWhileEditing; form.append(save, button("Cancel", () => { if (!discard()) return; editor = null; session.setDraft(null); }));

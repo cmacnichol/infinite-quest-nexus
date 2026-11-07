@@ -162,6 +162,67 @@ for (const width of [1280, 390]) test(`legacy filters handled identities from ma
   expect(api.writes).toHaveLength(1);
 });
 
+test("legacy match targets are independent of the roster search", async ({ page }) => {
+  await fixture(page);
+  await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByLabel("Find a character", { exact: true }).fill("No such character");
+  await dialog.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(dialog).toContainText("No characters match this search.");
+  await dialog.getByRole("button", { name: "Review character matches", exact: true }).click();
+  await dialog.getByRole("button", { name: "Review Mara", exact: true }).click();
+  const select = dialog.getByLabel("Existing character", { exact: true });
+  await expect(select.locator(`option[value="${protagonistId}"]`)).toHaveCount(1);
+  await select.selectOption(protagonistId);
+  await expect(dialog.getByRole("button", { name: "Attach to selected character", exact: true })).toBeEnabled();
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/unfiltered-match-targets.png` });
+});
+
+for (const surface of ["legacy", "next"] as const) test(`supporting editor keeps optional controls contextual ${surface}`, async ({ page }) => {
+  const api = await fixture(page);
+  api.characters.push({ id: candidateId, name: "Mara", aliases: [], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 1, lastObservedTurn: 1 });
+  if (surface === "legacy") await open(page);
+  else {
+    await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`);
+    await page.locator("[data-campaign-tools] summary").click();
+    await page.locator("[data-tool-action='open-characters']").click();
+  }
+  const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
+  await dialog.getByRole("button", { name: "Add character", exact: true }).click();
+  await expect(dialog.getByLabel("Role", { exact: true })).toBeVisible();
+  await expect(dialog).toContainText("Only a name is required");
+  await expect(dialog.getByRole("button", { name: /Use discovered value/ })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await dialog.getByRole("button", { name: "Mara", exact: true }).click();
+  await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: /Use discovered value/ })).toHaveCount(0);
+  await expect(dialog).toContainText("Pin prioritizes this character");
+  await dialog.getByLabel("Role", { exact: true }).fill("Guide");
+  await dialog.getByRole("button", { name: "Use discovered value for role", exact: true }).click();
+  await expect(dialog).toContainText("Will use the discovered value after saving.");
+  await expect(dialog.getByRole("button", { name: "Use discovered value for role", exact: true })).toHaveCount(0);
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/simplified-supporting-${surface}.png` });
+});
+
+test("replacement cast recovers a new character draft after a revision conflict", async ({ page }) => {
+  const api = await fixture(page);
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`);
+  await page.locator("[data-campaign-tools] summary").click();
+  await page.locator("[data-tool-action='open-characters']").click();
+  const dialog = page.locator("dialog.characters-workspace");
+  await dialog.getByRole("button", { name: "Add character", exact: true }).click();
+  await dialog.getByLabel("Name", { exact: true }).fill("New guide");
+  api.conflict();
+  await dialog.getByRole("button", { name: "Save character", exact: true }).click();
+  await dialog.getByRole("button", { name: "Compare latest", exact: true }).click();
+  await expect(dialog).toContainText("Your new character has not been saved.");
+  await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("New guide");
+  await dialog.getByRole("button", { name: "Reapply my changes", exact: true }).click();
+  await dialog.getByRole("button", { name: "Save character", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Edit character", exact: true })).toBeVisible();
+  expect(api.characters.filter(person => person.name === "New guide")).toHaveLength(1);
+});
+
 async function fixture(page: Page, deferredDetails = false, conflictFixture = false) {
   let revision = 0, enabled = true, conflict = false, trackingComplete = false, trackingUnavailable = false, pendingMatch = true;
   let resolvedCharacterId: string | undefined;
@@ -331,6 +392,7 @@ for (const width of [1440, 390]) test(`legacy cast add, edit, reset, conflict an
   await dialog.getByRole("button", { name: "Add character", exact: true }).click();
   await dialog.getByLabel("Name", { exact: true }).fill("Mara");
   await dialog.getByLabel("Aliases (one per line)").fill("The Watcher");
+  await dialog.getByText("Appearance details", { exact: true }).click();
   await dialog.getByLabel("Appearance", { exact: true }).fill("green eyes");
   await dialog.getByRole("button", { name: "Save character", exact: true }).click();
   await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("Mara");
@@ -567,5 +629,5 @@ for (const surface of ["legacy", "next"] as const) test(`conflict field can be c
   if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
   const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
   await dialog.getByRole("button", { name: "Review conflicts", exact: true }).click(); await expect(dialog.getByRole("button", { name: "Mara", exact: true })).toBeVisible(); await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toHaveCount(0);
-  await dialog.getByRole("button", { name: "Mara", exact: true }).click(); await expect(dialog).toContainText("Conflicting observations"); await dialog.getByRole("button", { name: "Edit character", exact: true }).click(); if (surface === "legacy") await dialog.getByText("Story profile", { exact: true }).click(); await dialog.getByLabel("Role", { exact: true }).fill("guide"); await dialog.getByRole("button", { name: "Save character", exact: true }).click();
+  await dialog.getByRole("button", { name: "Mara", exact: true }).click(); await expect(dialog).toContainText("Conflicting observations"); await dialog.getByRole("button", { name: "Edit character", exact: true }).click(); await dialog.getByLabel("Role", { exact: true }).fill("guide"); await dialog.getByRole("button", { name: "Save character", exact: true }).click();
 });

@@ -5,7 +5,7 @@ import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T18");
+const evidenceDirectory = resolve(process.env.PLAYWRIGHT_EVIDENCE_DIRECTORY ?? ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T18");
 const base = quietLeafApiPayloads();
 
 async function installAuthoringApi(page: Page, options: {
@@ -45,14 +45,31 @@ async function openNewWorld(page: Page, writes: Array<{ method: string; path: st
   await page.locator('[data-world-author-step="character"]').click();
 }
 
-test("new character keeps optional imported guidance tucked away and names its playable context", async ({ page }) => {
+test("new character offers manual fallback and notes while keeping empty imported source hidden", async ({ page }) => {
   await openNewWorld(page);
   await page.locator("#addPlayableCharacter").click();
   await expect(page.locator("#characterDialog")).toBeVisible();
   await expect(page.locator(".character-playable-context")).toBeVisible();
   await expect(page.locator("#characterGuidance")).toBeAttached();
   await expect(page.locator("#characterGuidance")).toBeHidden();
+  await expect(page.locator("#characterGeneratorUnavailable")).toContainText("Provider Setup");
+  await expect(page.locator("#characterGenerator")).toBeHidden();
+  await expect(page.locator("#characterUnclassifiedNotes")).toBeVisible();
+  await expect(page.locator("#characterMotivations")).toBeHidden();
+  const guidance = page.locator(".character-profile-section > .field-note");
+  const roleLabel = page.locator("label").filter({ has: page.locator("#characterRole") });
+  const guidanceBox = await guidance.boundingBox();
+  const roleBox = await roleLabel.boundingBox();
+  expect(guidanceBox && roleBox && guidanceBox.y + guidanceBox.height <= roleBox.y).toBe(true);
   await page.screenshot({ path: resolve(evidenceDirectory, "new-character-basic.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator("#characterGeneratorUnavailable").scrollIntoViewIfNeeded();
+  await expect(page.locator("#characterGeneratorUnavailable")).toBeVisible();
+  expect(await page.locator("#characterDialog").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: resolve(evidenceDirectory, "new-character-mobile-fallback.png") });
+  await page.locator("#characterUnclassifiedNotes").scrollIntoViewIfNeeded();
+  await expect(page.locator("#characterUnclassifiedNotes")).toBeVisible();
+  await page.screenshot({ path: resolve(evidenceDirectory, "new-character-mobile-notes.png") });
   await page.locator("#characterAppearance > summary").click();
   await page.locator("#characterAppearance > summary").click();
   await page.locator("#cancelCharacter").click();
@@ -72,11 +89,10 @@ test("closed character disclosures preserve appearance, mechanics, and imported 
   const row = page.locator("#characterStats .character-edit-row").last();
   await row.locator('[data-character-field="name"]').fill("Resolve");
   await row.locator('[data-character-field="value"]').fill("17");
-  await page.locator("#characterImportedGuidance > summary").click();
   await page.locator("#characterUnclassifiedNotes").fill("Unsorted imported-era note");
   await page.locator("#characterName").fill("Mira Vale");
   await page.locator("#characterRole").fill("Guide");
-  for (const selector of ["#characterAppearance > summary", "#characterMechanics > summary", "#characterImportedGuidance > summary"]) await page.locator(selector).click();
+  for (const selector of ["#characterAppearance > summary", "#characterMechanics > summary"]) await page.locator(selector).click();
   await page.locator("#saveCharacter").click();
   await expect(page.locator("#playableCharacterRoster")).toContainText("Mira Vale");
   expect(writes).toEqual([]);
@@ -193,7 +209,6 @@ test("character organization busy state freezes disclosure navigation and restor
   await page.locator("#characterRole").fill("Synthetic guide");
   const mechanicsSummary = page.locator("#characterMechanics > summary");
   await mechanicsSummary.click();
-  await page.locator("#characterImportedGuidance > summary").click();
   await page.locator("#organizeCharacterProfile").click();
   await requestStarted;
   await expect(mechanicsSummary).toHaveAttribute("aria-disabled", "true");
@@ -245,7 +260,9 @@ test("existing imported advanced character round-trips source, unknown fields, a
   await page.locator("#editWorldDraft").click();
   await page.locator('[data-world-author-step="character"]').click();
   await page.getByRole("button", { name: "Edit Imported Mira" }).click();
-  for (const selector of ["#characterAppearance > summary", "#characterMechanics > summary", "#characterImportedGuidance > summary"]) await expect(page.locator(selector)).toBeVisible();
+  for (const selector of ["#characterAppearance > summary", "#characterMechanics > summary"]) await expect(page.locator(selector)).toBeVisible();
+  await expect(page.locator("#characterGuidance")).toHaveValue("Preserved source");
+  await expect(page.locator("#characterGuidance")).toBeVisible();
   await page.locator("#saveCharacter").click();
   await page.locator("#saveWorldDraft").click();
   const save = api.writes.find((write) => write.method === "PUT" && write.path.endsWith("/draft"))?.body as { content?: { playableCharacters?: unknown[] } };

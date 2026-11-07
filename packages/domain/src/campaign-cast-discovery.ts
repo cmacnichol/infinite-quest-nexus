@@ -163,11 +163,13 @@ function validateDiscovery(input: DiscoveryValidationInput, explicitIdentity: bo
     try { validateCastFiction(candidate.name); candidate.aliases.forEach(validateCastFiction); candidate.observations.forEach((observation) => validateCastFiction(observation.value)); }
     catch { reject("non_fiction_value"); continue; }
     const identityText = candidate.identityEvidence.map((evidence) => evidence.quote).join("\n");
-    // The user's selected existing identity can resolve pronouns or an unproven
-    // proposed alias. This identity-only pass never approves attribute evidence,
-    // changes the target's name/aliases, or relaxes automatic discovery.
-    const confirmedAttachment = explicitIdentity && candidate.existingCharacterId !== null && candidate.observations.length === 0;
-    if (!confirmedAttachment && (!contains(identityText, candidate.name) || candidate.aliases.some((alias) => !contains(identityText, alias)))) { hold("identity_not_supported"); continue; }
+    // A user can resolve a pronoun to either an existing or a separate identity.
+    // This identity-only pass never approves attributes or automatic discovery.
+    // New aliases still require evidence because creation persists them.
+    const confirmedIdentity = explicitIdentity && candidate.observations.length === 0;
+    const confirmedAttachment = confirmedIdentity && candidate.existingCharacterId !== null;
+    if ((!confirmedIdentity && !contains(identityText, candidate.name))
+      || (!confirmedAttachment && candidate.aliases.some((alias) => !contains(identityText, alias)))) { hold("identity_not_supported"); continue; }
     if (!confirmedAttachment && candidate.aliases.some((alias) => !explicitlyLinksAlias(identityText, candidate.name, alias))) { hold("alias_not_supported"); continue; }
     if (candidate.identityEvidence.some((evidence) => prospective.test(paragraphs.get(evidence.paragraphId)!))) { hold("non_actual_identity"); continue; }
     if (/^(?:crowd|people|guards|villagers|everyone|someone|a person)$/iu.test(candidate.name)) { hold("insufficient_identity"); continue; }

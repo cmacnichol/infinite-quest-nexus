@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_CHARACTER_MECHANICS_ITEMS,
+  characterProfileSchema,
   type PlayableCharacter
 } from "../../packages/contracts/src/world-library.js";
 import {
@@ -17,6 +18,7 @@ const completeCharacter = (overrides: Partial<PlayableCharacter> = {}): Playable
   id: "trusted-character",
   name: "Mara",
   characterText: "A patient observer.",
+  profile: characterProfileSchema.parse({ story: { role: "Guide" } }),
   rpgStats: [],
   defaultTriggers: [],
   source: {},
@@ -24,6 +26,31 @@ const completeCharacter = (overrides: Partial<PlayableCharacter> = {}): Playable
 });
 
 describe("character workspace model", () => {
+  it("does not use unknown retained profile fields as authored story", () => {
+    const state = createCharacterWorkspaceState({ roster: [], method: "manual", candidate: completeCharacter({ profile: characterProfileSchema.parse({ story: { importedText: "retained" } }) }) });
+    expect(characterHandoffCandidate(state)).toBeNull();
+    expect(state.candidate.profile?.story.importedText).toBe("retained");
+  });
+
+  it("preserves legacy-only source without silently treating it as structured story", () => {
+    const candidate = completeCharacter({ profile: undefined, importedExtension: { keep: true } });
+    const state = createCharacterWorkspaceState({ roster: [], method: "manual", candidate });
+    expect(state.candidate.characterText).toBe(candidate.characterText);
+    expect(state.candidate.profile?.story.role).toBe("");
+    expect(state.candidate.importedExtension).toEqual({ keep: true });
+    expect(validateCharacterStage(state, "story").issues).toContainEqual(expect.objectContaining({ path: "candidate.profile.story.role", severity: "error" }));
+    expect(characterHandoffCandidate(state)).toBeNull();
+  });
+
+  it("accepts structured story without requiring or populating legacy source text", () => {
+    let state = createCharacterWorkspaceState({ roster: [], method: "manual" });
+    state = editCharacterCandidate(state, ["name"], "Mara");
+    state = editCharacterCandidate(state, ["profile", "story", "role"], "Guide");
+    expect(validateCharacterStage(state, "story").issues).toEqual([]);
+    expect(characterHandoffCandidate(state)?.characterText).toBe("");
+    expect(characterHandoffCandidate(state)?.profile?.story.role).toBe("Guide");
+  });
+
   it("creates a canonical empty candidate with a collision-safe trusted ID", () => {
     const roster = [completeCharacter({ id: "collision" })];
     const generatedIds = ["collision", "collision", "trusted-character"];
@@ -95,7 +122,7 @@ describe("character workspace model", () => {
 
     expect(edited.candidate.profile?.story.role).toBe("Cartographer");
     expect(edited.candidate.importedExtension).toEqual({ keep: true });
-    expect(initial.candidate.profile?.story.role).toBe("");
+    expect(initial.candidate.profile?.story.role).toBe("Guide");
     expect(edited).not.toBe(initial);
     expect(edited.candidate).not.toBe(initial.candidate);
     expect(edited.candidate.profile).not.toBe(initial.candidate.profile);
@@ -104,7 +131,7 @@ describe("character workspace model", () => {
   it("reports exact required text, duplicate identity, and duplicate-name warning issues", () => {
     const state = createCharacterWorkspaceState({
       roster: [completeCharacter({ id: "trusted-character", name: "  MARA  " })],
-      candidate: completeCharacter({ id: "trusted-character", name: "mara", characterText: "   " })
+      candidate: completeCharacter({ id: "trusted-character", name: "mara", characterText: "   ", profile: characterProfileSchema.parse({}) })
     });
 
     expect(validateCharacterStage(state, "identity").issues).toEqual([
@@ -112,7 +139,7 @@ describe("character workspace model", () => {
       expect.objectContaining({ path: "candidate.name", severity: "warning", message: "Another character already uses this name." })
     ]);
     expect(validateCharacterStage(state, "story").issues).toEqual([
-      expect.objectContaining({ path: "candidate.characterText", severity: "error", message: "Narrative guidance is required." })
+      expect.objectContaining({ path: "candidate.profile.story.role", severity: "error", message: "Add at least one structured story detail." })
     ]);
 
     const longName = editCharacterCandidate(state, ["name"], "n".repeat(201));
@@ -216,7 +243,7 @@ describe("character workspace model", () => {
     expect(state.stage).toBe("story");
     expect(setCharacterStage(state, "appearance").stage).toBe("story");
 
-    state = editCharacterCandidate(state, ["characterText"], "Guidance");
+    state = editCharacterCandidate(state, ["profile", "story", "role"], "Guide");
     state = setCharacterStage(state, "appearance");
     state = setCharacterStage(state, "mechanics");
     expect(state.stage).toBe("mechanics");
@@ -288,6 +315,6 @@ describe("character workspace model", () => {
       candidate: completeCharacter({ id: " trusted-character " })
     });
     expect(characterHandoffCandidate(duplicate)).toBeNull();
-    expect(characterHandoffCandidate(editCharacterCandidate(valid, ["characterText"], "   "))).toBeNull();
+    expect(characterHandoffCandidate(editCharacterCandidate(valid, ["profile", "story", "role"], "   "))).toBeNull();
   });
 });

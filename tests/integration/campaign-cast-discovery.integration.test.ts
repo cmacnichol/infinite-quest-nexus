@@ -518,7 +518,7 @@ describe("durable cast discovery", () => {
 
     } finally { await app.close(); }
   });
-  it.each(["self-alias", "second-person"])("attaches reviewed %s evidence without renaming or duplicating the target", async mode => {
+  for (const action of ["attach", "create"] as const) it.each(["self-alias", "second-person"])(`${action} resolves reviewed %s evidence without changing the existing target`, async mode => {
     const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
     const name = mode === "self-alias" ? "714" : "Mara Reed";
     const narration = mode === "self-alias" ? "714 has blue eyes." : "You have blue eyes.";
@@ -532,7 +532,7 @@ describe("durable cast discovery", () => {
     await f.enqueue(); const jobs = createCastDiscoveryJobRepository(pool, () => true), job = (await jobs.claim("attach-regression"))!;
     await jobs.checkpoint(job, output); await jobs.publish(job);
     const pending = await editor.candidates(f.scope, {}), id = pending.candidates[0]!.id;
-    const request = { action: "attach", characterId: target.character.id, expectedCastRevision: pending.revision,
+    const request = { action, ...(action === "attach" ? { characterId: target.character.id } : {}), expectedCastRevision: pending.revision,
       expectedBoundary: pending.boundary, idempotencyKey: "confirmed-attachment" };
     const app = Fastify();
     await app.register(registerCampaignCastRoutes, { application: createApiCampaignCastApplication(pool,
@@ -542,12 +542,17 @@ describe("durable cast discovery", () => {
       const response = await app.inject({ method: "POST", url, payload: request });
       expect(response.statusCode).toBe(200);
       const saved = response.json();
-      expect(saved.character).toMatchObject({ id: target.character.id, name, aliases: ["The Guide"], profile: { "story.role": "guide" } });
+      if (action === "attach") expect(saved.character).toMatchObject({ id: target.character.id, name, aliases: ["The Guide"], profile: { "story.role": "guide" } });
+      else {
+        expect(saved.character.id).not.toBe(target.character.id);
+        expect(saved.character).toMatchObject({ name, aliases: [], origin: { kind: "discovered" } });
+        expect((await editor.detail(f.scope, target.character.id)).character).toMatchObject(target.character);
+      }
       expect(saved.observationIds).toHaveLength(mode === "self-alias" ? 1 : 0);
       expect(saved.pendingObservations).toHaveLength(mode === "self-alias" ? 0 : 1);
       expect((await app.inject({ method: "POST", url, payload: request })).json()).toEqual(saved);
       expect((await editor.candidates(f.scope, { view: "matches" })).candidates).toEqual([]);
-      expect((await editor.current(f.scope)).characters.filter(person => person.name === name)).toHaveLength(1);
+      expect((await editor.current(f.scope)).characters.filter(person => person.name === name)).toHaveLength(action === "attach" ? 1 : 2);
     } finally { await app.close(); }
   });
   it("filters ignored identities before match pagination without hiding same-name unresolved people", async () => {

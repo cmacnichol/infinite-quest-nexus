@@ -166,19 +166,29 @@ export function createLegacyCastPanel(options: {
       preview.append(node("h3", person.name), node("p", `First seen turn ${person.firstObservedTurn}; last seen turn ${person.lastObservedTurn}.`));
       for (const [field, label] of fields) if (person.profile[field] !== undefined) preview.append(node("p", `${label}: ${person.profile[field]}`));
     });
-    populate(list?.characters ?? []);
-    const searchButton = button("Search characters", async () => {
+    populate([]);
+    async function searchTargets() {
       const searchToken = ++searchEpoch;
+      feedback.textContent = "Loading existing characters…";
       try {
         const found = await options.api.list(campaign, { query: search.value, limit: 50 });
+        const people = [...found.characters];
+        let cursor = found.nextCursor;
+        while (cursor) {
+          if (!current(token) || busy || searchToken !== searchEpoch) return;
+          const page = await options.api.list(campaign, { query: search.value, limit: 50, cursor, expectedRevision: found.revision });
+          people.push(...page.characters); cursor = page.nextCursor;
+        }
         if (!current(token) || busy || searchToken !== searchEpoch) return;
         enabled = found.capabilities.castEditing; controls.disabled = !enabled || options.generationActive();
-        populate(found.characters); feedback.textContent = found.nextCursor ? "More characters match. Refine the search to find the right person." : "";
+        populate(people); feedback.textContent = !people.length ? "No saved characters match. Try another search or create a separate character." : "";
       } catch (error) { if (current(token) && searchToken === searchEpoch) feedback.textContent = message(error); }
-    });
+    }
+    const searchButton = button("Search characters", () => { void searchTargets(); });
     controls.append(searchLabel, search, searchButton, selectLabel, select, attach,
       button("Create separate character", () => { void resolve("create"); }));
     dialog.append(controls, preview, feedback);
+    void searchTargets();
     async function resolve(action: "attach" | "create") {
       if (busy || !enabled || options.generationActive() || action === "attach" && !select.value) return;
       const decision = action === "create" ? { action } : { action, characterId: select.value };
@@ -363,6 +373,7 @@ export function createLegacyCastPanel(options: {
   }
   function renderEditor() {
     if (!editor) return;
+    const expanded = new Map([...dialog.querySelectorAll<HTMLDetailsElement>("[data-cast-group]")].map(group => [group.dataset.castGroup!, group.open]));
     const focusId = dialog.contains(document.activeElement) ? (document.activeElement as HTMLElement).id : "";
     const protagonist = editor.loaded?.character.origin.kind === "protagonist";
     const locked = !enabled || options.generationActive() || editor.saving || protagonist;
@@ -374,6 +385,7 @@ export function createLegacyCastPanel(options: {
     } else if (!enabled) status("Character editing is disabled. Your draft is kept here until you close it.");
     else if (options.generationActive()) status("Finish or resolve the current generation before editing characters.");
     const form = node("form"); form.className = "cast-editor";
+    form.append(node("p", editor.characterId ? "Saved facts are filled in. Edit only what needs changing." : "Only a name is required. Add details you know, or review story matches to fill characters from evidence."));
     const save = node("button", editor.saving ? "Saving…" : "Save character"); save.type = "submit"; save.className = "primary"; save.id = "cast-save";
     const syncSave = () => { save.disabled = Boolean(locked) || !canSaveCastEditor(editor!); };
     function textInput(label: string, id: string, value: string, max: number, changed: (value: string) => void, multiline = false) {
@@ -387,17 +399,22 @@ export function createLegacyCastPanel(options: {
       (value) => { editor = changeCastEditor(editor!, { aliases: value.split("\n").map((v) => v.trim()).filter(Boolean) }); }, true);
     const groups = new Map<string, HTMLDetailsElement>();
     for (const [key, title] of [["story", "Story profile"], ["appearance", "Appearance details"], ["state", "Current state"]]) {
-      const group = node("details"); group.className = "cast-field-group"; group.open = key === "appearance";
+      const group = node("details"); group.className = "cast-field-group"; group.dataset.castGroup = key!;
+      group.open = expanded.get(key!) ?? (key === "story" || Boolean(editor.characterId) && key === "appearance");
       group.append(node("summary", title)); groups.set(key!, group); form.append(group);
     }
     for (const [field, label] of fields) {
       const wrap = textInput(label, `cast-${field.replace(".", "-")}`, editor.draft.profile[field] ?? "", 2000,
         (value) => { editor = setCastEditorField(editor!, field, value); }, true);
-      const overriding = Object.hasOwn(editor.setOverrides, field) || editor.loaded?.overrides.some((o) => o.field === field);
-      wrap.append(node("small", editor.clearOverrides.includes(field) ? "Will use the discovered value after saving." : overriding ? "Your override" : Object.hasOwn(editor.draft.profile, field) ? "From recorded evidence" : "Unknown"));
-      if (editor.characterId && !protagonist) wrap.append(button(`Use discovered value for ${label.toLowerCase()}`, () => {
-        editor = setCastEditorField(editor!, field, null); renderEditor();
-      }, Boolean(locked)));
+      const fieldStatus = node("div"); wrap.append(fieldStatus);
+      function syncFieldStatus() {
+        const overriding = Object.hasOwn(editor!.setOverrides, field) || editor!.loaded?.overrides.some((o) => o.field === field);
+        fieldStatus.replaceChildren(node("small", editor!.clearOverrides.includes(field) ? "Will use the discovered value after saving." : overriding ? "Your override" : Object.hasOwn(editor!.draft.profile, field) ? "From recorded evidence" : "Unknown"));
+        if (editor!.characterId && !protagonist && overriding && !editor!.clearOverrides.includes(field)) fieldStatus.append(button(`Use discovered value for ${label.toLowerCase()}`, () => {
+          editor = setCastEditorField(editor!, field, null); renderEditor();
+        }, Boolean(locked)));
+      }
+      wrap.querySelector("textarea, input")!.addEventListener("input", syncFieldStatus); syncFieldStatus();
       const group = groups.get(field.split(".")[0]!); if (group) group.append(wrap);
     }
     if (editor.characterId && !protagonist) for (const [key, label] of [["pinned", "Pin character"], ["ignored", "Ignore character"]] as const) {
@@ -406,6 +423,7 @@ export function createLegacyCastPanel(options: {
       control.addEventListener("change", () => { editor = changeCastEditor(editor!, { [key]: control.checked }); syncSave(); });
       caption.prepend(control); form.append(caption);
     }
+    if (editor.characterId && !protagonist) form.append(node("small", "Pin prioritizes this character in story context. Ignore excludes this supporting character from story context."));
     if (editor.error) { const error = node("p", editor.error); error.setAttribute("role", "alert"); form.append(error); }
     if (editor.conflict) {
       form.append(button("Compare latest", () => { void compareLatest(); }));

@@ -101,6 +101,77 @@ function key(window: Window, value: string, shiftKey = false): Event {
 }
 
 describe("Character Workspace page", () => {
+  it("opens optional story details when validation targets a hidden field", () => {
+    const { document, root } = fixture();
+    const candidate = { ...generatedCharacter, profile: { ...generatedCharacter.profile!, story: { ...generatedCharacter.profile!.story, goals: "x".repeat(200_001) } } };
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(candidate)) });
+    click(document, '[data-action="continue-character"]'); click(document, '[data-action="continue-character"]');
+    click(document, '[data-action="continue-character"]');
+    const goals = document.querySelector('[name="candidate.profile.story.goals"]');
+    expect(goals?.closest('details')?.hasAttribute('open')).toBe(true);
+    expect(document.activeElement).toBe(goals);
+  });
+
+  it("keeps paste from enabling another request while generation is pending", async () => {
+    const { document, root } = fixture();
+    const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(), readClipboardText: async () => "A guide",
+      generateCharacterPreview: () => new Promise(() => {}),
+      loadGenerationProgress: async () => ({ status: "processing", phase: "generating", progressPercent: 20, message: "Working" }) });
+    click(document, '[data-action="paste-character-prompt"]'); await settle();
+    click(document, '[data-action="generate-character"]');
+    click(document, '[data-action="paste-character-prompt"]'); await settle();
+    expect(document.querySelector<HTMLButtonElement>('[data-action="generate-character"]')?.disabled).toBe(true);
+    mounted.dispose();
+  });
+
+  it("starts with AI assistance and reviews generated values directly with edit links", async () => {
+    const { document, root } = fixture();
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(), readClipboardText: async () => "A guide",
+      generateCharacterPreview: async () => ({ character: generatedCharacter }),
+      loadGenerationProgress: async () => ({ status: "completed", phase: "completed", progressPercent: 100, message: "Ready" }) });
+    expect(document.querySelector<HTMLInputElement>('[value="ai"]')?.checked).toBe(true);
+    expect(document.querySelector<HTMLElement>('[data-character-ai-prompt]')?.hidden).toBe(false);
+    click(document, '[data-action="paste-character-prompt"]'); await settle();
+    click(document, '[data-action="generate-character"]'); await settle();
+    const review = document.querySelector('[data-character-review]');
+    expect(review?.textContent).toContain("The Glass Reader");
+    expect(review?.textContent).toContain("Patient");
+    expect(review?.textContent).toContain("Silver");
+    expect(review?.textContent).toContain("Navigation");
+    click(document, '[data-character-edit-stage="story"]');
+    expect(document.querySelector('[name="candidate.profile.story.goals"]')?.closest('details')?.hasAttribute('open')).toBe(false);
+    const source = document.querySelector('[data-character-source]');
+    expect(source?.textContent).toContain("source only");
+    expect(document.querySelector('[name="candidate.characterText"]')).toBeNull();
+    click(document, '[data-character-stage="identity"]');
+    expect(document.querySelector('[name="candidate.id"]')?.closest('details')).not.toBeNull();
+  });
+
+  it("enables generation after paste and disables it after empty paste", async () => {
+    const { document, window, root } = fixture();
+    const readClipboardText = vi.fn().mockResolvedValueOnce("A quiet guide").mockResolvedValueOnce("   ");
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(), readClipboardText });
+    const ai = document.querySelector<HTMLInputElement>('[value="ai"]')!;
+    ai.checked = true; ai.dispatchEvent(new window.Event("change", { bubbles: true }));
+    click(document, '[data-action="paste-character-prompt"]'); await settle();
+    expect(document.querySelector<HTMLButtonElement>('[data-action="generate-character"]')?.disabled).toBe(false);
+    click(document, '[data-action="paste-character-prompt"]'); await settle();
+    expect(document.querySelector<HTMLButtonElement>('[data-action="generate-character"]')?.disabled).toBe(true);
+  });
+
+  it("removes selected mechanics while preserving the other collection and original", () => {
+    const { document, root } = fixture();
+    const sessionStore = store(session(generatedCharacter));
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore, navigate: vi.fn() });
+    for (let index = 0; index < 4; index += 1) click(document, '[data-action="continue-character"]');
+    expect(document.querySelector('[data-action="remove-character-mechanic"]')).not.toBeNull();
+    click(document, '[data-action="remove-character-mechanic"]');
+    click(document, '[data-action="continue-character"]'); click(document, '[data-action="accept-character"]');
+    expect(sessionStore.complete.mock.calls[0]?.[2].candidate.rpgStats).toEqual([]);
+    expect(sessionStore.complete.mock.calls[0]?.[2].candidate.defaultTriggers).toEqual(generatedCharacter.defaultTriggers);
+    expect(generatedCharacter.rpgStats).toHaveLength(1);
+  });
+
   it("renders a recoverable unavailable state for missing or expired sessions", () => {
     const { document, root } = fixture();
     mountCharacterWorkspacePage(root, "expired", { sessionStore: store(null) });
@@ -146,6 +217,7 @@ describe("Character Workspace page", () => {
     await settle();
     expect(generate).toHaveBeenCalledTimes(1);
     expect(generate.mock.calls[0]?.[0]).toMatchObject({ prompt: "Create a patient cartographer.", content: expect.objectContaining({ preservedLore: { cartographer: "Ilyra" } }) });
+    click(document, '[data-character-edit-stage="identity"]');
     expect(document.querySelector<HTMLInputElement>('[name="candidate.name"]')?.value).toBe("Ilyra Venn");
     input(document, window, '[name="candidate.name"]', "Ilyra Edited");
     expect(document.querySelector<HTMLInputElement>('[name="candidate.name"]')?.value).toBe("Ilyra Edited");
@@ -254,6 +326,7 @@ describe("Character Workspace page", () => {
     resolveFirst({ character: generatedCharacter });
     await settle();
     expect(generate).toHaveBeenCalledTimes(2);
+    click(document, '[data-character-edit-stage="identity"]');
     expect(document.querySelector<HTMLInputElement>('[name="candidate.name"]')?.value).toBe("Second Hero");
     expect(root.textContent).not.toContain("Ilyra Venn");
   });
@@ -440,7 +513,7 @@ describe("Character Workspace page", () => {
     click(document, '[data-action="continue-character"]');
     expect(document.querySelector('[name="candidate.id"]')?.getAttribute("aria-invalid")).toBeNull();
     click(document, '[data-action="continue-character"]');
-    expect(document.querySelector('[name="candidate.characterText"]')).not.toBeNull();
+    expect(document.querySelector('[name="candidate.profile.story.role"]')).not.toBeNull();
   });
 
   it("maps mechanics collection errors to the exact visible target and focuses it", () => {
@@ -460,9 +533,19 @@ describe("Character Workspace page", () => {
     expect(error?.textContent).toContain("cannot contain more than");
   });
 
+  it("keeps name-only mechanics visible in the character review", () => {
+    const { document, root } = fixture();
+    const edited = { ...generatedCharacter, rpgStats: [{ name: "Resolve" }], defaultTriggers: [{ name: "Watch" }] };
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(edited)) });
+    for (let step = 0; step < 5; step++) click(document, '[data-action="continue-character"]');
+    const review = document.querySelector("[data-character-review]");
+    expect(review?.textContent).toContain("Statistic: Resolve");
+    expect(review?.textContent).toContain("Tracker: Watch");
+  });
+
   it("renders complete review facts, exact final labels, and linked validation recovery", () => {
     const { document, window, root } = fixture();
-    const edited = { ...generatedCharacter, source: {} };
+    const edited = { ...generatedCharacter, source: {}, profile: { ...generatedCharacter.profile!, story: { ...generatedCharacter.profile!.story, personality: "" } } };
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(edited)) });
     for (const stage of ["identity", "story", "appearance", "mechanics"] as const) click(document, '[data-action="continue-character"]');
     expect(document.querySelector(".character-mechanics-master")).not.toBeNull();
@@ -480,17 +563,17 @@ describe("Character Workspace page", () => {
     expect(document.querySelector<HTMLButtonElement>('[data-action="accept-character"]')?.textContent).toBe("Update world draft");
 
     click(document, '[data-character-stage="story"]');
-    input(document, window, '[name="candidate.characterText"]', "");
+    input(document, window, '[name="candidate.profile.story.role"]', "");
     click(document, '[data-character-stage="review"]');
-    const errorLink = document.querySelector<HTMLAnchorElement>('[data-character-review-error-path="candidate.characterText"]');
-    expect(errorLink?.textContent).toContain("Narrative guidance is required");
+    const errorLink = document.querySelector<HTMLAnchorElement>('[data-character-review-error-path="candidate.profile.story.role"]');
+    expect(errorLink?.textContent).toContain("Add at least one structured story detail");
     errorLink?.click();
-    expect(document.activeElement).toBe(document.querySelector('[name="candidate.characterText"]'));
-    expect(document.querySelector('[name="candidate.characterText"]')?.getAttribute("aria-invalid")).toBe("true");
+    expect(document.activeElement).toBe(document.querySelector('[name="candidate.profile.story.role"]'));
+    expect(document.querySelector('[name="candidate.profile.story.role"]')?.getAttribute("aria-invalid")).toBe("true");
 
     click(document, '[data-character-stage="review"]');
     click(document, '[data-action="accept-character"]');
-    expect(document.activeElement).toBe(document.querySelector('[name="candidate.characterText"]'));
+    expect(document.activeElement).toBe(document.querySelector('[name="candidate.profile.story.role"]'));
 
     const createFixture = fixture();
     const createSession = session(generatedCharacter);

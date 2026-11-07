@@ -3364,6 +3364,7 @@ footer p:first-child {
 }
 
 .character-stage-index button {
+  position: relative;
   display: flex;
   width: 100%;
   min-height: 52px;
@@ -3671,6 +3672,20 @@ footer p:first-child {
 .character-review dd {
   margin: 8px 0 0;
 }
+
+.character-review-destination { max-width: 65ch; margin-bottom: 28px; color: var(--text-secondary); }
+.character-review-section { padding-block: 20px; border-top: 1px solid var(--rule); }
+.character-review-section > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.character-review-section h3 { margin: 0; font: 600 1.15rem/1.4 "Literata", Georgia, serif; }
+.character-review-section button { min-height: 44px; padding: 8px 14px; border: 1px solid var(--rule-strong); background: var(--surface-paper); color: var(--accent-hover); font: inherit; cursor: pointer; }
+.character-review-section button:hover { background: var(--accent-soft); }
+.character-review-section button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.character-review-section dl { display: block; margin: 0; }
+.character-review-section dl div { padding: 10px 0; border: 0; }
+.character-review-section dt { line-height: 1.4; }
+.character-review-section dd { max-width: 65ch; margin: 6px 0 0; overflow-wrap: anywhere; }
+.character-review > details { margin-block: 20px; }
+.character-review > details summary { min-height: 32px; cursor: pointer; }
 
 .character-prompt-dialog {
   width: min(900px, calc(100% - 40px));
