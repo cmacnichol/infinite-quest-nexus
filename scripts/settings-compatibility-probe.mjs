@@ -33,4 +33,4 @@ function ordered(value) {
   return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, ordered(item)]));
 }
 const digest = createHash("sha256").update(JSON.stringify(ordered(snapshot))).digest("hex");
-console.log(JSON.stringify({ version: 1, role: { role: config.role, databaseMaxConnections: config.databaseMaxConnections }, snapshot, digest }));
+process.stdout.write(JSON.stringify({ version: 1, role: { role: config.role, databaseMaxConnections: config.databaseMaxConnections }, snapshot, digest }) + "\n");
