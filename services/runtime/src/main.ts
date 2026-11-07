@@ -58,7 +58,7 @@ await runRuntimeLifecycle(config, abortController, {
       const registration = await registerSettingsRuntime(pool, resolved, signal, () => abortController.abort(), policy);
       try { await registration.waitUntilCompatible(); }
       catch (error) { await registration.dispose(); throw error; }
-      return { config: resolved.config, ...registration };
+      return { config: resolved.config, bootstrap, ...registration };
     },
     migrateDatabase,
     waitForDatabaseMigrations,

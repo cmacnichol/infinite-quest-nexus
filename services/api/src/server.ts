@@ -1,3 +1,5 @@
+import { registerInstanceSettingsRoutes } from "./instance-settings-routes.js";
+import { createInstanceSettingsHttpComposition } from "./instance-settings-composition.js";
 import { createCastContextPreview } from "../../runtime/src/campaign-cast-context-preview.js";
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -177,6 +179,7 @@ import {
 } from "../../../packages/application/src/imports/index.js";
 
 export type BuildServerOptions = {
+  settingsBootstrap?: RuntimeConfig;
   settingsReadiness?: () => Promise<boolean>;
   config: RuntimeConfig;
   pool: DatabasePool;
@@ -681,6 +684,7 @@ async function generationLifecycleLogContext(
 }
 
 export async function buildServer({
+  settingsBootstrap,
   settingsReadiness,
   config,
   pool,
@@ -727,6 +731,7 @@ export async function buildServer({
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
+  registerInstanceSettingsRoutes(app, { ...createInstanceSettingsHttpComposition(pool, settingsBootstrap ?? config), resolveActor: async () => initialOwnerId(pool) });
   const memoryAdapter = createMemoryApplicationAdapter(pool, memory, createCastContextPreview(pool, config));
   const turnCorrections = createTurnCorrectionApplication({
     corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation,

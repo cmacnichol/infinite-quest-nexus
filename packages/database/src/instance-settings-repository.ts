@@ -1,3 +1,4 @@
+import { INSTANCE_SETTING_FIELDS } from "../../domain/src/instance-settings.js";
 import { z } from "zod";
 import { instanceSettingsSchema, settingsRevisionSchema } from "../../contracts/src/instance-settings.js";
 import { SettingsConflictError, type SettingsActor, type SettingsState, type SettingsRepositoryPort } from "../../application/src/settings/index.js";
@@ -28,9 +29,9 @@ async function lock(client: DatabaseClient): Promise<void> {
   await client.query("SELECT pg_advisory_xact_lock(1936942451)");
   await client.query("SELECT singleton FROM instance_settings_state FOR UPDATE");
 }
-async function event(client: DatabaseClient, kind: string, revision: string, actor: SettingsActor, reason: string, maintenanceReference: string | null = null): Promise<void> {
-  await client.query(`INSERT INTO instance_settings_events(kind,revision,actor_user_id,operator_session_id,cli_reference,reason_code,maintenance_reference) VALUES($1,$2,$3,$4,$5,$6,$7)`,
-    [kind, revision, actor.userId, actor.operatorSessionId ?? null, actor.cliReference ?? null, reason, maintenanceReference]);
+async function event(client: DatabaseClient, kind: string, revision: string, actor: SettingsActor, reason: string, maintenanceReference: string | null = null, changedKeys: string[] = []): Promise<void> {
+  await client.query(`INSERT INTO instance_settings_events(kind,revision,actor_user_id,operator_session_id,cli_reference,reason_code,maintenance_reference,changed_keys) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [kind, revision, actor.userId, actor.operatorSessionId ?? null, actor.cliReference ?? null, reason, maintenanceReference, changedKeys]);
 }
 /** A deployment adapter must verify all drained lanes/protocol/policy inside this transaction. */
 export type SettingsActivationGuard = (client: DatabaseClient, state: SettingsState, request: import("../../application/src/settings/types.js").ActivationRequest) => Promise<void>;
@@ -73,7 +74,9 @@ export function createInstanceSettingsRepository(pool: DatabasePool, options: { 
         const updated = await client.query("UPDATE instance_settings_state SET requested_revision=$1,updated_at=clock_timestamp() WHERE requested_revision=$2", [next, input.expectedRequestedRevision]);
         if (updated.rowCount !== 1) throw new SettingsConflictError(state.requestedRevision);
         // Audit a fixed code, never arbitrary operator text or setting values.
-        await event(client, kind, next, input.actor, kind === "rollback" ? "operator_rollback" : "operator_change");
+        const at = (value: unknown, key: string): unknown => key.split(".").reduce((item: any, part) => item?.[part], value);
+        const changedKeys = INSTANCE_SETTING_FIELDS.filter(field => at(state.requested,field.key) !== at(snapshot,field.key)).map(field => field.key);
+        await event(client, kind, next, input.actor, kind === "rollback" ? "operator_rollback" : "operator_change", null, changedKeys);
         return readState(client);
       });
     },

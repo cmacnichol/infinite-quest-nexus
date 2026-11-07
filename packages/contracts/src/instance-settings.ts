@@ -86,3 +86,14 @@ export const instanceSettingsViewSchema = z.object({
 export type InstanceSettingsView = z.infer<typeof instanceSettingsViewSchema>;
 export const settingsOperatorSessionRequestSchema = z.object({ managementKey: z.string().min(1).max(4096) }).strict();
 export const settingsOperatorSessionResponseSchema = z.object({ csrfToken: z.string().min(1), expiresAt: z.iso.datetime() }).strict();
+
+export const settingsOperatorStatusSchema = z.discriminatedUnion("unlocked", [
+  z.object({managementEnabled:z.boolean(),unlocked:z.literal(false)}).strict(),
+  z.object({managementEnabled:z.literal(true),unlocked:z.literal(true),csrfToken:z.string().min(1),expiresAt:z.iso.datetime()}).strict()
+]);
+export const instanceSettingsHistorySchema = z.object({
+  events:z.array(z.object({id:settingsRevisionSchema,kind:z.enum(["seed","proposal","rollback","activation","cancellation"]),revision:settingsRevisionSchema,
+    actorUserId:z.uuid(),operatorSessionId:z.uuid().nullable(),reasonCode:z.enum(["seed_import","operator_rollback","operator_change","maintenance_activation"]),
+    changedKeys:z.array(settingsFieldDescriptorSchema.shape.key).max(40),createdAt:z.iso.datetime()}).strict()).max(100),
+  nextCursor:settingsRevisionSchema.nullable()
+}).strict();

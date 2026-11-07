@@ -31,6 +31,8 @@ export type ArchiveLimits = {
 
 export type RuntimeConfig = {
   logLevel?: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
+  settingsManagementEnabled?: boolean;
+  settingsManagementKeyFile?: string | undefined;
   instanceSettingsPolicyFile?: string | undefined;
   role: "all" | "api" | "worker" | "migrate";
   host: string;
@@ -241,6 +243,8 @@ export function loadRuntimeConfig(): RuntimeConfig {
 
   return {
     logLevel: (process.env.LOG_LEVEL || "info") as NonNullable<RuntimeConfig["logLevel"]>,
+    settingsManagementEnabled: process.env.SETTINGS_MANAGEMENT_ENABLED === "true",
+    settingsManagementKeyFile: process.env.SETTINGS_MANAGEMENT_KEY_FILE?.trim() || undefined,
     instanceSettingsPolicyFile: process.env.INSTANCE_SETTINGS_POLICY_FILE?.trim() || undefined,
     role: roleValue as RuntimeConfig["role"],
     host: process.env.APP_HOST?.trim() || "0.0.0.0",

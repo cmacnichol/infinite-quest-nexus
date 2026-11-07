@@ -3,6 +3,17 @@ import pino, { type LoggerOptions } from "pino";
 const isDev = process.env.NODE_ENV !== "production";
 
 export const LOGGER_REDACT_PATHS = [
+  "managementKey",
+  "*.managementKey",
+  "csrfToken",
+  "*.csrfToken",
+  "req.body",
+  "request.body",
+  "req.headers.x-settings-csrf",
+  "request.headers.x-settings-csrf",
+  "res.headers.set-cookie",
+  "settingsManagementKey",
+  "*.settingsManagementKey",
   "apiKey",
   "credentialEncryptionKey",
   "credentialSecret",

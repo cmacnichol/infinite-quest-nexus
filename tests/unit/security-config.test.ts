@@ -322,3 +322,15 @@ describe("System Archive configuration", () => {
     }
   });
 });
+
+it("keeps management deployment-only, disabled by default, and key-file-only", () => {
+  delete process.env.SETTINGS_MANAGEMENT_ENABLED;
+  delete process.env.SETTINGS_MANAGEMENT_KEY_FILE;
+  process.env.DATABASE_URL = "postgresql://fixture@localhost/fixture";
+  process.env.SETTINGS_MANAGEMENT_KEY = "never-load-direct-key";
+  expect(loadRuntimeConfig()).toMatchObject({settingsManagementEnabled:false,settingsManagementKeyFile:undefined});
+  process.env.SETTINGS_MANAGEMENT_ENABLED = "true";
+  process.env.SETTINGS_MANAGEMENT_KEY_FILE = "/run/secrets/settings-management";
+  expect(loadRuntimeConfig()).toMatchObject({settingsManagementEnabled:true,settingsManagementKeyFile:"/run/secrets/settings-management"});
+  expect(JSON.stringify(loadRuntimeConfig())).not.toContain("never-load-direct-key");
+});

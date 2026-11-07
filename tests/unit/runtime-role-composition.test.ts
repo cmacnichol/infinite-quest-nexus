@@ -343,4 +343,10 @@ describe("runtime role generation composition", () => {
     expect(values.runWorker).not.toHaveBeenCalled();
     expect(values.waitForDatabaseMigrations).not.toHaveBeenCalled();
   });
-});
+});    it.each(["api", "all"] as const)("preserves original deployment gates for installation edits in %s", async (role) => {
+      const controller = new AbortController(), { values } = dependencies(controller);
+      const bootstrap = { ...config(role), castEditingEnabled: true };
+      const effective = { ...bootstrap, castEditingEnabled: false };
+      await dispatchRuntimeRole(bootstrap, pool, controller.signal, { ...values, resolveSettings: async () => ({config:effective,bootstrap,dispose:async()=>{}}) }, providerTransport, generationEvents);
+      expect(values.buildServer).toHaveBeenCalledWith(expect.objectContaining({config:effective,settingsBootstrap:bootstrap}));
+    });
