@@ -81,7 +81,7 @@ export const settingsFieldDescriptorSchema = z.object({
 export type SettingsFieldDescriptor = z.infer<typeof settingsFieldDescriptorSchema> & { key: SettingsFieldKey };
 export const instanceSettingsViewSchema = z.object({
   activeRevision: settingsRevisionSchema.nullable(), requestedRevision: settingsRevisionSchema.nullable(), active: instanceSettingsSchema,
-  requested: instanceSettingsSchema.nullable(), fields: z.array(settingsFieldDescriptorSchema), activationStatus: z.enum(["environment", "active", "restart_required"])
+  requested: instanceSettingsSchema.nullable(), resetDefaults: instanceSettingsSchema.nullable(), fields: z.array(settingsFieldDescriptorSchema), activationStatus: z.enum(["environment", "active", "restart_required"])
 }).strict();
 export type InstanceSettingsView = z.infer<typeof instanceSettingsViewSchema>;
 export const settingsOperatorSessionRequestSchema = z.object({ managementKey: z.string().min(1).max(4096) }).strict();

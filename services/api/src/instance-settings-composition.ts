@@ -5,7 +5,7 @@ import { createSettingsOperatorRepository } from "../../../packages/database/src
 import { createInstanceSettingsRepository } from "../../../packages/database/src/instance-settings-repository.js";
 import { createSettingsUseCases, SettingsConflictError, type SettingsState } from "../../../packages/application/src/settings/index.js";
 import {
-  instanceSettingsHistorySchema, instanceSettingsPatchSchema, instanceSettingsViewSchema,
+  instanceSettingsHistorySchema, instanceSettingsPatchSchema, instanceSettingsViewSchema, instanceSettingsSchema,
   settingsFeatureGatesSchema, type InstanceSettings, type SettingsFieldKey, type SettingsFeatureKey
 } from "../../../packages/contracts/src/instance-settings.js";
 import { resolveInstanceSettings, INSTANCE_SETTING_FIELDS } from "../../../packages/domain/src/instance-settings.js";
@@ -86,11 +86,26 @@ export function createInstanceSettingsHttpComposition(pool: DatabasePool, bootst
       role: bootstrap.role, databaseMaxConnections: bootstrap.databaseMaxConnections
     });
     if (!resolution.ok) throw new SettingsHttpError(503, "settings_policy_rejected");
+    // Defaults come from the immutable seed, never the current shell environment.
+    // A stricter numeric/rate policy makes reset unavailable rather than rounding or clamping.
+    let resetSource: InstanceSettings | null = active;
+    if (state.requestedRevision) {
+      const { rows: [seed] } = await pool.query<{ snapshot: unknown }>(
+        "SELECT snapshot FROM instance_settings_revisions WHERE revision=1 AND kind='seed'"
+      );
+      const parsed = instanceSettingsSchema.safeParse(seed?.snapshot);
+      resetSource = parsed.success ? parsed.data : null;
+    }
+    const resetResolution = resetSource ? resolveInstanceSettings(resetSource, constrainedPolicy(), {
+      role: bootstrap.role, databaseMaxConnections: bootstrap.databaseMaxConnections
+    }) : null;
+    const resetDefaults = resetResolution?.ok ? resetResolution.effective : null;
     return instanceSettingsViewSchema.parse({
       activeRevision: state.activeRevision,
       requestedRevision: state.requestedRevision,
       active,
       requested: state.requested,
+      resetDefaults,
       fields: resolution.fields.map(field => ({
         ...field,
         // Policy locks/ranges constrain proposals; they do not hot-apply to the running process.

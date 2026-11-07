@@ -3,7 +3,7 @@ import type { ThemeController } from "./theme";
 import type { DisplayPreferencesStore } from "./preferences/display-preferences";
 import type { UiImplementation } from "./ui/feature-policy";
 
-export type AppNavigation = "world-library" | "world-editor" | "campaigns" | "story" | "data-transfer" | "setup";
+export type AppNavigation = "world-library" | "world-editor" | "campaigns" | "story" | "data-transfer" | "setup" | "settings";
 
 /** Static application-owned header content. Page data must never be interpolated here. */
 export interface AppShellOptions {
@@ -38,7 +38,7 @@ export function renderAppShell(
           <a href="/app/campaigns"${currentAttribute(currentNavigation, "campaigns")}>Campaigns</a>
           <a href="${storyHref}"${currentAttribute(currentNavigation, "story")}>Story</a>
           <a href="/app/data-transfer"${currentAttribute(currentNavigation, "data-transfer")}>Data Transfer</a>
-          <a href="/nexus/#providers"${currentAttribute(currentNavigation, "setup")}>Setup</a>
+          <a href="/app/settings"${currentAttribute(currentNavigation, "settings")}>Settings</a>
         </nav>
         <a class="story-link" href="${storyHref}">
           Enter story

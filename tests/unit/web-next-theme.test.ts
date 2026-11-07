@@ -170,7 +170,7 @@ describe("web theme integration", () => {
     renderAppShell(root, '<main id="main-content">Page</main>', "world-library");
 
     expect(document.querySelector<HTMLAnchorElement>('a[href="/app/campaigns"]')?.textContent).toBe("Campaigns");
-    expect(document.querySelector<HTMLAnchorElement>('a[href="/nexus/#providers"]')?.textContent).toBe("Setup");
+    expect(document.querySelector<HTMLAnchorElement>('a[href="/app/settings"]')?.textContent).toBe("Settings");
   });
 
   it("keeps a valid stored choice authoritative when matchMedia access throws", () => {

@@ -11,9 +11,9 @@ const { read } = vi.hoisted(() => ({ read: vi.fn() }));
 vi.mock("../../packages/database/src/instance-settings-repository.js", () => ({ createInstanceSettingsRepository: () => ({ read }) }));
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
-function fixture(mode: "environment" | "database", allowed = true) {
+function fixture(mode: "environment" | "database", allowed = true, pollMaximum = 60000) {
   const directory = mkdtempSync(join(tmpdir(), "iq-settings-projection-")); directories.push(directory);
-  const policy = runtimePolicy(); policy.featureGates.castEditingEnabled = allowed;
+  const policy = runtimePolicy(); policy.featureGates.castEditingEnabled = allowed; policy.numericBounds.workerPollIntervalMs!.max = pollMaximum;
   const path = join(directory, "policy.json"); writeFileSync(path, JSON.stringify(policy));
   const config = { ...bootstrap(), castEditingEnabled: true, instanceSettingsPolicyFile: path };
   const active = { ...settingsFixture(), castEditingEnabled: true };
@@ -42,4 +42,22 @@ describe("running installation projection", () => {
     query.mockResolvedValue({ rows: [{ policy_digest: "e".repeat(64) }] });
     await expect(composition.settings.read()).rejects.toMatchObject({ code: "settings_policy_mismatch", statusCode: 503 });
   });
+});
+
+it("exposes immutable seeded defaults constrained by current policy and disables unsafe numeric reset", async () => {
+  const { composition, query } = fixture("environment", false, 2000);
+  const seed = settingsFixture(); seed.castEditingEnabled = true;
+  query.mockResolvedValue({ rows: [{ snapshot: seed }] } as never);
+  const result = await composition.settings.read();
+  expect(result.resetDefaults?.castEditingEnabled).toBe(false);
+  expect(result.active.castEditingEnabled).toBe(true);
+  query.mockResolvedValue({ rows: [{ snapshot: { ...seed, workerPollIntervalMs: 60000 } }] } as never);
+  expect((await composition.settings.read()).resetDefaults).toBeNull();
+});
+it("uses the captured environment snapshot before seed initialization", async () => {
+  const { composition } = fixture("environment", false);
+  read.mockResolvedValue({ installationId: null, mode: "environment", activeRevision: null, requestedRevision: null, requested: null, policyDigest: null });
+  const result = await composition.settings.read();
+  expect(result.resetDefaults).not.toBeNull();
+  expect(result.resetDefaults?.castEditingEnabled).toBe(false);
 });

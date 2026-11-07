@@ -1,3 +1,4 @@
+import { mountSettingsPage, parseSettingsRoute } from "./settings/page";
 import "./styles.css";
 import { generateWorldPreview } from "./world-creation-api";
 import { createAuthoringJobsApi } from "./authoring-jobs-api";
@@ -56,6 +57,8 @@ async function start(): Promise<MountedPage | null> {
     if (result === "resumed") return null;
     if (pageDisposed) return null;
   }
+  const settingsRoute = parseSettingsRoute(new URL(window.location.href));
+  if (settingsRoute) return mountSettingsPage(appRoot, settingsRoute);
   const characterSessionKey = characterSessionKeyFromPath(window.location.pathname);
   const storyRoute = storyRouteFromLocation(window.location.pathname, window.location.search);
   const campaignRoute = campaignRouteFromPath(window.location.pathname);
