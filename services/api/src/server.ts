@@ -731,7 +731,7 @@ export async function buildServer({
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
-  registerInstanceSettingsRoutes(app, { ...createInstanceSettingsHttpComposition(pool, settingsBootstrap ?? config), resolveActor: async () => initialOwnerId(pool) });
+  registerInstanceSettingsRoutes(app, { ...createInstanceSettingsHttpComposition(pool, settingsBootstrap ?? config, config), resolveActor: async () => initialOwnerId(pool) });
   const memoryAdapter = createMemoryApplicationAdapter(pool, memory, createCastContextPreview(pool, config));
   const turnCorrections = createTurnCorrectionApplication({
     corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation,

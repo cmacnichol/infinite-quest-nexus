@@ -26,7 +26,7 @@ const url=process.env.TEST_DATABASE_URL;
   Object.assign(config,{...snapshot,security:{...config.security,...Object.fromEntries(Object.entries(snapshot).filter(([key])=>key in config.security))},castEditingEnabled:true,settingsManagementEnabled:true,settingsManagementKeyFile:keyFile,instanceSettingsPolicyFile:policyFile,databaseMaxConnections:20});
   const actor=await initialOwnerId(pool);
   await createInstanceSettingsRepository(pool).seed({snapshot:{...snapshot,castEditingEnabled:false},installationId:policy.installationId,seedDigest:"1".repeat(64),policyDigest:settingsDigest(policy),actor:{userId:actor,cliReference:"http-test"}});
-  const apps=[pool,otherPool].map(db=>{const app=Fastify({trustProxy:true});registerInstanceSettingsRoutes(app,{...createInstanceSettingsHttpComposition(db,config),resolveActor:async()=>actor});return app;});
+  const apps=[pool,otherPool].map(db=>{const app=Fastify({trustProxy:true});registerInstanceSettingsRoutes(app,{...createInstanceSettingsHttpComposition(db,config,config),resolveActor:async()=>actor});return app;});
   const headers={host:"nexus.test","x-forwarded-proto":"https",origin:"https://nexus.test"};
   try{
    for(let i=0;i<5;i++)expect((await apps[i%2]!.inject({method:"POST",url:"/api/v1/settings/operator-session",headers,payload:{managementKey:"wrong"}})).statusCode).toBe(401);
@@ -40,6 +40,9 @@ const url=process.env.TEST_DATABASE_URL;
    const environment=(await apps[0]!.inject({url:"/api/v1/settings/instance",headers:auth})).json();
    expect(environment.activeRevision).toBeNull();expect(environment.fields.every((field:any)=>field.source==="environment")).toBe(true);
    await createInstanceSettingsRepository(pool,{activationGuard:async()=>{}}).activate({expectedActiveRevision:null,expectedRequestedRevision:"1",policyDigest:settingsDigest(policy),maintenanceReference:"http-test-maintenance",actor:{userId:actor,cliReference:"http-test"}});
+   await Promise.all(apps.map(app=>app.close()));
+   const running={...config,castEditingEnabled:false};
+   apps.splice(0,apps.length,...[pool,otherPool].map(db=>{const app=Fastify({trustProxy:true});registerInstanceSettingsRoutes(app,{...createInstanceSettingsHttpComposition(db,config,running),resolveActor:async()=>actor});return app;}));
    const body={expectedRequestedRevision:"1",changes:{castEditingEnabled:true,campaignArchiveLimits:{maxEntries:snapshot.campaignArchiveLimits.maxEntries-1}},reason:"planted provider secret"};
    const edits=await Promise.all(apps.map(app=>app.inject({method:"PATCH",url:"/api/v1/settings/instance",headers:auth,payload:body})));expect(edits.map(result=>result.statusCode).sort()).toEqual([200,409]);
    const saved=edits.find(result=>result.statusCode===200)!.json();expect(saved.active.castEditingEnabled).toBe(false);expect(saved.activeRevision).toBe("1");expect(saved.requestedRevision).toBe("2");expect(saved.fields.every((field:any)=>field.source==="database")).toBe(true);
