@@ -188,7 +188,12 @@ describe("Sogni Supernet SDK provider", () => {
 
   it("discovers model-aware controls and cancels by persisted project ID", async () => {
     const client = fakeClient({
-      getSupportedModels: vi.fn().mockResolvedValue([{ id: "flux-test", name: "Flux Test", media: "image" }]),
+      getSupportedModels: vi.fn().mockResolvedValue([
+        { id: "flux-test", name: "Flux Test", media: "image" },
+        { id: "audio-test", name: "Audio Test", media: "audio" },
+        { id: "video-test", name: "Video Test", media: "video" },
+        { id: "model-test", name: "Model Test", media: "model" }
+      ]),
       getAvailableModels: vi.fn().mockImplementation(async (workerType) => workerType === "fast"
         ? [{ id: "flux-test", name: "Flux Test", workerCount: 7, media: "image" }]
         : [{ id: "flux-test", name: "Flux Test", workerCount: 3, media: "image" }]),
@@ -198,7 +203,7 @@ describe("Sogni Supernet SDK provider", () => {
     setSogniSdkClientFactoryForTests(async () => client);
 
     await expect(discoverSogniSdkModels(profile)).resolves.toEqual([expect.objectContaining({
-      id: "flux-test", workerCount: 3, loaded: true,
+      id: "flux-test", media: "image", workerCount: 3, loaded: true,
       workerAvailability: [
         expect.objectContaining({ type: "fast", workerCount: 7 }),
         expect.objectContaining({ type: "relaxed", workerCount: 3 })

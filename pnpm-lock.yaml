@@ -176,8 +176,8 @@ importers:
         specifier: workspace:*
         version: link:packages/contracts
       '@sogni-ai/sogni-client':
-        specifier: 5.23.0
-        version: 5.23.0
+        specifier: 5.70.0
+        version: 5.70.0
       archiver:
         specifier: ^8.0.0
         version: 8.0.0
@@ -1335,12 +1335,12 @@ packages:
   '@shoelace-style/localize@3.2.3':
     resolution: {integrity: sha512-pWoZywizMilenLfQcpE9bjaqi7WKiQXJB42cxvmSPwYS76U776wJ7B5QQ0P28yVit1vpHuFZzq1CtfVFv32jaQ==}
 
-  '@sogni-ai/sogni-client@5.23.0':
-    resolution: {integrity: sha512-YUDIJj+BFz9nqZYNe109vbthGYyDLfSRp3no/zH09rvv+dC430IEESPqhuRk0SBqWEGtysrZZ3D7F91t/kebnw==}
+  '@sogni-ai/sogni-client@5.70.0':
+    resolution: {integrity: sha512-tkg3tfrgMnmg/zXIo8lTuXJBAoFtfjI9AcdZqYrHdXdrz+gcHwr2uT0XvmF0RkmrTXwfy8DBi5PTb/QznOHCIA==}
     engines: {node: '>=22'}
 
-  '@sogni-ai/sogni-protocol@1.0.0-alpha.30':
-    resolution: {integrity: sha512-GUfjHhSalcJ5uOqP9010jeumYZSjjp6ZEHRHfVy/52jL0bNlxvk/U0f9Lmy0nhEO4iWeYlzWPhcWUvg4VJ8+Mg==}
+  '@sogni-ai/sogni-protocol@1.0.0-alpha.55':
+    resolution: {integrity: sha512-gjZWpzCwpuZuQ1XJtW1ffqyWq+96ixginK2wOs5sUm+9mlQoQuI84MSKRTJkiu8j5VknNPczHwH/ev7PyDNwSw==}
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
@@ -4139,10 +4139,10 @@ snapshots:
 
   '@shoelace-style/localize@3.2.3': {}
 
-  '@sogni-ai/sogni-client@5.23.0':
+  '@sogni-ai/sogni-client@5.70.0':
     dependencies:
       '@lukeed/uuid': 2.0.1
-      '@sogni-ai/sogni-protocol': 1.0.0-alpha.30
+      '@sogni-ai/sogni-protocol': 1.0.0-alpha.55
       '@types/js-cookie': 3.0.6
       '@types/lodash': 4.17.24
       '@types/ws': 8.18.1
@@ -4156,7 +4156,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@sogni-ai/sogni-protocol@1.0.0-alpha.30': {}
+  '@sogni-ai/sogni-protocol@1.0.0-alpha.55': {}
 
   '@standard-schema/spec@1.1.0': {}
 
