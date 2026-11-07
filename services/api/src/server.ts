@@ -842,7 +842,7 @@ export async function buildServer({
   });
 
   installRequestSecurity(app, config);
-  installRequestAdmission(app, pool, config, requestAdmission);
+  const admissionReadiness=installRequestAdmission(app, pool, config, requestAdmission);
   registerSystemImportGate(app, {
     pool,
     enabled: config.systemArchiveEnabled ?? false,
@@ -1002,6 +1002,7 @@ export async function buildServer({
   app.get("/health/live", async () => ({ status: "ok", role: config.role }));
   app.get("/health/ready", async (_request, reply) => {
     try {
+      if (!admissionReadiness.isReady()) return reply.code(503).send({ status: "not_ready", reason: "request admission unavailable" });
       if (settingsReadiness && !await settingsReadiness()) return reply.code(503).send({ status: "not_ready", reason: "settings runtime incompatible" });
       const result = await pool.query<{ database_version: string; vector_version: string | null }>(
         `SELECT current_setting('server_version') AS database_version,

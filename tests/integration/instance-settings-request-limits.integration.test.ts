@@ -69,6 +69,28 @@ integration("request settings preserve distributed admission authority", () => {
     await releaseAdmission(pool,acquired.leaseId);
     await expect(renewAdmission(replica,acquired.leaseId,owner,"renew-scope","provider",9)).rejects.toThrow();
   });
+
+  it("reports only the exhausted older window as Retry-After",async()=>{
+    const now=new Date("2026-07-23T12:00:10Z");
+    expect(await acquireAdmission(pool,owner,"short",policy(30,1),now)).toMatchObject({allowed:true});
+    expect(await acquireAdmission(replica,owner,"long",policy(60,9),new Date(now.getTime()+1000))).toEqual({allowed:false,retryAfterSeconds:19});
+  });
+  it.each(["generation","provider"] as const)("bounds expired history cleanup on %s denial",async key=>{
+    const now=new Date("2026-07-23T12:00:10Z"),old=new Date(now.getTime()-10800000);
+    const current={...policy(60,1),key,maxConcurrent:key==="provider"?1:null};
+    expect(await acquireAdmission(pool,owner,"held",current,now)).toMatchObject({allowed:true});
+    await pool.query(`INSERT INTO api_admission_windows(owner_user_id,operation,window_started_at,window_expires_at,max_requests)
+      SELECT $1,$2,$3::timestamptz+i*interval '1 second',$3::timestamptz+(i+1)*interval '1 second',9 FROM generate_series(1,150) i`,[owner,key,old]);
+    await pool.query(`INSERT INTO api_admission_buckets(owner_user_id,operation,window_started_at,window_expires_at,accepted_count)
+      SELECT $1,$2,$3::timestamptz+i*interval '1 second',$3::timestamptz+(i+1)*interval '1 second',0 FROM generate_series(1,150) i`,[owner,key,old]);
+    await pool.query(`INSERT INTO api_admission_events(owner_user_id,operation,accepted_at) SELECT $1,$2,$3 FROM generate_series(1,150)`,[owner,key,old]);
+    expect(await acquireAdmission(replica,owner,"denied",current,now)).toMatchObject({allowed:false});
+    for(const table of ["api_admission_windows","api_admission_buckets","api_admission_events"]){
+      const column=table==="api_admission_events"?"accepted_at":"window_expires_at";
+      expect((await pool.query(`SELECT count(*)::int AS count FROM ${table} WHERE ${column}<$1`,[new Date(now.getTime()-3600000)])).rows).toEqual([{count:50}]);
+    }
+    expect((await pool.query("SELECT count(*)::int AS count FROM api_admission_events WHERE accepted_at=$1",[now])).rows).toEqual([{count:1}]);
+  });
   it("retains old SQL conflict target and treats old binary accepts as unknown authority", async () => {
     const sql = `INSERT INTO api_admission_buckets(owner_user_id,operation,window_started_at,window_expires_at,accepted_count)
       VALUES($1,'generation','2026-07-23T12:00:00Z','2026-07-23T12:01:00Z',1)
@@ -154,6 +176,8 @@ integration("two API replica request admission", () => {
     const url="/api/v1/providers/11111111-1111-4111-8111-111111111111/models";
     try{
       const first=apps[0]!.inject({url}).then(response=>response);await started;expect((await first).statusCode).toBe(503);
+      expect((await apps[0]!.inject({url:"/health/ready"})).statusCode).toBe(503);
+      expect((await apps[0]!.inject({url:"/health/live"})).statusCode).toBe(200);
       await new Promise(resolve=>setTimeout(resolve,900));
       expect((await pools[0]!.query("SELECT expires_at<clock_timestamp() AS expired,request_running FROM api_admission_leases")).rows).toEqual([{expired:true,request_running:true}]);
       expect((await apps[1]!.inject({url})).statusCode).toBe(429);
@@ -228,7 +252,7 @@ import { spawn } from "node:child_process";
 // @ts-expect-error Launcher intentionally has no TypeScript declarations.
 import { tsxCommand } from "../../scripts/node-tool-command.mjs";
 integration("crashed HTTP reservation process",()=>{
-  it("requires selective verified recovery after an actual reserving process exits",async()=>{
+  it.each([true,false])("recovers an exited reservation process with mounted policy=%s",async withPolicy=>{
     const pool=createDatabasePool(process.env.TEST_DATABASE_URL!,3);
     await migrateDatabase(pool,resolve("database/migrations"));
     await pool.query("TRUNCATE api_admission_events,api_admission_windows,api_admission_buckets,api_admission_leases");
@@ -247,7 +271,7 @@ integration("crashed HTTP reservation process",()=>{
         await writeFile(policyPath,JSON.stringify(runtimePolicy()));
         await writeFile(inputPath,JSON.stringify({...lease,operation:"provider",requestId:"crashed-process-request",maintenanceReference:"crash/test-123",verifiedShutdown:"all-api-processes-stopped-and-work-terminated"}));
         const command=tsxCommand(["scripts/instance-settings.ts","recover-admission","--input",inputPath]);
-        const operator=spawn(command.executable,command.arguments,{env:{...process.env,DATABASE_URL:process.env.TEST_DATABASE_URL,APP_ROLE:"api",INSTANCE_SETTINGS_POLICY_FILE:policyPath},stdio:["ignore","pipe","ignore"]});
+        const operator=spawn(command.executable,command.arguments,{env:{...process.env,DATABASE_URL:process.env.TEST_DATABASE_URL,APP_ROLE:"api",INSTANCE_SETTINGS_POLICY_FILE:withPolicy?policyPath:""},stdio:["ignore","pipe","ignore"]});
         let result="";operator.stdout!.on("data",chunk=>{result+=chunk;});
         expect(await new Promise<number|null>((resolve,reject)=>{operator.on("error",reject);operator.on("exit",resolve);})).toBe(0);
         expect(JSON.parse(result)).toMatchObject({status:"ok",command:"recover-admission",result:{recovered:true,maintenanceReference:"crash/test-123"}});

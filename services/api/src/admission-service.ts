@@ -135,12 +135,12 @@ export async function acquireAdmission(
       [ownerUserId,policy.key,now]
     );
     let availableRemaining = unknownActive ? 0 : policy.maxRequests;
-    let retryAt = unknownActive?.window_expires_at ?? window.expiresAt;
+    let retryAt = history.rows.reduce<Date|null>((deadline,row)=>row.window_expires_at>now&&(!deadline||row.window_expires_at>deadline)?row.window_expires_at:deadline,null);
     for (const budget of budgets.rows) {
       const unknown = history.rows.filter(row => row.window_expires_at>budget.window_started_at && row.window_started_at<budget.window_expires_at).reduce((sum,row)=>sum+row.unknown_count,0);
       const available = budget.max_requests-budget.accepted_count-unknown;
       availableRemaining=Math.min(availableRemaining,available);
-      if (available<=0 && budget.window_expires_at>retryAt) retryAt=budget.window_expires_at;
+      if (available<=0 && (!retryAt || budget.window_expires_at>retryAt)) retryAt=budget.window_expires_at;
     }
 
     if (policy.maxConcurrent !== null) {
@@ -173,6 +173,7 @@ export async function acquireAdmission(
       if (active >= policy.maxConcurrent) {
         const retryAt = concurrency.rows[0]?.retry_at
           ?? new Date(now.getTime() + policy.leaseSeconds * 1000);
+        await cleanupExpiredBuckets(client,now);
         await client.query("COMMIT");
         transactionOpen = false;
         return { allowed: false, retryAfterSeconds: retryAfterSeconds(now, retryAt) };
@@ -180,9 +181,10 @@ export async function acquireAdmission(
     }
 
     if (availableRemaining<=0) {
+      await cleanupExpiredBuckets(client,now);
       await client.query("COMMIT");
       transactionOpen=false;
-      return {allowed:false,retryAfterSeconds:retryAfterSeconds(now,retryAt)};
+      return {allowed:false,retryAfterSeconds:retryAfterSeconds(now,retryAt ?? window.expiresAt)};
     }
     const remaining=availableRemaining-1;
     await client.query(`INSERT INTO api_admission_events(owner_user_id,operation,accepted_at) VALUES($1,$2,$3)`,[ownerUserId,policy.key,now]);

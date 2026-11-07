@@ -5,13 +5,20 @@ import { createInstanceSettingsRepository } from "../packages/database/src/insta
 import { instanceSettingsSchema } from "../packages/contracts/src/instance-settings.js";
 import { loadDeploymentSettingsPolicy, settingsDigest, loadActiveRuntimeSettings, readSettingsRuntimeReports, settingsReportsCompatible } from "../services/runtime/src/instance-settings.js";
 import { createSettingsActivationGuard } from "../services/runtime/src/settings-activation.js";
-import { exportSettingsSeed, runInstanceSettingsCommand } from "../services/runtime/src/settings-operator.js";
+import { exportSettingsSeed, runInstanceSettingsCommand, runAdmissionRecoveryCommand } from "../services/runtime/src/settings-operator.js";
 const output=(value:unknown)=>process.stdout.write(JSON.stringify(value)+'\n');
 try {
   const config=loadRuntimeConfig();
   const args=process.argv.slice(2);
   if(args[0]==='export-seed') {output(exportSettingsSeed(config));}
-  else {
+  else if(args[0]==='recover-admission') {
+    const pool=createDatabasePool(config.databaseUrl,config.databaseMaxConnections);
+    try {
+      process.exitCode=await runAdmissionRecoveryCommand(args,{output,
+        readJson:async path=>JSON.parse(await readFile(path,'utf8')),
+        recoverAdmission:input=>recoverRequestAdmission(pool,input)});
+    } finally {await pool.end();}
+  } else {
     const policy=loadDeploymentSettingsPolicy(config.instanceSettingsPolicyFile??'');
     const pool=createDatabasePool(config.databaseUrl,config.databaseMaxConnections);
     try {

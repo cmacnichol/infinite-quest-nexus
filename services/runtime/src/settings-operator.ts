@@ -28,6 +28,7 @@ export type SettingsOperatorPorts={
 };
 /** No process-execution port exists: this tool records changes, never controls deployment. */
 export async function runInstanceSettingsCommand(args:readonly string[],ports:SettingsOperatorPorts):Promise<number> {
+  if(args[0]==='recover-admission') return runAdmissionRecoveryCommand(args,ports);
   try {
     const [command,...rest]=args;
     if(!['export-seed','seed','propose','status','validate','activate','propose-rollback','recover-admission'].includes(command??'')) throw new Error('settings_command_invalid');
@@ -38,10 +39,6 @@ export async function runInstanceSettingsCommand(args:readonly string[],ports:Se
       options.set(key,value);
     }
     const required=(key:string)=>{const value=options.get(key);if(!value)throw new Error('settings_argument_required');return value;};
-    if(command==='recover-admission') {
-      if(!ports.recoverAdmission)throw new Error('settings_admission_recovery_unavailable');
-      ports.output({status:'ok',command,result:await ports.recoverAdmission(await ports.readJson(required('--input')))});return 0;
-    }
     if(command==='export-seed') {ports.output(exportSettingsSeed(ports.config));return 0;}
     if(command==='status') {ports.output(await ports.status());return 0;}
     if(ports.policy.minimumSettingsProtocolVersion>SETTINGS_PROTOCOL_VERSION) throw new Error('settings_protocol_unsupported');
@@ -70,5 +67,18 @@ export async function runInstanceSettingsCommand(args:readonly string[],ports:Se
     // Fixed codes only. Never print database errors, file contents, paths or credentials.
     const code=error instanceof Error && /^settings_[a-z_]+$/.test(error.message)?error.message:'settings_command_failed';
     ports.output({status:'error',code});return 1;
+  }
+}
+
+/** Recovery needs database authority and explicit shutdown evidence, never a settings policy. */
+export async function runAdmissionRecoveryCommand(args:readonly string[],ports:Pick<SettingsOperatorPorts,"readJson"|"recoverAdmission"|"output">):Promise<number> {
+  try {
+    if(args.length!==3||args[0]!=="recover-admission"||args[1]!=="--input"||!args[2])throw new Error("settings_arguments_invalid");
+    if(!ports.recoverAdmission)throw new Error("settings_admission_recovery_unavailable");
+    const result=await ports.recoverAdmission(await ports.readJson(args[2]));
+    ports.output({status:"ok",command:"recover-admission",result});return 0;
+  }catch(error){
+    const code=error instanceof Error&&/^settings_[a-z_]+$/.test(error.message)?error.message:"settings_command_failed";
+    ports.output({status:"error",code});return 1;
   }
 }

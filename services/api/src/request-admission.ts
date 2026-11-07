@@ -32,7 +32,7 @@ export function requestOperation(method:string, route:string):AdmissionPolicy["k
   if (method==="POST" && GENERATION_POST.has(route)) return "generation";
   return null;
 }
-export function installRequestAdmission(app:FastifyInstance,pool:DatabasePool,config:RuntimeConfig,port:RequestAdmissionPort={acquire:acquireAdmission,release:releaseAdmission}):void {
+export function installRequestAdmission(app:FastifyInstance,pool:DatabasePool,config:RuntimeConfig,port:RequestAdmissionPort={acquire:acquireAdmission,release:releaseAdmission}):{isReady():boolean} {
   type State = {leaseId:string;owner:string;requestId:string;key:AdmissionPolicy["key"];pendingHandlers:number;responseEnded:boolean;released:boolean;timer:ReturnType<typeof setTimeout>|null;renewal:Promise<void>;done:Promise<void>;finish:()=>void};
   const states=new WeakMap<FastifyRequest,State>();
   const active=new Set<State>();
@@ -130,4 +130,5 @@ export function installRequestAdmission(app:FastifyInstance,pool:DatabasePool,co
   });
   app.addHook("onResponse",async request=>{const state=states.get(request);if(state)state.responseEnded=true;await release(request);});
   app.addHook("onClose",async()=>{await Promise.all([...active].map(state=>state.done));});
+  return {isReady:()=>!unavailable};
 }
