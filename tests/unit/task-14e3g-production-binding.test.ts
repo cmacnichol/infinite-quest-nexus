@@ -646,8 +646,6 @@ describe("Task 14e3g production binding", () => {
       readPrivateCompositionParitySources(process.cwd()),
     );
 
-    expect(violations).not.toContain(
-      "services/worker/src/worker.ts: private asset-maintenance composition must remain unbound until e3g",
-    );
-  });
+    expect(violations).toEqual([]);
+  }, 60_000); // Parses the production source graph, including on shared CI runners.
 });
