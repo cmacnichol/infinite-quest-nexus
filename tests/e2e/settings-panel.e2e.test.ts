@@ -89,3 +89,48 @@ test(`${mode} foreign campaign route cannot create an editor and blocked storage
   await page.goto(`${base}/app/settings?section=providers`); await expect(page.getByRole("link", { name: "Open provider editor" })).toBeVisible();
   await expect(page.locator('.settings-content input[type="password"]')).toHaveCount(0);
 });
+
+test(`${mode} retention accepts arbitrary whole seconds from minute-aligned saved defaults`, async ({ page }) => {
+  await api(page);
+  await page.goto(`${base}/app/settings?section=sharing`);
+  const preview = page.getByRole("textbox", { name: "Import preview retention", exact: true });
+  const download = page.getByRole("textbox", { name: "Archive download retention", exact: true });
+  await expect(preview).toHaveValue("1800");
+  await preview.fill("61"); await preview.press("Tab");
+  await download.fill("301"); await download.press("Tab");
+  await page.getByLabel("Reason for this change").fill("Exact whole-second retention");
+  await page.getByRole("button", { name: "Save section", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm staged Save" }).click();
+  await expect(page.getByRole("status")).toHaveText("Saved — restart required");
+  await expect(page.locator(".settings-field").filter({ has: preview }).locator(".settings-comparison")).toContainText("Saved: 61 seconds");
+  await expect(page.locator(".settings-field").filter({ has: download }).locator(".settings-comparison")).toContainText("Saved: 301 seconds");
+  await page.screenshot({ path: `docs/review/assets/settings-panel/${mode}-retention-fix.png`, fullPage: true });
+});
+test(`${mode} identity change removes loaded campaign titles and editor links`, async ({ page }) => {
+  await api(page);
+  const campaignId = quietLeafApiPayloads().campaigns.campaigns[0]!.id;
+  await page.goto(`${base}/app/settings?section=campaign&campaignId=${campaignId}`);
+  await expect(page.getByRole("link", { name: "Open campaign editor" })).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("app-identity-changed")));
+  await expect(page.getByText("Your account changed. Reload Settings to continue.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open campaign editor" })).toHaveCount(0);
+  await expect(page.getByText("Fixture Story", { exact: true })).toHaveCount(0);
+  await page.screenshot({ path: `docs/review/assets/settings-panel/${mode}-identity-fix.png` });
+});
+test(`${mode} identity change ignores a late campaign response`, async ({ page }) => {
+  await api(page);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let requested!: () => void;
+  const started = new Promise<void>(resolve => { requested = resolve; });
+  await page.route("**/api/v1/campaigns", async route => {
+    requested(); await gate;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(quietLeafApiPayloads().campaigns) }).catch(() => undefined);
+  });
+  await page.goto(`${base}/app/settings?section=campaign`); await started;
+  await page.evaluate(() => window.dispatchEvent(new Event("app-identity-changed")));
+  release();
+  await expect(page.getByText("Your account changed. Reload Settings to continue.")).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Campaign", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Fixture Story", { exact: true })).toHaveCount(0);
+});

@@ -23,3 +23,11 @@ it("describes exact byte ranges in readable binary units", () => {
   expect(readableRangeValue(field, 21474836480)).toBe("20 GiB");
   expect(readableRangeValue(field, 1048577)).toBe("1,048,577 bytes");
 });
+import { displayUnit } from "../../apps/web-next/src/settings/instance-editor.js";
+it.each([61, 301, 1800, 86401])("round-trips arbitrary valid retention value %s without a repeating decimal", (seconds) => {
+  const field = { key: seconds < 300 ? "archivePreviewTtlSeconds" : "systemArchiveArtifactTtlSeconds", unit: "seconds" } as SettingsFieldDescriptor;
+  const unit = displayUnit(field);
+  expect(fromDisplayUnit(toDisplayUnit(seconds, unit.factor), unit.factor)).toBe(seconds);
+  // The input unit must allow the next whole second even when the saved value divides 60.
+  expect(fromDisplayUnit(String(seconds + 1), unit.factor)).toBe(seconds + 1);
+});

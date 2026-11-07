@@ -20,7 +20,8 @@ export function toDisplayUnit(value: number, factor: number): string {
 export function displayUnit(field: SettingsFieldDescriptor): { factor: number; label: string } {
   if (field.unit === "bytes") return { factor: field.key.endsWith("maxUncompressedBytes") ? 1073741824 : 1048576, label: field.key.endsWith("maxUncompressedBytes") ? "GiB" : "MiB" };
   if (field.unit === "milliseconds") return { factor: 1000, label: "seconds" };
-  if (field.unit === "seconds") return { factor: field.key.includes("Ttl") ? 60 : 1, label: field.key.includes("Ttl") ? "minutes" : "seconds" };
+  // Whole-second inputs can represent every valid TTL, including values not divisible by 60.
+  if (field.unit === "seconds") return { factor: 1, label: "seconds" };
   return { factor: 1, label: field.unit === "ratio" ? "× expansion" : field.unit === "count" ? (field.key.endsWith("maxEntries") ? "files" : field.key === "workerGenerationConcurrency" ? "jobs per worker" : field.key === "textProviderConcurrency" ? "shared slots" : "requests") : "" };
 }
 export function readableValue(field: SettingsFieldDescriptor, value: boolean | string | number): string {

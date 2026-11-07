@@ -172,9 +172,41 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
   if (installation) void session.load();
   if (route.section === "campaign") void ownerApi.campaigns.list(controller.signal).then(value => { if (!disposed) { campaigns = value.campaigns; render(); } }).catch(() => { if (!disposed) { campaignFailed = true; render(); } });
   if (route.section === "diagnostics") void ownerApi.meta.get(controller.signal).then(value => { if (!disposed) { meta = value; render(); } }).catch(() => undefined);
-  // Future authentication owns this event. Existing authority is always rechecked server-side.
-  const onIdentityChange = () => { reason = ""; validation = []; review = false; resetPreview = false; controller.abort(); void session.logout(); };
+  function disposePage(): void {
+    if (disposed) return;
+    disposed = true;
+    campaigns = null;
+    campaignFailed = false;
+    meta = null;
+    reason = "";
+    validation = [];
+    review = false;
+    resetPreview = false;
+    controller.abort();
+    window.clearInterval(expiryTimer);
+    window.removeEventListener("app-identity-changed", onIdentityChange);
+    unsubscribe();
+    session.dispose();
+    shell.dispose();
+    content.replaceChildren();
+  }
+  // Identity changes invalidate the whole route, including its owner-scoped list and links.
+  // Disposing also guards late responses even if a transport ignores cancellation.
+  const onIdentityChange = () => {
+    void session.logout();
+    disposePage();
+    const main = node(document, "main");
+    main.id = "main-content";
+    const message = node(document, "p", "Your account changed. Reload Settings to continue.");
+    message.setAttribute("role", "status");
+    const reload = node(document, "a", "Reload Settings");
+    reload.href = "/app/settings";
+    main.append(message, reload);
+    root.replaceChildren(main);
+  };
   window.addEventListener("app-identity-changed", onIdentityChange);
-  const expiryTimer = window.setInterval(() => { if (session.state.expiresAt && Date.parse(session.state.expiresAt) <= Date.now()) onIdentityChange(); }, 1000);
-  return { dispose() { if (disposed) return; disposed = true; controller.abort(); window.clearInterval(expiryTimer); window.removeEventListener("app-identity-changed", onIdentityChange); unsubscribe(); session.dispose(); shell.dispose(); content.replaceChildren(); } };
+  const expiryTimer = window.setInterval(() => {
+    if (session.state.expiresAt && Date.parse(session.state.expiresAt) <= Date.now()) void session.logout();
+  }, 1000);
+  return { dispose: disposePage };
 }
