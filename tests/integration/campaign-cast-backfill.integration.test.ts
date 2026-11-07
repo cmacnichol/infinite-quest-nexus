@@ -43,6 +43,46 @@ describe("accepted-history scan preview", () => {
       request: { fromTurn: 1, throughTurn: 3, expectedBoundary: { turnNumber: 3, timelineRevision: 0 }, idempotencyKey: "scan" },
       execution: { providerProfileId, plan: deriveTextExecutionPlan({ ...basis, routeBasisHash: textExecutionRouteBasisHash(basis) }, CAST_DISCOVERY_SYSTEM_PROMPT) } };
   }
+  it("reports the job's actual recovery owner even when a scan overlaps its turn", async () => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    const jobs = createCastDiscoveryJobRepository(pool, () => true, () => true);
+    await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!, execution: f.execution, enabled: true }));
+    const claim = (await jobs.claim("recovery-owner"))!;
+    await jobs.fail(claim, "provider_timeout");
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET available_at=clock_timestamp() WHERE id=$1", [claim.id]);
+    await jobs.fail((await jobs.claim("recovery-owner"))!, "provider_timeout");
+    const scan = await scans.start(f.scope, f.request, f.execution);
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, discoveryEnabled: true, backfillEnabled: false });
+    expect((await repo.workspaceRead!(f.scope)).status.recovery).toMatchObject({ kind: "forward", jobId: claim.id, scanId: null });
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET scan_id=$2 WHERE id=$1", [claim.id, scan.id]);
+    expect((await repo.workspaceRead!(f.scope)).status.recovery).toMatchObject({ kind: "scan", jobId: claim.id, scanId: scan.id });
+    const cast = await repo.current(f.scope);
+    await expect(jobs.retryFailed(f.scope, claim.id, { expectedCastRevision: cast.revision, expectedBoundary: cast.boundary, idempotencyKey: "bypass" })).rejects.toMatchObject({ code: "cast_revision_conflict" });
+    await pool.query("UPDATE campaign_cast_scans SET status='cancelled' WHERE id=$1", [scan.id]);
+    expect((await repo.workspaceRead!(f.scope)).status.recovery).toMatchObject({ kind: "scan", scanStatus: "cancelled" });
+  });
+  it.each(["failed", "paused"] as const)("reconciles a %s scan when a separately retried forward job completes", async status => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    const jobs = createCastDiscoveryJobRepository(pool, () => true, () => true);
+    const jobId = await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client,
+      { scope: f.scope, turnId: f.turnIds[0]!, admissionUnavailable: true, enabled: true }));
+    if (!jobId) throw new Error("Expected a forward discovery job.");
+    const scan = await scans.start(f.scope, f.request, f.execution);
+    await scans.scheduleNext();
+    expect(await scans.get(f.scope, scan.id)).toMatchObject({ status: "failed", firstFailedTurn: 1 });
+    if (status === "paused") await scans.control(f.scope, scan.id, "pause");
+    const cast = await createPostgresCampaignCastRepository(pool).current(f.scope);
+    await jobs.retryFailed(f.scope, jobId, { expectedCastRevision: cast.revision, expectedBoundary: cast.boundary,
+      idempotencyKey: "retry-from-tracking" }, f.execution);
+    const claim = (await jobs.claim("forward-recovery"))!;
+    await jobs.checkpoint(claim, { version: 1, characters: [] });
+    expect(await jobs.publish(claim)).toBe("complete");
+    expect(await scans.get(f.scope, scan.id)).toMatchObject({ status: status === "paused" ? "paused" : "queued",
+      completeTurns: 1, failedTurns: 0, firstFailedTurn: null });
+    if (status === "paused") await scans.control(f.scope, scan.id, "resume");
+    await scans.scheduleNext();
+    expect((await jobs.claim("next-scan-turn"))?.source.turnNumber).toBe(2);
+  });
   it("adopts a new scan policy without resetting an exhausted job's explicit retry budget", async () => {
     const f = await fixture(), modern = await fixture(120000);
     const scans = createCastBackfillRepository(pool, () => true), jobs = createCastDiscoveryJobRepository(pool, () => true, () => true);

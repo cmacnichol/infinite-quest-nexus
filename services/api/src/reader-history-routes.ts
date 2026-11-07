@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
@@ -19,7 +20,7 @@ export async function registerReaderHistoryRoutes(
   app: FastifyInstance,
   options: ReaderHistoryRoutesOptions
 ): Promise<void> {
-  app.get<{ Params: { campaignId: string; turnNumber: string } }>(
+  app.get<{ Params: { campaignId: string; turnNumber: string }; Querystring: { sourceHash?: string } }>(
     "/api/v1/campaigns/:campaignId/reader/turns/:turnNumber",
     async (request, reply) => {
       const campaign = z.uuid().safeParse(request.params.campaignId);
@@ -33,7 +34,8 @@ export async function registerReaderHistoryRoutes(
       };
       const turn = await options.application.getEffectiveTurn(scope, parsedTurnNumber.data);
       if (!turn) return reply.code(404).send({ error: "Turn not found." });
-      return readerTurnResponseSchema.parse({ campaignId: scope.campaignId, turn });
+      const response = readerTurnResponseSchema.parse({ campaignId: scope.campaignId, turn });
+      return request.query.sourceHash === "1" ? { ...response, sourceHash: createHash("sha256").update(turn.narration).digest("hex") } : response;
     }
   );
 

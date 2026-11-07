@@ -12,6 +12,8 @@ export const charactersWorkspaceStatusSchema = z.object({
   reviewDecisions: z.object({ identities: z.number().int().min(0).max(10000), confirmed: z.number().int().min(0).max(10000), dismissed: z.number().int().min(0).max(10000) }).optional(),
   changeToken: z.string().optional(),
   legacyServer: z.boolean().optional(),
+  recovery: z.object({ kind: z.enum(["forward", "scan", "manual", "none"]), turnNumber: z.number().int().positive(),
+    jobId: z.uuid().nullable(), scanId: z.uuid().nullable(), scanStatus: z.enum(["queued", "running", "paused", "complete", "failed", "cancelled"]).nullable() }).optional(),
   tracking: castDiscoveryStatusSchema.nullable()
 });
 export type CharactersWorkspaceStatus = z.infer<typeof charactersWorkspaceStatusSchema>;

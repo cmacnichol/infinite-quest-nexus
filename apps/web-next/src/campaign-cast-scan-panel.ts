@@ -1,6 +1,26 @@
 import type { CampaignCastApi } from "@infinite-quest/client-web";
 import type { CastBoundary, CastDiscoveryStatus, CastBackfillRequest, CastBackfillRetry } from "@infinite-quest/contracts";
 
+export function castScanRecovery(discovery: CastDiscoveryStatus | null, boundary: number) {
+  const messages: Record<NonNullable<NonNullable<CastDiscoveryStatus["firstGap"]>["diagnosticCode"]>, string> = {
+    admission_unavailable: "The text provider could not be prepared.",
+    provider_timeout: "The text provider timed out.",
+    provider_failed: "The text provider failed.",
+    invalid_output: "The text provider returned an invalid response.",
+    source_requires_manual_scan: "This turn exceeds the automatic scan limit and requires manual review.",
+    publication_failed: "The discovered characters could not be saved."
+  };
+  const gap = discovery?.firstGap;
+  const start = discovery?.coverageStartTurn;
+  let fromTurn: number | null = null, throughTurn: number | null = null;
+  if (boundary > 0) {
+    if (!start) { fromTurn = 1; throughTurn = boundary; }
+    else if (gap && gap.turnNumber <= boundary) { fromTurn = gap.turnNumber; throughTurn = boundary; }
+    else if (start > 1) { fromTurn = 1; throughTurn = Math.min(start - 1, boundary); }
+  }
+  return { fromTurn, throughTurn, diagnostic: gap?.diagnosticCode ? messages[gap.diagnosticCode] : null };
+}
+
 export function renderLegacyCastScan(container: HTMLElement, options: {
   api: CampaignCastApi["scans"]; campaignId: string; authority: { revision: number; boundary: CastBoundary };
   data: Awaited<ReturnType<CampaignCastApi["scans"]["latest"]>>; discovery: CastDiscoveryStatus | null;
@@ -35,6 +55,14 @@ export function renderLegacyCastScan(container: HTMLElement, options: {
   }
   const scan = options.data.scan, enabled = options.data.capabilities.castBackfill;
   root.append(node("p", "Discover supporting characters from accepted story turns. Your character edits are preserved. Cancellation keeps characters already discovered."));
+  const recovery = castScanRecovery(options.discovery, options.authority.boundary.turnNumber);
+  if (options.discovery) {
+    const { coverageStartTurn, trackedThroughTurn, firstGap } = options.discovery;
+    if (coverageStartTurn === null) root.append(node("p", "Character tracking has not started."));
+    else if (trackedThroughTurn !== null && trackedThroughTurn >= coverageStartTurn) root.append(node("p", `Tracked turns ${coverageStartTurn}–${trackedThroughTurn}.`));
+    else root.append(node("p", `Tracking starts at turn ${coverageStartTurn}; no turns are complete yet.`));
+    if (firstGap) root.append(node("p", `First tracking gap: turn ${firstGap.turnNumber} (${firstGap.status.replaceAll("_", " ")}).${recovery.diagnostic ? ` ${recovery.diagnostic}` : ""}`));
+  }
   if (!enabled) root.append(node("p", "New history scans are disabled. Saved progress remains available."));
   if (scan) {
     const total = scan.throughTurn - scan.fromTurn + 1;
@@ -46,7 +74,7 @@ export function renderLegacyCastScan(container: HTMLElement, options: {
     if (["queued", "running"].includes(scan.status)) actions.append(button("Pause scan", () => control("pause")));
     if (scan.status === "paused") actions.append(button("Resume scan", () => control("resume"), !enabled));
     if (!["complete", "cancelled"].includes(scan.status)) actions.append(button("Cancel scan", () => control("cancel")));
-    if (scan.firstFailedTurn) {
+    if (scan.firstFailedTurn && !(options.discovery?.firstGap?.turnNumber === scan.firstFailedTurn && options.discovery.firstGap.diagnosticCode === "source_requires_manual_scan")) {
       const retry: CastBackfillRetry = { turnNumber: scan.firstFailedTurn, expectedCastRevision: options.authority.revision,
         expectedBoundary: options.authority.boundary, idempotencyKey: crypto.randomUUID() };
       actions.append(button(`Retry turn ${scan.firstFailedTurn}`, () => {
@@ -62,9 +90,10 @@ export function renderLegacyCastScan(container: HTMLElement, options: {
     const from = node("input"), through = node("input");
     from.id = "cast-scan-from"; through.id = "cast-scan-through";
     for (const input of [from, through]) { input.type = "number"; input.min = "1"; input.max = String(options.authority.boundary.turnNumber); input.required = true; input.step = "1"; }
-    from.value = "1";
-    through.value = String(options.discovery?.coverageStartTurn && options.discovery.coverageStartTurn > 1
-      ? Math.min(options.discovery.coverageStartTurn - 1, options.authority.boundary.turnNumber) : options.authority.boundary.turnNumber);
+    from.value = String(recovery.fromTurn ?? 1);
+    through.value = String(recovery.throughTurn ?? options.authority.boundary.turnNumber);
+    if (recovery.fromTurn !== null) root.append(node("p", `Recommended range: turns ${recovery.fromTurn}–${recovery.throughTurn}. Preview checks saved progress before you start.`));
+    else root.append(node("p", "All turns are tracked. You can still preview a selected range."));
     const fromLabel = node("label", "From turn"), throughLabel = node("label", "Through turn");
     fromLabel.htmlFor = from.id; throughLabel.htmlFor = through.id;
     const preview = node("section"); preview.setAttribute("aria-label", "Scan preview");
@@ -74,7 +103,7 @@ export function renderLegacyCastScan(container: HTMLElement, options: {
     form.append(fromLabel, from, throughLabel, through, submit);
     form.addEventListener("submit", event => {
       event.preventDefault();
-      request = { fromTurn: Number(from.value), throughTurn: Number(through.value), expectedBoundary: options.authority.boundary, idempotencyKey: crypto.randomUUID() };
+      request ??= { fromTurn: Number(from.value), throughTurn: Number(through.value), expectedBoundary: options.authority.boundary, idempotencyKey: crypto.randomUUID() };
       const submitted = request;
       void run(async () => {
         const result = await options.api.preview(options.campaignId, submitted);
