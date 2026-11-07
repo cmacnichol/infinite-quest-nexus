@@ -16,13 +16,14 @@ export function createSettingsActivationGuard(policy:DeploymentSettingsPolicy):S
     validateSettingsPolicy(state.requested,policy,resolveInstanceSettings);
     // Discover every durable lease table, including future lanes. Table identifiers come
     // only from PostgreSQL's catalog and are quoted, never from operator input.
-    const leases=await client.query<{table_name:string;column_name:string}>(`SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND (column_name='lease_expires_at' OR (table_name='text_provider_capacity_leases' AND column_name='expires_at')) ORDER BY table_name`);
+    const leases=await client.query<{table_name:string;column_name:string}>(`SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND (column_name='lease_expires_at' OR (table_name IN ('text_provider_capacity_leases','api_admission_leases') AND column_name='expires_at')) ORDER BY table_name`);
     const quote=(name:string)=>'"'+name.replaceAll('"','""')+'"';
     const tables=[...new Set([...leases.rows.map(r=>r.table_name),'prepared_text_physical_attempts','instance_settings_runtime_reports'])].sort();
     // Block claims/invocations/report insertion across the final guard and activation commit.
     await client.query('LOCK TABLE '+tables.map(quote).join(',')+' IN SHARE MODE');
     for(const row of leases.rows) {
-      const active=await client.query('SELECT 1 FROM '+quote(row.table_name)+' WHERE '+quote(row.column_name)+' > clock_timestamp() LIMIT 1');
+      const predicate=row.table_name==='api_admission_leases'?'(request_running OR expires_at > clock_timestamp())':quote(row.column_name)+' > clock_timestamp()';
+      const active=await client.query('SELECT 1 FROM '+quote(row.table_name)+' WHERE '+predicate+' LIMIT 1');
       if(active.rowCount) throw new Error('settings_active_leases');
     }
     const attempts=await client.query("SELECT 1 FROM prepared_text_physical_attempts WHERE status IN ('reserved','dispatched') LIMIT 1");

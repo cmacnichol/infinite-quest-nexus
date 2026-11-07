@@ -114,7 +114,7 @@ describe("archive request intersections",()=>{
 import multipart from "@fastify/multipart";
 import { Readable } from "node:stream";
 describe("chunked multipart ingress",()=>{
-  it("bounds the total stream at exact limit/+1 independently of per-file limits",async()=>{
+  it.each(["multipart/form-data", "Multipart/Form-Data"])("bounds exact/+1 total bytes for %s",async(mediaType)=>{
     const app=Fastify({bodyLimit:256});
     const pool={query:async()=>({rows:[{id:"11111111-1111-4111-8111-111111111111"}]})} as unknown as DatabasePool;
     installRequestAdmission(app,pool,bootstrap(),{acquire:async()=>({allowed:true,leaseId:null,remaining:1,expiresAt:new Date()}),release:async()=>undefined});
@@ -123,8 +123,46 @@ describe("chunked multipart ingress",()=>{
     const prefix='--b\r\nContent-Disposition: form-data; name="file"; filename="f"\r\nContent-Type: application/octet-stream\r\n\r\n',suffix='\r\n--b--\r\n';
     const data=prefix+"x".repeat(256-Buffer.byteLength(prefix+suffix))+suffix;
     try {
-      expect((await app.inject({method:"POST",url:"/api/v1/imports/world/preview",headers:{"content-type":"multipart/form-data; boundary=b"},payload:Readable.from(data)})).statusCode).toBe(200);
-      expect((await app.inject({method:"POST",url:"/api/v1/imports/world/preview",headers:{"content-type":"multipart/form-data; boundary=b"},payload:Readable.from(data+" ")})).statusCode).toBe(413);
+      expect((await app.inject({method:"POST",url:"/api/v1/imports/world/preview",headers:{"content-type":`${mediaType}; boundary=b`},payload:Readable.from(data)})).statusCode).toBe(200);
+      expect((await app.inject({method:"POST",url:"/api/v1/imports/world/preview",headers:{"content-type":`${mediaType}; boundary=b`},payload:Readable.from(data+" ")})).statusCode).toBe(413);
     }finally{await app.close();}
+  });
+});
+
+describe("automatic provider HEAD admission",()=>{
+  it("charges the same provider operation for HEAD and GET",()=>{
+    expect(requestOperation("HEAD","/api/v1/providers/:providerId/models")).toBe("provider");
+  });
+  it("retains capacity after socket close until a nonabortable handler settles",async()=>{
+    const app=Fastify();const pool={query:async()=>({rows:[{id:"11111111-1111-4111-8111-111111111111"}]})} as unknown as DatabasePool;
+    const release=vi.fn(async()=>undefined);let finish!:()=>void,entered!:()=>void;
+    const started=new Promise<void>(resolve=>{entered=resolve;});const waiting=new Promise<void>(resolve=>{finish=resolve;});
+    installRequestAdmission(app,pool,bootstrap(),{acquire:async()=>({allowed:true,leaseId:"lease",remaining:1,expiresAt:new Date()}),release});
+    app.get("/api/v1/providers/:providerId/models",async()=>{entered();await waiting;return {};});
+    try{
+      await app.listen({host:"127.0.0.1",port:0});const address=app.server.address();if(!address||typeof address==="string")throw new Error("port");
+      const req=request({hostname:"127.0.0.1",port:address.port,path:"/api/v1/providers/id/models"});req.on("error",()=>{});req.end();await started;req.destroy();
+      await new Promise(resolve=>setTimeout(resolve,30));expect(release).not.toHaveBeenCalled();finish();await expect.poll(()=>release.mock.calls.length).toBe(1);
+    }finally{finish();await app.close();}
+  });
+});
+
+describe("renewal failure retains actual-work ownership",()=>{
+  it.each(["database unavailable","lease lost"])("returns503 and blocks new local work after %s without releasing running work",async message=>{
+    const app=Fastify(),config=bootstrap();config.workerLeaseSeconds=0.06;
+    const pool={query:async()=>({rows:[{id:"11111111-1111-4111-8111-111111111111"}]})} as unknown as DatabasePool;
+    const release=vi.fn(async()=>undefined),renew=vi.fn(async()=>{throw new Error(message);});
+    let finish!:()=>void,entered!:()=>void;
+    const started=new Promise<void>(resolve=>{entered=resolve;}),waiting=new Promise<void>(resolve=>{finish=resolve;});
+    installRequestAdmission(app,pool,config,{acquire:async()=>({allowed:true,leaseId:"lease",remaining:1,expiresAt:new Date()}),release,renew});
+    app.get("/api/v1/providers/:providerId/models",async()=>{entered();await waiting;return {};});
+    try{
+      const response=app.inject({url:"/api/v1/providers/id/models"}).then(response=>response);
+      await started;expect((await response).statusCode).toBe(503);expect(renew).toHaveBeenCalled();expect(release).not.toHaveBeenCalled();
+      expect((await app.inject({url:"/api/v1/providers/id/models"})).statusCode).toBe(503);
+      let closed=false;const closing=app.close().then(()=>{closed=true;});
+      await new Promise(resolve=>setTimeout(resolve,20));expect(closed).toBe(false);
+      finish();await closing;expect(release).toHaveBeenCalledTimes(1);
+    }finally{finish();await app.close();}
   });
 });

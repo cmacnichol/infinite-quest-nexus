@@ -9,6 +9,7 @@ export type AdmissionPolicy = {
   maxRequests: number;
   maxConcurrent: number | null;
   leaseSeconds: number;
+  durableRequest?: boolean;
 };
 
 export type AdmissionDecision =
@@ -107,9 +108,40 @@ export async function acquireAdmission(
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [lockKey]);
     await client.query(
       `DELETE FROM api_admission_leases
-        WHERE owner_user_id = $1 AND operation = $2 AND expires_at <= $3`,
+        WHERE owner_user_id = $1 AND operation = $2 AND expires_at <= $3 AND NOT request_running`,
       [ownerUserId, policy.key, now]
     );
+
+    // Keep the old bucket key and SQL contract for rollback binaries. accounted_count
+    // separates our timestamped events from history written by older binaries.
+    const history = await client.query<{window_started_at:Date;window_expires_at:Date;unknown_count:number}>(
+      `SELECT window_started_at, window_expires_at, accepted_count-accounted_count AS unknown_count
+       FROM api_admission_buckets WHERE owner_user_id=$1 AND operation=$2
+       AND window_expires_at>$3 AND accepted_count>accounted_count`,
+      [ownerUserId, policy.key, new Date(now.getTime()-3600000)]
+    );
+    const unknownActive = history.rows.find(row => row.window_expires_at > now);
+    await client.query(
+      `INSERT INTO api_admission_windows(owner_user_id,operation,window_started_at,window_expires_at,max_requests)
+       VALUES($1,$2,$3,$4,$5) ON CONFLICT(owner_user_id,operation,window_started_at,window_expires_at)
+       DO UPDATE SET max_requests=LEAST(api_admission_windows.max_requests,EXCLUDED.max_requests)`,
+      [ownerUserId,policy.key,window.startedAt,window.expiresAt,policy.maxRequests]
+    );
+    const budgets = await client.query<{window_started_at:Date;window_expires_at:Date;max_requests:number;accepted_count:number}>(
+      `SELECT w.window_started_at,w.window_expires_at,w.max_requests,
+        (SELECT count(*)::int FROM api_admission_events e WHERE e.owner_user_id=w.owner_user_id
+         AND e.operation=w.operation AND e.accepted_at>=w.window_started_at AND e.accepted_at<w.window_expires_at) AS accepted_count
+       FROM api_admission_windows w WHERE w.owner_user_id=$1 AND w.operation=$2 AND w.window_expires_at>$3`,
+      [ownerUserId,policy.key,now]
+    );
+    let availableRemaining = unknownActive ? 0 : policy.maxRequests;
+    let retryAt = unknownActive?.window_expires_at ?? window.expiresAt;
+    for (const budget of budgets.rows) {
+      const unknown = history.rows.filter(row => row.window_expires_at>budget.window_started_at && row.window_started_at<budget.window_expires_at).reduce((sum,row)=>sum+row.unknown_count,0);
+      const available = budget.max_requests-budget.accepted_count-unknown;
+      availableRemaining=Math.min(availableRemaining,available);
+      if (available<=0 && budget.window_expires_at>retryAt) retryAt=budget.window_expires_at;
+    }
 
     if (policy.maxConcurrent !== null) {
       const duplicate = await client.query<LeaseRow>(
@@ -119,13 +151,7 @@ export async function acquireAdmission(
         [ownerUserId, policy.key, requestId]
       );
       if (duplicate.rows[0]) {
-        const bucket = await client.query<Pick<BucketRow, "accepted_count">>(
-          `SELECT accepted_count
-             FROM api_admission_buckets
-            WHERE owner_user_id = $1 AND operation = $2 AND window_started_at = $3`,
-          [ownerUserId, policy.key, window.startedAt]
-        );
-        const remaining = Math.max(0, policy.maxRequests - (bucket.rows[0]?.accepted_count ?? 0));
+        const remaining = Math.max(0, availableRemaining);
         await cleanupExpiredBuckets(client, now);
         await client.query("COMMIT");
         transactionOpen = false;
@@ -147,50 +173,18 @@ export async function acquireAdmission(
       if (active >= policy.maxConcurrent) {
         const retryAt = concurrency.rows[0]?.retry_at
           ?? new Date(now.getTime() + policy.leaseSeconds * 1000);
-        await rollback(client);
+        await client.query("COMMIT");
         transactionOpen = false;
         return { allowed: false, retryAfterSeconds: retryAfterSeconds(now, retryAt) };
       }
     }
 
-    // Keep the old bucket key and SQL contract for rollback binaries. accounted_count
-    // separates our timestamped events from history written by older binaries.
-    const history = await client.query<{window_started_at:Date;window_expires_at:Date;unknown_count:number}>(
-      `SELECT window_started_at, window_expires_at, accepted_count-accounted_count AS unknown_count
-       FROM api_admission_buckets WHERE owner_user_id=$1 AND operation=$2
-       AND window_expires_at>$3 AND accepted_count>accounted_count`,
-      [ownerUserId, policy.key, new Date(now.getTime()-3600000)]
-    );
-    const unknownActive = history.rows.find(row => row.window_expires_at > now);
-    if (unknownActive) {
-      await rollback(client);
-      transactionOpen = false;
-      return {allowed:false,retryAfterSeconds:retryAfterSeconds(now,unknownActive.window_expires_at)};
+    if (availableRemaining<=0) {
+      await client.query("COMMIT");
+      transactionOpen=false;
+      return {allowed:false,retryAfterSeconds:retryAfterSeconds(now,retryAt)};
     }
-    await client.query(
-      `INSERT INTO api_admission_windows(owner_user_id,operation,window_started_at,window_expires_at,max_requests)
-       VALUES($1,$2,$3,$4,$5) ON CONFLICT(owner_user_id,operation,window_started_at,window_expires_at)
-       DO UPDATE SET max_requests=LEAST(api_admission_windows.max_requests,EXCLUDED.max_requests)`,
-      [ownerUserId,policy.key,window.startedAt,window.expiresAt,policy.maxRequests]
-    );
-    const budgets = await client.query<{window_started_at:Date;window_expires_at:Date;max_requests:number;accepted_count:number}>(
-      `SELECT w.window_started_at,w.window_expires_at,w.max_requests,
-        (SELECT count(*)::int FROM api_admission_events e WHERE e.owner_user_id=w.owner_user_id
-         AND e.operation=w.operation AND e.accepted_at>=w.window_started_at AND e.accepted_at<w.window_expires_at) AS accepted_count
-       FROM api_admission_windows w WHERE w.owner_user_id=$1 AND w.operation=$2 AND w.window_expires_at>$3`,
-      [ownerUserId,policy.key,now]
-    );
-    let remaining = policy.maxRequests;
-    for (const budget of budgets.rows) {
-      const unknown = history.rows.filter(row => row.window_expires_at>budget.window_started_at && row.window_started_at<budget.window_expires_at).reduce((sum,row)=>sum+row.unknown_count,0);
-      const available = budget.max_requests-budget.accepted_count-unknown;
-      if (available<=0) {
-        await rollback(client);
-        transactionOpen=false;
-        return {allowed:false,retryAfterSeconds:retryAfterSeconds(now,budget.window_expires_at)};
-      }
-      remaining=Math.min(remaining,available-1);
-    }
+    const remaining=availableRemaining-1;
     await client.query(`INSERT INTO api_admission_events(owner_user_id,operation,accepted_at) VALUES($1,$2,$3)`,[ownerUserId,policy.key,now]);
     await client.query(
       `INSERT INTO api_admission_buckets(owner_user_id,operation,window_started_at,window_expires_at,accepted_count,accounted_count)
@@ -205,14 +199,15 @@ export async function acquireAdmission(
     if (policy.maxConcurrent !== null) {
       const lease = await client.query<LeaseRow>(
         `INSERT INTO api_admission_leases (
-           owner_user_id, operation, request_id, expires_at
-         ) VALUES ($1,$2,$3,$4)
+           owner_user_id, operation, request_id, expires_at, request_running
+         ) VALUES ($1,$2,$3,$4,$5)
          RETURNING id`,
         [
           ownerUserId,
           policy.key,
           requestId,
-          new Date(now.getTime() + policy.leaseSeconds * 1000)
+          new Date(now.getTime() + policy.leaseSeconds * 1000),
+          policy.durableRequest === true
         ]
       );
       const insertedLeaseId = lease.rows[0]?.id;
@@ -249,4 +244,14 @@ export async function releaseAdmission(pool: DatabasePool, leaseId: string): Pro
   } catch {
     throw new AdmissionControlUnavailableError();
   }
+}
+
+/** Renewal cannot recreate a missing lease or change owner/request authority. */
+export async function renewAdmission(pool:DatabasePool,leaseId:string,ownerUserId:string,requestId:string,operation:AdmissionPolicy["key"],leaseSeconds:number):Promise<void> {
+  try {
+    const result=await pool.query(`UPDATE api_admission_leases SET expires_at=clock_timestamp()+$6*interval '1 second'
+      WHERE id=$1 AND owner_user_id=$2 AND request_id=$3 AND operation=$4 AND request_running=$5`,
+      [leaseId,ownerUserId,requestId,operation,true,leaseSeconds]);
+    if(result.rowCount!==1)throw new Error("lease_lost");
+  }catch{throw new AdmissionControlUnavailableError();}
 }

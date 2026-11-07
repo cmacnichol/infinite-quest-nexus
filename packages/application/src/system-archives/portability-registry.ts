@@ -21,6 +21,7 @@ export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
   activity_event_outbox: "operational",
   story_activity_events: "operational",
   campaign_activity_history: "operational",
+  api_admission_recoveries: "operational",
   api_admission_events: "operational",
   api_admission_windows: "operational",
   api_admission_buckets: "operational",

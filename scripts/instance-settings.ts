@@ -1,3 +1,4 @@
+import { recoverRequestAdmission } from "../services/runtime/src/admission-recovery.js";
 import { readFile } from "node:fs/promises";
 import { createDatabasePool, initialOwnerId, loadRuntimeConfig } from "../packages/database/src/index.js";
 import { createInstanceSettingsRepository } from "../packages/database/src/instance-settings-repository.js";
@@ -17,6 +18,7 @@ try {
       const repository=createInstanceSettingsRepository(pool,{activationGuard:createSettingsActivationGuard(policy)});
       process.exitCode=await runInstanceSettingsCommand(args,{
         config,policy,repository,actor:{userId:await initialOwnerId(pool),cliReference:'settings-operator-cli'},output,
+        recoverAdmission:input=>recoverRequestAdmission(pool,input),
         readJson:async path=>JSON.parse(await readFile(path,'utf8')),
         readRevision:async revision=>{if(!/^[1-9]\d*$/.test(revision))throw new Error('settings_revision_invalid');const {rows:[row]}=await pool.query('SELECT snapshot FROM instance_settings_revisions WHERE revision=$1',[revision]);return instanceSettingsSchema.parse(row?.snapshot);},
         status:async()=>{

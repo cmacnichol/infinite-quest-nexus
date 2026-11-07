@@ -29,6 +29,10 @@ describe('controlled settings activation',()=>{
   await pool.query("INSERT INTO settings_test_future_lane VALUES(clock_timestamp()+interval '1 minute')");
   await expect(repository.activate(request)).rejects.toThrow('settings_active_leases');
   await pool.query('DELETE FROM settings_test_future_lane');
+  const admissionOwner=await initialOwnerId(pool);
+  await pool.query("INSERT INTO api_admission_leases(owner_user_id,operation,request_id,expires_at,request_running) VALUES($1,'provider','crashed-http',clock_timestamp()-interval '1 hour',true)",[admissionOwner]);
+  await expect(repository.activate(request)).rejects.toThrow('settings_active_leases');
+  await pool.query("DELETE FROM api_admission_leases WHERE request_id='crashed-http'");
   const config=bootstrap();
   const resolved=await loadActiveRuntimeSettings(pool,config,policy);
   const controller=new AbortController();const stop=await startSettingsRuntimeReport(pool,resolved,controller.signal,()=>controller.abort());

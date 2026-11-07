@@ -23,13 +23,14 @@ export function reconcileSettingsSeeds(input:unknown,policy:DeploymentSettingsPo
 export type SettingsOperatorPorts={
   config:RuntimeConfig;policy:DeploymentSettingsPolicy;repository:SettingsRepositoryPort;actor:SettingsActor;
   readJson(path:string):Promise<unknown>;readRevision(revision:string):Promise<InstanceSettings>;
+  recoverAdmission?(input:unknown):Promise<unknown>;
   status():Promise<unknown>; output(value:unknown):void;
 };
 /** No process-execution port exists: this tool records changes, never controls deployment. */
 export async function runInstanceSettingsCommand(args:readonly string[],ports:SettingsOperatorPorts):Promise<number> {
   try {
     const [command,...rest]=args;
-    if(!['export-seed','seed','propose','status','validate','activate','propose-rollback'].includes(command??'')) throw new Error('settings_command_invalid');
+    if(!['export-seed','seed','propose','status','validate','activate','propose-rollback','recover-admission'].includes(command??'')) throw new Error('settings_command_invalid');
     const options=new Map<string,string>();
     for(let i=0;i<rest.length;i+=2) {
       const key=rest[i],value=rest[i+1];
@@ -37,6 +38,10 @@ export async function runInstanceSettingsCommand(args:readonly string[],ports:Se
       options.set(key,value);
     }
     const required=(key:string)=>{const value=options.get(key);if(!value)throw new Error('settings_argument_required');return value;};
+    if(command==='recover-admission') {
+      if(!ports.recoverAdmission)throw new Error('settings_admission_recovery_unavailable');
+      ports.output({status:'ok',command,result:await ports.recoverAdmission(await ports.readJson(required('--input')))});return 0;
+    }
     if(command==='export-seed') {ports.output(exportSettingsSeed(ports.config));return 0;}
     if(command==='status') {ports.output(await ports.status());return 0;}
     if(ports.policy.minimumSettingsProtocolVersion>SETTINGS_PROTOCOL_VERSION) throw new Error('settings_protocol_unsupported');
