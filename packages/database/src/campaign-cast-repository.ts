@@ -520,6 +520,13 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         const fingerprint = await readFingerprint();
         const boundary = { turnNumber: campaign.active_turn_number, timelineRevision: state.timeline_revision };
         const tracking = await readCastDiscoveryStatus(client, scope, options.discoveryEnabled === true);
+        const gap = tracking.firstGap;
+        const recoveryJob = gap?.jobId ? (await client.query(`SELECT j.scan_id,s.status AS scan_status FROM campaign_cast_discovery_jobs j
+          LEFT JOIN campaign_cast_scans s ON s.id=j.scan_id AND s.campaign_id=j.campaign_id AND s.owner_user_id=j.owner_user_id
+          WHERE j.id=$1 AND j.campaign_id=$2 AND j.owner_user_id=$3`, [gap.jobId, scope.campaignId, scope.ownerUserId])).rows[0] : null;
+        const recovery = gap ? { kind: gap.diagnosticCode === "source_requires_manual_scan" ? "manual" as const
+          : gap.status !== "failed" || !recoveryJob ? "none" as const : recoveryJob.scan_id ? "scan" as const : "forward" as const,
+          turnNumber: gap.turnNumber, jobId: gap.jobId, scanId: recoveryJob?.scan_id ?? null, scanStatus: recoveryJob?.scan_status ?? null } : undefined;
         const enrollment = (await client.query("SELECT capability FROM campaign_story_memory_enrollments WHERE campaign_id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows[0];
         const projected = await snapshotProjection(client, scope, campaign, state, boundary);
         const rows = (await client.query(`SELECT p.proposal,p.resolution_receipt,p.detail_decisions,
@@ -537,8 +544,11 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
           count.review += review; count.conflict += conflict;
         };
         let identities = 0, details = 0, conflicts = 0;
+        const ignoredTargets = new Set(projected.snapshot.characters.filter(person => person.ignored).map(person => person.id));
         for (const row of rows) {
           const id = row.resolution_receipt?.result?.character?.id ?? row.proposal?.existingCharacterId;
+          // Count the same actionable identity proposals that the review list returns.
+          if (!row.resolution_receipt && ignoredTargets.has(id)) continue;
           if (id && (!row.resolution_receipt || row.pending_indexes.length) && projected.snapshot.characters.some(person => person.id === id)) {
             reviewIds.add(id);
             addAttention(id, row.resolution_receipt ? row.pending_indexes.length : 1);
@@ -550,7 +560,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         }
         const decisionCounts = (await client.query(`SELECT
           LEAST(10000,count(*) FILTER (WHERE p.resolution_receipt IS NOT NULL))::integer AS identities,
-          LEAST(10000,COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p.detail_decisions) d WHERE d->'result'->>'disposition'='confirm')),0))::integer AS confirmed,
+          LEAST(10000,COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p.detail_decisions) d WHERE d->'result'->>'disposition' IN ('confirm','accept'))),0))::integer AS confirmed,
           LEAST(10000,COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p.detail_decisions) d WHERE d->'result'->>'disposition'='dismiss')),0))::integer AS dismissed
           FROM campaign_cast_discovery_candidates p JOIN effective_turn_narrations n
             ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
@@ -575,7 +585,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
           revision: state.revision, boundary, capabilities: { editing: options.editingEnabled === true,
             discovery: options.discoveryEnabled === true, autoMatch: options.castAutoMatchEnabled === true && options.discoveryEnabled === true && options.editingEnabled === true, backfill: options.backfillEnabled === true,
             context }, contextDisabledReason: context ? null : "Story Memory or character context is unavailable.",
-          counts: { identities, details, conflicts }, reviewDecisions: decisionCounts, changeToken: sha256(fingerprint), tracking } };
+          counts: { identities, details, conflicts }, reviewDecisions: decisionCounts, changeToken: sha256(fingerprint), tracking, recovery } };
         statusCache.delete(cacheKey);
         statusCache.set(cacheKey, { fingerprint, value });
         if (statusCache.size > 32) statusCache.delete(statusCache.keys().next().value!);

@@ -95,6 +95,17 @@ const fieldCues: Record<CastField, RegExp> = {
 const instructions = /\b(?:ignore (?:all |previous |prior )?instructions|system prompt|edit another campaign|override (?:the )?(?:system|developer))\b/iu;
 const prospective = /\b(?:hopes? to meet|plans? to meet|imagines?|imagined|hypothetical|if .{0,80}(?:arrives|exists))\b/iu;
 const speech = /[“”"]|\b(?:says?|said|claims?|claimed|rumou?r|alleges?|believes?)\b/iu;
+/** Review can resolve attribution, but cannot turn unsafe or unsupported source into a fact. */
+export function canAcceptReviewedCastObservation(source: CastDiscoverySource, narration: string,
+  observation: CastDiscoveryCandidate["observations"][number], reason: string): boolean {
+  if (!["identity_not_supported", "unsupported_subject", "unsupported_field"].includes(reason)
+    || observation.mode !== "fact" || observation.speakerCharacterId !== null || sha256(narration) !== source.sourceHash) return false;
+  const paragraph = source.paragraphs.find(item => item.id === observation.paragraphId)?.text;
+  if (!paragraph || !narration.includes(paragraph) || !paragraph.includes(observation.quote)
+    || !contains(observation.quote, observation.value) || instructions.test(paragraph) || prospective.test(paragraph)
+    || speech.test(paragraph) || /\b(?:not|never|no longer|without|neither|isn't|wasn't|doesn't)\b/iu.test(paragraph)) return false;
+  try { validateCastFiction(observation.value); return true; } catch { return false; }
+}
 function contains(text: string, term: string) {
   const escaped = normalizeEntityTerm(term).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}(?:$|[^\\p{L}\\p{N}])`, "u").test(normalizeEntityTerm(text));

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createReaderHistoryApplication, type ReaderHistoryApplication } from "../../packages/application/src/reader-history/index.js";
@@ -71,6 +72,14 @@ describe("exact reader turn route", () => {
       turn: expect.objectContaining({ id: turnId, turnNumber: 2, narration: "The corrected gate opens." })
     });
     expect(getEffectiveTurn).toHaveBeenCalledWith({ ownerUserId, campaignId }, 2);
+  });
+
+  it("returns the effective narration fingerprint only when requested", async () => {
+    const narration = "The corrected gate opens.";
+    const app = await buildApp({ getEffectiveTurn: vi.fn().mockResolvedValue(turnSummary({ narration })) } as unknown as ReaderHistoryApplication);
+    const response = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/reader/turns/2?sourceHash=1` });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().sourceHash).toBe(createHash("sha256").update(narration).digest("hex"));
   });
 
   it("rejects a non-positive or non-integer number before the repository is called", async () => {
