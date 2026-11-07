@@ -54,6 +54,51 @@ export function mountProviderEditor(root, ports) {
   });
 
   let providerSaveBusy = false;
+  let formDestination = "";
+  let inventoryRequest = null;
+  const rangeDefaults = [elements.providerSogniSteps, elements.providerSogniGuidance, elements.providerSogniPreviewCount]
+    .map(input => ({input, min: input.min, max: input.max, step: input.step}));
+  const destination = () => JSON.stringify([elements.providerType.value, elements.providerRole.value, elements.providerBaseUrl.value.trim()]);
+  const suppliedCredential = () => elements.providerApiKey.value.trim();
+  function sameSavedDestination(profile) {
+    return profile && profile.providerType === elements.providerType.value && profile.providerRole === elements.providerRole.value
+      && profile.baseUrl === elements.providerBaseUrl.value.trim();
+  }
+  function invalidateInventory() {
+    inventoryRequest?.abort();
+    inventoryRequest = null;
+    clearResponseFormatCapability();
+    providerSelectionCredentialRevision++;
+    const hadInventory = discoveredProfileModels.length > 0;
+    const previousModel = elements.providerDefaultModel.value;
+    if (discoveredProfileModels.some(model => profileModelValue(model) === previousModel)) {
+      elements.providerDefaultModel.value = "";
+      if (providerSelectionEditor?.mode === "model") setProviderSelectionState({type:"modelDraftChanged", modelId:"", responseFormatPolicy: elements.providerResponseFormatPolicy.value});
+    }
+    discoveredProfileModels = [];
+    discoveredProfileModelsIdentity = "";
+    elements.providerModelPickerList.replaceChildren();
+    elements.providerModelPickerStatus.textContent = "";
+    elements.providerCustomModel.value = "";
+    elements.refreshProviderModels.disabled = false;
+    elements.refreshProviderModelDialog.disabled = false;
+    if (elements.providerContextTokens.readOnly) elements.providerContextTokens.value = "32768";
+    applyProfileModelContext();
+    if (hadInventory) {
+      for (const {input, min, max, step} of rangeDefaults) { input.min = min; input.max = max; input.step = step; }
+      for (const select of [elements.providerSogniSampler, elements.providerSogniScheduler]) select.replaceChildren(new Option("Model default", ""));
+      elements.providerSogniSizePreset.replaceChildren(new Option("Custom dimensions", "custom"));
+      applySogniWorkerTypeOptions(null);
+    }
+    if (providerSelectionEditor) setProviderSelectionState({type:"authorityChanged", ...providerSelectionAuthority(providers.find(p => p.id === editingProviderId))});
+  }
+  function syncDestination() {
+    const next = destination();
+    if (next === formDestination) return;
+    formDestination = next;
+    elements.providerApiKey.value = "";
+    invalidateInventory();
+  }
   const DEFAULT_LM_STUDIO_BASE_URL = "http://10.11.41.224:1234";
   const providerPresetsApi = ports.presets;
   const openManagedModal = dialog => dialog.showModal();
@@ -490,7 +535,7 @@ export function mountProviderEditor(root, ports) {
       maxOutputTokens: Number(elements.providerOutputTokens.value),
       temperature: Number(elements.providerTemperature.value),
       requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
-      ...(elements.providerApiKey.value ? { apiKey: elements.providerApiKey.value } : {}),
+      ...(suppliedCredential() ? { apiKey: suppliedCredential() } : {}),
       enabled: elements.providerEnabled.checked,
       isDefault: elements.providerIsDefault.checked,
       configuration: { ...(existing?.configuration || {}), textResponseFormatPolicy: "required", streaming: elements.providerStreaming.checked }
@@ -507,10 +552,11 @@ export function mountProviderEditor(root, ports) {
 
   function useSavedProviderPresetApi() {
     const profile = providers.find((item) => item.id === editingProviderId);
-    return Boolean(profile && !elements.providerApiKey.value && profile.baseUrl === elements.providerBaseUrl.value);
+    return Boolean(sameSavedDestination(profile) && !suppliedCredential());
   }
 
   async function loadProviderPresets({ offset = 0, refresh = false } = {}) {
+    syncDestination();
     if (!providerSelectionEditor || providerSelectionEditor.mode !== "preset") return;
     providerPresetListController?.abort();
     const controller = new AbortController();
@@ -531,6 +577,7 @@ export function mountProviderEditor(root, ports) {
   }
 
   async function loadProviderPresetDetail(slug) {
+    syncDestination();
     if (!providerSelectionEditor || providerSelectionEditor.mode !== "preset" || !slug) return;
     providerPresetDetailController?.abort();
     const controller = new AbortController();
@@ -570,6 +617,7 @@ export function mountProviderEditor(root, ports) {
   }
 
   function resetProviderForm() {
+    invalidateInventory();
     clearResponseFormatCapability();
     editingProviderId = "";
     elements.providerForm.reset();
@@ -597,6 +645,7 @@ export function mountProviderEditor(root, ports) {
     elements.providerContextSource.className = "field-note";
     initializeProviderSelectionEditor();
     syncProviderRoleSettings();
+    formDestination = destination();
   }
 
   function clearResponseFormatCapability() {
@@ -802,6 +851,7 @@ export function mountProviderEditor(root, ports) {
   }
 
   function beginProviderEdit(provider) {
+    invalidateInventory();
     const returnFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
     clearResponseFormatCapability();
     editingProviderId = provider.id;
@@ -830,6 +880,7 @@ export function mountProviderEditor(root, ports) {
     initializeProviderSelectionEditor(provider);
     elements.providerAdvancedSettings.open = false;
     syncProviderRoleSettings();
+    formDestination = destination();
     openEditDialog(elements.providerDialog, returnFocusTo);
     elements.providerName.focus();
     providerMessage(`Editing ${provider.name}. Leave the API key blank to keep the stored credential.`);
@@ -839,6 +890,13 @@ export function mountProviderEditor(root, ports) {
   async function saveProvider(event) {
     event.preventDefault();
     if (providerSaveBusy) return;
+    syncDestination();
+    const savedProfile = providers.find(item => item.id === editingProviderId);
+    if (savedProfile?.hasApiKey && !sameSavedDestination(savedProfile) && !suppliedCredential()) {
+      providerMessage("Enter a new API key for the changed endpoint, or restore the saved endpoint.", "error");
+      elements.providerApiKey.focus();
+      return;
+    }
     providerSaveBusy = true;
     const providerControls = [...elements.providerForm.querySelectorAll("input, select, textarea, button")];
     const disabledBeforeSave = providerControls.map((control) => control.disabled);
@@ -856,7 +914,7 @@ export function mountProviderEditor(root, ports) {
           name: elements.providerName.value,
           ...(!editingProviderId ? { providerType: elements.providerType.value, providerRole: elements.providerRole.value } : {}),
           baseUrl: elements.providerBaseUrl.value,
-          apiKey: elements.providerApiKey.value || undefined,
+          apiKey: suppliedCredential() || undefined,
           isDefault: elements.providerIsDefault.checked,
           defaultModel: nativeSelection?.defaultModel ?? preservedSelection?.defaultModel ?? elements.providerDefaultModel.value,
           ...(nativeSelection ? { textSelection: nativeSelection.textSelection } : {}),
@@ -895,6 +953,10 @@ export function mountProviderEditor(root, ports) {
     providerSaveBusy = false;
   }
   async function refreshProviderModelsFromForm() {
+    syncDestination();
+    inventoryRequest?.abort();
+    const request = new AbortController();
+    inventoryRequest = request;
     const sequence = ++responseFormatCapabilitySequence;
     const identity = responseFormatCapabilityIdentity();
     clearResponseFormatCapability();
@@ -907,13 +969,13 @@ export function mountProviderEditor(root, ports) {
       const useStoredProfile = useSavedProviderPresetApi();
       const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
       const result = useStoredProfile
-        ? await ports.models(editingProviderId, signal)
+        ? await ports.models(editingProviderId, request.signal)
         : await ports.discover({
             name: elements.providerName.value || "Unsaved provider",
             providerType: elements.providerType.value,
             providerRole: elements.providerRole.value,
             baseUrl: elements.providerBaseUrl.value,
-            apiKey: elements.providerApiKey.value || undefined,
+            apiKey: suppliedCredential() || undefined,
             defaultModel: elements.providerDefaultModel.value,
             ...(!isIllustrationProviderForm() ? {
               contextWindowTokens: elements.providerContextTokens.value,
@@ -924,8 +986,8 @@ export function mountProviderEditor(root, ports) {
             enabled: elements.providerEnabled.checked,
             isDefault: elements.providerIsDefault.checked,
             configuration: providerConfigurationFromForm(existingConfig)
-      }, signal);
-      if (sequence !== responseFormatCapabilitySequence - 1 || identity !== responseFormatCapabilityIdentity()) return;
+      }, request.signal);
+      if (request.signal.aborted || sequence !== responseFormatCapabilitySequence - 1 || identity !== responseFormatCapabilityIdentity()) return;
       discoveredProfileModels = result.models || [];
       discoveredProfileModelsIdentity = identity;
       const orderedModels = [...discoveredProfileModels].sort((left, right) => Number(right.loaded) - Number(left.loaded) || left.displayName.localeCompare(right.displayName));
@@ -950,15 +1012,18 @@ export function mountProviderEditor(root, ports) {
       elements.providerModelPickerStatus.className = "status success";
       providerMessage(`${discoveredProfileModels.length} model entr${discoveredProfileModels.length === 1 ? "y" : "ies"} found. Select one from Default model and save the profile.`, "success");
     } catch (error) {
-      if (sequence !== responseFormatCapabilitySequence - 1 || identity !== responseFormatCapabilityIdentity()) return;
+      if (request.signal.aborted || sequence !== responseFormatCapabilitySequence - 1 || identity !== responseFormatCapabilityIdentity()) return;
       clearResponseFormatCapability();
       const message = "Model inventory is unavailable. Check the endpoint and credentials, then refresh.";
       providerMessage(message, "error");
       elements.providerModelPickerStatus.textContent = message;
       elements.providerModelPickerStatus.className = "status error";
     } finally {
-      elements.refreshProviderModels.disabled = false;
-      elements.refreshProviderModelDialog.disabled = false;
+      if (inventoryRequest === request) {
+        inventoryRequest = null;
+        elements.refreshProviderModels.disabled = false;
+        elements.refreshProviderModelDialog.disabled = false;
+      }
     }
   }
   function profileModelValue(model) {
@@ -1100,6 +1165,7 @@ export function mountProviderEditor(root, ports) {
     }
   }
   async function openProviderModelPicker(forceRefresh = false) {
+    syncDestination();
 
     const role = elements.providerRole.value;
     elements.providerModelDialogTitle.textContent = role === "image" ? "Choose image model" : role === "embedding" ? "Choose embedding model" : "Choose default model";
@@ -1171,6 +1237,7 @@ export function mountProviderEditor(root, ports) {
       applySogniConfiguration({}, elements.providerType.value);
     }
     syncProviderRoleSettings({ applySuggestedDefaults: !editingProviderId });
+    syncDestination();
   });
 
   elements.providerSogniSizePreset.addEventListener("change", () => {
@@ -1185,19 +1252,14 @@ export function mountProviderEditor(root, ports) {
   elements.providerSogniNetwork.addEventListener("change", applySogniWorkerAvailability);
 
   elements.providerRole.addEventListener("change", () => {
-    discoveredProfileModels = [];
-    clearResponseFormatCapability();
     syncProviderRoleSettings({ applySuggestedDefaults: !editingProviderId });
+    syncDestination();
   });
-  for (const control of [elements.providerBaseUrl, elements.providerApiKey, elements.providerStreaming, elements.providerResponseFormatPolicy]) {
-    control.addEventListener("input", clearResponseFormatCapability);
-    control.addEventListener("change", clearResponseFormatCapability);
-  }
-  for (const control of [elements.providerBaseUrl, elements.providerApiKey, elements.providerStreaming]) {
-    control.addEventListener("input", () => {
-      providerSelectionCredentialRevision += 1;
-      if (providerSelectionEditor) setProviderSelectionState({ type: "authorityChanged", ...providerSelectionAuthority(providers.find((item) => item.id === editingProviderId) || null) });
-    });
+  for (const event of ["input", "change"]) {
+    elements.providerBaseUrl.addEventListener(event, syncDestination);
+    elements.providerApiKey.addEventListener(event, invalidateInventory);
+    elements.providerStreaming.addEventListener(event, clearResponseFormatCapability);
+    elements.providerResponseFormatPolicy.addEventListener(event, clearResponseFormatCapability);
   }
   elements.providerResponseFormatPolicy.addEventListener("change", () => {
     if (providerSelectionEditor?.mode === "model") {
@@ -1286,6 +1348,7 @@ export function mountProviderEditor(root, ports) {
   void loadProviders().catch(() => reportProviderListReadFailure("Provider profiles could not be loaded."));
   return {dispose() {
     controller.abort();
+    inventoryRequest?.abort();
     releaseCancel();
     if (elements.discardChangesDialog.open) elements.discardChangesDialog.close();
     abortProviderPresetRequests();

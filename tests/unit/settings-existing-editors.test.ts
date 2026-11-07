@@ -21,6 +21,6 @@ it("omits blank credentials and untouched policy fields and rejects unsafe profi
     });
   };
   const api = createOwnerSettingsApis(transport);
-  await expect(api.providers.save("11111111-1111-4111-8111-111111111111", {name: "Edited", apiKey: ""}, new AbortController().signal)).rejects.toThrow();
+  await expect(api.providers.save("11111111-1111-4111-8111-111111111111", {name: "Edited", apiKey: "   "}, new AbortController().signal)).rejects.toThrow();
   expect(calls).toEqual([{name:"Edited"}]);
 });

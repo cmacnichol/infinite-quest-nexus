@@ -12,7 +12,7 @@ export interface StoryResumeStore {
 }
 
 export interface StoryResumeEntryOptions {
-  readonly store: StoryResumeStore;
+  readonly store: StoryResumeStore | ((signal: AbortSignal) => Promise<StoryResumeStore>);
   readonly list: (signal: AbortSignal) => Promise<Readonly<{ campaigns: readonly ResumeCandidate[] }>>;
   /** Use Location.replace so Back/Forward does not trap a returning user at /app. */
   readonly replace: (path: string) => void;
@@ -88,15 +88,18 @@ export function resolveAppLanding(lastCampaignId: string | null, campaigns: read
  */
 export async function resumeStoredStoryCampaign(options: StoryResumeEntryOptions): Promise<"resumed" | "library"> {
   if (options.signal?.aborted) return "library";
-  const campaignId = options.store.read();
-  if (campaignId === null) return "library";
 
   const controller = new AbortController();
   const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs! >= 0 ? options.timeoutMs! : 3_000;
   let timeout: ReturnType<typeof setTimeout> | null = null;
-  const lookup = options.list(controller.signal)
-    .then((response) => ({ kind: "response" as const, campaigns: response.campaigns }))
-    .catch(() => ({ kind: "unavailable" as const }));
+  const lookup = (async () => {
+    const store = typeof options.store === "function" ? await options.store(controller.signal) : options.store;
+    if (controller.signal.aborted) return {kind: "unavailable" as const};
+    const campaignId = store.read();
+    if (!campaignId) return {kind: "unavailable" as const};
+    const response = await options.list(controller.signal);
+    return {kind: "response" as const, store, campaignId, campaigns: response.campaigns};
+  })().catch(() => ({kind: "unavailable" as const}));
   const timedOut = new Promise<{ kind: "unavailable" }>((resolve) => {
     timeout = setTimeout(() => {
       controller.abort();
@@ -115,9 +118,9 @@ export async function resumeStoredStoryCampaign(options: StoryResumeEntryOptions
     const result = await Promise.race([lookup, timedOut, pageDisposed]);
     if (options.signal?.aborted || result.kind !== "response") return "library";
 
-    const landing = resolveAppLanding(campaignId, result.campaigns);
+    const landing = resolveAppLanding(result.campaignId, result.campaigns);
     if (landing === "/app/worlds") {
-      options.store.forget();
+      result.store.forget();
       return "library";
     }
     options.replace(landing);

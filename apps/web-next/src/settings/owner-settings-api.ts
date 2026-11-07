@@ -36,7 +36,8 @@ export function createOwnerSettingsApis(fetchImpl: typeof fetch = fetch) {
       metadata: (signal: AbortSignal) => http.request({method: "GET", path: "/meta", responseSchema: metadata, signal}),
       save(id: string, value: Record<string, unknown>, signal: AbortSignal) {
         const {apiKey, ...fields} = value;
-        const body = apiKey ? {...fields, apiKey} : fields;
+        const suppliedKey = typeof apiKey === "string" ? apiKey.trim() : "";
+        const body = suppliedKey ? {...fields, apiKey: suppliedKey} : fields;
         return http.request({method: id ? "PATCH" : "POST", path: id ? providerPath(id) : "/providers",
           body: json((id ? providerProfileUpdateSchema : providerProfileInputSchema).parse(body)), responseSchema: safeProviderProfileViewSchema, signal});
       },

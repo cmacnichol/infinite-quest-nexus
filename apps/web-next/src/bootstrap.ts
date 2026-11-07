@@ -33,12 +33,13 @@ async function start(): Promise<MountedPage | null> {
   if (uiImplementation() === "web-awesome") await ensureWebAwesome();
   if (pageDisposed) return null;
   if (isAppEntryPath(window.location.pathname)) {
-    const storage = browserDeviceStorage(window);
-    const user = await loadUserProfile(startupController.signal).catch(() => null);
-    if (pageDisposed) return null;
-    storage.activate(user);
     const result = await resumeStoredStoryCampaign({
-      store: createStoryResumeStore(storage),
+      async store(signal) {
+        const storage = browserDeviceStorage(window);
+        const user = await loadUserProfile(signal);
+        if (!signal.aborted) storage.activate(user);
+        return createStoryResumeStore(storage);
+      },
       list(signal) {
         try {
           return createStoryPlayerComposition().api.campaigns.list(signal);

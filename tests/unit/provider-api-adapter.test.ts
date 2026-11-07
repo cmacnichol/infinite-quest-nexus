@@ -16,7 +16,7 @@ function adapter(responseFormatCapabilities?: object) {
   };
   const runtime = { storeCredential: vi.fn(), discoverCandidateModelsWithCredential: vi.fn(),
     resolveCandidatePresetWithCredential: vi.fn(async (_candidate: { baseUrl: string }, _slug: string, _credential: string | null) => ({ preset: {} })),
-    presetSaveAuthoritySnapshot: vi.fn(async (_ownerUserId: string, _providerProfileId: string, _lock: boolean): Promise<Readonly<{ candidate: unknown; readSavedCredential(): string | null; revision: string }> | null> => null) };
+    presetSaveAuthoritySnapshot: vi.fn(async (_ownerUserId: string, _providerProfileId: string, _lock: boolean): Promise<Readonly<{ candidate: unknown; hasCredential: boolean; readSavedCredential(): string | null; revision: string }> | null> => null) };
   return { application, runtime, adapter: createProviderApplicationAdapter({ application, runtime, responseFormatCapabilities, transaction: async (work: (binding: never) => Promise<unknown>) => work({ application, runtime } as never) } as never) };
 }
 
@@ -168,7 +168,7 @@ describe("provider API configuration boundary", () => {
     const readSavedCredential = vi.fn(() => "rotated-secret");
     value.application.listProfiles.mockResolvedValue([staleProfile]);
     value.runtime.presetSaveAuthoritySnapshot.mockResolvedValue({
-      candidate: authorityProfile, readSavedCredential, revision: "authority-b"
+      candidate: authorityProfile, hasCredential: true, readSavedCredential, revision: "authority-b"
     });
     value.runtime.resolveCandidatePresetWithCredential.mockImplementation(async (candidate, _slug, credential) => {
       if (candidate.baseUrl !== authorityProfile.baseUrl || credential !== "rotated-secret") {

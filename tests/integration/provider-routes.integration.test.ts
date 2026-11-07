@@ -437,7 +437,11 @@ integration("provider route configuration redaction", () => {
         throw new Error("concrete authority selection must not validate a preset");
       };
       try {
-        const saved = await racedApp.inject({ method: "PATCH", url: `/api/v1/providers/${id}`, payload: { baseUrl: "https://after-switch.test/api/v1" } });
+        const changedEndpoint = {baseUrl: "https://after-switch.test/api/v1"};
+        const rejected = await racedApp.inject({method: "PATCH", url: `/api/v1/providers/${id}`, payload: changedEndpoint});
+        expect(rejected.statusCode).toBe(400);
+        const saved = await racedApp.inject({method: "PATCH", url: `/api/v1/providers/${id}`, payload: {...changedEndpoint, apiKey: "fresh-fixture-key"}});
+
         expect(saved.statusCode).toBe(200);
         expect(saved.json()).toMatchObject({ baseUrl: "https://after-switch.test/api/v1", textSelection: { kind: "model", modelId: "concrete-model" } });
         expect(remoteAttempts).toBe(0);

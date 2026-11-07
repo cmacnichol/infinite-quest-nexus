@@ -630,3 +630,18 @@ test("a committed profile remains saved when refreshing the provider list fails"
   await expect(page.locator("#providerProfileList")).toContainText("Committed before list failure");
   expect(api.writes).toHaveLength(1);
 });
+
+test("moving a saved credentialed profile requires a fresh key for that endpoint", async ({page}) => {
+  const api = await installProviderApi(page, {providers:[providerFixture({hasApiKey:true})]});
+  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.locator("#providerProfileList").getByRole("button",{name:"Edit"}).click();
+  await page.locator("#providerBaseUrl").fill("https://moved.example.test/v1");
+  await page.locator("#providerApiKey").fill("   ");
+  await page.locator("#saveProvider").click();
+  await expect(page.locator("#providerEditorStatus")).toContainText("Enter a new API key");
+  expect(api.writes).toHaveLength(0);
+  await page.locator("#providerApiKey").fill("replacement-fixture-credential");
+  await page.locator("#saveProvider").click();
+  await expect.poll(() => api.writes.length).toBe(1);
+  expect(requiredItem(api.writes,0).body).toMatchObject({baseUrl:"https://moved.example.test/v1",apiKey:"replacement-fixture-credential"});
+});

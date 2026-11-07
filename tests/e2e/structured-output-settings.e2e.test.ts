@@ -57,6 +57,9 @@ async function installProviderApi(page: Page) {
     if (url.pathname === "/api/v1/providers/11111111-1111-4111-8111-111111111111/models" && request.method() === "GET") {
       return route.fulfill({ contentType: "application/json", body: JSON.stringify({ models: [{ id: "safe-model", displayName: "Safe model", loaded: true, instanceId: "safe-model", contextLength: 32768, responseFormatCapability: modelCapability }] }) });
     }
+    if (url.pathname === "/api/v1/providers/discover-models" && request.method() === "POST") {
+      return route.fulfill({json:{models:[{id:"changed-endpoint-model",displayName:"Changed endpoint model",loaded:true}]}});
+    }
     if (url.pathname.startsWith("/api/v1/providers/") && request.method() === "PATCH") {
       const body = request.postDataJSON() as Record<string, unknown>;
       writes.push(body);
@@ -136,7 +139,8 @@ test("Nexus fences saved-profile and cached-picker capability evidence after rel
   await page.locator("#providerStreaming").check();
   await page.locator("#providerResponseFormatPolicy").selectOption("required");
   await page.locator("#providerDefaultModel").click();
-  await page.getByRole("button", { name: /Safe model/ }).click();
+  await expect(page.getByRole("button",{name:/Safe model/})).toHaveCount(0);
+  await page.getByRole("button", { name: /Changed endpoint model/ }).click();
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("unknown");
   await page.locator("#refreshProviderModels").click();
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("unknown");

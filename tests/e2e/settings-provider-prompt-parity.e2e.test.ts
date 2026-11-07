@@ -199,3 +199,91 @@ test(`${mode} hydrates only the active account and filters cross-tab theme chang
   await page.evaluate(id => window.dispatchEvent(new StorageEvent("storage",{key:`infinite-quest.user.${id}.infinite-quest.theme`})),secondOwner);
   await expect(html).toHaveAttribute("data-theme","dark");
 });
+
+test(`${mode} changing provider destinations clears credentials and previously discovered models`, async ({page}) => {
+  await api(page);
+  const discoveries: Record<string, unknown>[] = [];
+  await page.route("**/api/v1/providers/discover-models", async route => {
+    discoveries.push(route.request().postDataJSON());
+    const model = "Fixture model " + discoveries.length;
+    await route.fulfill({json:{models:[{id:model,displayName:model,loaded:true,contextLength:32000}]}});
+  });
+  await page.goto(base + "/app/settings?section=providers");
+  await page.locator("#newProviderButton").click();
+  await page.locator("#providerType").selectOption("openrouter");
+  await page.locator("#providerApiKey").fill("first-synthetic-key");
+  await page.locator("#providerDefaultModel").click();
+  await page.getByRole("button",{name:/Fixture model 1/}).click();
+  await page.locator("#providerBaseUrl").fill("https://new-fixture.invalid/v1");
+  await expect(page.locator("#providerApiKey")).toHaveValue("");
+  await page.locator("#providerDefaultModel").click();
+  await expect(page.getByRole("button",{name:/Fixture model 2/})).toBeVisible();
+  await expect(page.getByRole("button",{name:/Fixture model 1/})).toHaveCount(0);
+  expect(discoveries[1]).not.toHaveProperty("apiKey");
+  await page.getByRole("button",{name:/Fixture model 2/}).click();
+  await page.locator("#providerApiKey").fill("another-synthetic-key");
+  await page.locator("#providerType").selectOption("sogni");
+  await expect(page.locator("#providerApiKey")).toHaveValue("");
+  await page.locator("#providerDefaultModel").click();
+  await expect(page.getByRole("button",{name:/Fixture model 3/})).toBeVisible();
+  expect(discoveries[2]).toMatchObject({providerRole:"image", providerType:"sogni"});
+  expect(discoveries[2]).not.toHaveProperty("apiKey");
+  await page.getByRole("button",{name:/Fixture model 3/}).click();
+  await page.locator("#providerType").selectOption("openai_compatible");
+  await page.locator("#providerRole").selectOption("text");
+  await page.locator("#providerApiKey").fill("fixture-only-text-key");
+  await page.locator("#providerRole").selectOption("embedding");
+  await expect(page.locator("#providerApiKey")).toHaveValue("");
+  await page.locator("#providerDefaultModel").click();
+  await expect(page.getByRole("button",{name:/Fixture model 4/})).toBeVisible();
+  expect(discoveries[3]?.providerRole).toBe("embedding");
+  expect(discoveries[3]).not.toHaveProperty("apiKey");
+});
+test(`${mode} prompt search and a delayed save keep the newer draft`, async ({page}) => {
+  await api(page);
+  let release!: () => void;
+  const held = new Promise<void>(resolve => {release = resolve;});
+  let started = false;
+  await page.route("**/api/v1/prompt-library/overrides", async route => {
+    started = true;
+    await held;
+    await route.fulfill({json:{library:{templates:[{...template,effectiveContent:"Saved version"}]}}});
+  });
+  await page.goto(base + "/app/settings?section=prompts");
+  const content = page.locator("#promptLibraryContent");
+  await expect(content).toHaveValue(template.effectiveContent);
+  await content.fill("Saved version");
+  await page.locator("#promptLibraryFilter").fill("Story");
+  await expect(content).toHaveValue("Saved version");
+  await page.getByRole("button",{name:"Save prompt"}).click();
+  await expect.poll(()=>started).toBe(true);
+  await content.fill("Newer draft");
+  release();
+  await expect(page.locator("#promptLibraryStatus")).toContainText("saved");
+  await expect(content).toHaveValue("Newer draft");
+  await expect(page.locator("#promptLibraryDiscard")).toBeVisible();
+  await page.locator("#promptLibraryDiscard").click();
+  await expect(content).toHaveValue("Saved version");
+});
+test(`${mode} invalid or empty campaign links require an owned campaign`, async ({page}) => {
+  const {requests,writes} = await api(page);
+  for (const invalid of ["","bad-id"]) {
+    await page.goto(base + "/app/settings?section=prompts&campaignId="+invalid);
+    await expect(page.locator("#promptLibraryScope")).toHaveValue("campaign");
+    await expect(page.locator("#promptLibraryStatus")).toContainText("Select a campaign");
+    await expect(page.getByRole("button",{name:"Save prompt"})).toBeHidden();
+  }
+  expect(requests).not.toContain("GET /api/v1/prompt-library");
+  expect(writes).toHaveLength(0);
+});
+test(`${mode} stalled optional identity at the app entry still opens World Library`, async ({page}) => {
+  await api(page);
+  let release!: () => void;
+  const held = new Promise<void>(resolve => {release=resolve;});
+  await page.route("**/api/v1/session", async route => {await held; await route.fulfill({json:fixture.session}).catch(()=>undefined);});
+  try {
+    await page.goto(base + "/app/");
+    await expect(page.getByRole("heading",{name:"World Library",exact:true})).toBeVisible({timeout:5000});
+  } finally { release(); }
+  await expect(page).toHaveURL(/\/app\/?$/);
+});

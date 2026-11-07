@@ -57,7 +57,7 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
         content.append(host);
         const ports = createOwnerSettingsApis();
         ownerEditor = route.section === "providers" ? mountProviderEditor(host, ports.providers)
-          : mountPromptEditor(host, ports.prompts, route.campaignId, new URL(window.location.href).searchParams.get("prompt"));
+          : mountPromptEditor(host, ports.prompts, route.campaignId, new URL(window.location.href).searchParams.get("prompt"), route.campaignSelectionRequired);
       } else if (!campaigns) {
         content.append(node(document, "p", campaignFailed ? "Your campaigns could not be loaded. Reload to retry." : "Loading your campaigns…", "settings-status"));
       } else {

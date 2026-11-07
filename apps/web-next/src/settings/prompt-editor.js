@@ -1,6 +1,6 @@
 import markup from "./prompt-editor.html?raw";
 
-export function mountPromptEditor(root, ports, campaignId, promptKey) {
+export function mountPromptEditor(root, ports, campaignId, promptKey, requireCampaign = false) {
   const document = root.ownerDocument;
   const window = document.defaultView;
   const controller = new AbortController();
@@ -19,6 +19,7 @@ export function mountPromptEditor(root, ports, campaignId, promptKey) {
   let promptLibraryPreviewSequence = 0;
   let campaigns = [];
   let scopeEpoch = 0;
+  let saving = false;
   function promptLibraryCampaignId() {
     return elements.promptLibraryScope?.value === "campaign" ? elements.promptLibraryCampaign?.value || "" : "";
   }
@@ -171,18 +172,33 @@ export function mountPromptEditor(root, ports, campaignId, promptKey) {
   }
   async function savePromptLibraryTemplate(event) {
     event.preventDefault();
+    if (saving) return;
     const template = promptLibrarySelectedTemplate(); if (!template) return;
     const scope = elements.promptLibraryScope.value;
     const epoch = scopeEpoch;
+    saving = true;
+    const submit = elements.promptLibraryEditor.querySelector('[type="submit"]');
+    submit.disabled = true;
     try {
       const content = elements.promptLibraryContent.value;
       const response = await ports.save({ key: template.key, scope, ...(scope === "campaign" ? { campaignId: promptLibraryCampaignId() } : {}), content }, signal);
       if (signal.aborted || epoch !== scopeEpoch) return;
-      promptLibrary = response.library; elements.promptLibraryStatus.textContent = "Prompt saved. New jobs will use this version."; elements.promptLibraryStatus.className = "status success"; renderPromptLibrary(true);
+      promptLibrary = response.library;
+      if (template.key === selectedPromptTemplateKey) {
+        const editedDuringSave = elements.promptLibraryContent.value !== content;
+        promptLibraryEditorBaseline = promptLibrarySelectedTemplate()?.effectiveContent ?? content;
+        if (!editedDuringSave) elements.promptLibraryContent.value = promptLibraryEditorBaseline;
+      }
+      elements.promptLibraryStatus.textContent = promptLibraryIsDirty() ? "Prompt saved. You have further unsaved edits." : "Prompt saved. New jobs will use this version.";
+      elements.promptLibraryStatus.className = "status success";
+      renderPromptLibrary();
     } catch (error) {
       if (signal.aborted || epoch !== scopeEpoch) return;
       elements.promptLibraryStatus.textContent = error.message || String(error);
       elements.promptLibraryStatus.className = "status error";
+    } finally {
+      saving = false;
+      submit.disabled = false;
     }
   }
   async function resetPromptLibraryTemplate() {
@@ -230,7 +246,7 @@ export function mountPromptEditor(root, ports, campaignId, promptKey) {
       behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
     });
   }
-  elements.promptLibraryFilter?.addEventListener("input", renderPromptLibrary);
+  elements.promptLibraryFilter?.addEventListener("input", () => renderPromptLibrary());
   elements.promptLibraryScope?.addEventListener("change", () => {
     if (promptLibraryIsDirty()) {
       elements.promptLibraryScope.value = promptLibraryActiveScope;
@@ -274,7 +290,7 @@ export function mountPromptEditor(root, ports, campaignId, promptKey) {
     if (signal.aborted) return;
     campaigns = result.campaigns;
     syncPromptLibraryCampaigns();
-    if (campaignId) {
+    if (campaignId || requireCampaign) {
       elements.promptLibraryScope.value = "campaign";
       elements.promptLibraryCampaign.value = campaigns.some(c => c.id === campaignId) ? campaignId : "";
     }

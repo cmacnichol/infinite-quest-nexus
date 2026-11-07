@@ -50,6 +50,12 @@ const url = process.env.TEST_DATABASE_URL;
     expect(updated.json().hasApiKey).toBe(true);
     expect(JSON.stringify(updated.json())).not.toContain("synthetic-provider-key");
     expect(await fingerprint()).toBe(encryptedBefore);
+    const moved = await app.inject({method:"PATCH",url:`/api/v1/providers/${provider.json().id}`, payload:{baseUrl:"https://second-fixture.invalid",apiKey:"   "}});
+    expect(moved.statusCode).toBe(400);
+    expect(await fingerprint()).toBe(encryptedBefore);
+    const replaced = await app.inject({method:"PATCH",url:`/api/v1/providers/${provider.json().id}`, payload:{baseUrl:"https://second-fixture.invalid",apiKey:"second-synthetic-credential"}});
+    expect(replaced.statusCode).toBe(200);
+    expect(await fingerprint()).not.toBe(encryptedBefore);
     const scoped = await pool.connect();
     try {
       expect(await createPostgresProviderRepositories(scoped).profiles.listProfiles({ownerUserId:b})).toEqual([]);
