@@ -787,7 +787,7 @@ export function createSystemArchiveUploadService(
     },
 
     async completeUpload(owner, uploadId) {
-      const assembly = await options.uploads.getAssembly(owner, uploadId);
+      const assembly = await options.uploads.getAssembly(owner, uploadId, options.maximumBytes);
       if (assembly.byteLength > options.maximumBytes) {
         throw Object.assign(new Error("System Archive policy changed; restart this transfer."), { statusCode: 409, code: "system-archive-upload-restart-required", retryable: true });
       }

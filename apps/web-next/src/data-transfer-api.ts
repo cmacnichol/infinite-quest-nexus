@@ -311,7 +311,7 @@ export function createDataTransferApi(options: DataTransferApiOptions = {}): Dat
       const key = uploadStorageKey(file.size, hash);
       const stored = parseStoredUpload(storage?.getItem(key) ?? null);
       let current: SystemUploadView | null = null;
-      if (stored && stored.byteLength === file.size && stored.sha256 === hash && stored.chunkBytes === chunkBytes) {
+      if (stored && stored.byteLength === file.size && stored.sha256 === hash) {
         try {
           current = await getUpload(stored.id, uploadOptions.signal);
           if (!["created", "uploading", "completed"].includes(current.status) || current.byteLength !== file.size) current = null;
@@ -334,13 +334,14 @@ export function createDataTransferApi(options: DataTransferApiOptions = {}): Dat
       uploadOptions.onProgress?.({ phase: "uploading", receivedBytes: current.receivedBytes, byteLength: file.size });
       if (current.status === "completed") return current;
       let offset = current.receivedBytes;
-      if (offset % chunkBytes !== 0 && offset !== file.size) {
+      const serverChunkBytes = positiveChunkBytes(current.chunkBytes ?? chunkBytes);
+      if (current.nextChunkIndex === undefined && offset % chunkBytes !== 0 && offset !== file.size) {
         throw new DataTransferApiError("Durable upload progress does not align with this client's chunk boundary.", 409, "system-archive-upload-resume-conflict");
       }
-      let index = Math.floor(offset / chunkBytes);
+      let index = current.nextChunkIndex ?? Math.floor(offset / chunkBytes);
       while (offset < file.size) {
         if (uploadOptions.signal?.aborted) throw uploadOptions.signal.reason ?? new DOMException("Transfer cancelled", "AbortError");
-        const end = Math.min(file.size, offset + chunkBytes);
+        const end = Math.min(file.size, offset + Math.min(chunkBytes, positiveChunkBytes(current.chunkBytes ?? serverChunkBytes)));
         const bytes = new Uint8Array(await file.slice(offset, end).arrayBuffer());
         const value = await requestJson(fetchImpl, `/api/v1/system-imports/uploads/${encodeURIComponent(current.id)}/chunks/${index}`, {
           method: "PUT",
@@ -356,7 +357,7 @@ export function createDataTransferApi(options: DataTransferApiOptions = {}): Dat
         current = systemUploadViewSchema.parse(value);
         uploadOptions.onUploadAvailable?.(current);
         offset = current.receivedBytes;
-        index += 1;
+        index = current.nextChunkIndex ?? index + 1;
         uploadOptions.onProgress?.({ phase: "uploading", receivedBytes: offset, byteLength: file.size });
       }
       uploadOptions.onProgress?.({ phase: "completing", receivedBytes: offset, byteLength: file.size });

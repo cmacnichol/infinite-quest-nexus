@@ -35,7 +35,7 @@ describe("durable transfer settings across restart", () => {
   let pool: DatabasePool, owner: { ownerUserId: string };
   beforeAll(async () => { pool = createDatabasePool(process.env.TEST_DATABASE_URL!, 8); await migrateDatabase(pool, resolve("database/migrations")); owner = { ownerUserId: await initialOwnerId(pool) }; }, 60000);
   afterAll(async () => { await pool?.end(); });
-  beforeEach(async () => { await pool.query("DELETE FROM system_archive_jobs"); await pool.query("DELETE FROM system_archive_uploads"); });
+  beforeEach(async () => { await pool.query("UPDATE portable_import_work SET status='expired',terminal_at=clock_timestamp(),lease_id=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE status IN ('running','recoverable')"); await pool.query("UPDATE portable_import_operations SET status='expired' WHERE status='previewed'"); await pool.query("DELETE FROM system_archive_jobs"); await pool.query("DELETE FROM system_archive_uploads"); });
   it("loads every transfer control from the active revision while keeping staged changes inactive", async () => {
     const policy = runtimePolicy();
     const repository = createInstanceSettingsRepository(pool, { activationGuard: createSettingsActivationGuard(policy) });
@@ -77,8 +77,8 @@ describe("durable transfer settings across restart", () => {
     await uploads.completeUpload(owner, { uploadId: upload.id, stagedInputId: staged.rows[0]!.id });
     return upload;
   }
-  async function preview(policy: ArchivePolicySnapshot) {
-    const upload = await completedUpload(policy);
+  async function preview(policy: ArchivePolicySnapshot, uploadId?: string) {
+    const upload = uploadId ? { id: uploadId } : await completedUpload(policy);
     const imports = createPostgresSystemArchiveImportRepository(pool, policy);
     const destination = await imports.destinationFingerprint(owner, { ignoreUploadId: upload.id });
     const archiveFingerprint = hash("validated-system-archive");
@@ -91,7 +91,7 @@ describe("durable transfer settings across restart", () => {
       rebuilds: { chronicleIndex: { category: "chronicle-index", status: "pending", itemCount: 0 }, assetThumbnails: { category: "asset-thumbnails", status: "pending", itemCount: 0 } },
       space: { staging: { requiredBytes: 0, availableBytes: 0, verified: true, sufficient: true, overrideUsed: false }, assetRoot: { requiredBytes: 0, availableBytes: 0, verified: true, sufficient: true, overrideUsed: false } }, warnings: [], errors: [],
     };
-    return imports.createPreview(owner, { uploadId: upload.id, archiveFingerprint, destination, projection });
+    return { ...await imports.createPreview(owner, { uploadId: upload.id, archiveFingerprint, destination, projection }), uploadId: upload.id };
   }
   it.each(Object.keys(historicalArchivePolicy("system").limits) as (keyof ArchivePolicySnapshot["limits"])[])("requires a fresh System preview after tightening %s across restart", async (key) => {
     const original = { ...historicalArchivePolicy("system"), settingsRevision: "1" };
@@ -101,10 +101,11 @@ describe("durable transfer settings across restart", () => {
     expect(record.ttl).toBeGreaterThan(1799); expect(record.ttl).toBeLessThanOrEqual(1801);
     const tightened = { ...original, settingsRevision: "2", limits: { ...original.limits, [key]: original.limits[key] - 1 } };
     await expect(createPostgresSystemArchiveImportRepository(pool, tightened).consumePreviewAuthority(owner, issued.previewHandle, "commit-test")).rejects.toMatchObject({ statusCode: 409, code: "archive-preview-stale" });
-    expect((await pool.query("SELECT status FROM system_archive_jobs WHERE id=$1", [issued.jobId])).rows[0].status).toBe("previewed");
+    expect((await pool.query("SELECT status FROM system_archive_jobs WHERE id=$1", [issued.jobId])).rows[0].status).toBe("expired");
+    const fresh = await preview(tightened, issued.uploadId);
     // A later increase keeps the historical snapshot and original expiry.
     const relaxed = { ...original, settingsRevision: "3", limits: { ...original.limits, [key]: original.limits[key] + 1 } };
-    await createPostgresSystemArchiveImportRepository(pool, relaxed).consumePreviewAuthority(owner, issued.previewHandle, "commit-test");
+    await createPostgresSystemArchiveImportRepository(pool, relaxed).consumePreviewAuthority(owner, fresh.previewHandle, "commit-test");
     expect((await pool.query("SELECT policy_snapshot,progress->>'expiresAt' AS expiry FROM system_archive_jobs WHERE id=$1", [issued.jobId])).rows[0]).toEqual({ policy_snapshot: original, expiry: issued.expiresAt });
     await expect(pool.query("UPDATE system_archive_jobs SET policy_snapshot=NULL WHERE id=$1", [issued.jobId])).rejects.toThrow("archive_policy_snapshot_immutable");
   });
@@ -234,6 +235,58 @@ describe("durable transfer settings across restart", () => {
     const tightened = createApiSystemArchiveComposition({ pool, config: { ...config, systemArchiveChunkBytes: 2, systemArchiveLimits: { ...original.limits, maxCompressedBytes: 3 } }, storage: { adapter: {} } as never });
     await expect(tightened.uploadAdmission!(owner, upload.id, 2)).rejects.toMatchObject({ statusCode: 409, code: "system-archive-upload-restart-required" });
     expect((await pool.query("SELECT received_bytes,policy_snapshot FROM system_archive_uploads WHERE id=$1", [upload.id])).rows[0]).toEqual({ received_bytes: "4", policy_snapshot: original });
+  });
+
+  it.each(["incomplete", "full-prefix", "completed"])("rejects oversized completion before renewal for %s", async (mode) => {
+    const original = { ...historicalArchivePolicy("system"), chunkBytes: 4, uploadTtlSeconds: 600 };
+    const upload = await completedUpload(original);
+    if (mode !== "completed") {
+      // A separate incomplete authority avoids mutating the completed lifecycle.
+      await pool.query("DELETE FROM system_archive_jobs");
+    }
+    const operation = await portableOperation("portable_staging");
+    let id = upload.id;
+    if (mode !== "completed") {
+      await pool.query("INSERT INTO system_archive_uploads(owner_user_id,handle_token_hash,filesystem_operation_id,byte_length,content_hash,expires_at,policy_snapshot) VALUES($1,$2,$3,4,$4,clock_timestamp()+interval '10 minutes',$5::jsonb) RETURNING id", [owner.ownerUserId, hash(randomUUID()), operation.id, hash("abcd"), JSON.stringify(original)]).then(result => { id = result.rows[0].id; });
+    }
+    if (mode === "full-prefix") await createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 600, policy: original }).recordChunk(owner, { uploadId: id, index: 0, offset: 0, bytes: 4, sha256: hash("abcd") });
+    const before = (await pool.query("SELECT expires_at FROM system_archive_uploads WHERE id=$1", [id])).rows[0].expires_at;
+    const config = { ...bootstrap(), systemArchiveUploadTtlSeconds: 3600, systemArchiveChunkBytes: 2, systemArchiveLimits: { ...original.limits, maxCompressedBytes: 3 } };
+    const api = createApiSystemArchiveComposition({ pool, config, storage: { adapter: {} } as never });
+    await expect(api.application.completeUpload({ ownerUserId: owner.ownerUserId, uploadId: id as never })).rejects.toMatchObject({ code: "system-archive-upload-restart-required", statusCode: 409 });
+    expect((await pool.query("SELECT expires_at FROM system_archive_uploads WHERE id=$1", [id])).rows[0].expires_at).toEqual(before);
+  });
+
+  it("returns the effective 1 MiB chunk ceiling and durable resume index through owner-scoped APIs", async () => {
+    const cap = 1024 * 1024;
+    const policy = { ...historicalArchivePolicy("system"), chunkBytes: cap * 1.5, uploadTtlSeconds: 600 };
+    const operation = await portableOperation("portable_staging");
+    const original = createPostgresSystemArchiveUploadRepository(pool, { uploadTtlSeconds: 600, policy });
+    const upload = await pool.query(`INSERT INTO system_archive_uploads(owner_user_id,handle_token_hash,filesystem_operation_id,byte_length,content_hash,expires_at,policy_snapshot) VALUES($1,$2,$3,$4,$5,clock_timestamp()+interval '10 minutes',$6::jsonb) RETURNING id`, [owner.ownerUserId, hash(randomUUID()), operation.id, cap*2.5, hash("archive"), JSON.stringify(policy)]);
+    const id = upload.rows[0].id;
+    await original.recordChunk(owner, { uploadId: id, index: 6, offset: 0, bytes: cap*1.5, sha256: hash("prefix") });
+    const api = createApiSystemArchiveComposition({ pool, config: { ...bootstrap(), systemArchiveChunkBytes: cap }, storage: { adapter: {} } as never });
+    const resumed = await api.application.getUpload({ ownerUserId: owner.ownerUserId, uploadId: id });
+    expect(resumed).toMatchObject({ chunkBytes: cap, nextChunkIndex: 7, receivedBytes: cap*1.5 });
+    const foreign = (await pool.query("INSERT INTO users(display_name) VALUES('Foreign') RETURNING id")).rows[0].id;
+    await expect(api.application.getUpload({ ownerUserId: foreign, uploadId: id })).rejects.toMatchObject({ statusCode: 404 });
+    await pool.query("DELETE FROM users WHERE id=$1", [foreign]);
+  });
+  it("retires only an incompatible owner's preview and keeps unrelated work blocking replacement", async () => {
+    const policy = historicalArchivePolicy("system"), issued = await preview(policy);
+    const current = { ...policy, limits: { ...policy.limits, maxEntries: policy.limits.maxEntries-1 } };
+    const imports = createPostgresSystemArchiveImportRepository(pool, current);
+    const foreign = (await pool.query("INSERT INTO users(display_name) VALUES('Foreign') RETURNING id")).rows[0].id;
+    await expect(imports.consumePreviewAuthority({ ownerUserId: foreign }, issued.previewHandle, "wrong-owner")).rejects.toMatchObject({ statusCode: 409 });
+    await pool.query("DELETE FROM users WHERE id=$1", [foreign]);
+    expect((await pool.query("SELECT status FROM system_archive_jobs WHERE id=$1", [issued.jobId])).rows[0].status).toBe("previewed");
+    await expect(imports.consumePreviewAuthority(owner, issued.previewHandle, "changed-policy")).rejects.toMatchObject({ code: "archive-preview-stale" });
+    const unrelated = (await pool.query("INSERT INTO system_archive_jobs(owner_user_id,kind,status,idempotency_key_hash) VALUES($1,'export','queued',$2) RETURNING id", [owner.ownerUserId, hash(randomUUID())])).rows[0].id;
+    await expect(preview(current, issued.uploadId)).rejects.toMatchObject({ statusCode: 409 });
+    expect((await pool.query("SELECT status FROM system_archive_jobs WHERE id=$1", [unrelated])).rows[0].status).toBe("queued");
+    await pool.query("DELETE FROM system_archive_jobs WHERE id=$1", [unrelated]);
+    const fresh = await preview(current, issued.uploadId);
+    expect(fresh.jobId).not.toBe(issued.jobId);
   });
 
 });

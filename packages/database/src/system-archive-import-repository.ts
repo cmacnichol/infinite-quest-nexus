@@ -2261,6 +2261,7 @@ export function createPostgresSystemArchiveImportRepository(
       const previewHash = createHash("sha256").update(previewHandle).digest("hex");
       const commitKeyHash = createHash("sha256").update(idempotencyKey).digest("hex");
       const client = await pool.connect();
+      let retired = false;
       try {
         await client.query("BEGIN");
         const selected = await client.query<{
@@ -2296,8 +2297,18 @@ export function createPostgresSystemArchiveImportRepository(
         );
         const row = selected.rows[0];
         if (!row) throw repositoryError("System Archive preview authority is unavailable or expired.", 409);
-        if (policy && row.status === "previewed") requireCompatibleArchivePreview(
-          row.policy_snapshot ? archivePolicySnapshotSchema.parse(row.policy_snapshot) : historicalArchivePolicy("system"), policy);
+        if (policy && row.status === "previewed") {
+          try {
+            requireCompatibleArchivePreview(row.policy_snapshot ? archivePolicySnapshotSchema.parse(row.policy_snapshot) : historicalArchivePolicy("system"), policy);
+          } catch (error) {
+            // Only this owner's incompatible preview is retired. Retain upload and
+            // unrelated work; a fresh preview can now run normal empty-target checks.
+            await client.query("UPDATE system_archive_jobs SET status='expired',updated_at=clock_timestamp() WHERE id=$1 AND owner_user_id=$2 AND status='previewed'", [row.id, owner.ownerUserId]);
+            await client.query("COMMIT");
+            retired = true;
+            throw error;
+          }
+        }
         const progress = row.progress as Partial<{
           archiveFingerprint: unknown;
           destinationFingerprint: unknown;
@@ -2357,7 +2368,7 @@ export function createPostgresSystemArchiveImportRepository(
           destination
         });
       } catch (error) {
-        await client.query("ROLLBACK").catch(() => undefined);
+        if (!retired) await client.query("ROLLBACK").catch(() => undefined);
         throw error;
       } finally {
         client.release();

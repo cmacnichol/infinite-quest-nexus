@@ -14,6 +14,7 @@ type SystemArchiveUploadRow = Readonly<{
   status: "created" | "uploading" | "completed" | "expired" | "failed";
   byte_length: string | number;
   received_bytes: string | number;
+  next_chunk_index: string | number;
   content_hash: string;
   staged_input_id: string | null;
   expires_at: Date;
@@ -88,7 +89,7 @@ export interface SystemArchiveUploadRepository {
     owner: OwnerScope,
     request: RecordSystemArchiveUploadChunkRequest
   ): Promise<SystemArchiveUploadView | null>;
-  getAssembly(owner: OwnerScope, uploadId: string): Promise<SystemArchiveUploadAssembly>;
+  getAssembly(owner: OwnerScope, uploadId: string, maximumBytes?: number): Promise<SystemArchiveUploadAssembly>;
   completeUpload(
     owner: OwnerScope,
     request: CompleteSystemArchiveUploadRequest
@@ -105,7 +106,9 @@ type SystemArchiveUploadRepositoryOptions = Readonly<{
 }>;
 
 const UPLOAD_COLUMNS = `id,owner_user_id,filesystem_operation_id,status,byte_length,
-  received_bytes,content_hash,staged_input_id,expires_at,policy_snapshot`;
+  received_bytes,content_hash,staged_input_id,expires_at,policy_snapshot,
+  (SELECT COALESCE(max(chunk_index)::bigint+1,0) FROM system_archive_upload_chunks
+    WHERE upload_id=system_archive_uploads.id) AS next_chunk_index`;
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 
 function repositoryError(
@@ -140,12 +143,14 @@ function requireChunkIndex(value: number): void {
   }
 }
 
-function toView(row: SystemArchiveUploadRow): SystemArchiveUploadView {
+function toView(row: SystemArchiveUploadRow, currentChunkBytes: number): SystemArchiveUploadView {
   return systemUploadViewSchema.parse({
     id: row.id,
     status: row.status,
     byteLength: Number(row.byte_length),
     receivedBytes: Number(row.received_bytes),
+    chunkBytes: Math.min(uploadPolicy(row).chunkBytes, currentChunkBytes),
+    nextChunkIndex: Number(row.next_chunk_index),
     expiresAt: row.expires_at.toISOString()
   });
 }
@@ -244,7 +249,8 @@ async function renewUploadAuthority(
 async function lockedAssembly(
   client: DatabaseClient,
   owner: OwnerScope,
-  uploadId: string
+  uploadId: string,
+  maximumBytes: number
 ): Promise<Readonly<{
   upload: SystemArchiveUploadRow;
   assembly: SystemArchiveUploadAssembly;
@@ -258,6 +264,9 @@ async function lockedAssembly(
   );
   const upload = selected.rows[0];
   if (!upload) throw repositoryError("System Archive upload was not found.", 404);
+  if (Number(upload.byte_length) > maximumBytes) {
+    throw repositoryError("System Archive policy changed; restart this transfer.", 409, "system-archive-upload-restart-required");
+  }
   const chunks = await client.query<SystemArchiveUploadChunkRow>(
     `SELECT chunk_index,byte_offset,byte_length,content_hash
        FROM system_archive_upload_chunks
@@ -287,6 +296,8 @@ export function createPostgresSystemArchiveUploadRepository(
     ...historicalArchivePolicy("system"), settingsRevision: "environment", uploadTtlSeconds: options.uploadTtlSeconds,
   });
   if (policy.uploadTtlSeconds !== options.uploadTtlSeconds) throw new Error("system_archive_upload_policy_ttl_mismatch");
+
+  const view = (row: SystemArchiveUploadRow) => toView(row, policy.chunkBytes);
 
   return {
     async createUpload(owner, request) {
@@ -319,7 +330,7 @@ export function createPostgresSystemArchiveUploadRepository(
               404
             );
           }
-          return toView(row);
+          return view(row);
         });
       } catch (error) {
         if (postgresCode(error) === "23505") {
@@ -346,7 +357,7 @@ export function createPostgresSystemArchiveUploadRepository(
         [uploadId, owner.ownerUserId]
       );
       if (!result.rows[0]) throw repositoryError("System Archive upload was not found.", 404);
-      return toView(result.rows[0]);
+      return view(result.rows[0]);
     },
 
     async cancelUpload(owner, uploadId) {
@@ -391,7 +402,7 @@ export function createPostgresSystemArchiveUploadRepository(
           [uploadId, owner.ownerUserId]
         );
         await client.query("COMMIT");
-        return toView(row);
+        return view(row);
       } catch (error) {
         await client.query("ROLLBACK").catch(() => undefined);
         throw error;
@@ -461,7 +472,7 @@ export function createPostgresSystemArchiveUploadRepository(
             request.uploadId,
             upload.filesystem_operation_id
           );
-          return toView(renewed);
+          return view(renewed);
         }
 
         if (request.offset !== Number(upload.received_bytes)) {
@@ -508,7 +519,7 @@ export function createPostgresSystemArchiveUploadRepository(
         if (operation.rowCount !== 1) {
           throw new Error("System Archive chunk persistence lost its filesystem authority.");
         }
-        return toView(row);
+        return view(row);
       });
       if (!outcome) throw repositoryError("System Archive upload has expired.", 410);
       return outcome;
@@ -522,7 +533,8 @@ export function createPostgresSystemArchiveUploadRepository(
       const reconciled = await pool.query<SystemArchiveUploadRow>(
         `SELECT upload.id,upload.owner_user_id,upload.filesystem_operation_id,upload.status,
                 upload.byte_length,upload.received_bytes,upload.content_hash,
-                upload.staged_input_id,upload.expires_at
+                upload.staged_input_id,upload.expires_at,upload.policy_snapshot,
+                (SELECT COALESCE(max(chunk_index)::bigint+1,0) FROM system_archive_upload_chunks WHERE upload_id=upload.id) AS next_chunk_index
            FROM system_archive_uploads upload
            JOIN system_archive_upload_chunks chunk
              ON chunk.upload_id=upload.id
@@ -535,12 +547,12 @@ export function createPostgresSystemArchiveUploadRepository(
           request.offset, request.bytes, request.sha256]
       );
       const row = reconciled.rows[0];
-      return row ? toView(row) : null;
+      return row ? view(row) : null;
     },
 
-    async getAssembly(owner, uploadId) {
+    async getAssembly(owner, uploadId, maximumBytes = policy.limits.maxCompressedBytes) {
       return withTransaction(pool, async (client) => (
-        await lockedAssembly(client, owner, uploadId)
+        await lockedAssembly(client, owner, uploadId, maximumBytes)
       ).assembly);
     },
 
@@ -549,7 +561,8 @@ export function createPostgresSystemArchiveUploadRepository(
         const { upload, assembly } = await lockedAssembly(
           client,
           owner,
-          request.uploadId
+          request.uploadId,
+          policy.limits.maxCompressedBytes
         );
         const staged = await client.query<{
           id: string;
@@ -604,7 +617,7 @@ export function createPostgresSystemArchiveUploadRepository(
         if (operation.rowCount !== 1 || stagedRenewal.rowCount !== 1) {
           throw new Error("System Archive upload completion lost its private authority.");
         }
-        return toView(row);
+        return view(row);
       });
     },
 
@@ -612,7 +625,8 @@ export function createPostgresSystemArchiveUploadRepository(
       const reconciled = await pool.query<SystemArchiveUploadRow>(
         `SELECT upload.id,upload.owner_user_id,upload.filesystem_operation_id,upload.status,
                 upload.byte_length,upload.received_bytes,upload.content_hash,
-                upload.staged_input_id,upload.expires_at
+                upload.staged_input_id,upload.expires_at,upload.policy_snapshot,
+                (SELECT COALESCE(max(chunk_index)::bigint+1,0) FROM system_archive_upload_chunks WHERE upload_id=upload.id) AS next_chunk_index
            FROM system_archive_uploads upload
            JOIN portable_staged_inputs staged
              ON staged.id=upload.staged_input_id
@@ -625,7 +639,7 @@ export function createPostgresSystemArchiveUploadRepository(
         [request.uploadId, owner.ownerUserId, request.stagedInputId]
       );
       const row = reconciled.rows[0];
-      return row ? toView(row) : null;
+      return row ? view(row) : null;
     }
   };
 }

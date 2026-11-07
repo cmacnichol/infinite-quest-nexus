@@ -1478,7 +1478,7 @@ function writeSystemArchiveOperation(operation) {
 function readSystemArchiveUploadSession(key) {
   try {
     const value = JSON.parse(localStorage.getItem(key) || "null");
-    return value && typeof value.id === "string" && value.byteLength >= 0 && typeof value.sha256 === "string" && value.chunkBytes === SYSTEM_ARCHIVE_CHUNK_BYTES
+    return value && typeof value.id === "string" && value.byteLength >= 0 && typeof value.sha256 === "string"
       ? value : null;
   } catch {
     return null;
@@ -1803,14 +1803,16 @@ async function uploadAndPreviewSystemArchive() {
     renderSystemArchiveProgress("uploading", systemArchiveUpload.receivedBytes, file.size);
     if (systemArchiveUpload.status !== "completed") {
       let offset = systemArchiveUpload.receivedBytes;
-      if (offset % SYSTEM_ARCHIVE_CHUNK_BYTES !== 0 && offset !== file.size) throw new Error("Durable upload progress does not align with this browser's chunk boundary.");
-      let index = Math.floor(offset / SYSTEM_ARCHIVE_CHUNK_BYTES);
+      if (systemArchiveUpload.nextChunkIndex === undefined && offset % SYSTEM_ARCHIVE_CHUNK_BYTES !== 0 && offset !== file.size) throw new Error("Durable upload progress does not align with this browser's chunk boundary.");
+      let index = systemArchiveUpload.nextChunkIndex ?? Math.floor(offset / SYSTEM_ARCHIVE_CHUNK_BYTES);
       while (offset < file.size) {
-        const end = Math.min(file.size, offset + SYSTEM_ARCHIVE_CHUNK_BYTES);
+        const chunkBytes = Math.min(SYSTEM_ARCHIVE_CHUNK_BYTES, systemArchiveUpload.chunkBytes ?? SYSTEM_ARCHIVE_CHUNK_BYTES);
+        if (!Number.isSafeInteger(chunkBytes) || chunkBytes < 1) throw new Error("System Archive server chunk limit is invalid.");
+        const end = Math.min(file.size, offset + chunkBytes);
         const bytes = new Uint8Array(await file.slice(offset, end).arrayBuffer());
         systemArchiveUpload = await systemArchiveChunkRequest(systemArchiveUpload, index, offset, bytes, file.size, signal);
         offset = systemArchiveUpload.receivedBytes;
-        index += 1;
+        index = systemArchiveUpload.nextChunkIndex ?? index + 1;
         renderSystemArchiveProgress("uploading", offset, file.size);
       }
       renderSystemArchiveProgress("completing", offset, file.size);
