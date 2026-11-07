@@ -43,6 +43,7 @@ async function main(args: string[]) {
       return await runAdmissionRecoveryCommand(args, { output, readJson, recoverAdmission: input => recoverRequestAdmission(pool, input) });
     }
     const policy = loadDeploymentSettingsPolicy(config.instanceSettingsPolicyFile ?? "");
+    if (policy.systemArchiveAllowLimitIncrease && config.systemArchiveAllowLimitIncrease !== true) throw new Error("settings_deployment_divergence");
     if (command === "export-rollback") {
       operands();
       output(await exportRollback(pool, config, policy));

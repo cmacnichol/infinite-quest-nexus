@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -32,6 +32,7 @@ it.skipIf(process.platform !== "linux")("starts two complete APIs and two worker
   const children: { child: ChildProcess; exit: Promise<number | null> }[] = [];
   let startupError = "";
   try {
+    for (const name of ["archives", "assets"]) await mkdir(join(directory, name), { mode: 0o700 });
     await migrateDatabase(pool, resolve("database/migrations"));
     const api = exportSettingsSeed({ ...bootstrap(), role: "api", databaseMaxConnections: 8, systemArchiveEnabled: false });
     const worker = { ...api, role: { ...api.role, role: "worker" as const } };

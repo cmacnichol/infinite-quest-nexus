@@ -31,6 +31,12 @@ describe('runtime installation settings',()=>{
     expect(projected).not.toHaveProperty('credentialEncryptionKey');
     expect(mergeRuntimeSettings(config,{...projected,apiDefaultBodyLimitBytes:123456}).security.apiDefaultBodyLimitBytes).toBe(123456);
   });
+  it("rejects a policy granting archive ceiling exceptions beyond the mounted deployment permission", () => {
+    const policy = { ...runtimePolicy(), systemArchiveAllowLimitIncrease: true };
+    const state = { ...environment, installationId: policy.installationId, active: settingsFixture(),
+      mode: "database" as const, activeRevision: "1", policyDigest: settingsDigest(policy) };
+    expect(() => resolveRuntimeSettingsState(state, { ...bootstrap(), systemArchiveAllowLimitIncrease: false }, policy)).toThrow("settings_deployment_divergence");
+  });
   it('preserves environment startup without requiring a policy',()=>{
     const config=bootstrap();
     expect(resolveRuntimeSettingsState(environment,config).config).toBe(config);

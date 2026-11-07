@@ -36,6 +36,7 @@ export function resolveRuntimeSettingsState(state:SettingsState, bootstrap:Runti
   if(!policy) throw new Error('settings_policy_required');
   if(policy.minimumSettingsProtocolVersion>SETTINGS_PROTOCOL_VERSION) throw new Error('settings_protocol_unsupported');
   if(state.installationId!==policy.installationId || state.policyDigest!==settingsDigest(policy)) throw new Error('settings_policy_mismatch');
+  if (policy.systemArchiveAllowLimitIncrease && bootstrap.systemArchiveAllowLimitIncrease !== true) throw new Error("settings_deployment_divergence");
   if(!state.active || !state.activeRevision) throw new Error('settings_active_missing');
   if(!policy.expectedRoles.some(r=>r.role===bootstrap.role && r.databaseMaxConnections===bootstrap.databaseMaxConnections)) throw new Error('settings_role_mismatch');
   validateSettingsPolicy(state.active,policy,resolveInstanceSettings);

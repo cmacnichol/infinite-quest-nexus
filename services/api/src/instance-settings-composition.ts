@@ -34,7 +34,8 @@ export function createInstanceSettingsHttpComposition(
   const runningConfig = structuredClone(running);
   const readPolicy = () => {
     try {
-      return bootstrap.instanceSettingsPolicyFile ? loadDeploymentSettingsPolicy(bootstrap.instanceSettingsPolicyFile) : undefined;
+      const policy = bootstrap.instanceSettingsPolicyFile ? loadDeploymentSettingsPolicy(bootstrap.instanceSettingsPolicyFile) : undefined;
+      return policy?.systemArchiveAllowLimitIncrease && bootstrap.systemArchiveAllowLimitIncrease !== true ? undefined : policy;
     } catch {
       return undefined;
     }

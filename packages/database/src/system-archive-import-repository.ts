@@ -160,7 +160,10 @@ const AUTHORITY_TABLES = Object.entries(SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS)
     || classification === "portable_normalized"
     || classification === "security_authority")
   .map(([table]) => table)
-  .filter((table) => table !== "users")
+  // The bootstrapped identity and installation-local management login/attempt
+  // records survive restore. Neither represents content in a restore target.
+  // Other security authority (share links and asset grants) still blocks entry.
+  .filter((table) => table !== "users" && table !== "settings_operator_sessions" && table !== "settings_unlock_attempts")
   .sort();
 
 function hash(value: unknown): string {
