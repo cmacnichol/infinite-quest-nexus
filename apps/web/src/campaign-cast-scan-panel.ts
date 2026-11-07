@@ -24,7 +24,7 @@ export function castScanRecovery(discovery: CastDiscoveryStatus | null, boundary
 export function renderLegacyCastScan(container: HTMLElement, options: {
   api: CampaignCastApi["scans"]; campaignId: string; authority: { revision: number; boundary: CastBoundary };
   data: Awaited<ReturnType<CampaignCastApi["scans"]["latest"]>>; discovery: CastDiscoveryStatus | null;
-  current(): boolean; generationActive(): boolean; refresh(): Promise<void>;
+  current(): boolean; generationActive(): boolean; refresh(scanId?: string): Promise<void>;
 }) {
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => {
     const value = document.createElement(tag); value.textContent = text; return value;
@@ -115,7 +115,10 @@ export function renderLegacyCastScan(container: HTMLElement, options: {
         preview.append(button("Start scan", () => {
           if (!request || options.generationActive()) return;
           const startRequest = request;
-          void run(() => options.api.start(options.campaignId, startRequest));
+          void run(async () => {
+            const started = await options.api.start(options.campaignId, startRequest);
+            if (options.current()) await options.refresh(started.id);
+          }, false);
         }, options.generationActive()));
       }, false);
     });

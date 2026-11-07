@@ -117,10 +117,10 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     if (!state.campaignId) return; const campaign = state.campaignId, tool = ++toolEpoch; reviewing = true; dialog.classList.remove("characters-sheet-layout");
     try {
       const [latestData, authority, discovery] = await Promise.all([api.scans.latest(campaign), api.list(campaign), api.discoveryStatus(campaign)]);
-      const data = scanId ? { ...latestData, scan: await api.scans.get(campaign, scanId) } : latestData;
+      const data = scanId && scanId !== latestData.scan?.id ? { ...latestData, scan: await api.scans.get(campaign, scanId) } : latestData;
       if (!reviewing || tool !== toolEpoch || state.campaignId !== campaign || !dialog.open) return;
       dialog.replaceChildren(node("h2", "Scan earlier story"), button("Back to characters", () => { reviewing = false; toolEpoch++; render(); }));
-      renderLegacyCastScan(dialog, { api: api.scans, campaignId: campaign, authority, data, discovery, current: () => reviewing && tool === toolEpoch && state.campaignId === campaign && dialog.open, generationActive, refresh: () => scan(scanId) });
+      renderLegacyCastScan(dialog, { api: api.scans, campaignId: campaign, authority, data, discovery, current: () => reviewing && tool === toolEpoch && state.campaignId === campaign && dialog.open, generationActive, refresh: (id = scanId) => scan(id) });
     } catch { if (!reviewing || tool !== toolEpoch || state.campaignId !== campaign || !dialog.open) return; dialog.replaceChildren(node("p", "Could not load scan."), button("Retry", () => { void scan(); }), button("Back to characters", () => { reviewing = false; toolEpoch++; render(); })); }
   }
   async function preview() {

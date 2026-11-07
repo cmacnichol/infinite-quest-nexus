@@ -663,6 +663,55 @@ test("legacy exposes recovery for a failed tracking gap", async ({ page }) => {
   if (screenshotRoot) await page.screenshot({ path: `${screenshotRoot}/tracking-recovery.png`, fullPage: true });
 });
 
+for (const surface of ["legacy", "next"] as const) test(`starting another scan from tracking recovery follows the new scan on ${surface}`, async ({ page }) => {
+  await fixture(page);
+  await recoveryWorkspace(page, "scan");
+  const boundary = { turnNumber: 1, timelineRevision: 0 };
+  await page.route("**/cast/discovery", route => route.fulfill({ json: {
+    enabled: true, state: "failed", activeTurnNumber: 1, coverageStartTurn: 1, trackedThroughTurn: 0, unresolvedCount: 0,
+    firstGap: { turnNumber: 1, jobId: candidateId, status: "failed", diagnosticCode: "provider_timeout" }
+  } }));
+  const old = { id: candidateId, fromTurn: 1, throughTurn: 1, completeTurns: 0, failedTurns: 1, firstFailedTurn: 1, pendingReviewCount: 0, status: "failed" };
+  const next = { ...old, id: versionId, failedTurns: 0, firstFailedTurn: null, status: "queued" };
+  let latest = old.id;
+  await page.route("**/cast/scans**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/preview")) return route.fulfill({ json: { fromTurn: 1, throughTurn: 1, boundary, turnCount: 1,
+      estimatedChunkRequests: 1, completedChunkReceipts: 0, completedTurns: 0, manualScanTurns: [],
+      providerProfileId: versionId, selection: { kind: "model", modelId: "fixture" } } });
+    if (path.endsWith("/scans")) {
+      if (route.request().method() === "POST") { latest = next.id; return route.fulfill({ json: next }); }
+      return route.fulfill({ json: { scan: latest === old.id ? old : next, capabilities: { castBackfill: true } } });
+    }
+    const scan = path.includes(old.id) ? old : next;
+    if (path.endsWith("/cancel")) scan.status = "cancelled";
+    if (path.endsWith("/pause")) scan.status = "paused";
+    return route.fulfill({ json: scan });
+  });
+  if (surface === "legacy") await open(page);
+  else {
+    await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`);
+    await page.locator("[data-campaign-tools] summary").click();
+    await page.locator("[data-tool-action='open-characters']").click();
+  }
+  const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace");
+  const button = (name: string) => dialog.getByRole("button", { name, exact: true });
+  await button("Open tracking recovery").click();
+  await button("Cancel scan").click();
+  await button("Preview scan").click();
+  await button("Start scan").click();
+  await expect(dialog.getByRole("heading", { name: "Scan queued" })).toBeVisible();
+  next.status = "running";
+  await button("Refresh scan").click();
+  await expect(dialog.getByRole("heading", { name: "Scan running" })).toBeVisible();
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/replacement-scan-${surface}.png` });
+  await button("Pause scan").click();
+  await expect(dialog.getByRole("heading", { name: "Scan paused" })).toBeVisible();
+  await button("Cancel scan").click();
+  await expect(dialog.getByRole("heading", { name: "Scan cancelled" })).toBeVisible();
+  expect(next.status).toBe("cancelled");
+});
+
 for (const kind of ["forward", "scan"] as const) test(`next routes ${kind} recovery to its owner`, async ({ page }) => {
   await fixture(page);
   await recoveryWorkspace(page, kind);

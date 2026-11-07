@@ -93,12 +93,12 @@ export function createLegacyCastPanel(options: {
     const token = ++epoch; editor = null; shell("Scan earlier story"); status("Loading scan…");
     try {
       const [latestData, roster, tracking] = await Promise.all([options.api.scans.latest(campaign), options.api.list(campaign), options.api.discoveryStatus(campaign).catch(() => null)]);
-      const data = scanId ? { ...latestData, scan: await options.api.scans.get(campaign, scanId) } : latestData;
+      const data = scanId && scanId !== latestData.scan?.id ? { ...latestData, scan: await options.api.scans.get(campaign, scanId) } : latestData;
       if (!current(token)) return;
       scanData = data; list = roster; discovery = tracking;
       shell("Scan earlier story"); dialog.append(button("Back to characters", () => { void loadRoster(); }));
       renderLegacyCastScan(dialog, { api: options.api.scans, campaignId: campaign, authority: roster, data, discovery: tracking,
-        current: () => current(token), generationActive: options.generationActive, refresh: () => loadScan(scanId) });
+        current: () => current(token), generationActive: options.generationActive, refresh: (id = scanId) => loadScan(id) });
     } catch (error) {
       if (!current(token)) return;
       shell("Scan earlier story"); status(message(error));
