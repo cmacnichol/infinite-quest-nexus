@@ -28,3 +28,5 @@ export * from "./authoring-world-apply-adapter.js";
 export * from "./readable-campaign-export-repository.js";
 export * from "./activity-repository.js";
 export * from "./activity-maintenance-repository.js";
+export * from "./instance-settings-repository.js";
+export * from "./settings-operator-repository.js";

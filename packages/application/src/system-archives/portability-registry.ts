@@ -11,6 +11,12 @@ export type PortabilityClass = typeof SYSTEM_ARCHIVE_PORTABILITY_CLASSES[number]
 
 /** Every table created by the current migrations has one deliberate export treatment. */
 export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
+  instance_settings_state: "deployment_configuration",
+  instance_settings_revisions: "deployment_configuration",
+  instance_settings_events: "operational",
+  instance_settings_runtime_reports: "operational",
+  settings_operator_sessions: "security_authority",
+  settings_unlock_attempts: "security_authority",
   activity_events: "portable_authority",
   activity_event_outbox: "operational",
   story_activity_events: "operational",
