@@ -1,6 +1,6 @@
 # Choose and connect providers
 
-Configure providers from **Setup → Provider Setup** after installation.
+Open **Settings → Providers** to manage the current user's provider profiles. Personal reading, theme, and device preferences stay under **User Profile** in the user menu. Installation unlock grants no authority over another user's providers or credentials.
 
 | Provider type | Common role | Notes |
 | --- | --- | --- |
