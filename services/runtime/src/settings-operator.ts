@@ -1,6 +1,6 @@
-import { resolveInstanceSettings } from "../../../packages/domain/src/instance-settings.js";
+import { INSTANCE_SETTING_FIELDS, valueAt, resolveInstanceSettings } from "../../../packages/domain/src/instance-settings.js";
 import { z } from "zod";
-import { instanceSettingsSchema, runtimeRoleCapacitySchema, type DeploymentSettingsPolicy, type InstanceSettings } from "../../../packages/contracts/src/instance-settings.js";
+import { deploymentSettingsPolicySchema, instanceSettingsSchema, runtimeRoleCapacitySchema, type DeploymentSettingsPolicy, type InstanceSettings } from "../../../packages/contracts/src/instance-settings.js";
 import { validateSettingsPolicy, type SettingsActor, type SettingsRepositoryPort } from "../../../packages/application/src/settings/index.js";
 import type { RuntimeConfig } from "../../../packages/database/src/index.js";
 import { projectRuntimeSettings, settingsDigest, SETTINGS_PROTOCOL_VERSION } from "./instance-settings.js";
@@ -20,6 +20,35 @@ export function reconcileSettingsSeeds(input:unknown,policy:DeploymentSettingsPo
   validateSettingsPolicy(snapshot,policy,resolveInstanceSettings);
   return snapshot;
 }
+export function createSeedPolicy(input: unknown, installationId: string): DeploymentSettingsPolicy {
+  const seeds = z.array(seedSchema).min(1).parse(input);
+  const snapshot = seeds[0]!.snapshot;
+  const roles = new Map<string, { role: string; replicas: number; databaseMaxConnections: number }>();
+  for (const { role } of seeds) {
+    const existing = roles.get(role.role);
+    if (existing && existing.databaseMaxConnections !== role.databaseMaxConnections) throw new Error("settings_seed_inconsistent");
+    roles.set(role.role, { ...role, replicas: (existing?.replicas ?? 0) + 1 });
+  }
+  const numericBounds = Object.fromEntries(INSTANCE_SETTING_FIELDS.filter(f => f.kind === "integer").map(f => {
+    const value = valueAt(snapshot, f.key);
+    return [f.key, { min: value, max: value }];
+  }));
+  const policy = deploymentSettingsPolicySchema.parse({
+    version: 1, installationId, minimumSettingsProtocolVersion: 1, systemArchiveAllowLimitIncrease: false,
+    expectedRoles: [...roles.values()], numericBounds,
+    featureGates: Object.fromEntries(INSTANCE_SETTING_FIELDS.filter(f => f.kind === "boolean").map(f => [f.key, valueAt(snapshot, f.key)])),
+    approvedRateTuples: [{ windowSeconds: snapshot.apiRateLimitWindowSeconds, providerRequests: snapshot.apiRateLimitProviderRequests,
+      generationRequests: snapshot.apiRateLimitGenerationRequests, importRequests: snapshot.apiRateLimitImportRequests }]
+  });
+  reconcileSettingsSeeds(seeds, policy);
+  return policy;
+}
+
+export function exportCompatibilityEnvironment(snapshot: InstanceSettings): Record<string, string> {
+  const checked = instanceSettingsSchema.parse(snapshot);
+  return Object.fromEntries(INSTANCE_SETTING_FIELDS.map(field => [field.environmentName, String(valueAt(checked, field.key))]));
+}
+
 export type SettingsOperatorPorts={
   config:RuntimeConfig;policy:DeploymentSettingsPolicy;repository:SettingsRepositoryPort;actor:SettingsActor;
   readJson(path:string):Promise<unknown>;readRevision(revision:string):Promise<InstanceSettings>;
@@ -35,7 +64,7 @@ export async function runInstanceSettingsCommand(args:readonly string[],ports:Se
     const options=new Map<string,string>();
     for(let i=0;i<rest.length;i+=2) {
       const key=rest[i],value=rest[i+1];
-      if(!key?.startsWith('--')||!value||options.has(key)||!['--input','--expected-active','--expected-requested','--maintenance','--revision'].includes(key)) throw new Error('settings_arguments_invalid');
+      if(!key?.startsWith('--')||!value||options.has(key)||!['--input','--expected-active','--expected-requested','--maintenance','--revision','--expected-epoch'].includes(key)) throw new Error('settings_arguments_invalid');
       options.set(key,value);
     }
     const required=(key:string)=>{const value=options.get(key);if(!value)throw new Error('settings_argument_required');return value;};
@@ -52,7 +81,7 @@ export async function runInstanceSettingsCommand(args:readonly string[],ports:Se
     if(state.installationId!==ports.policy.installationId) throw new Error('settings_installation_mismatch');
     if(command==='activate') {
       const active=required('--expected-active');
-      await ports.repository.activate({expectedActiveRevision:active==='null'?null:active,expectedRequestedRevision:required('--expected-requested'),policyDigest,maintenanceReference:required('--maintenance'),actor:ports.actor});
+      await ports.repository.activate({...(options.has('--expected-epoch') ? {expectedEpoch:required('--expected-epoch')} : {}),expectedActiveRevision:active==='null'?null:active,expectedRequestedRevision:required('--expected-requested'),policyDigest,maintenanceReference:required('--maintenance'),actor:ports.actor});
     } else if(command==='propose'||command==='propose-rollback') {
       const snapshot=command==='propose'?instanceSettingsSchema.parse(await ports.readJson(required('--input'))):await ports.readRevision(required('--revision'));
       validateSettingsPolicy(snapshot,ports.policy,resolveInstanceSettings);

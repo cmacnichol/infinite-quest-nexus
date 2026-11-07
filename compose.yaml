@@ -28,6 +28,7 @@ services:
         NEXUS_BUILD_DATE: ${NEXUS_BUILD_DATE:-}
     image: infinitequest-nexus:local
     environment:
+      # Optional Settings policy and separate operator-key mounts are shown in docs/runbooks/instance-settings.md.
       APP_ROLE: all
       APP_PORT: 8080
       DATABASE_URL: postgresql://infinitequest:${POSTGRES_PASSWORD}@postgres:5432/infinitequest

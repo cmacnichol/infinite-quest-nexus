@@ -68,7 +68,10 @@ export const deploymentSettingsPolicySchema = z.object({
   version: z.literal(1), installationId: z.uuid(), minimumSettingsProtocolVersion: integer(1), featureGates: settingsFeatureGatesSchema,
   numericBounds: z.record(z.enum(Object.keys(INSTANCE_SETTINGS_NUMERIC_BOUNDS) as [SettingsNumericKey, ...SettingsNumericKey[]]), numericBoundSchema),
   approvedRateTuples: z.array(z.object({ windowSeconds: integer(1, 3600), providerRequests: integer(1, 10000), generationRequests: integer(1, 10000), importRequests: integer(1, 10000) }).strict()).min(1),
-  expectedRoles: z.array(runtimeRoleCapacitySchema.extend({ replicas: integer(1, 1000) }).strict()).min(1), systemArchiveAllowLimitIncrease: z.boolean()
+  expectedRoles: z.array(runtimeRoleCapacitySchema.extend({
+    role: z.enum(["all", "api", "worker"]), replicas: integer(1, 1000), maximumReplicas: integer(1, 1000).optional()
+  }).strict().refine(role => (role.maximumReplicas ?? role.replicas) >= role.replicas)).min(1)
+    .refine(roles => new Set(roles.map(role => role.role)).size === roles.length), systemArchiveAllowLimitIncrease: z.boolean()
 }).strict();
 export type DeploymentSettingsPolicy = z.infer<typeof deploymentSettingsPolicySchema>;
 export const settingsFieldDescriptorSchema = z.object({
@@ -93,7 +96,7 @@ export const settingsOperatorStatusSchema = z.discriminatedUnion("unlocked", [
 ]);
 export const instanceSettingsHistorySchema = z.object({
   events:z.array(z.object({id:settingsRevisionSchema,kind:z.enum(["seed","proposal","rollback","activation","cancellation"]),revision:settingsRevisionSchema,
-    actorUserId:z.uuid(),operatorSessionId:z.uuid().nullable(),reasonCode:z.enum(["seed_import","operator_rollback","operator_change","maintenance_activation"]),
+    actorUserId:z.uuid(),operatorSessionId:z.uuid().nullable(),reasonCode:z.enum(["seed_import","operator_rollback","operator_change","maintenance_activation","maintenance_environment"]),
     changedKeys:z.array(settingsFieldDescriptorSchema.shape.key).max(40),createdAt:z.iso.datetime()}).strict()).max(100),
   nextCursor:settingsRevisionSchema.nullable()
 }).strict();

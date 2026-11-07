@@ -61,9 +61,17 @@ export async function loadActiveRuntimeSettings(pool:DatabasePool,bootstrap:Runt
 }
 export type SettingsRuntimeReport={role:string;protocol_version:number;active_revision:string|null;policy_digest:string;activation_epoch:string;effective_configuration_digest:string;fresh:boolean;readiness_state:string};
 export function settingsReportsCompatible(reports:SettingsRuntimeReport[],resolved:ResolvedRuntimeSettings,policy:DeploymentSettingsPolicy,requireReady:boolean):boolean {
-  const fresh=reports.filter(r=>r.fresh);
-  if(fresh.some(r=>r.protocol_version!==SETTINGS_PROTOCOL_VERSION || r.active_revision!==resolved.activeRevision || r.policy_digest!==resolved.policyDigest || r.activation_epoch!==resolved.activationEpoch || r.effective_configuration_digest!==resolved.effectiveDigest || (requireReady&&r.readiness_state!=='ready'))) return false;
-  return policy.expectedRoles.every(r=>fresh.filter(p=>p.role===r.role).length===r.replicas) && fresh.length===policy.expectedRoles.reduce((n,r)=>n+r.replicas,0);
+  const fresh = reports.filter(report => report.fresh);
+  if (fresh.some(report => report.protocol_version !== SETTINGS_PROTOCOL_VERSION ||
+      report.active_revision !== resolved.activeRevision || report.policy_digest !== resolved.policyDigest ||
+      report.activation_epoch !== resolved.activationEpoch || report.effective_configuration_digest !== resolved.effectiveDigest ||
+      !["ready", "blocked", "stopping"].includes(report.readiness_state) ||
+      !policy.expectedRoles.some(role => role.role === report.role))) return false;
+  return policy.expectedRoles.every(role => {
+    const members = fresh.filter(report => report.role === role.role);
+    const eligible = members.filter(report => report.readiness_state === "ready" || (!requireReady && report.readiness_state === "blocked"));
+    return eligible.length >= role.replicas && members.length <= (role.maximumReplicas ?? role.replicas);
+  });
 }
 export async function readSettingsRuntimeReports(pool:DatabasePool):Promise<SettingsRuntimeReport[]> {
   return (await pool.query<SettingsRuntimeReport>("SELECT role,build_version,protocol_version,active_revision,policy_digest,activation_epoch,effective_configuration_digest,readiness_state,heartbeat_at>clock_timestamp()-interval '30 seconds' AS fresh FROM instance_settings_runtime_reports")).rows;
@@ -84,7 +92,10 @@ export async function registerSettingsRuntime(pool:DatabasePool,resolved:Resolve
   await write();
   const timer=setInterval(()=>{if(!stopped&&!failed) pending=pending.then(write).catch(()=>{failed=true;onFailure();});},10000);
   timer.unref();
-  const abort=()=>{draining=true;};
+  const abort=()=>{
+    draining=true;
+    pending=pending.then(write).catch(()=>{failed=true;onFailure();});
+  };
   signal.addEventListener('abort',abort,{once:true});
   const compatible=async(requireReady:boolean)=>!failed&&!stopped&&(!policy||resolved.mode==='environment'||settingsReportsCompatible(await readSettingsRuntimeReports(pool),resolved,policy,requireReady));
   return {

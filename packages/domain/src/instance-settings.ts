@@ -52,7 +52,7 @@ export const INSTANCE_SETTING_FIELDS: readonly RegistryField[] = [
 });
 export type SettingsResolutionError = { code: "invalid_settings" | "invalid_policy" | "invalid_capacity" | "policy_bound" | "reviewed_bound" | "archive_chunk_capacity" | "pool_capacity" | "rate_policy"; field?: SettingsFieldKey };
 export type SettingsResolution = { ok: true; effective: InstanceSettings; fields: SettingsFieldDescriptor[] } | { ok: false; errors: SettingsResolutionError[] };
-function valueAt(settings: InstanceSettings, key: SettingsFieldKey): boolean | number | InstanceSettings["logLevel"] {
+export function valueAt(settings: InstanceSettings, key: SettingsFieldKey): boolean | number | InstanceSettings["logLevel"] {
   const [group, property] = key.split(".");
   if (property) return settings[group as "campaignArchiveLimits" | "systemArchiveLimits"][property as keyof InstanceSettings["campaignArchiveLimits"]];
   return settings[key as Exclude<SettingsFieldKey, SettingsNumericKey> | Exclude<SettingsNumericKey, `${string}.${string}`>];
