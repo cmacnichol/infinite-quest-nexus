@@ -1,0 +1,4 @@
+# Use only with a disposable COMPOSE_PROJECT_NAME and the local single-user overlay.
+services:
+  infinitequest-app:
+    image: ${SETTINGS_PROOF_IMAGE:?Set a unique proof image tag}

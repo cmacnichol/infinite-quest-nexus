@@ -4,6 +4,30 @@ Use the following procedure on the installation selected for a maintenance chang
 
 The production operator executable is `node /app/dist/services/runtime/src/settings-operator-cli.js`. Below, `operator` means that command in the candidate image. `pnpm settings:operator` is its source-checkout equivalent. Supply the intended `APP_ROLE` and the same effective container configuration as the corresponding service. Commands that change database state need operator database credentials. Use a one-shot process with the same role configuration during maintenance. The executable does not control containers.
 
+## Local single-user installation
+
+Use the [local Compose override](../installation/docker-compose.md#local-single-user-settings) on the computer where the browser runs. It sets `INSTANCE_SETTINGS_ACCESS_MODE=local-single-user` on the combined service. This mode requires `APP_ROLE=all` and zero trusted proxy hops. Browser writes must originate from the same local HTTP origin. Operator Unlock remains the default for HTTPS ingress.
+
+For a fresh or previously unseeded installation, first startup migrates the database, captures its effective configuration, creates a stable installation ID and activates revision 1 under the normal drain guards. Subsequent starts preserve the active revision, requested revision and initial owner. Keep the existing database, asset, archive and encryption-key volumes. If the database was seeded using an operator-supplied policy, retain the matching policy mount when switching access modes. An absent or mismatched policy stops startup so the process cannot silently replace the installation's authority.
+
+The generated local policy retains the initial feature gates and request-rate tuple. It permits a slower queue polling interval and a reduction in generation concurrency. Most numeric bounds are pinned to their seed values. For example, changing Log level in Diagnostics stages a new revision immediately. A restart alone preserves that pending revision.
+
+In the local installation Settings editor, select **Apply saved settings and restart** beside the revision numbers. The app stops accepting new work, lets admitted work finish, and runs the activation checks against the selected revision. Docker restarts the combined service when the process exits. The browser reconnects and checks readiness and the active revision. If the revision changes or the activation guard reports a blocker, check the reported status before retrying. This procedure relies on the local Compose restart policy.
+
+To activate from the command line, follow the drain checks in [Stage, activate and observe](#stage-activate-and-observe). For the combined local service, these PowerShell commands show the one-shot invocation. Substitute the revisions and epoch reported by `status`, and your maintenance reference:
+
+```powershell
+$stack = @('-f', 'compose.yaml', '-f', 'compose.local-single-user.yaml')
+$operator = '/app/dist/services/runtime/src/settings-operator-cli.js'
+docker compose @stack exec -T infinitequest-app node $operator status
+docker compose @stack exec -T infinitequest-app node $operator validate
+docker compose @stack stop infinitequest-app
+docker compose @stack run --rm --no-deps --entrypoint node infinitequest-app $operator activate --expected-active 1 --expected-requested 2 --expected-epoch 1 --maintenance local/change-001
+docker compose @stack up -d
+```
+
+To return to protected management on a locally initialized database, export the current policy **before** removing the local override. Run `docker compose @stack exec -T infinitequest-app node $operator export-policy` and save its JSON output to a UTF-8 file. Mount it using `INSTANCE_SETTINGS_POLICY_FILE` and follow [Mount the files](#mount-the-files) for the key and TLS proxy. Recreate the app with protected access and the same volumes. The saved revisions and actor history stay in the database.
+
 ## Capture the installation and review policy
 
 1. Upgrade compatible binaries in **environment mode** with existing deployment inputs. Migration creates an empty Settings singleton. Keep the management toggle off during initial inspection. An unset optional policy leaves this mode available. An explicitly configured unreadable or malformed policy path fails startup. Database-mode startup also requires the matching active policy, installation ID and implementation protocol.

@@ -1,6 +1,8 @@
 import type { InstanceSettings, InstanceSettingsPatch, InstanceSettingsView, SettingsFieldKey } from "@infinite-quest/contracts";
-export type OperatorStatus = { managementEnabled: boolean; unlocked: false } | { managementEnabled: true; unlocked: true; csrfToken: string; expiresAt: string };
+export type OperatorStatus = { managementEnabled: boolean; unlocked: false } | { managementEnabled: true; unlocked: true; csrfToken: string; expiresAt: string } | { managementEnabled: true; unlocked: true; accessMode: "local-single-user" };
 export interface InstanceSettingsApi {
+  restart?(revision: string, operationId: string): Promise<import("@infinite-quest/contracts").LocalSettingsRestartOperation>;
+  restartStatus?(operationId: string): Promise<import("@infinite-quest/contracts").LocalSettingsRestartOperation>;
   status(): Promise<OperatorStatus>;
   unlock(managementKey: string): Promise<{ csrfToken: string; expiresAt: string }>;
   logout(csrfToken: string): Promise<void>;
@@ -10,7 +12,7 @@ export interface InstanceSettingsApi {
 export interface SettingsState {
   readonly unlocked: boolean; readonly managementEnabled: boolean; readonly busy: boolean;
   readonly view: InstanceSettingsView | null; readonly draft: InstanceSettings | null;
-  readonly message: string; readonly conflict: boolean; readonly expiresAt: string | null;
+  readonly message: string; readonly conflict: boolean; readonly expiresAt: string | null; readonly localSingleUser: boolean;
 }
 export interface SettingsSession {
   readonly state: SettingsState;
@@ -32,7 +34,7 @@ function assign(settings: InstanceSettings, key: SettingsFieldKey, value: unknow
   else (settings as unknown as Record<string, unknown>)[group!] = value;
 }
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
-const empty = (): SettingsState => ({ unlocked: false, managementEnabled: false, busy: false, view: null, draft: null, message: "", conflict: false, expiresAt: null });
+const empty = (): SettingsState => ({ unlocked: false, managementEnabled: false, busy: false, view: null, draft: null, message: "", conflict: false, expiresAt: null, localSingleUser: false });
 export function createSettingsSession(api: InstanceSettingsApi): SettingsSession {
   let state = empty(); let csrf = ""; let epoch = 0; let disposed = false;
   const listeners = new Set<(state: SettingsState) => void>();
@@ -40,7 +42,7 @@ export function createSettingsSession(api: InstanceSettingsApi): SettingsSession
   const clear = () => { csrf = ""; state = empty(); };
   const failure = (error: unknown) => {
     const { status, code } = error as { status?: number; code?: string };
-    if (status === 401 || status === 403) { const managementEnabled = state.managementEnabled; clear(); publish({ managementEnabled, message: "Operator unlock required. Installation drafts were cleared." }); }
+    if (status === 401 || status === 403) { const { managementEnabled, localSingleUser } = state; clear(); publish({ managementEnabled, localSingleUser, message: localSingleUser ? "Local access was denied. Installation drafts were cleared." : "Operator unlock required. Installation drafts were cleared." }); }
     else publish({ busy: false, conflict: status === 409, message: status === 409 ? "Saved settings changed elsewhere. Your draft is retained. Discard and reload to compare before saving." : code === "settings_policy_mismatch" ? "Installation management unavailable: deployment policy changed. Contact the operator." : status === 422 ? "Changes were not saved. Check permitted ranges, dependencies and approved request-rate policy." : "Installation management unavailable. Try again or contact the operator." });
   };
   const install = (view: InstanceSettingsView) => publish({ view: clone(view), draft: clone(view.requested ?? view.active), busy: false, conflict: false });
@@ -51,7 +53,8 @@ export function createSettingsSession(api: InstanceSettingsApi): SettingsSession
       try {
         const status = await api.status(); if (disposed || operation !== epoch) return;
         if (!status.unlocked) { clear(); publish({ managementEnabled: status.managementEnabled }); return; }
-        csrf = status.csrfToken; publish({ unlocked: true, managementEnabled: true, expiresAt: status.expiresAt });
+        const local = "accessMode" in status;
+        csrf = local ? "" : status.csrfToken; publish({ unlocked: true, managementEnabled: true, expiresAt: local ? null : status.expiresAt, localSingleUser: local });
         const view = await api.get(); if (!disposed && operation === epoch) install(view);
       } catch (error) { if (!disposed && operation === epoch) failure(error); }
     },
@@ -72,7 +75,7 @@ export function createSettingsSession(api: InstanceSettingsApi): SettingsSession
       const draft = clone(state.draft); assign(draft, key, value); publish({ draft, message: "" });
     },
     async save(keys, reason) {
-      if (!state.view || !state.draft || !csrf || state.busy || state.conflict) return;
+      if (!state.view || !state.draft || (!csrf && !state.localSingleUser) || state.busy || state.conflict) return;
       const changes: Record<string, unknown> = {};
       const saved = state.view.requested ?? state.view.active;
       for (const key of keys) {

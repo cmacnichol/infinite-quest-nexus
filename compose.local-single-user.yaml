@@ -1,0 +1,10 @@
+services:
+  infinitequest-app:
+    environment:
+      INSTANCE_SETTINGS_ACCESS_MODE: local-single-user
+    ports: !override
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+
+networks:
+  infinitequest-backend:
+    name: "${COMPOSE_PROJECT_NAME}-local-backend"

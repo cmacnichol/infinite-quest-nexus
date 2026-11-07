@@ -14,3 +14,13 @@ it("does not reflect untrusted error content or accept malformed protected respo
   const malformed = createInstanceSettingsApi(vi.fn().mockResolvedValue(new Response(JSON.stringify({ unlocked: true, apiKey: "private" }))));
   await expect(malformed.status()).rejects.toThrow();
 });
+
+it("sends the local restart marker and validates operation responses", async () => {
+  const id = "123e4567-e89b-42d3-a456-426614174000";
+  const operation = { operationId: id, revision: "2", status: "draining" };
+  const fetcher = vi.fn().mockImplementation(async () => new Response(JSON.stringify(operation)));
+  const api = createInstanceSettingsApi(fetcher);
+  expect(await api.restart!("2", id)).toEqual(operation);
+  expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: "POST", headers: { "Content-Type": "application/json", "X-Settings-Local": "1" }, body: JSON.stringify({ expectedRequestedRevision: "2", operationId: id }) });
+  expect(await api.restartStatus!(id)).toEqual(operation);
+});

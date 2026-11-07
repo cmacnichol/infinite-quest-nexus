@@ -14,6 +14,15 @@ function fixture() {
   return { api, session: createSettingsSession(api) };
 }
 describe("settings session", () => {
+  it("loads and saves local settings without an operator session", async () => {
+    const { api, session } = fixture();
+    api.status = async () => ({ managementEnabled: true, unlocked: true, accessMode: "local-single-user" });
+    await session.load();
+    expect(session.state.localSingleUser).toBe(true);
+    session.edit("logLevel", "debug");
+    await session.save(["logLevel"], "Adjust diagnostics");
+    expect(session.state.view!.requested!.logLevel).toBe("debug");
+  });
   it("stages Save without changing active values", async () => {
     const { session } = fixture(); await session.load(); const before = session.state.view!.active.logLevel;
     session.edit("logLevel", "debug"); await session.save(["logLevel"], "Adjust diagnostics");

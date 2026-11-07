@@ -90,13 +90,18 @@ export type InstanceSettingsView = z.infer<typeof instanceSettingsViewSchema>;
 export const settingsOperatorSessionRequestSchema = z.object({ managementKey: z.string().min(1).max(4096) }).strict();
 export const settingsOperatorSessionResponseSchema = z.object({ csrfToken: z.string().min(1), expiresAt: z.iso.datetime() }).strict();
 
-export const settingsOperatorStatusSchema = z.discriminatedUnion("unlocked", [
+export const settingsOperatorStatusSchema = z.union([
   z.object({managementEnabled:z.boolean(),unlocked:z.literal(false)}).strict(),
-  z.object({managementEnabled:z.literal(true),unlocked:z.literal(true),csrfToken:z.string().min(1),expiresAt:z.iso.datetime()}).strict()
+  z.object({managementEnabled:z.literal(true),unlocked:z.literal(true),csrfToken:z.string().min(1),expiresAt:z.iso.datetime()}).strict(),
+  z.object({managementEnabled:z.literal(true),unlocked:z.literal(true),accessMode:z.literal("local-single-user")}).strict()
 ]);
 export const instanceSettingsHistorySchema = z.object({
   events:z.array(z.object({id:settingsRevisionSchema,kind:z.enum(["seed","proposal","rollback","activation","cancellation"]),revision:settingsRevisionSchema,
-    actorUserId:z.uuid(),operatorSessionId:z.uuid().nullable(),reasonCode:z.enum(["seed_import","operator_rollback","operator_change","maintenance_activation","maintenance_environment"]),
+    actorUserId:z.uuid(),operatorSessionId:z.uuid().nullable(),localSingleUser:z.boolean().optional(),reasonCode:z.enum(["seed_import","operator_rollback","operator_change","maintenance_activation","maintenance_environment"]),
     changedKeys:z.array(settingsFieldDescriptorSchema.shape.key).max(40),createdAt:z.iso.datetime()}).strict()).max(100),
   nextCursor:settingsRevisionSchema.nullable()
 }).strict();
+
+export const localSettingsRestartRequestSchema = z.object({ expectedRequestedRevision: settingsRevisionSchema, operationId: z.string().uuid() }).strict();
+export const localSettingsRestartOperationSchema = z.object({ operationId: z.string().uuid(), revision: settingsRevisionSchema, status: z.enum(["draining", "restarting", "failed", "ready"]), error: z.string().max(1000).optional() }).strict();
+export type LocalSettingsRestartOperation = z.infer<typeof localSettingsRestartOperationSchema>;

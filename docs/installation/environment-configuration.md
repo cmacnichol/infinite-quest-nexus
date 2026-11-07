@@ -4,6 +4,7 @@ In environment mode, the process reads the effective settings listed below. Afte
 
 | Additional deployment setting | Classification | Purpose |
 | --- | --- | --- |
+| `INSTANCE_SETTINGS_ACCESS_MODE` | Deployment-only access mode | Set to `local-single-user` for direct HTTP access on a combined, loopback-published installation. Leave unset for standard Operator Unlock. See [local Compose setup](./docker-compose.md#local-single-user-settings). |
 | `INSTANCE_SETTINGS_POLICY_FILE` | Operator bootstrap and ceiling | Versioned nonsecret policy path, identical on all runtime roles |
 | `SETTINGS_MANAGEMENT_ENABLED` | Permanent deployment gate | Explicitly enables browser unlock on an API with a policy and a separate key |
 | `SETTINGS_MANAGEMENT_KEY_FILE` | Bootstrap secret path | Separate management key accessible only to intended API/combined processes |

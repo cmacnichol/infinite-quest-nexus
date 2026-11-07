@@ -22,6 +22,20 @@ Compose starts `postgres`, waits for its health check, then starts `infiniteques
 
 Docker Compose generates and persists a local credential-encryption key on first start. Supply `CREDENTIAL_ENCRYPTION_KEY` only when restoring an existing local deployment or when the operator needs to control the value. Back it up securely: changing or losing it makes saved provider credentials unreadable.
 
+## Local single-user Settings
+
+For a personal installation on this computer, use the local override with the same project name and database password as your existing Compose deployment:
+
+```powershell
+docker compose -f compose.yaml -f compose.local-single-user.yaml up -d --build
+```
+
+Open `http://127.0.0.1:8080/app/settings?section=diagnostics` (use your published `APP_PORT` if different). The override sets `INSTANCE_SETTINGS_ACCESS_MODE=local-single-user`, publishes the app on IPv4 loopback only, and uses a project-specific backend network. Anyone who can use the local app can edit installation Settings. Keep other containers off its private network. Use the same pair of Compose files for later operations on this deployment.
+
+On first use, the combined API/worker process seeds Settings from its effective configuration. A Save records a requested revision under the initial owner's identity. Select **Apply saved settings and restart** to drain the combined service and activate the saved revision. Keep the page open to see when the restarted app is ready and serving that revision. See the [installation Settings runbook](../runbooks/instance-settings.md) for existing installations and activation.
+
+For a reverse-proxied deployment, use the standard management configuration. Terminate HTTPS at the proxy, keep the backend HTTP listener private, and forward the public host and scheme. The browser uses HTTPS and Operator Unlock; the app container can serve HTTP.
+
 ## Open
 
 - Nexus: `http://localhost:8080/nexus/`

@@ -4,10 +4,10 @@ import { registerInstanceSettingsRoutes } from "../../services/api/src/instance-
 import { installRequestSecurity } from "../../services/api/src/request-security.js";
 import { bootstrap } from "../helpers/instance-settings-runtime.js";
 import { SettingsHttpError } from "../../services/api/src/settings-operator-session.js";
-function fixture(enabled=true,trustProxy=true,parentSecurity=false,bodyLimit=1048576) {
+function fixture(enabled=true,trustProxy=true,parentSecurity=false,bodyLimit=1048576,accessMode?: "local-single-user", restart?: import("../../services/api/src/instance-settings-routes.js").LocalSettingsRestartPort) {
  const app=Fastify({trustProxy,bodyLimit});
  if(parentSecurity)installRequestSecurity(app,bootstrap());
- registerInstanceSettingsRoutes(app,{enabled:()=>enabled,resolveActor:async()=>"actor",settings:{read:async()=>({safe:true}),patch:async()=>({safe:true}),history:async()=>({events:[],nextCursor:null})},operatorSessions:{unlock:async()=>({token:"a".repeat(43),csrfToken:"csrf",expiresAt:new Date()}),authorize:async(token,_actor,csrf)=>{if(!token)throw new SettingsHttpError(401,"settings_unlock_required");if(csrf!==undefined&&csrf!=="csrf")throw new SettingsHttpError(403,"settings_csrf_invalid");return {id:"session"} as any;},restore:async(token)=>{if(!token)throw new SettingsHttpError(401,"settings_unlock_required");return {csrfToken:"csrf",expiresAt:new Date()};},revoke:async()=>{}}});return app;
+ registerInstanceSettingsRoutes(app,{accessMode,localSettingsRestart:restart,enabled:()=>enabled,resolveActor:async()=>"actor",settings:{read:async()=>({safe:true}),patch:async()=>({safe:true}),history:async()=>({events:[],nextCursor:null})},operatorSessions:{unlock:async()=>({token:"a".repeat(43),csrfToken:"csrf",expiresAt:new Date()}),authorize:async(token,_actor,csrf)=>{if(!token)throw new SettingsHttpError(401,"settings_unlock_required");if(csrf!==undefined&&csrf!=="csrf")throw new SettingsHttpError(403,"settings_csrf_invalid");return {id:"session"} as any;},restore:async(token)=>{if(!token)throw new SettingsHttpError(401,"settings_unlock_required");return {csrfToken:"csrf",expiresAt:new Date()};},revoke:async()=>{}}});return app;
 }
 const headers={host:"nexus.test","x-forwarded-proto":"https",origin:"https://nexus.test"};
 describe("protected installation routes",()=>{
@@ -39,4 +39,32 @@ describe("protected installation routes",()=>{
   }
  });
 
+});
+
+describe("local single-user installation routes", () => {
+ it("permits only explicit loopback authority and exact same-origin mutations", async () => {
+  const app=fixture(true,false,false,1048576,"local-single-user");
+  const local={host:"localhost:3000"};
+  expect((await app.inject({url:"/api/v1/settings/operator-session",headers:local})).json()).toEqual({managementEnabled:true,unlocked:true,accessMode:"local-single-user"});
+  expect((await app.inject({url:"/api/v1/settings/instance",headers:local})).statusCode).toBe(200);
+  for (const headers of [{host:"evil.test:3000"},{host:"localhost:3000","x-forwarded-for":"127.0.0.1"},{host:"localhost:3000",origin:"http://evil.test"},{host:"localhost:3000","sec-fetch-site":"cross-site"}]) expect((await app.inject({url:"/api/v1/settings/instance",headers})).statusCode).toBe(403);
+  const patch={expectedRequestedRevision:"1",changes:{logLevel:"info"},reason:"test"};
+  for (const headers of [local,{...local,origin:"http://evil.test","x-settings-local":"1"},{...local,origin:"http://localhost:3000"}]) expect((await app.inject({method:"PATCH",url:"/api/v1/settings/instance",headers,payload:patch})).statusCode).toBe(403);
+  expect((await app.inject({method:"PATCH",url:"/api/v1/settings/instance",headers:{...local,origin:"http://localhost:3000","x-settings-local":"1"},payload:patch})).statusCode).toBe(200);
+  await app.close();
+ });
+});
+
+it("only exposes guarded restart operations in local mode", async () => {
+ const operation = { operationId: "123e4567-e89b-42d3-a456-426614174000", revision: "2", status: "draining" as const };
+ const restart = { isDraining: () => false, start: async (revision: string) => ({ ...operation, revision }), status: async () => operation };
+ const local = fixture(true, false, false, 1048576, "local-single-user", restart);
+ const headers = { host: "localhost:3000", origin: "http://localhost:3000", "x-settings-local": "1" };
+ expect((await local.inject({ method: "POST", url: "/api/v1/settings/instance/restart", headers, payload: { expectedRequestedRevision: "2", operationId: operation.operationId } })).json()).toEqual(operation);
+ expect((await local.inject({ method: "POST", url: "/api/v1/settings/instance/restart", headers: { host: "localhost:3000" }, payload: { expectedRequestedRevision: "2", operationId: operation.operationId } })).statusCode).toBe(403);
+ expect((await local.inject({ url: "/api/v1/settings/instance/restart/op-1", headers })).statusCode).toBe(422);
+ expect((await local.inject({ url: `/api/v1/settings/instance/restart/${operation.operationId}`, headers })).json()).toEqual(operation);
+ const protectedApp = fixture(true, true, false, 1048576, undefined, restart);
+ expect((await protectedApp.inject({ method: "POST", url: "/api/v1/settings/instance/restart", headers, payload: { expectedRequestedRevision: "2", operationId: operation.operationId } })).statusCode).toBe(404);
+ await local.close(); await protectedApp.close();
 });

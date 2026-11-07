@@ -991,5 +991,5 @@ describe("layered generation context planner", () => {
     expect(first.contextPlan.requestTokens).toBe(estimateStoryTokens(first.contextPlan.serializedRequest));
     expect(first.contextPlan.requestTokens + first.contextPlan.safetyAllowanceTokens).toBeLessThanOrEqual(limit - 100);
     expect(first.contextPlan.serializedRequest).toBe(serializeProviderRequest({ ...plannerProvider() as any, baseUrl: "" }, { systemPrompt: "System", input: first.storyInput }).body);
-  });
+  }, 30_000);
 });

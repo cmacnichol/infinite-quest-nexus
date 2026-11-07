@@ -23,18 +23,19 @@ export type SettingsRuntimePorts = Readonly<{
   loadDeploymentSettingsPolicy(path: string): DeploymentSettingsPolicy;
   projectRuntimeSettings(config: RuntimeConfig): InstanceSettings;
   settingsDigest(value: unknown): string;
+  localPolicy?: DeploymentSettingsPolicy | undefined;
 }>;
 
 export function createInstanceSettingsHttpComposition(
   pool: DatabasePool, bootstrap: RuntimeConfig, running: RuntimeConfig,
-  { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest }: SettingsRuntimePorts
+  { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest, localPolicy }: SettingsRuntimePorts
 ) {
   const repository = createInstanceSettingsRepository(pool);
   // Capture the configuration this process actually serves, before any mounted policy changes.
   const runningConfig = structuredClone(running);
   const readPolicy = () => {
     try {
-      const policy = bootstrap.instanceSettingsPolicyFile ? loadDeploymentSettingsPolicy(bootstrap.instanceSettingsPolicyFile) : undefined;
+      const policy = bootstrap.instanceSettingsPolicyFile ? loadDeploymentSettingsPolicy(bootstrap.instanceSettingsPolicyFile) : bootstrap.instanceSettingsAccessMode === "local-single-user" ? localPolicy : undefined;
       return policy?.systemArchiveAllowLimitIncrease && bootstrap.systemArchiveAllowLimitIncrease !== true ? undefined : policy;
     } catch {
       return undefined;
@@ -53,7 +54,7 @@ export function createInstanceSettingsHttpComposition(
   };
   const enabled = () => {
     const mounted = readPolicy();
-    return !!mounted && mounted.minimumSettingsProtocolVersion <= 1 && Buffer.byteLength(readKey() ?? "") >= 32;
+    return !!mounted && mounted.minimumSettingsProtocolVersion <= 1 && (bootstrap.instanceSettingsAccessMode === "local-single-user" || Buffer.byteLength(readKey() ?? "") >= 32);
   };
   const currentPolicy = () => {
     const mounted = readPolicy();
@@ -131,7 +132,7 @@ export function createInstanceSettingsHttpComposition(
     operatorSessions: createSettingsOperatorSessions(createSettingsOperatorRepository(pool), readKey),
     settings: {
       read: async () => view(await repository.read()),
-      patch: async (input: unknown, actor: { userId: string; operatorSessionId: string }) => {
+      patch: async (input: unknown, actor: import("../../../packages/application/src/settings/index.js").SettingsActor) => {
         const patch = instanceSettingsPatchSchema.parse(input);
         const state = await repository.read();
         await validateRunningPolicy(state);
@@ -158,13 +159,13 @@ export function createInstanceSettingsHttpComposition(
       history: async (cursor: string | undefined, limit: number) => {
         await validateRunningPolicy(await repository.read());
         const { rows } = await pool.query(`
-          SELECT id::text,kind,revision,actor_user_id,operator_session_id,reason_code,changed_keys,created_at
+          SELECT id::text,kind,revision,actor_user_id,operator_session_id,local_single_user,reason_code,changed_keys,created_at
           FROM instance_settings_events WHERE ($1::bigint IS NULL OR id<$1::bigint)
           ORDER BY instance_settings_events.id DESC LIMIT $2`, [cursor ?? null, limit + 1]);
         const allowed = new Set<string>(INSTANCE_SETTING_FIELDS.map(field => field.key));
         const events = rows.slice(0, limit).map(row => ({
           id: row.id, kind: row.kind, revision: row.revision, actorUserId: row.actor_user_id,
-          operatorSessionId: row.operator_session_id, reasonCode: row.reason_code,
+          operatorSessionId: row.operator_session_id, ...(row.local_single_user ? { localSingleUser: true } : {}), reasonCode: row.reason_code,
           changedKeys: Array.isArray(row.changed_keys)
             ? row.changed_keys.filter((key: unknown) => typeof key === "string" && allowed.has(key))
             : [],
