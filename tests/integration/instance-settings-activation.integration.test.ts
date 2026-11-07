@@ -24,6 +24,12 @@ describe('controlled settings activation',()=>{
   await pool.query(`INSERT INTO prepared_text_physical_attempts(owner_user_id,logical_kind,reservation_key,logical_reservation,plan_hash,candidate_ordinal,requested_model,provider_policy,request_payload_hash,request_body)
     VALUES($1,'direct','settings-test','{}',$2,0,'test-model','{}',$2,'{}')`,[actor.userId,'a'.repeat(64)]);
   await expect(repository.activate(request)).rejects.toThrow('settings_active_invocations');
+  await pool.query(`INSERT INTO cancelled_dispatch_recoveries
+    (attempt_id,owner_user_id,parent_job_id,logical_kind,attempt_sha256,maintenance_reference)
+    SELECT id,owner_user_id,gen_random_uuid(),'story',sha256(convert_to(to_jsonb(a)::text,'UTF8')),'test/wrong-parent'
+    FROM prepared_text_physical_attempts a WHERE reservation_key='settings-test'`);
+  await expect(repository.activate(request)).rejects.toThrow('settings_active_invocations');
+  await expect(pool.query("DELETE FROM cancelled_dispatch_recoveries WHERE maintenance_reference='test/wrong-parent'")).rejects.toThrow();
   await pool.query("UPDATE prepared_text_physical_attempts SET status='completed',dispatched_at=clock_timestamp(),completed_at=clock_timestamp(),outcome='failed',failure_reason='cancelled' WHERE reservation_key='settings-test'");
   await pool.query('CREATE TABLE settings_test_future_lane (lease_expires_at timestamptz)');
   await pool.query("INSERT INTO settings_test_future_lane VALUES(clock_timestamp()+interval '1 minute')");
