@@ -187,7 +187,7 @@ const pageMarkup = `
           <section><h4>Terminal diagnostics</h4><p data-system-report-diagnostics></p></section>
         </div>
         <div class="recovery-checklist">
-          <section><h4>Provider recovery</h4><p>Enter credentials, verify health and model discovery, then explicitly enable each imported profile.</p><a href="/nexus/#providers">Open Provider Setup</a></section>
+          <section><h4>Provider recovery</h4><p>Enter credentials, verify health and model discovery, then explicitly enable each imported profile.</p><a href="/app/settings?section=providers">Open Provider Setup</a></section>
           <section><h4>Access recovery</h4><p>Create new access relationships on this destination. Source share links and sessions remain invalid.</p></section>
           <section><h4>Rebuilds queued</h4><p data-system-report-rebuilds></p></section>
         </div>

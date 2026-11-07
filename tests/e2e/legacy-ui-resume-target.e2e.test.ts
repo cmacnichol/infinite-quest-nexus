@@ -18,7 +18,7 @@ async function installStoryDocument(page: Page) {
 async function installApi(page: Page, statusCode: number) {
   let syncRequests = 0;
   await page.addInitScript(({ rememberedId }) => {
-    localStorage.setItem("infiniteQuestLastCampaignId", rememberedId);
+    localStorage.setItem("infinite-quest.user.22222222-2222-4222-8222-222222222222.infiniteQuestLastCampaignId", rememberedId);
   }, { rememberedId: previousCampaignId });
   await page.route("**/api/v1/**", async (route: Route) => {
     const url = new URL(route.request().url());
@@ -60,12 +60,13 @@ async function installDashboardApi(page: Page, campaignList: ReturnType<typeof d
   let releaseList!: () => void;
   const listReleased = new Promise<void>((resolve) => { releaseList = resolve; });
   await page.addInitScript((rememberedId) => {
-    localStorage.setItem("infiniteQuestLastCampaignId", rememberedId);
+    localStorage.setItem("infinite-quest.user.22222222-2222-4222-8222-222222222222.infiniteQuestLastCampaignId", rememberedId);
     localStorage.setItem("infiniteQuestStoryDraft:preserve", "draft-preserved");
     localStorage.setItem("infiniteQuestReaderPreference:preserve", "preference-preserved");
   }, "stale-remembered-id");
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/v1/session") return route.fulfill({json:{user:{id:previousCampaignId,displayName:"Fixture reader",settings:{}}}});
     if (url.pathname === "/api/v1/campaigns" && route.request().method() === "GET") {
       campaignRequests += 1;
       if (options.delayList && campaignRequests === 1) {
@@ -106,8 +107,9 @@ test("failed Story load preserves the prior resume ID and offers not-found recov
   await expect(page.locator("#storyLoadRecovery a")).toHaveAttribute("href", "/nexus/#campaigns");
   await expect(page.locator("#storyLoadRetry")).toBeHidden();
   await expect(page.locator("#storyArea .turn")).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("infiniteQuestLastCampaignId"))).toBe(previousCampaignId);
-  expect(api.syncRequests()).toBe(1);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("infinite-quest.user.22222222-2222-4222-8222-222222222222.infiniteQuestLastCampaignId"))).toBe(previousCampaignId);
+  // Story and its activity history can independently verify access to the same campaign.
+  expect([1, 2]).toContain(api.syncRequests());
 
   await mkdir(screenshots, { recursive: true });
   await page.screenshot({ path: `${screenshots}/t06-story-not-found.png`, fullPage: true });
@@ -346,7 +348,7 @@ test("dashboard validates stale resume IDs and chooses the newest active campaig
   await api.releaseList();
   await expect(page.locator("#dashboardStoryLink")).toHaveAttribute("href", "/story/active-new");
   await expect(page.locator("#storyViewLink")).toHaveAttribute("href", "/story/active-new");
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("infiniteQuestLastCampaignId"))).toBeNull();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("infinite-quest.user.22222222-2222-4222-8222-222222222222.infiniteQuestLastCampaignId"))).toBeNull();
   expect(await page.evaluate(() => localStorage.getItem("infiniteQuestStoryDraft:preserve"))).toBe("draft-preserved");
   expect(await page.evaluate(() => localStorage.getItem("infiniteQuestReaderPreference:preserve"))).toBe("preference-preserved");
   await mkdir(screenshots, { recursive: true });

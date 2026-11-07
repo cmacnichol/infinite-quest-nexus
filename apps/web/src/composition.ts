@@ -61,7 +61,7 @@ export interface StoryPlayerComposition {
 
 export interface StoryPlayerEnvironment {
   readonly document: Document;
-  readonly storage: Storage;
+  readonly storage: Pick<Storage, "getItem" | "setItem" | "removeItem">;
   readonly draftDatabase?: DraftDatabasePort;
   readonly readerPositionDatabase?: ReaderPositionDatabasePort;
   readonly eventSourceFactory: EventSourceFactory | null;
@@ -117,10 +117,15 @@ const defaultFactories: StoryPlayerCompositionFactories = {
 };
 
 function browserEnvironment(): StoryPlayerEnvironment {
+  let storage: StoryPlayerEnvironment["storage"];
+  try { storage = window.localStorage; } catch {
+    const memory = new Map<string, string>();
+    storage = {getItem: key => memory.get(key) ?? null, setItem: (key, value) => { memory.set(key, value); }, removeItem: key => { memory.delete(key); }};
+  }
   return {
     document: window.document,
     window,
-    storage: window.localStorage,
+    storage,
     eventSourceFactory: typeof window.EventSource === "function"
       ? (url) => new window.EventSource(url)
       : null,

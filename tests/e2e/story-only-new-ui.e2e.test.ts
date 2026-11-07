@@ -119,7 +119,7 @@ async function setAutomaticChoiceSubmission(page: Page, enabled: boolean): Promi
       await expect(page.locator("[data-profile-status]")).toContainText(/saved/i);
       changed = true;
     }
-    await page.getByRole("button", { name: "Close Preferences" }).click();
+    await page.getByRole("button", { name: "Close User Profile" }).click();
     if (changed) {
       await page.reload();
       await expect(page.locator("[data-story-composer]")).toBeVisible();
@@ -222,7 +222,7 @@ test("new UI profile persists Story Direction without Auto", async ({ page }, te
     await selectWebAwesomeProfileTurnStyle(page, "flexible_action");
     await selectWebAwesomeProfileTurnStyle(page, "flexible_scene");
     await expect(page.locator("[data-profile-status]")).toContainText(/saved/i);
-    await page.getByRole("button", { name: "Close Preferences" }).click();
+    await page.getByRole("button", { name: "Close User Profile" }).click();
     await page.reload();
     await page.locator("wa-button.command-menu__trigger").filter({ hasText: "Profile" }).click();
     await page.locator("wa-dropdown-item[value='preferences']").click();

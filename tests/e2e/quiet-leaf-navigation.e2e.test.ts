@@ -31,7 +31,7 @@ test("the app entry resumes only the server-verified remembered Story campaign",
   const api = await installStoryApi(page);
   try {
     await page.addInitScript((campaignId) => {
-      localStorage.setItem("infinite-quest.story-resume.v1", JSON.stringify({ version: 1, campaignId }));
+      localStorage.setItem("infinite-quest.user.66666666-6666-4666-8666-666666666666.infinite-quest.story-resume.v1", JSON.stringify({ version: 1, campaignId }));
     }, api.campaignId);
     await page.goto("/app/");
     await expect(page).toHaveURL(`/app/story/${api.campaignId}`);

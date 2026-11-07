@@ -1,3 +1,5 @@
+import { browserDeviceStorage } from "@infinite-quest/client-web";
+import { loadUserProfile } from "./user-profile-menu";
 import { mountSettingsPage, parseSettingsRoute } from "./settings/page";
 import "./styles.css";
 import { generateWorldPreview } from "./world-creation-api";
@@ -27,20 +29,16 @@ let mountedPage: MountedPage | null = null;
 let pageDisposed = false;
 const startupController = new AbortController();
 
-function browserResumeStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> | null {
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
 async function start(): Promise<MountedPage | null> {
   if (uiImplementation() === "web-awesome") await ensureWebAwesome();
   if (pageDisposed) return null;
   if (isAppEntryPath(window.location.pathname)) {
+    const storage = browserDeviceStorage(window);
+    const user = await loadUserProfile(startupController.signal).catch(() => null);
+    if (pageDisposed) return null;
+    storage.activate(user);
     const result = await resumeStoredStoryCampaign({
-      store: createStoryResumeStore(browserResumeStorage()),
+      store: createStoryResumeStore(storage),
       list(signal) {
         try {
           return createStoryPlayerComposition().api.campaigns.list(signal);

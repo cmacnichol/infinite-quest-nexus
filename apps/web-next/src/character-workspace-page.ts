@@ -748,7 +748,7 @@ export function mountCharacterWorkspacePage(
             code: "authoring_provider_unavailable", stage: "character", retryable: true, issues: []
           }), " ");
           const setup = document.createElement("a");
-          setup.href = "/nexus/#providers";
+          setup.href = "/app/settings?section=providers";
           setup.textContent = "Provider Setup";
           status.append(setup, ", then try again.");
         } else if (error instanceof CharacterWorkspaceApiError && error.authoringFailure) {

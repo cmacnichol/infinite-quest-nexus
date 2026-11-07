@@ -600,7 +600,7 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
     reader.append(background, firstAction, begin);
     if (!state.canBeginStory) {
       const setup = element(document, "a", "story-setup", "Set up a text provider");
-      setup.href = "/nexus/#providers";
+      setup.href = "/app/settings?section=providers";
       setup.dataset.storySetup = "";
       reader.append(setup);
     }
@@ -664,7 +664,7 @@ export function renderStoryContent(document: Document, state: StoryPlayerViewSta
     content.push(background, firstAction, begin);
     if (!state.canBeginStory) {
       const setup = element(document, "a", "story-setup", "Set up a text provider");
-      setup.href = "/nexus/#providers";
+      setup.href = "/app/settings?section=providers";
       setup.dataset.storySetup = "";
       content.push(setup);
     }

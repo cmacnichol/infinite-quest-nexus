@@ -1,6 +1,7 @@
 /* ═══════════════════════════════════════════════════════════════
    Infinite Quest — Story Player
    ═══════════════════════════════════════════════════════════════ */
+import { browserDeviceStorage, mountLegacyDeviceProfile } from "@infinite-quest/client-web";
 import { createStoryActivityView, safeActivityDiagnostic } from "./story-activity.js";
 import { branchCampaignFromTurn } from "./story-routing.js";
 import {
@@ -1329,7 +1330,7 @@ async function loadCampaign(campaignId, options = {}) {
     if (activity) {
       const currentSession = await apiClient.session.get();
       if (state.campaignId !== campaignId || activityActivationEpoch !== activityEpoch) return;
-      state.user = currentSession.user;
+      if (!acceptProfileOwner(currentSession.user)) return;
       applyReaderPreferences(state.user.settings?.readerPreferences);
       void activity.open({ apiBase: composition.activityApiBase, ownerUserId: currentSession.user.id, campaignId });
     }
@@ -1400,7 +1401,7 @@ async function loadCampaign(campaignId, options = {}) {
     if (!current()) return false;
     void loadReaderIllustrations(campaignId, loadSequence);
     try {
-      localStorage.setItem("infiniteQuestLastCampaignId", campaignId);
+      ownerDevice.setItem("infiniteQuestLastCampaignId", campaignId);
     } catch {
       // The campaign remains usable when browser preference storage is unavailable.
     }
@@ -4857,9 +4858,30 @@ async function saveStoryMemorySettings() {
   }
 }
 
+const profileController = new AbortController();
+const ownerDevice = browserDeviceStorage(window);
+function acceptProfileOwner(user) {
+  if (user?.id && state.user?.id && state.user.id !== user.id) {
+    window.dispatchEvent(new Event("app-identity-changed"));
+    return false;
+  }
+  state.user = user;
+  ownerDevice.activate(user);
+  return true;
+}
+let deviceProfile = null;
+window.addEventListener("app-identity-changed", () => {
+  profileController.abort();
+  deviceProfile?.dispose();
+  state.user = null;
+  document.body.replaceChildren();
+  window.location.reload();
+}, { once: true });
 function openUserProfile() {
   const dlg = $("userProfileDialog");
-  if (!dlg) return;
+  if (!dlg || !state.user?.id) return;
+  deviceProfile ??= mountLegacyDeviceProfile(dlg.querySelector(".settings-section-card").parentElement, ownerDevice);
+  deviceProfile.activate(state.user, state.campaignId || null);
   const nameInput = $("userProfileDisplayName");
   const cbSubmit = $("userProfileAutoSubmitChoices");
   const cbContinuous = $("userProfileContinuousReading");
@@ -4991,9 +5013,10 @@ async function saveUserProfile() {
         defaultTurnControlStyle,
         readerPreferences
       }
-    });
+    }, profileController.signal);
+    if (profileController.signal.aborted) return;
     if (res && res.user) {
-      state.user = res.user;
+      if (!acceptProfileOwner(res.user)) return;
     } else {
       if (state.user) {
         state.user.displayName = displayName;
@@ -6162,7 +6185,7 @@ async function init() {
   try {
     const sessionRes = await apiClient.session.get();
     if (sessionRes && sessionRes.user) {
-      state.user = sessionRes.user;
+      if (!acceptProfileOwner(sessionRes.user)) return;
       applyReaderPreferences(state.user.settings?.readerPreferences);
     }
   } catch (err) {

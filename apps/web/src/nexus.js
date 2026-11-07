@@ -1,19 +1,17 @@
+import { settingsBookmarkDestination } from "./settings-bookmark.js";
+import { browserDeviceStorage, mountLegacyDeviceProfile, mountReaderPreferenceFields } from "@infinite-quest/client-web";
 import {
   buildCampaignCreateRequest,
   createCampaignCreationDraft,
   createEditSession,
-  createSelectionEditorState,
   filterSortCampaigns,
   filterSortWorlds,
-  providerReadinessForRole,
-  reduceSelectionEditor,
   resolveResumeCampaign,
-  serializeSelectionEditorPatch
 } from "@infinite-quest/client-core";
-import { createProviderPresetsApi, nativePresetSupport } from "@infinite-quest/client-web";
 import { bindEditDialogDismissal, requestEditDismissal } from "./legacy-edit-session.js";
 import { createLegacySectionLoader } from "./legacy-section-loader.js";
 import { bindLegacyTabGroup } from "./legacy-tabs.js";
+const ownerDevice = browserDeviceStorage(window);
 
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
 const campaignSectionLoader = createLegacySectionLoader({
@@ -172,7 +170,6 @@ let worldVersionReadiness = null;
 let worldVersionReadinessError = "";
 let worldVersionReadinessCheckedId = "";
 let worldVersionReadinessLoading = false;
-let providerSaveBusy = false;
 const editDialogSessions = new WeakMap();
 const editDialogBindingDisposers = new WeakMap();
 let dashboardWorld = null;
@@ -201,9 +198,6 @@ const characterRowOriginals = new WeakMap();
 const legacyStorageKey = "infiniteQuestNexusClientState.v1";
 let detectedBrowserStory = null;
 let providers = [];
-let providerInventoryObservations = [];
-let providerInventoryRequestSequence = 0;
-const providerInventoryRequestEpochs = new Map();
 let selectedProvider = null;
 let embeddingConfig = null;
 let illustrationConfig = null;
@@ -211,19 +205,7 @@ let contextPreviewSequence = 0;
 let discoveredProviderModels = [];
 let pendingDeleteTitle = "";
 let pendingDeleteResolve = null;
-let editingProviderId = "";
-let discoveredProfileModels = [];
-let discoveredProfileModelsIdentity = "";
 let discoveredEmbeddingModels = [];
-let providerModelPickerTarget = "provider";
-let responseFormatCapabilitySequence = 0;
-let responseFormatCapabilityProfile = null;
-let nativeTextExecutionPlansSupportState = "loading";
-let providerSelectionEditor = null;
-let providerSelectionRequestSequence = 0;
-let providerPresetListController = null;
-let providerPresetDetailController = null;
-let providerSelectionCredentialRevision = 0;
 const embeddingJobMonitors = new Map();
 let worldCoverJobPollSequence = 0;
 let illustrationRefinementPromptValue = "";
@@ -233,16 +215,6 @@ let transferPreviewSequence = 0;
 let transferTargetVersionsRequestEpoch = 0;
 let transferPreview = null;
 let transferIdempotencyKey = "";
-let promptLibrary = null;
-let selectedPromptTemplateKey = "";
-let promptLibraryPreviewVisible = false;
-let promptLibraryEditorBaseline = "";
-let promptLibraryEditorContext = "";
-let promptLibraryCategory = "All";
-let promptLibraryActiveScope = "application";
-let promptLibraryActiveCampaignId = "";
-let promptLibraryPreviewTimer = 0;
-let promptLibraryPreviewSequence = 0;
 let systemArchiveEnabled = false;
 let systemArchiveSelectedFile = null;
 let systemArchiveUpload = null;
@@ -579,7 +551,6 @@ function clearCampaignEditorSelection({ focus = false } = {}) {
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
-const DEFAULT_LM_STUDIO_BASE_URL = "http://10.11.41.224:1234";
 const CHARACTER_PROFILE_FIELDS = Object.freeze({
   "identity.aliases": "characterAliases",
   "identity.pronouns": "characterPronouns",
@@ -660,15 +631,13 @@ function beginEditDialogSession(dialog, returnFocusTo) {
   editDialogSessions.set(dialog, state);
   const dispose = bindEditDialogDismissal(dialog, () => ({
     isDirty: () => state.editSession.isDirty(modalFormSnapshot(dialog)),
-    isBusy: () => (dialog === elements.providerDialog && providerSaveBusy)
-      || (dialog === elements.worldAuthorDialog && worldAuthorBusy)
+    isBusy: () => (dialog === elements.worldAuthorDialog && worldAuthorBusy)
       || (dialog === elements.characterDialog && characterModalBusy),
     confirm: () => requestStagedEditDecision(dialog === elements.characterDialog && characterModalScope === "campaign"),
     ...(dialog === elements.characterDialog && characterModalScope === "campaign"
       ? { save: () => saveCharacterFromModal({ preventDefault() {} }) }
       : {}),
     discard: () => {
-      if (dialog === elements.providerDialog) resetProviderForm();
       state.editSession.markSaved(modalFormSnapshot(dialog));
     },
     returnFocusTo: state.returnFocusTo,
@@ -713,15 +682,13 @@ function dismissEditDialog(dialog) {
   return requestEditDismissal({
     dialog,
     isDirty: () => state.editSession.isDirty(modalFormSnapshot(dialog)),
-    isBusy: () => (dialog === elements.providerDialog && providerSaveBusy)
-      || (dialog === elements.worldAuthorDialog && worldAuthorBusy)
+    isBusy: () => (dialog === elements.worldAuthorDialog && worldAuthorBusy)
       || (dialog === elements.characterDialog && characterModalBusy),
     confirm: () => requestStagedEditDecision(dialog === elements.characterDialog && characterModalScope === "campaign"),
     ...(dialog === elements.characterDialog && characterModalScope === "campaign"
       ? { save: () => saveCharacterFromModal({ preventDefault() {} }) }
       : {}),
     discard: () => {
-      if (dialog === elements.providerDialog) resetProviderForm();
       state.editSession.markSaved(modalFormSnapshot(dialog));
     },
     returnFocusTo: state.returnFocusTo,
@@ -747,7 +714,7 @@ function clickedDialogBackdrop(dialog, event) {
 
 function requestModalDismissal(dialog) {
   if (dialog === elements.createCampaignDialog && createCampaignSubmitting) return;
-  if ([elements.providerDialog, elements.worldAuthorDialog, elements.characterDialog].includes(dialog)) {
+  if ([elements.worldAuthorDialog, elements.characterDialog].includes(dialog)) {
     dismissEditDialog(dialog);
     return;
   }
@@ -798,14 +765,14 @@ async function loadApplicationMetadata() {
   try {
     const response = await fetch("/api/v1/meta");
     if (!response.ok) {
-      nativeTextExecutionPlansSupportState = "unsupported";
-      syncProviderSelectionSupport();
+
+
       setSystemArchiveCapability(false, "System Archive availability could not be confirmed. Specialized formats remain available.");
       return;
     }
     const metadata = await response.json();
-    nativeTextExecutionPlansSupportState = nativePresetSupport(metadata).state;
-    syncProviderSelectionSupport();
+
+
     const version = metadata?.application?.version;
     if (version && elements.nexusVersion) {
       elements.nexusVersion.textContent = `v${version}`;
@@ -813,8 +780,8 @@ async function loadApplicationMetadata() {
     }
     setSystemArchiveCapability(metadata?.capabilities?.systemArchive === true);
   } catch {
-    nativeTextExecutionPlansSupportState = "unsupported";
-    syncProviderSelectionSupport();
+
+
     setSystemArchiveCapability(false, "System Archive availability could not be confirmed. Specialized formats remain available.");
   }
 }
@@ -847,7 +814,7 @@ function updateStoryViewLink() {
   const resumeCampaign = campaignsLoaded
     ? resolveResumeCampaign(
       campaigns,
-      localStorage.getItem("infiniteQuestLastCampaignId"),
+      ownerDevice.getItem("infiniteQuestLastCampaignId"),
       selectedCampaignIsExplicit ? selectedCampaign?.id : null
     )
     : null;
@@ -1058,24 +1025,20 @@ function managementHeading(route) {
 function applyManagementView(hash, { focus = false } = {}) {
   const route = parseManagementRoute(hash || "#dashboard");
   const dashboardView = route.view === "dashboard";
-  const providerView = route.view === "providers";
-  const promptLibraryView = route.view === "prompt-library";
+  if (route.view === "providers" || route.view === "prompt-library") {
+    location.assign(settingsBookmarkDestination(hash));
+    return;
+  }
   const dataTransferView = route.view === "data-transfer";
   const campaignView = route.view === "campaigns";
   document.body.dataset.managementView = route.view;
   elements.managementHeader.hidden = dashboardView;
   elements.dashboard.hidden = !dashboardView;
-  elements.providers.hidden = !providerView;
   elements["world-library"].hidden = route.view !== "worlds";
   elements.campaigns.hidden = !campaignView;
-  elements["prompt-library"].hidden = !promptLibraryView;
   document.querySelectorAll(".data-transfer-management").forEach((section) => { section.hidden = !dataTransferView; });
-  elements.managementTitle.textContent = providerView ? "Provider Management" : promptLibraryView ? "Prompt Library" : dataTransferView ? "Data Transfer" : campaignView ? "Campaign Management" : "World Management";
-  elements.managementDescription.textContent = providerView
-    ? "Add and manage provider profiles independently for story text, image generation, and Chronicle embeddings."
-    : promptLibraryView
-      ? "Edit the application-owned instructions used for text and image generation. Changes apply to newly queued work."
-      : dataTransferView
+  elements.managementTitle.textContent = dataTransferView ? "Data Transfer" : campaignView ? "Campaign Management" : "World Management";
+  elements.managementDescription.textContent = dataTransferView
         ? "Move an owner library, world, campaign, external import, or readable story through its supported portable format."
         : campaignView
           ? "Configure campaigns, Chronicle memory, provider selection, illustrations, and world-version migrations."
@@ -1084,8 +1047,6 @@ function applyManagementView(hash, { focus = false } = {}) {
 
   [elements.navDashboard, elements.navProviders, elements.navPromptLibrary, elements.navWorlds, elements.navCampaigns, elements.navDataTransfer].forEach((link) => link?.classList.remove("active"));
   if (dashboardView) elements.navDashboard?.classList.add("active");
-  if (providerView) elements.navProviders?.classList.add("active");
-  if (promptLibraryView) { elements.navPromptLibrary?.classList.add("active"); void loadPromptLibrary(); }
   if (route.routeName === "#world-library") elements.navWorlds?.classList.add("active");
   if (campaignView) elements.navCampaigns?.classList.add("active");
   if (dataTransferView) elements.navDataTransfer?.classList.add("active");
@@ -1102,9 +1063,9 @@ function isManagementRouteHash(hash) {
 }
 
 async function canLeaveManagementRoute(nextRoute) {
-  for (const dialog of [elements.providerDialog, elements.worldAuthorDialog, elements.characterDialog]) {
+  for (const dialog of [elements.worldAuthorDialog, elements.characterDialog]) {
     if (!dialog?.open) continue;
-    if (worldAuthorBusy || providerSaveBusy || characterModalBusy) return false;
+    if (worldAuthorBusy || characterModalBusy) return false;
     await dismissEditDialog(dialog);
     if (dialog.open) return false;
   }
@@ -2129,200 +2090,6 @@ function worldGenerationFailureMessage(error) {
   return missing ? `${base} ${missing}` : base;
 }
 
-function promptLibraryCampaignId() {
-  return elements.promptLibraryScope?.value === "campaign" ? elements.promptLibraryCampaign?.value || "" : "";
-}
-
-function promptLibrarySelectedTemplate() {
-  return promptLibrary?.templates?.find((template) => template.key === selectedPromptTemplateKey) || null;
-}
-
-function promptLibraryIsDirty() {
-  return Boolean(promptLibraryEditorContext && elements.promptLibraryContent.value !== promptLibraryEditorBaseline);
-}
-
-function renderPromptLibraryDirtyState() {
-  const dirty = promptLibraryIsDirty();
-  elements.promptLibraryUnsaved?.classList.toggle("hidden", !dirty);
-  elements.promptLibraryDiscard?.classList.toggle("hidden", !dirty);
-}
-
-function syncPromptLibraryCampaigns() {
-  if (!elements.promptLibraryCampaign) return;
-  const current = elements.promptLibraryCampaign.value || selectedCampaign?.id || "";
-  elements.promptLibraryCampaign.replaceChildren(
-    new Option("Select a campaign", ""),
-    ...campaigns.map((campaign) => new Option(campaign.title, campaign.id))
-  );
-  if (campaigns.some((campaign) => campaign.id === current)) elements.promptLibraryCampaign.value = current;
-  elements.promptLibraryCampaignField?.classList.toggle("hidden", elements.promptLibraryScope.value !== "campaign");
-}
-
-async function renderPromptLibraryPreview() {
-  const template = promptLibrarySelectedTemplate();
-  if (!template || !elements.promptLibraryPreviewPanel) return;
-  elements.promptLibraryPreviewPanel.classList.toggle("hidden", !promptLibraryPreviewVisible);
-  elements.promptLibraryPreview.setAttribute("aria-expanded", String(promptLibraryPreviewVisible));
-  elements.promptLibraryPreview.textContent = promptLibraryPreviewVisible ? "Hide full request" : "Preview full request";
-  if (!promptLibraryPreviewVisible) return;
-  const sequence = ++promptLibraryPreviewSequence;
-  elements.promptLibraryPreviewContent.textContent = "Building sample request…";
-  try {
-    const previewCampaignId = promptLibraryCampaignId();
-    const preview = await api("/api/v1/prompt-library/preview", {
-      method: "POST",
-      body: JSON.stringify({ key: template.key, content: elements.promptLibraryContent.value, ...(previewCampaignId ? { campaignId: previewCampaignId } : {}) })
-    });
-    if (sequence !== promptLibraryPreviewSequence) return;
-    const sections = preview.sections.map((section) => `── ${section.label} [${section.role}] ──\n${section.content}`).join("\n\n");
-    const unresolved = preview.unresolvedVariables.length ? preview.unresolvedVariables.map((name) => `{{${name}}}`).join(", ") : "none";
-    elements.promptLibraryPreviewContent.textContent = `Estimated tokens: ${preview.estimatedTokens.toLocaleString()}\nUnresolved variables: ${unresolved}\n\n${sections}`;
-  } catch (error) {
-    if (sequence === promptLibraryPreviewSequence) elements.promptLibraryPreviewContent.textContent = error.message || String(error);
-  }
-}
-
-function schedulePromptLibraryPreview() {
-  clearTimeout(promptLibraryPreviewTimer);
-  if (promptLibraryPreviewVisible) promptLibraryPreviewTimer = setTimeout(() => void renderPromptLibraryPreview(), 250);
-}
-
-function selectPromptLibraryTemplate(key) {
-  if (key === selectedPromptTemplateKey) return;
-  if (promptLibraryIsDirty()) {
-    elements.promptLibraryStatus.textContent = "Save or discard the current edits before switching prompts.";
-    elements.promptLibraryStatus.className = "status warning";
-    return;
-  }
-  selectedPromptTemplateKey = key;
-  renderPromptLibrary(true);
-}
-
-function renderPromptLibrary(loadEditor = false) {
-  if (!elements.promptLibraryList || !promptLibrary) return;
-  const filter = (elements.promptLibraryFilter?.value || "").trim().toLowerCase();
-  const campaignScope = elements.promptLibraryScope?.value === "campaign";
-  syncPromptLibraryCampaigns();
-  elements.promptLibraryCampaignHint.textContent = campaignScope
-    ? (promptLibraryCampaignId() ? "Only campaign-runtime prompts can be overridden; authoring and import prompts remain application-wide." : "Choose a campaign to manage its runtime overrides.")
-    : "Application defaults apply to all new work unless an eligible campaign override exists.";
-  const categories = ["All", ...new Set(promptLibrary.templates.map((template) => template.category))];
-  elements.promptLibraryCategories?.replaceChildren(...categories.map((category) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = category;
-    button.classList.toggle("active", category === promptLibraryCategory);
-    button.addEventListener("click", () => { promptLibraryCategory = category; renderPromptLibrary(); });
-    return button;
-  }));
-  const templates = promptLibrary.templates.filter((template) => !campaignScope || template.campaignOverrideAllowed)
-    .filter((template) => promptLibraryCategory === "All" || template.category === promptLibraryCategory)
-    .filter((template) => !filter || `${template.title} ${template.category} ${template.description}`.toLowerCase().includes(filter));
-  elements.promptLibraryList.replaceChildren(...templates.map((template) => {
-    const button = document.createElement("button");
-    button.type = "button"; button.className = `prompt-library-item${template.key === selectedPromptTemplateKey ? " active" : ""}`;
-    button.dataset.promptKey = template.key;
-    button.setAttribute("aria-pressed", String(template.key === selectedPromptTemplateKey));
-    const title = document.createElement("strong"); title.textContent = template.title;
-    const source = document.createElement("small"); source.textContent = `${template.category} · ${template.effectiveSource}`;
-    const description = document.createElement("small"); description.textContent = template.description;
-    button.append(title, source, description);
-    button.addEventListener("click", () => selectPromptLibraryTemplate(template.key));
-    return button;
-  }));
-  const template = promptLibrarySelectedTemplate();
-  elements.promptLibraryEditor.classList.toggle("hidden", !template);
-  if (!template) return;
-  elements.promptLibraryEditorTitle.textContent = template.title;
-  elements.promptLibraryEditorDescription.textContent = template.description;
-  elements.promptLibraryEditorMeta.textContent = `Effective source: ${template.effectiveSource}. Variables: ${template.variables.length ? template.variables.map((name) => `{{${name}}}`).join(", ") : "none"}. Limit: ${template.maxLength.toLocaleString()} characters.`;
-  elements.promptLibraryContent.maxLength = template.maxLength;
-  const context = `${elements.promptLibraryScope.value}:${promptLibraryCampaignId()}:${template.key}`;
-  if (loadEditor || context !== promptLibraryEditorContext) {
-    promptLibraryEditorContext = context;
-    promptLibraryEditorBaseline = template.effectiveContent;
-    elements.promptLibraryContent.value = template.effectiveContent;
-  }
-  elements.promptLibraryWarning?.classList.toggle("hidden", template.category !== "Story Engine");
-  const compatibility = template.compatibility;
-  elements.promptLibraryCompatibility?.classList.toggle("hidden", !compatibility);
-  elements.promptLibraryRequiredShape?.classList.toggle("hidden", !compatibility);
-  if (compatibility) {
-    elements.promptLibraryCompatibilityCopy.textContent = `Required output shape version ${compatibility.requiredShapeVersion}. Saving records this prompt against the current shape; the application adds the required output rules automatically.${compatibility.acknowledged ? "" : " Saved for an earlier output shape or outside the Prompt Library. Save it again before generation can use it."}`;
-    elements.promptLibraryRequiredShape.textContent = compatibility.requiredShapePreview;
-  }
-  const resetAvailable = campaignScope ? template.effectiveSource === "campaign" : template.effectiveSource === "application";
-  elements.promptLibraryReset.textContent = campaignScope ? "Use inherited application prompt" : "Restore shipped default";
-  elements.promptLibraryReset.disabled = !resetAvailable;
-  elements.promptLibraryResetCampaigns.classList.toggle("hidden", campaignScope || !template.campaignOverrideAllowed);
-  renderPromptLibraryDirtyState();
-  if (promptLibraryPreviewVisible) schedulePromptLibraryPreview();
-  requestAnimationFrame(() => elements.promptLibraryList.querySelector(".prompt-library-item.active")?.scrollIntoView({ block: "nearest", inline: "nearest" }));
-}
-
-async function loadPromptLibrary() {
-  if (!elements.promptLibraryStatus) return;
-  syncPromptLibraryCampaigns();
-  const campaignId = promptLibraryCampaignId();
-  if (elements.promptLibraryScope?.value === "campaign" && !campaignId) {
-    elements.promptLibraryStatus.textContent = "Select a campaign before editing campaign overrides.";
-    elements.promptLibraryStatus.className = "status error";
-    promptLibrary = { templates: [] }; renderPromptLibrary(); return;
-  }
-  elements.promptLibraryStatus.textContent = "Loading prompt library…"; elements.promptLibraryStatus.className = "status";
-  try {
-    promptLibrary = await api(`/api/v1/prompt-library${campaignId ? `?campaignId=${encodeURIComponent(campaignId)}` : ""}`);
-    if (!selectedPromptTemplateKey) selectedPromptTemplateKey = promptLibrary.templates[0]?.key || "";
-    promptLibraryActiveScope = elements.promptLibraryScope.value;
-    promptLibraryActiveCampaignId = campaignId;
-    elements.promptLibraryStatus.textContent = "Changes apply to newly queued jobs; queued and retried jobs retain their snapshotted prompt.";
-    elements.promptLibraryStatus.className = "status";
-    renderPromptLibrary(true);
-  } catch (error) { elements.promptLibraryStatus.textContent = error.message || String(error); elements.promptLibraryStatus.className = "status error"; }
-}
-
-async function savePromptLibraryTemplate(event) {
-  event.preventDefault();
-  const template = promptLibrarySelectedTemplate(); if (!template) return;
-  const scope = elements.promptLibraryScope.value;
-  try {
-    const content = elements.promptLibraryContent.value;
-    const response = await api("/api/v1/prompt-library/overrides", { method: "PUT", body: JSON.stringify({ key: template.key, scope, ...(scope === "campaign" ? { campaignId: promptLibraryCampaignId() } : {}), content }) });
-    promptLibrary = response.library; elements.promptLibraryStatus.textContent = "Prompt saved. New jobs will use this version."; elements.promptLibraryStatus.className = "status success"; renderPromptLibrary(true);
-  } catch (error) { elements.promptLibraryStatus.textContent = error.message || String(error); elements.promptLibraryStatus.className = "status error"; }
-}
-
-async function resetPromptLibraryTemplate() {
-  const template = promptLibrarySelectedTemplate(); if (!template) return;
-  const scope = elements.promptLibraryScope.value;
-  try {
-    const response = await api("/api/v1/prompt-library/overrides", { method: "DELETE", body: JSON.stringify({ key: template.key, scope, ...(scope === "campaign" ? { campaignId: promptLibraryCampaignId() } : {}) }) });
-    promptLibrary = response.library; elements.promptLibraryStatus.textContent = scope === "campaign" ? "Campaign override removed; the inherited application prompt is active." : "Application override removed; the shipped default is active."; elements.promptLibraryStatus.className = "status success"; renderPromptLibrary(true);
-  } catch (error) { elements.promptLibraryStatus.textContent = error.message || String(error); elements.promptLibraryStatus.className = "status error"; }
-}
-
-async function resetAllCampaignPromptOverrides() {
-  const template = promptLibrarySelectedTemplate();
-  if (!template || !template.campaignOverrideAllowed || elements.promptLibraryScope.value !== "application") return;
-  if (promptLibraryIsDirty()) {
-    elements.promptLibraryStatus.textContent = "Save or discard your edits before resetting campaign overrides.";
-    elements.promptLibraryStatus.className = "status warning";
-    return;
-  }
-  if (!window.confirm(`Reset “${template.title}” for all your campaigns to the saved application default? This will overwrite all campaign overrides for this prompt by removing them. This cannot be undone. Other prompts and already queued jobs will not change.`)) return;
-  elements.promptLibraryResetCampaigns.disabled = true;
-  try {
-    await api("/api/v1/prompt-library/overrides", { method: "DELETE", body: JSON.stringify({ key: template.key, scope: "application", allCampaigns: true }) });
-    elements.promptLibraryStatus.textContent = `All your campaigns now inherit the application default for “${template.title}”. New jobs will use this prompt.`;
-    elements.promptLibraryStatus.className = "status success";
-  } catch (error) {
-    elements.promptLibraryStatus.textContent = error.message || String(error);
-    elements.promptLibraryStatus.className = "status error";
-  } finally {
-    elements.promptLibraryResetCampaigns.disabled = false;
-  }
-}
-
 function setStatus(message, type = "") {
   elements.importStatus.textContent = message;
   elements.importStatus.className = `status ${type}`.trim();
@@ -2793,14 +2560,6 @@ async function openQuickCampaign() {
 function scrollCarousel(element, direction) {
   element.scrollBy({
     left: direction * Math.max(280, element.clientWidth * .82),
-    behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
-  });
-}
-
-function scrollPromptLibrary(direction) {
-  if (!elements.promptLibraryList) return;
-  elements.promptLibraryList.scrollBy({
-    left: direction * Math.max(260, elements.promptLibraryList.clientWidth * .8),
     behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
   });
 }
@@ -3884,7 +3643,7 @@ function openWorldAuthor(mode) {
   elements.generateWorldPreview.disabled = !textAvailable;
   elements.worldGeneratorAvailability.innerHTML = textAvailable
     ? "Generation uses the configured default text provider."
-    : 'Configure a default text provider in <a href="#providers">Provider Setup</a> to enable generation.';
+    : 'Configure a default text provider in <a href="/app/settings?section=providers">Provider Setup</a> to enable generation.';
   elements.worldAuthorDialog.removeAttribute("aria-busy");
   worldAuthorBusyControlSnapshot = null;
   populateWorldAuthorForm(mode === "create" ? emptyWorldContent() : selectedWorld.draftContent);
@@ -4067,7 +3826,7 @@ function updateWorldCoverChoice() {
     if (defaultProvider("image")) {
       elements.worldCoverStatus.textContent = "A new cover will be queued after the world draft is saved.";
     } else {
-      elements.worldCoverStatus.innerHTML = 'Configure a default image provider in <a href="#providers">Provider Setup</a>. The world can still be saved without a cover.';
+      elements.worldCoverStatus.innerHTML = 'Configure a default image provider in <a href="/app/settings?section=providers">Provider Setup</a>. The world can still be saved without a cover.';
     }
   }
   else if (mode === "library") {
@@ -5083,7 +4842,7 @@ async function createCampaignFromWorld(event) {
     refreshModalBaseline(elements.createCampaignDialog);
     let persistenceWarning = "";
     try {
-      localStorage.setItem("infiniteQuestLastCampaignId", campaign.id);
+      ownerDevice.setItem("infiniteQuestLastCampaignId", campaign.id);
     } catch (error) {
       persistenceWarning = ` The campaign is committed, but the remembered campaign could not be saved: ${error.message || String(error)}`;
     }
@@ -5131,7 +4890,7 @@ function openCreateCampaignDialog() {
 function openCommittedCampaignStory() {
   const campaignId = campaignCreationDialogSession?.committedCampaignId;
   if (!campaignId) return;
-  try { localStorage.setItem("infiniteQuestLastCampaignId", campaignId); } catch { /* The committed campaign remains openable by its ID. */ }
+  try { ownerDevice.setItem("infiniteQuestLastCampaignId", campaignId); } catch { /* The committed campaign remains openable by its ID. */ }
   try {
     window.location.assign(`/story/${encodeURIComponent(campaignId)}`);
   } catch (error) {
@@ -5154,9 +4913,9 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false, expli
   clearWorkflowReadFailure(elements.campaignStatusMessage, "campaigns", "workflowRetryCampaigns");
   campaignsLoaded = true;
   campaignsLoadError = false;
-  const rememberedCampaignId = localStorage.getItem("infiniteQuestLastCampaignId");
+  const rememberedCampaignId = ownerDevice.getItem("infiniteQuestLastCampaignId");
   if (rememberedCampaignId && !campaigns.some((campaign) => campaign.id === rememberedCampaignId && campaign.status === "active")) {
-    localStorage.removeItem("infiniteQuestLastCampaignId");
+    ownerDevice.removeItem("infiniteQuestLastCampaignId");
   }
   renderDashboardCampaigns();
   updateStoryViewLink();
@@ -5890,11 +5649,7 @@ function illustrationPolicyUsesProvider(policy = elements.illustrationSourcePoli
 }
 
 function openIllustrationPromptEditor() {
-  elements.promptLibraryScope.value = "campaign";
-  syncPromptLibraryCampaigns();
-  elements.promptLibraryCampaign.value = selectedCampaign?.id || "";
-  selectedPromptTemplateKey = "illustration_refinement";
-  window.location.hash = "#prompt-library";
+  if (selectedCampaign) window.location.assign(`/app/settings?section=prompts&campaignId=${encodeURIComponent(selectedCampaign.id)}&prompt=illustration_refinement`);
 }
 
 function renderIllustrationSettingsVisibility() {
@@ -5943,25 +5698,6 @@ function providerTypeLabel(providerType) {
   return providerType === "sogni" ? "Sogni Creative Workflow (REST)"
     : providerType === "sogni_sdk" ? "Sogni Supernet SDK"
       : providerType;
-}
-
-function applyDiscoveredProviderContext() {
-  const option = elements.modelSelect.selectedOptions[0];
-  const contextLength = Number(option?.dataset.contextLength || 0);
-  const model = discoveredProviderModels.find((item) => (item.loaded ? item.instanceId : item.id) === elements.modelSelect.value);
-  if (model) elements.providerDefaultModel.value = model.id;
-  if (contextLength > 0) {
-    elements.providerContextTokens.value = String(contextLength);
-    elements.providerContextTokens.readOnly = true;
-    elements.providerContextTokens.setAttribute("aria-readonly", "true");
-    elements.providerContextSource.textContent = `Locked to ${number(contextLength)} tokens advertised by the selected model.`;
-    elements.providerContextSource.className = "field-note api-supplied";
-  } else {
-    elements.providerContextTokens.readOnly = false;
-    elements.providerContextTokens.removeAttribute("aria-readonly");
-    elements.providerContextSource.textContent = "The model API did not advertise a context length; enter the loaded context manually.";
-    elements.providerContextSource.className = "field-note manual-entry";
-  }
 }
 
 function enabledProviders(role) {
@@ -6048,706 +5784,10 @@ function populateEmbeddingProviderSelect() {
   }
 }
 
-function providerReadinessCapabilityLabel(status) {
-  const labels = {
-    "not-applicable": "Not applicable",
-    unknown: "Unknown",
-    advertised: "Advertised, not verified",
-    expired: "Expired",
-    malformed: "Malformed evidence",
-    "identity-mismatch": "Does not match current model/schema",
-    unsupported: "Not supported",
-    verified: "Verified for current schema"
-  };
-  return labels[status] || "Unknown";
-}
-
-function renderProviderReadiness() {
-  for (const role of ["text", "image", "embedding"]) {
-    const card = elements.providers.querySelector(`[data-provider-readiness="${role}"]`);
-    if (!card) continue;
-    const readiness = providerReadinessForRole(role, providers, providerInventoryObservations, Date.now(), Date.parse);
-    card.dataset.readinessState = readiness.state;
-    card.querySelector("[data-readiness-health]").textContent = readiness.health.replaceAll("-", " ");
-    card.querySelector("[data-readiness-inventory]").textContent = readiness.inventory.replaceAll("-", " ");
-    card.querySelector("[data-readiness-capability]").textContent = providerReadinessCapabilityLabel(readiness.capability);
-    card.querySelector("[data-readiness-state]").textContent = readiness.state === "ready"
-      ? "Ready · current observed evidence"
-      : readiness.state === "checking"
-        ? "Checking model inventory…"
-        : readiness.state === "not-configured"
-          ? "Not configured"
-          : "Not ready · see evidence above";
-    const check = card.querySelector("[data-readiness-check]");
-    check.hidden = !readiness.profileId;
-    check.classList.toggle("hidden", !readiness.profileId);
-    check.disabled = readiness.inventory === "checking";
-    check.textContent = check.disabled ? "Checking inventory…" : "Check model inventory";
-  }
-}
-
-async function refreshProviderReadinessInventory(role) {
-  const card = elements.providers.querySelector(`[data-provider-readiness="${role}"]`);
-  const readiness = providerReadinessForRole(role, providers, providerInventoryObservations, Date.now(), Date.parse);
-  const profile = providers.find((item) => item.id === readiness.profileId);
-  if (!card || !profile) return;
-  const identity = {
-    profileId: profile.id,
-    role,
-    providerType: profile.providerType,
-    baseUrl: profile.baseUrl,
-    modelId: profile.defaultModel
-  };
-  const requestEpoch = ++providerInventoryRequestSequence;
-  providerInventoryRequestEpochs.set(profile.id, requestEpoch);
-  providerInventoryObservations = providerInventoryObservations.filter((item) => item.profileId !== profile.id);
-  providerInventoryObservations.push({ ...identity, status: "checking", modelIds: [], checkedAt: null });
-  renderProviderReadiness();
-  try {
-    const result = await api(`/api/v1/providers/${profile.id}/models?refresh=true`);
-    if (providerInventoryRequestEpochs.get(profile.id) !== requestEpoch) return;
-    const currentProfile = providers.find((item) => item.id === profile.id);
-    if (!currentProfile || currentProfile.providerRole !== identity.role || currentProfile.providerType !== identity.providerType || currentProfile.baseUrl !== identity.baseUrl || currentProfile.defaultModel !== identity.modelId) return;
-    const modelIds = Array.isArray(result.models) ? result.models.map(profileModelValue).filter((modelId) => typeof modelId === "string" && modelId.length > 0) : [];
-    providerInventoryObservations = providerInventoryObservations.filter((item) => item.profileId !== profile.id);
-    providerInventoryObservations.push({ ...identity, status: modelIds.length ? "available" : "unavailable", modelIds, checkedAt: new Date().toISOString() });
-  } catch {
-    if (providerInventoryRequestEpochs.get(profile.id) !== requestEpoch) return;
-    providerInventoryObservations = providerInventoryObservations.filter((item) => item.profileId !== profile.id);
-    providerInventoryObservations.push({ ...identity, status: "unavailable", modelIds: [], checkedAt: new Date().toISOString() });
-  } finally {
-    if (providerInventoryRequestEpochs.get(profile.id) === requestEpoch) {
-      providerInventoryRequestEpochs.delete(profile.id);
-      renderProviderReadiness();
-    }
-  }
-}
-function renderProviderProfiles() {
-  renderProviderReadiness();
-  elements.providerProfileList.replaceChildren();
-  if (!providers.length) {
-    elements.providerProfileList.innerHTML = '<p class="muted">No provider profiles have been added.</p>';
-    return;
-  }
-  for (const provider of providers) {
-    const row = document.createElement("div");
-    row.className = "provider-profile";
-    const details = document.createElement("div");
-    const title = document.createElement("strong");
-    title.textContent = provider.name;
-    const summary = document.createElement("span");
-    const selection = providerTextSelection(provider);
-    const selectionLabel = selection.kind === "openrouter_preset" ? `Preset · ${selection.slug}` : `Model · ${selection.modelId || "not selected"}`;
-    summary.textContent = `${provider.providerRole} · ${providerTypeLabel(provider.providerType)} · ${selectionLabel} · ${Number(provider.requestTimeoutMs || 300000) / 60000} min timeout`;
-    details.append(title, summary);
-    if (provider.providerRole === "intent") {
-      const retired = document.createElement("span");
-      retired.className = "default-badge";
-      retired.textContent = "Retired classifier profile · retained for historical provenance";
-      details.append(retired);
-      row.append(details);
-      elements.providerProfileList.append(row);
-      continue;
-    }
-    const actions = document.createElement("div");
-    actions.className = "button-row";
-    const edit = document.createElement("button");
-    edit.type = "button";
-    edit.className = "button secondary";
-    edit.textContent = "Edit";
-    edit.addEventListener("click", () => beginProviderEdit(provider));
-    actions.append(edit);
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "button danger";
-    remove.textContent = "Delete";
-    remove.addEventListener("click", async () => {
-      const impact = "Campaign assignments and provider-linked jobs, chains, or derived data may be removed.";
-      if (!window.confirm(`Delete provider profile “${provider.name}”? ${impact}`)) return;
-      remove.disabled = true;
-      try {
-        await api(`/api/v1/providers/${provider.id}`, { method: "DELETE" });
-        if (editingProviderId === provider.id) resetProviderForm();
-        await loadProviders();
-        providerMessage(`${provider.name} deleted. Campaigns now use another default profile when available.`, "success");
-      } catch (error) {
-        providerMessage(error.message || String(error), "error");
-        remove.disabled = false;
-      }
-    });
-    actions.append(remove);
-    const implicitlyDefault = enabledProviders(provider.providerRole).length === 1;
-    if (provider.isDefault || implicitlyDefault) {
-      const badge = document.createElement("span");
-      badge.className = "default-badge";
-      badge.textContent = provider.isDefault ? "System default" : "Default (only profile)";
-      details.append(badge);
-      row.append(details, actions);
-    } else {
-      const makeDefault = document.createElement("button");
-      makeDefault.type = "button";
-      makeDefault.className = "button secondary";
-      makeDefault.textContent = "Make default";
-      makeDefault.addEventListener("click", async () => {
-        makeDefault.disabled = true;
-        await api(`/api/v1/providers/${provider.id}/default`, { method: "PUT", body: "{}" });
-        await loadProviders();
-        providerMessage(`${provider.name} is now the default ${provider.providerRole} profile.`, "success");
-      });
-      actions.append(makeDefault);
-      row.append(details, actions);
-    }
-    elements.providerProfileList.append(row);
-  }
-}
-
-const providerPresetsApi = createProviderPresetsApi({
-  async request(specification) {
-    const options = { method: specification.method };
-    if (specification.signal) options.signal = specification.signal;
-    if (specification.body?.kind === "json") options.body = JSON.stringify(specification.body.value);
-    const value = await api(`/api/v1${specification.path}`, options);
-    return specification.responseSchema.parse(value);
-  }
-});
-
-const providerOverrideFields = Object.freeze({
-  temperature: "providerOverrideTemperature",
-  top_p: "providerOverrideTopP",
-  top_k: "providerOverrideTopK",
-  frequency_penalty: "providerOverrideFrequencyPenalty",
-  presence_penalty: "providerOverridePresencePenalty",
-  repetition_penalty: "providerOverrideRepetitionPenalty",
-  min_p: "providerOverrideMinP",
-  top_a: "providerOverrideTopA",
-  seed: "providerOverrideSeed",
-  max_tokens: "providerOverrideMaxTokens",
-  max_completion_tokens: "providerOverrideMaxCompletionTokens"
-});
-
-function providerTextSelection(provider = null) {
-  if (provider?.textSelection?.kind === "openrouter_preset" || provider?.textSelection?.kind === "model") return provider.textSelection;
-  const value = String(provider?.defaultModel || "");
-  const match = /^@preset\/([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)$/u.exec(value);
-  return match ? { kind: "openrouter_preset", slug: match[1] } : { kind: "model", modelId: value };
-}
-
-function providerSelectionAuthority(provider = null) {
-  return {
-    profileRevision: provider ? `${provider.id}:${provider.updatedAt || "saved"}` : "new",
-    configurationRevision: JSON.stringify(provider?.configuration || {}),
-    credentialRevision: `${provider?.hasApiKey === true}:${providerSelectionCredentialRevision}`
-  };
-}
-
-function initializeProviderSelectionEditor(provider = null) {
-  abortProviderPresetRequests();
-  const authority = providerSelectionAuthority(provider);
-  providerSelectionEditor = createSelectionEditorState({
-    savedSelection: providerTextSelection(provider),
-    responseFormatPolicy: provider?.configuration?.textResponseFormatPolicy || "required",
-    ...(provider?.configuration?.textExecutionOverrides ? { textExecutionOverrides: provider.configuration.textExecutionOverrides } : {}),
-    ...authority
-  });
-  renderProviderSelectionEditor();
-}
-
-function activeProviderSelectionDraft() {
-  if (!providerSelectionEditor) return null;
-  return providerSelectionEditor.mode === "model" ? providerSelectionEditor.modelDraft : providerSelectionEditor.presetDraft;
-}
-
-function syncProviderSelectionSupport() {
-  if (!elements.providerTextSelectionMode) return;
-  const eligible = nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
-  const candidate = elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
-  elements.providerTextSelectionMode.classList.toggle("hidden", !eligible);
-  elements.providerTextSelectionMode.hidden = !eligible;
-  elements.providerTextSelectionSupport.classList.toggle("hidden", !candidate || eligible);
-  elements.providerTextSelectionSupport.hidden = !candidate || eligible;
-  elements.providerTextSelectionSupport.textContent = nativeTextExecutionPlansSupportState === "loading"
-    ? "Checking whether this server supports native Model/Preset selection…"
-    : "This server does not advertise native text execution plans. The saved selection will be preserved when you save other settings.";
-  renderProviderSelectionEditor();
-}
-
-function setProviderSelectionState(event) {
-  if (!providerSelectionEditor) return;
-  if (event.type === "modeChanged" || event.type === "authorityChanged") abortProviderPresetRequests();
-  if (event.type === "presetDraftChanged") abortProviderPresetRequests({ list: false });
-  providerSelectionEditor = reduceSelectionEditor(providerSelectionEditor, event);
-  renderProviderSelectionEditor();
-}
-
-function abortProviderPresetRequests({ list = true, detail = true } = {}) {
-  if (list) { providerPresetListController?.abort(); providerPresetListController = null; }
-  if (detail) { providerPresetDetailController?.abort(); providerPresetDetailController = null; }
-}
-
-function formatPresetObject(value) {
-  const entries = Object.entries(value || {});
-  return entries.length ? entries.map(([key, item]) => `${key}: ${Array.isArray(item) ? item.join(" → ") : String(item)}`).join(" · ") : "Provider defaults";
-}
-
-function renderProviderPresetDetail() {
-  const detail = providerSelectionEditor?.detail.value;
-  const presetMode = nativeTextExecutionPlansSupportState === "supported" && providerSelectionEditor?.mode === "preset";
-  elements.providerPresetDetail.classList.toggle("hidden", !presetMode);
-  elements.providerPresetDetail.hidden = !presetMode;
-  if (!presetMode) return;
-  if (providerSelectionEditor.detail.busy) {
-    elements.providerPresetPrompt.textContent = "Loading preset details…";
-    return;
-  }
-  if (providerSelectionEditor.detail.error) {
-    elements.providerPresetPrompt.textContent = `Preset details are unavailable (${providerSelectionEditor.detail.error}${providerSelectionEditor.detail.errorField ? `: ${providerSelectionEditor.detail.errorField}` : ""}).`;
-    return;
-  }
-  if (!detail) {
-    elements.providerPresetPrompt.textContent = "Choose a preset to inspect its standard prompt.";
-    elements.providerPresetVersion.textContent = "Unknown";
-    elements.providerPresetModels.textContent = "Unknown";
-    elements.providerPresetPolicy.textContent = "Unknown";
-    elements.providerPresetLimits.textContent = "Unknown";
-    elements.providerPresetParameters.textContent = "Inherited";
-    return;
-  }
-  elements.providerPresetPrompt.textContent = detail.standardPrompt || "No standard prompt configured.";
-  elements.providerPresetVersion.textContent = `${detail.version} · ${detail.versionId}`;
-  elements.providerPresetModels.textContent = detail.candidateModelIds.length ? detail.candidateModelIds.join(" → ") : "No configured model candidates";
-  elements.providerPresetPolicy.textContent = formatPresetObject(detail.providerPolicy);
-  const limit = (value) => value === null ? "Unknown" : number(value);
-  elements.providerPresetLimits.textContent = `Configured max_tokens: ${limit(detail.limits.configuredMaxTokens)} · configured max_completion_tokens: ${limit(detail.limits.configuredMaxCompletionTokens)} · effective max output: ${limit(detail.limits.effectiveMaxOutputTokens)} · context capacity unknown until execution`;
-  elements.providerPresetParameters.textContent = formatPresetObject(detail.parameters);
-}
-
-function renderProviderOverrides() {
-  const eligible = nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
-  elements.providerTextOverrides.classList.toggle("hidden", !eligible);
-  elements.providerTextOverrides.hidden = !eligible;
-  if (!eligible || !providerSelectionEditor) return;
-  const intent = activeProviderSelectionDraft().overrideIntent;
-  elements.providerTextOverrideMode.value = intent.mode;
-  elements.providerTextOverrideFields.classList.toggle("hidden", intent.mode !== "explicit");
-  elements.providerTextOverrideFields.hidden = intent.mode !== "explicit";
-  const overrides = intent.mode === "explicit" ? intent.value : intent.mode === "preserve" ? intent.value || {} : {};
-  for (const [key, id] of Object.entries(providerOverrideFields)) elements[id].value = overrides.parameters?.[key] ?? "";
-  elements.providerOverrideContextTokens.value = overrides.conservativeContextWindowTokens ?? "";
-}
-
-function renderProviderSelectionEditor() {
-  if (!providerSelectionEditor || !elements.providerSelectionModel) return;
-  const eligible = nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
-  const illustration = elements.providerRole.value === "image";
-  const presetMode = providerSelectionEditor.mode === "preset";
-  elements.providerSelectionModel.checked = !presetMode;
-  elements.providerSelectionPreset.checked = presetMode;
-  elements.providerModelSelectionField.classList.toggle("hidden", presetMode);
-  elements.providerModelSelectionField.hidden = presetMode;
-  elements.providerPresetSelectionPanel.classList.toggle("hidden", !eligible || !presetMode);
-  elements.providerPresetSelectionPanel.hidden = !eligible || !presetMode;
-  elements.providerResponseFormatPolicyField.classList.toggle("hidden", illustration || presetMode);
-  elements.providerResponseFormatPolicyField.hidden = illustration || presetMode;
-  elements.providerResponseFormatCapability.classList.toggle("hidden", illustration || presetMode);
-  elements.providerResponseFormatCapability.hidden = illustration || presetMode;
-  if (!presetMode) {
-    elements.providerDefaultModel.value = providerSelectionEditor.modelDraft.modelId;
-    elements.providerResponseFormatPolicy.value = providerSelectionEditor.modelDraft.responseFormatPolicy;
-    elements.providerResponseFormatPolicyNote.textContent = providerSelectionEditor.modelDraft.responseFormatPolicy === "required"
-      ? "Required is the default for new Model work and blocks before dispatch when exact current schema evidence is unavailable."
-      : `${providerSelectionEditor.modelDraft.responseFormatPolicy === "legacy" ? "Legacy JSON" : "Automatic schema"} is an explicit historical compatibility override for this Model draft. New selections default to Required.`;
-  } else {
-    const draftSlug = providerSelectionEditor.presetDraft.slug;
-    const selectedExists = providerSelectionEditor.list.presets.some((preset) => preset.slug === draftSlug);
-    elements.providerPresetSelect.replaceChildren(new Option("Choose a preset", ""));
-    if (draftSlug && !selectedExists) {
-      const label = providerSelectionEditor.savedChoiceAvailability === "unavailable" ? `${draftSlug} · unavailable` : `${draftSlug} · saved selection`;
-      elements.providerPresetSelect.append(new Option(label, draftSlug));
-    }
-    for (const preset of providerSelectionEditor.list.presets) elements.providerPresetSelect.append(new Option(`${preset.name} · ${preset.status}`, preset.slug));
-    elements.providerPresetSelect.value = draftSlug;
-    elements.providerPresetSelect.disabled = providerSelectionEditor.list.busy;
-    elements.refreshProviderPresets.disabled = providerSelectionEditor.list.busy;
-    elements.loadMoreProviderPresets.classList.toggle("hidden", providerSelectionEditor.list.nextOffset === null);
-    elements.loadMoreProviderPresets.hidden = providerSelectionEditor.list.nextOffset === null;
-    elements.loadMoreProviderPresets.disabled = providerSelectionEditor.list.busy;
-    if (providerSelectionEditor.list.busy) elements.providerPresetStatus.textContent = "Loading OpenRouter presets…";
-    else if (providerSelectionEditor.list.error) elements.providerPresetStatus.textContent = `Preset discovery failed (${providerSelectionEditor.list.error}${providerSelectionEditor.list.errorField ? `: ${providerSelectionEditor.list.errorField}` : ""}). Your selection is unchanged.`;
-    else if (providerSelectionEditor.savedChoiceAvailability === "unavailable") elements.providerPresetStatus.textContent = `Saved preset ${draftSlug} is unavailable. It remains selected until you explicitly change it.`;
-    else if (providerSelectionEditor.list.presets.length) elements.providerPresetStatus.textContent = `${providerSelectionEditor.list.presets.length} of ${providerSelectionEditor.list.totalCount} presets loaded.`;
-    else elements.providerPresetStatus.textContent = "No presets loaded. Choose Refresh to query OpenRouter.";
-  }
-  renderProviderPresetDetail();
-  renderProviderOverrides();
-}
-
-function providerPresetCandidate() {
-  const existing = editingProviderId ? providers.find((item) => item.id === editingProviderId) : null;
-  const discoverySelection = { kind: "model", modelId: providerSelectionEditor.modelDraft.modelId };
-  return {
-    name: elements.providerName.value || "Unsaved OpenRouter provider",
-    providerType: "openrouter",
-    providerRole: "text",
-    baseUrl: elements.providerBaseUrl.value,
-    defaultModel: discoverySelection.modelId,
-    textSelection: discoverySelection,
-    contextWindowTokens: Number(elements.providerContextTokens.value),
-    maxOutputTokens: Number(elements.providerOutputTokens.value),
-    temperature: Number(elements.providerTemperature.value),
-    requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
-    ...(elements.providerApiKey.value ? { apiKey: elements.providerApiKey.value } : {}),
-    enabled: elements.providerEnabled.checked,
-    isDefault: elements.providerIsDefault.checked,
-    configuration: { ...(existing?.configuration || {}), textResponseFormatPolicy: "required", streaming: elements.providerStreaming.checked }
-  };
-}
-
-function providerPresetDiagnostic(error) {
-  const code = error?.details?.code;
-  const knownCodes = ["authentication", "discovery_unavailable", "preset_missing", "preset_inactive", "preset_config_unsupported", "invalid_response"];
-  const diagnostic = knownCodes.includes(code) ? code : error?.statusCode === 401 || error?.statusCode === 403 ? "authentication" : error?.statusCode === 404 ? "preset_missing" : "discovery_unavailable";
-  const field = error?.details?.field;
-  return { error: diagnostic, ...(diagnostic === "preset_config_unsupported" && typeof field === "string" && field.length <= 64 && /^[a-z_]+(?:\.[a-z_]+){0,2}$/u.test(field) ? { field } : {}) };
-}
-
-function useSavedProviderPresetApi() {
-  const profile = providers.find((item) => item.id === editingProviderId);
-  return Boolean(profile && !elements.providerApiKey.value && profile.baseUrl === elements.providerBaseUrl.value);
-}
-
-async function loadProviderPresets({ offset = 0, refresh = false } = {}) {
-  if (!providerSelectionEditor || providerSelectionEditor.mode !== "preset") return;
-  providerPresetListController?.abort();
-  const controller = new AbortController();
-  providerPresetListController = controller;
-  const requestId = `preset-list-${++providerSelectionRequestSequence}`;
-  setProviderSelectionState({ type: "requestStarted", requestId, mode: "preset", offset });
-  try {
-    const page = useSavedProviderPresetApi()
-      ? await providerPresetsApi.listSaved(editingProviderId, { offset, limit: 25, refresh }, controller.signal)
-      : await providerPresetsApi.listCandidate(providerPresetCandidate(), { offset, limit: 25 }, controller.signal);
-    setProviderSelectionState({ type: "listLoaded", requestId, page });
-  } catch (error) {
-    if (!controller.signal.aborted) setProviderSelectionState({ type: "requestFailed", requestId, ...providerPresetDiagnostic(error) });
-  } finally {
-    if (providerPresetListController === controller) providerPresetListController = null;
-    setProviderSelectionState({ type: "requestFinished", requestId });
-  }
-}
-
-async function loadProviderPresetDetail(slug) {
-  if (!providerSelectionEditor || providerSelectionEditor.mode !== "preset" || !slug) return;
-  providerPresetDetailController?.abort();
-  const controller = new AbortController();
-  providerPresetDetailController = controller;
-  const requestId = `preset-detail-${++providerSelectionRequestSequence}`;
-  setProviderSelectionState({ type: "detailRequestStarted", requestId, slug });
-  try {
-    const detail = useSavedProviderPresetApi()
-      ? await providerPresetsApi.detailSaved(editingProviderId, slug, controller.signal)
-      : await providerPresetsApi.detailCandidate(providerPresetCandidate(), slug, controller.signal);
-    setProviderSelectionState({ type: "detailLoaded", requestId, detail });
-  } catch (error) {
-    if (!controller.signal.aborted) setProviderSelectionState({ type: "detailFailed", requestId, ...providerPresetDiagnostic(error) });
-  } finally {
-    if (providerPresetDetailController === controller) providerPresetDetailController = null;
-    setProviderSelectionState({ type: "detailRequestFinished", requestId });
-  }
-}
-
-function currentProviderExplicitOverrides() {
-  const parameters = {};
-  for (const [key, id] of Object.entries(providerOverrideFields)) {
-    const raw = elements[id].value;
-    if (raw !== "") parameters[key] = Number(raw);
-  }
-  const overrides = {};
-  if (Object.keys(parameters).length) overrides.parameters = parameters;
-  if (elements.providerOverrideContextTokens.value !== "") overrides.conservativeContextWindowTokens = Number(elements.providerOverrideContextTokens.value);
-  return overrides;
-}
-
-function updateProviderOverrideIntent() {
-  if (!providerSelectionEditor) return;
-  const mode = elements.providerTextOverrideMode.value;
-  const intent = mode === "inherit" ? { mode: "inherit" } : mode === "explicit" ? { mode: "explicit", value: currentProviderExplicitOverrides() } : { mode: "preserve", ...(activeProviderSelectionDraft().overrideIntent.value ? { value: activeProviderSelectionDraft().overrideIntent.value } : {}) };
-  setProviderSelectionState({ type: providerSelectionEditor.mode === "model" ? "modelOverrideIntentChanged" : "presetOverrideIntentChanged", intent });
-}
-
-function resetProviderForm() {
-  clearResponseFormatCapability();
-  editingProviderId = "";
-  elements.providerForm.reset();
-  elements.providerName.value = nextAvailableProviderName("Local LM Studio");
-  elements.providerType.value = "lmstudio";
-  elements.providerRole.value = "text";
-  elements.providerBaseUrl.value = DEFAULT_LM_STUDIO_BASE_URL;
-  elements.providerContextTokens.value = "32768";
-  elements.providerOutputTokens.value = "4096";
-  elements.providerTemperature.value = "0.8";
-  elements.providerResponseFormatPolicy.value = "required";
-  elements.providerRequestTimeoutMinutes.value = "5";
-  applySogniConfiguration(SOGNI_DEFAULT_CONFIGURATION);
-  elements.providerAdvancedSettings.open = false;
-  elements.providerStreaming.checked = false;
-  elements.providerEnabled.checked = true;
-  elements.providerType.disabled = false;
-  elements.providerRole.disabled = false;
-  elements.saveProvider.textContent = "Save provider";
-  elements.cancelProviderEdit.classList.remove("hidden");
-  discoveredProfileModels = [];
-  elements.providerModelPickerList.replaceChildren();
-  elements.providerContextTokens.readOnly = false;
-  elements.providerContextSource.textContent = "Editable until model discovery supplies a context length.";
-  elements.providerContextSource.className = "field-note";
-  initializeProviderSelectionEditor();
-  syncProviderRoleSettings();
-}
-
-function clearResponseFormatCapability() {
-  responseFormatCapabilitySequence += 1;
-  responseFormatCapabilityProfile = null;
-  if (!elements.providerResponseFormatCapability) return;
-  elements.providerResponseFormatCapability.textContent = "Schema compatibility is unknown until the server returns a capability summary.";
-  elements.providerResponseFormatCapability.className = "text-model-setting field-note";
-}
-
-function storedProfileMatchesResponseFormatIdentity() {
-  const profile = providers.find((item) => item.id === editingProviderId);
-  if (!profile) return false;
-  return profile.providerRole === elements.providerRole.value
-    && profile.providerType === elements.providerType.value
-    && profile.baseUrl === elements.providerBaseUrl.value
-    && (profile.defaultModel || "") === elements.providerDefaultModel.value
-    && Boolean(profile.configuration?.streaming || profile.configuration?.streamingSupport) === elements.providerStreaming.checked
-    && (profile.configuration?.textResponseFormatPolicy || "required") === elements.providerResponseFormatPolicy.value;
-}
-
-function responseFormatCapabilityIdentity() {
-  return [editingProviderId, elements.providerRole.value, elements.providerType.value, elements.providerBaseUrl.value.trim(), elements.providerDefaultModel.value.trim(), elements.providerStreaming.checked, elements.providerResponseFormatPolicy.value].join("\u001f");
-}
-
-function capabilityTime(value) {
-  const date = typeof value === "string" ? new Date(value) : null;
-  return date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : null;
-}
-
-function safeResponseFormatReason(reason) {
-  if (reason === "schema_incompatible") return "The current tracker schema is incompatible with this adapter.";
-  if (reason === "discovery_unavailable") return "Server verification is unavailable.";
-  return "Server verification has not confirmed this capability.";
-}
-
-function renderResponseFormatCapability(capability, identity = responseFormatCapabilityIdentity()) {
-  if (identity !== responseFormatCapabilityIdentity() || !elements.providerResponseFormatCapability) return;
-  const status = elements.providerResponseFormatCapability;
-  const operations = Array.isArray(capability?.operations) ? capability.operations : [];
-  const now = Date.now();
-  const verified = operations.filter((operation) => operation?.status === "verified" && capabilityTime(operation.expiresAt) && new Date(operation.expiresAt).getTime() > now);
-  const unsupported = operations.find((operation) => operation?.status === "unsupported");
-  const advertised = operations.some((operation) => operation?.status === "advertised");
-  const advertisedAt = capabilityTime(capability?.advertisedAt);
-  if (verified.length && unsupported) {
-    const verifiedCoverage = verified.map((operation) => operation.operation === "continuity_review" ? "continuity review" : operation.operation).join(", ");
-    const unavailableOperation = unsupported.operation === "continuity_review" ? "continuity review" : unsupported.operation;
-    status.textContent = `Mixed schema coverage: verified for ${verifiedCoverage}; ${unavailableOperation} is unavailable. ${safeResponseFormatReason(unsupported.reason)}`;
-    status.className = "text-model-setting field-note warning";
-  } else if (verified.length) {
-    const coverage = verified.map((operation) => `${operation.operation === "continuity_review" ? "continuity review" : operation.operation}${operation.streaming ? " streaming" : ""}`).join(", ");
-    const expiresAt = capabilityTime(verified.map((operation) => operation.expiresAt).sort()[0]);
-    status.textContent = `Verified schema coverage: ${coverage}${advertisedAt ? `, discovered ${advertisedAt}` : ""}${expiresAt ? `, expires ${expiresAt}` : ""}. Server verification is required before schema use.`;
-    status.className = "text-model-setting field-note success";
-  } else if (unsupported) {
-    status.textContent = `Schema support is unavailable. ${safeResponseFormatReason(unsupported.reason)}`;
-    status.className = "text-model-setting field-note warning";
-  } else if (advertised) {
-    status.textContent = `Schema support is advertised${advertisedAt ? ` from ${advertisedAt}` : ""}, but is not verified. Required blocks a new job before dispatch.`;
-    status.className = "text-model-setting field-note warning";
-  } else {
-    status.textContent = "Schema compatibility is unknown. Required blocks a new job before dispatch until the server verifies it.";
-    status.className = "text-model-setting field-note warning";
-  }
-}
-
-function nextAvailableProviderName(baseName) {
-  const existingNames = new Set(providers.map((provider) => provider.name.trim().toLocaleLowerCase()));
-  if (!existingNames.has(baseName.toLocaleLowerCase())) return baseName;
-  let suffix = 2;
-  while (existingNames.has(`${baseName} ${suffix}`.toLocaleLowerCase())) suffix += 1;
-  return `${baseName} ${suffix}`;
-}
-
-function syncProviderRoleSettings(options = {}) {
-  const sogniRest = elements.providerType.value === "sogni";
-  const sogniSdk = elements.providerType.value === "sogni_sdk";
-  const sogni = sogniRest || sogniSdk;
-  if (sogni) elements.providerRole.value = "image";
-  const illustration = elements.providerRole.value === "image";
-  elements.providerRoleNote.textContent = elements.providerRole.value === "image"
-      ? "Illustration providers are independent from story text and use separate credentials."
-      : elements.providerRole.value === "embedding"
-        ? "Embedding providers index Chronicle memory and do not generate narration."
-        : "Story text providers generate narration.";
-  elements.providerStreaming.disabled = sogni;
-  if (sogni) elements.providerStreaming.checked = false;
-  elements.providerRole.disabled = Boolean(editingProviderId) || sogni;
-  for (const field of document.querySelectorAll(".text-model-setting")) {
-    field.classList.toggle("hidden", illustration);
-    field.hidden = illustration;
-    field.setAttribute("aria-hidden", String(illustration));
-  }
-  if (illustration) clearResponseFormatCapability();
-  elements.providerSogniSettings.classList.toggle("hidden", !sogni);
-  elements.providerSogniSettings.setAttribute("aria-hidden", String(!sogni));
-  for (const control of elements.providerSogniSettings.querySelectorAll("input, select")) control.disabled = !sogni;
-  elements.providerSogniSdkSettings.classList.toggle("hidden", !sogniSdk);
-  elements.providerSogniSdkSettings.setAttribute("aria-hidden", String(!sogniSdk));
-  for (const control of elements.providerSogniSdkSettings.querySelectorAll("input, select")) control.disabled = !sogniSdk;
-  elements.providerSogniRestNote.classList.toggle("hidden", !sogniRest);
-  elements.providerSogniSdkNote.classList.toggle("hidden", !sogniSdk);
-  elements.providerSogniWebpFormat.hidden = !sogniSdk;
-  elements.providerSogniWebpFormat.disabled = !sogniSdk;
-  if (sogniRest && elements.providerSogniOutputFormat.value === "webp") elements.providerSogniOutputFormat.value = "png";
-  syncProviderSelectionSupport();
-}
-
-function isIllustrationProviderForm() {
-  return elements.providerRole.value === "image";
-}
-
-function applySogniConfiguration(configuration = {}, providerType = elements.providerType.value) {
-  const config = { ...(providerType === "sogni_sdk" ? SOGNI_SDK_DEFAULT_CONFIGURATION : SOGNI_DEFAULT_CONFIGURATION), ...configuration };
-  elements.providerSogniWidth.value = String(config.defaultWidth);
-  elements.providerSogniHeight.value = String(config.defaultHeight);
-  elements.providerSogniAspectRatio.value = config.defaultAspectRatio;
-  elements.providerSogniImageCount.value = String(config.defaultImageCount);
-  elements.providerSogniOutputFormat.value = config.defaultOutputFormat;
-  elements.providerSogniQuality.value = config.defaultQuality;
-  elements.providerSogniNetwork.value = config.network || "fast";
-  elements.providerSogniTokenType.value = config.tokenType || "auto";
-  elements.providerSogniContentFilter.value = config.contentFilter || "enabled";
-  const configuredSizePreset = config.defaultSizePreset || "custom";
-  elements.providerSogniSizePreset.replaceChildren(new Option("Custom dimensions", "custom"));
-  if (configuredSizePreset !== "custom") elements.providerSogniSizePreset.append(new Option(configuredSizePreset, configuredSizePreset));
-  elements.providerSogniSizePreset.value = configuredSizePreset;
-  elements.providerSogniSteps.value = config.defaultSteps ?? "";
-  elements.providerSogniGuidance.value = config.defaultGuidance ?? "";
-  elements.providerSogniSeed.value = config.defaultSeed ?? "";
-  elements.providerSogniSampler.replaceChildren(new Option("Model default", ""));
-  if (config.defaultSampler) elements.providerSogniSampler.append(new Option(config.defaultSampler, config.defaultSampler));
-  elements.providerSogniSampler.value = config.defaultSampler || "";
-  elements.providerSogniScheduler.replaceChildren(new Option("Model default", ""));
-  if (config.defaultScheduler) elements.providerSogniScheduler.append(new Option(config.defaultScheduler, config.defaultScheduler));
-  elements.providerSogniScheduler.value = config.defaultScheduler || "";
-  elements.providerSogniPreviewCount.value = String(config.defaultPreviewCount || 0);
-  elements.providerSogniPollIntervalSeconds.value = String(Number(config.pollIntervalMs) / 1000);
-  elements.providerSogniMaximumPollIntervalSeconds.value = String(Number(config.maximumPollIntervalMs) / 1000);
-  elements.providerSogniGenerationTimeoutSeconds.value = String(Number(config.generationTimeoutMs) / 1000);
-  elements.providerSogniMaximumAttempts.value = String(config.maximumAttempts);
-  elements.providerSogniModelDiscoveryEnabled.checked = config.modelDiscoveryEnabled !== false;
-}
-
-function providerConfigurationFromForm(existingConfig = {}) {
-  const configuration = { ...existingConfig, streaming: elements.providerStreaming.checked };
-  if (nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter" && providerSelectionEditor) {
-    const patch = serializeSelectionEditorPatch(providerSelectionEditor);
-    const presetMode = providerSelectionEditor.mode === "preset";
-    const hasSavedFormatPolicy = Object.prototype.hasOwnProperty.call(existingConfig, "textResponseFormatPolicy");
-    configuration.textResponseFormatPolicy = presetMode && hasSavedFormatPolicy
-      ? existingConfig.textResponseFormatPolicy
-      : patch.configuration.textResponseFormatPolicy;
-    if (Object.prototype.hasOwnProperty.call(patch.configuration, "textExecutionOverrides")) {
-      configuration.textExecutionOverrides = patch.configuration.textExecutionOverrides;
-    }
-    return configuration;
-  }
-  const hasExplicitResponseFormatPolicy = Object.prototype.hasOwnProperty.call(existingConfig, "textResponseFormatPolicy");
-  if (elements.providerRole.value === "text" && (elements.providerResponseFormatPolicy.value !== "required" || hasExplicitResponseFormatPolicy)) {
-    configuration.textResponseFormatPolicy = elements.providerResponseFormatPolicy.value;
-  } else {
-    delete configuration.textResponseFormatPolicy;
-  }
-  const providerType = elements.providerType.value;
-  if (providerType !== "sogni" && providerType !== "sogni_sdk") return configuration;
-  const common = {
-    ...configuration,
-    defaultWidth: Number(elements.providerSogniWidth.value),
-    defaultHeight: Number(elements.providerSogniHeight.value),
-    defaultAspectRatio: elements.providerSogniAspectRatio.value.trim(),
-    defaultImageCount: Number(elements.providerSogniImageCount.value),
-    defaultOutputFormat: elements.providerSogniOutputFormat.value,
-    defaultQuality: elements.providerSogniQuality.value,
-    pollIntervalMs: Math.round(Number(elements.providerSogniPollIntervalSeconds.value) * 1000),
-    maximumPollIntervalMs: Math.round(Number(elements.providerSogniMaximumPollIntervalSeconds.value) * 1000),
-    generationTimeoutMs: Math.round(Number(elements.providerSogniGenerationTimeoutSeconds.value) * 1000),
-    maximumAttempts: Number(elements.providerSogniMaximumAttempts.value),
-    modelDiscoveryEnabled: elements.providerSogniModelDiscoveryEnabled.checked
-  };
-  delete common.sensitiveContentFilter;
-  delete common.workflowSafeContentFilterSupported;
-  if (providerType === "sogni") return common;
-  const sdkConfiguration = {
-    ...common,
-    network: elements.providerSogniNetwork.value,
-    tokenType: elements.providerSogniTokenType.value,
-    contentFilter: elements.providerSogniContentFilter.value,
-    defaultSizePreset: elements.providerSogniSizePreset.value.trim() || "custom",
-    ...(elements.providerSogniSteps.value ? { defaultSteps: Number(elements.providerSogniSteps.value) } : {}),
-    ...(elements.providerSogniGuidance.value ? { defaultGuidance: Number(elements.providerSogniGuidance.value) } : {}),
-    ...(elements.providerSogniSeed.value ? { defaultSeed: Number(elements.providerSogniSeed.value) } : {}),
-    defaultSampler: elements.providerSogniSampler.value.trim(),
-    defaultScheduler: elements.providerSogniScheduler.value.trim(),
-    defaultPreviewCount: Number(elements.providerSogniPreviewCount.value)
-  };
-  for (const key of ["defaultSteps", "defaultGuidance", "defaultSeed"]) {
-    if (!elements[{ defaultSteps: "providerSogniSteps", defaultGuidance: "providerSogniGuidance", defaultSeed: "providerSogniSeed" }[key]].value) delete sdkConfiguration[key];
-  }
-  return sdkConfiguration;
-}
-
-function beginProviderEdit(provider) {
-  const returnFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
-  clearResponseFormatCapability();
-  editingProviderId = provider.id;
-  elements.providerName.value = provider.name;
-  elements.providerType.value = provider.providerType;
-  elements.providerRole.value = provider.providerRole;
-  elements.providerBaseUrl.value = provider.baseUrl;
-  elements.providerApiKey.value = "";
-  elements.providerDefaultModel.value = provider.defaultModel || "";
-  elements.providerContextTokens.value = String(provider.contextWindowTokens);
-  elements.providerOutputTokens.value = String(provider.maxOutputTokens);
-  elements.providerTemperature.value = String(provider.temperature);
-  elements.providerResponseFormatPolicy.value = provider.configuration?.textResponseFormatPolicy || "required";
-  elements.providerRequestTimeoutMinutes.value = String(Number(provider.requestTimeoutMs || 300000) / 60000);
-  applySogniConfiguration(provider.configuration, provider.providerType);
-  elements.providerStreaming.checked = Boolean(provider.configuration?.streaming || provider.configuration?.streamingSupport);
-  elements.providerEnabled.checked = provider.enabled;
-  elements.providerIsDefault.checked = provider.isDefault;
-  elements.providerType.disabled = true;
-  elements.providerRole.disabled = true;
-  elements.saveProvider.textContent = "Save changes";
-  elements.cancelProviderEdit.classList.remove("hidden");
-  discoveredProfileModels = [];
-  responseFormatCapabilityProfile = provider.responseFormatCapability || null;
-  elements.providerModelPickerList.replaceChildren();
-  initializeProviderSelectionEditor(provider);
-  elements.providerAdvancedSettings.open = false;
-  openEditDialog(elements.providerDialog, returnFocusTo);
-  elements.providerName.focus();
-  providerMessage(`Editing ${provider.name}. Leave the API key blank to keep the stored credential.`);
-  syncProviderRoleSettings();
-  renderResponseFormatCapability(responseFormatCapabilityProfile);
-  if (providerSelectionEditor.mode === "preset") {
-    void loadProviderPresets().then(() => loadProviderPresetDetail(providerSelectionEditor?.presetDraft.slug));
-  }
-}
-
 async function loadProviders(preselectId = "", { preserveWorkflowFeedback = false } = {}) {
   ({ providers } = await api("/api/v1/providers"));
   clearDashboardWorkflowError("providers");
   clearWorkflowReadFailure(elements.providerStatus, "providers", "workflowRetryProviders");
-  renderProviderProfiles();
   updateCharacterGeneratorAvailability();
   const currentImportProviderId = elements.providerSelect.value;
   elements.providerSelect.replaceChildren(new Option(defaultProvider("text") ? `Use default · ${defaultProvider("text").name}` : "Use the default text provider", ""));
@@ -6774,277 +5814,22 @@ async function loadProviders(preselectId = "", { preserveWorkflowFeedback = fals
   populateEmbeddingProviderSelect();
 }
 
-async function saveProvider(event) {
-  event.preventDefault();
-  if (providerSaveBusy) return;
-  providerSaveBusy = true;
-  const providerControls = [...elements.providerForm.querySelectorAll("input, select, textarea, button")];
-  const disabledBeforeSave = providerControls.map((control) => control.disabled);
-  providerControls.forEach((control) => { control.disabled = true; });
-  providerMessage("Saving provider profile…");
-  let provider;
-  const wasEditing = Boolean(editingProviderId);
-  try {
-    const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
-    const preservedSelection = providerSelectionEditor ? serializeSelectionEditorPatch(providerSelectionEditor) : null;
-    const nativeSelection = nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter" && providerSelectionEditor
-      ? serializeSelectionEditorPatch(providerSelectionEditor)
-      : null;
-    provider = await api(editingProviderId ? `/api/v1/providers/${editingProviderId}` : "/api/v1/providers", {
-      method: editingProviderId ? "PATCH" : "POST",
-      body: JSON.stringify({
-        name: elements.providerName.value,
-        ...(!editingProviderId ? { providerType: elements.providerType.value, providerRole: elements.providerRole.value } : {}),
-        baseUrl: elements.providerBaseUrl.value,
-        apiKey: elements.providerApiKey.value || undefined,
-        isDefault: elements.providerIsDefault.checked,
-        defaultModel: nativeSelection?.defaultModel ?? preservedSelection?.defaultModel ?? elements.providerDefaultModel.value,
-        ...(nativeSelection ? { textSelection: nativeSelection.textSelection } : {}),
-        ...(!isIllustrationProviderForm() ? {
-          contextWindowTokens: elements.providerContextTokens.value,
-          maxOutputTokens: elements.providerOutputTokens.value,
-          temperature: elements.providerTemperature.value
-        } : {}),
-        requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
-        enabled: elements.providerEnabled.checked,
-        configuration: providerConfigurationFromForm(existingConfig)
-      })
-    });
-  } catch (error) {
-    providerMessage(safeWorkflowFailure("Provider profile could not be saved.", error), "error");
-    providerControls.forEach((control, index) => { control.disabled = disabledBeforeSave[index] ?? false; });
-    providerSaveBusy = false;
-    return;
-  }
-
-  providerInventoryRequestEpochs.set(provider.id, ++providerInventoryRequestSequence);
-  providerInventoryObservations = providerInventoryObservations.filter((item) => item.profileId !== provider.id);
-  resetProviderForm();
-  try {
-    await loadProviders(provider.providerRole === "text" ? provider.id : "");
-    if (provider.providerRole === "embedding") {
-      elements.embeddingProvider.value = provider.id;
-      elements.embeddingModel.value = provider.defaultModel || "";
-      elements.embeddingModel.disabled = false;
-      elements.discoverEmbeddingModels.disabled = false;
-      discoveredEmbeddingModels = [];
-    }
-    if (provider.providerRole === "image") {
-      elements.campaignImageProvider.value = provider.id;
-      elements.illustrationModel.value = provider.defaultModel || "";
-      elements.discoverIllustrationModels.disabled = false;
-    }
-  } catch (error) {
-    providerMessage(`${provider.name} was ${wasEditing ? "updated" : "saved"}.`, "success");
-    reportProviderListReadFailure("The provider list could not be refreshed. Retry provider profiles to confirm the saved profile.");
-    if (elements.providerDialog) elements.providerDialog.close();
-    providerControls.forEach((control, index) => { control.disabled = disabledBeforeSave[index] ?? false; });
-    providerSaveBusy = false;
-    return;
-  }
-
-  providerMessage(`${provider.name} ${wasEditing ? "updated" : "saved"}. Credentials, if supplied, were encrypted before database storage.`, "success");
-  if (elements.providerDialog) elements.providerDialog.close();
-  providerControls.forEach((control, index) => { control.disabled = disabledBeforeSave[index] ?? false; });
-  providerSaveBusy = false;
-}
-async function refreshProviderModelsFromForm() {
-  const sequence = ++responseFormatCapabilitySequence;
-  const identity = responseFormatCapabilityIdentity();
-  clearResponseFormatCapability();
-  elements.refreshProviderModels.disabled = true;
-  elements.refreshProviderModelDialog.disabled = true;
-  providerMessage("Discovering models from this provider profile…");
-  elements.providerModelPickerStatus.textContent = "Discovering active and inactive models from the endpoint…";
-  elements.providerModelPickerStatus.className = "status";
-  try {
-    const useStoredProfile = editingProviderId && !elements.providerApiKey.value;
-    const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
-    const result = useStoredProfile
-      ? await api(`/api/v1/providers/${editingProviderId}/models?refresh=true`)
-      : await api("/api/v1/providers/discover-models", {
-        method: "POST",
-        body: JSON.stringify({
-          name: elements.providerName.value || "Unsaved provider",
-          providerType: elements.providerType.value,
-          providerRole: elements.providerRole.value,
-          baseUrl: elements.providerBaseUrl.value,
-          apiKey: elements.providerApiKey.value || undefined,
-          defaultModel: elements.providerDefaultModel.value,
-          ...(!isIllustrationProviderForm() ? {
-            contextWindowTokens: elements.providerContextTokens.value,
-            maxOutputTokens: elements.providerOutputTokens.value,
-            temperature: elements.providerTemperature.value
-          } : {}),
-          requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
-          enabled: elements.providerEnabled.checked,
-          isDefault: elements.providerIsDefault.checked,
-          configuration: providerConfigurationFromForm(existingConfig)
-        })
-    });
-    if (sequence !== responseFormatCapabilitySequence - 1 || identity !== responseFormatCapabilityIdentity()) return;
-    discoveredProfileModels = result.models || [];
-    discoveredProfileModelsIdentity = identity;
-    const orderedModels = [...discoveredProfileModels].sort((left, right) => Number(right.loaded) - Number(left.loaded) || left.displayName.localeCompare(right.displayName));
-    const current = elements.providerDefaultModel.value.trim();
-    const selected = orderedModels.find((model) => profileModelValue(model) === current || model.id === current)
-      || orderedModels.find((model) => model.loaded)
-      || orderedModels[0]
-      || null;
-    if (selected) {
-      const value = profileModelValue(selected);
-      elements.providerDefaultModel.value = value;
-      applySogniSdkModelOptions(selected);
-    }
-    const responseFormatIdentityMatches = discoveredProfileModelsIdentity === responseFormatCapabilityIdentity() && storedProfileMatchesResponseFormatIdentity();
-    const selectedCapability = responseFormatIdentityMatches
-      ? selected?.responseFormatCapability || (responseFormatCapabilityProfile?.model === elements.providerDefaultModel.value ? responseFormatCapabilityProfile : null)
-      : null;
-    renderResponseFormatCapability(selectedCapability, identity);
-    applyProfileModelContext();
-    renderProviderModelPicker();
-    elements.providerModelPickerStatus.textContent = `${discoveredProfileModels.length} model entr${discoveredProfileModels.length === 1 ? "y" : "ies"} found. Active models are listed first.`;
-    elements.providerModelPickerStatus.className = "status success";
-    providerMessage(`${discoveredProfileModels.length} model entr${discoveredProfileModels.length === 1 ? "y" : "ies"} found. Select one from Default model and save the profile.`, "success");
-  } catch (error) {
-    if (sequence !== responseFormatCapabilitySequence - 1 || identity !== responseFormatCapabilityIdentity()) return;
-    clearResponseFormatCapability();
-    providerMessage(error.message || String(error), "error");
-    elements.providerModelPickerStatus.textContent = error.message || String(error);
-    elements.providerModelPickerStatus.className = "status error";
-  } finally {
-    elements.refreshProviderModels.disabled = false;
-    elements.refreshProviderModelDialog.disabled = false;
-  }
-}
-
 function profileModelValue(model) {
   return String(model?.loaded ? model.instanceId || model.id : model?.id || "");
 }
 
-function activeModelPickerModels() {
-  return providerModelPickerTarget === "embedding" ? discoveredEmbeddingModels : discoveredProfileModels;
-}
-
-function activeModelPickerValue() {
-  return providerModelPickerTarget === "embedding"
-    ? elements.embeddingModel.value.trim()
-    : elements.providerDefaultModel.value.trim();
-}
-
 function chooseProviderModel(value) {
-  if (providerModelPickerTarget === "embedding") {
-    elements.embeddingModel.value = value;
-    const model = discoveredEmbeddingModels.find((item) => profileModelValue(item) === value || item.id === value);
-    elements.providerModelDialog.close();
-    elements.embeddingStatus.className = "status";
-    elements.embeddingStatus.textContent = `${value} selected for campaign embeddings. Save & index to apply this change${model?.contextLength ? `; its advertised ${number(model.contextLength)}-token limit applies only to embedding requests` : ""}.`;
-    return;
-  }
-  elements.providerDefaultModel.value = value;
-  if (providerSelectionEditor && providerSelectionEditor.mode === "model") {
-    const policy = value === providerSelectionEditor.modelDraft.modelId
-      ? providerSelectionEditor.modelDraft.responseFormatPolicy
-      : "required";
-    setProviderSelectionState({ type: "modelDraftChanged", modelId: value, responseFormatPolicy: policy });
-  }
-  clearResponseFormatCapability();
-  if (discoveredProfileModelsIdentity === responseFormatCapabilityIdentity() && storedProfileMatchesResponseFormatIdentity()) renderResponseFormatCapability(discoveredProfileModels.find((item) => profileModelValue(item) === value || item.id === value)?.responseFormatCapability);
-  applyProfileModelContext();
-  applySogniSdkModelOptions(discoveredProfileModels.find((item) => profileModelValue(item) === value || item.id === value));
+  elements.embeddingModel.value = value;
+  const model = discoveredEmbeddingModels.find(item => profileModelValue(item) === value || item.id === value);
   elements.providerModelDialog.close();
-  providerMessage(`${value} selected as the profile default. Save the profile to keep this change.`);
-}
-
-function applySogniWorkerTypeOptions(model) {
-  if (elements.providerType.value !== "sogni_sdk") return;
-  const selectedType = elements.providerSogniNetwork.value || "fast";
-  const workerTypes = model?.workerAvailability?.length ? model.workerAvailability : [
-    {
-      type: "fast",
-      displayName: "Fast GPU workers",
-      description: "High-end GPU workers that generate images faster at a higher cost."
-    },
-    {
-      type: "relaxed",
-      displayName: "Relaxed Mac workers",
-      description: "Mac workers that generate images more slowly at a lower cost."
-    }
-  ];
-  elements.providerSogniNetwork.replaceChildren();
-  for (const workerType of workerTypes) {
-    const count = Number(workerType.workerCount);
-    const countLabel = Number.isFinite(count) ? ` · ${number(count)} available` : "";
-    const option = new Option(`${workerType.displayName}${countLabel}`, workerType.type);
-    option.title = workerType.description;
-    elements.providerSogniNetwork.append(option);
-  }
-  elements.providerSogniNetwork.value = workerTypes.some((item) => item.type === selectedType) ? selectedType : workerTypes[0]?.type || "fast";
-  const selected = workerTypes.find((item) => item.type === elements.providerSogniNetwork.value);
-  const selectedCount = Number(selected?.workerCount);
-  const availability = Number.isFinite(selectedCount)
-    ? ` ${number(selectedCount)} worker${selectedCount === 1 ? "" : "s"} currently available for this model.`
-    : "";
-  elements.providerSogniWorkerTypeNote.textContent = `${selected?.description || ""}${availability}`.trim();
-  elements.providerSogniWorkerTypeNote.title = selected?.description || "";
-}
-
-function applySogniWorkerAvailability() {
-  if (elements.providerType.value !== "sogni_sdk") return;
-  const selectedType = elements.providerSogniNetwork.value;
-  for (const model of discoveredProfileModels) {
-    const availability = model.workerAvailability?.find((item) => item.type === selectedType);
-    if (!availability) continue;
-    model.workerCount = Number(availability.workerCount || 0);
-    model.loaded = model.workerCount > 0;
-  }
-  const selectedModel = discoveredProfileModels.find((item) => profileModelValue(item) === elements.providerDefaultModel.value || item.id === elements.providerDefaultModel.value);
-  applySogniWorkerTypeOptions(selectedModel);
-  renderProviderModelPicker();
-}
-
-function applySogniSdkModelOptions(model) {
-  if (elements.providerType.value !== "sogni_sdk") return;
-  applySogniWorkerTypeOptions(model);
-  if (!model?.imageOptions) return;
-  const options = model.imageOptions;
-  const selectedPreset = elements.providerSogniSizePreset.value || "custom";
-  elements.providerSogniSizePreset.replaceChildren(new Option("Custom dimensions", "custom"));
-  for (const preset of options.sizePresets) elements.providerSogniSizePreset.append(new Option(`${preset.label} · ${preset.width}×${preset.height}`, preset.id));
-  elements.providerSogniSizePreset.value = options.sizePresets.some((preset) => preset.id === selectedPreset) ? selectedPreset : "custom";
-  const configuredPreset = options.sizePresets.find((preset) => preset.id === elements.providerSogniSizePreset.value);
-  if (configuredPreset) {
-    elements.providerSogniWidth.value = String(configuredPreset.width);
-    elements.providerSogniHeight.value = String(configuredPreset.height);
-    elements.providerSogniAspectRatio.value = configuredPreset.ratio || elements.providerSogniAspectRatio.value;
-  }
-  if (options.steps) {
-    elements.providerSogniSteps.min = String(options.steps.min);
-    elements.providerSogniSteps.max = String(options.steps.max);
-    elements.providerSogniSteps.step = String(options.steps.step);
-    if (!elements.providerSogniSteps.value) elements.providerSogniSteps.value = String(options.steps.default);
-  }
-  if (options.guidance) {
-    elements.providerSogniGuidance.min = String(options.guidance.min);
-    elements.providerSogniGuidance.max = String(options.guidance.max);
-    elements.providerSogniGuidance.step = String(options.guidance.step);
-    if (!elements.providerSogniGuidance.value) elements.providerSogniGuidance.value = String(options.guidance.default);
-  }
-  const selectedSampler = elements.providerSogniSampler.value;
-  elements.providerSogniSampler.replaceChildren(new Option("Model default", ""));
-  for (const sampler of options.samplers) elements.providerSogniSampler.append(new Option(sampler, sampler));
-  elements.providerSogniSampler.value = options.samplers.includes(selectedSampler) ? selectedSampler : options.defaultSampler || "";
-  const selectedScheduler = elements.providerSogniScheduler.value;
-  elements.providerSogniScheduler.replaceChildren(new Option("Model default", ""));
-  for (const scheduler of options.schedulers) elements.providerSogniScheduler.append(new Option(scheduler, scheduler));
-  elements.providerSogniScheduler.value = options.schedulers.includes(selectedScheduler) ? selectedScheduler : options.defaultScheduler || "";
-  elements.providerSogniPreviewCount.max = String(options.maximumPreviews ?? 10);
+  elements.embeddingStatus.className = "status";
+  elements.embeddingStatus.textContent = `${value} selected for campaign embeddings. Save & index to apply this change${model?.contextLength ? `; its advertised ${number(model.contextLength)}-token limit applies only to embedding requests` : ""}.`;
 }
 
 function renderProviderModelPicker() {
   const query = elements.providerModelFilter.value.trim().toLowerCase();
-  const discoveredModels = activeModelPickerModels();
-  const selectedValue = activeModelPickerValue();
+  const discoveredModels = discoveredEmbeddingModels;
+  const selectedValue = elements.embeddingModel.value.trim();
   const orderedModels = [...discoveredModels]
     .sort((left, right) => Number(right.loaded) - Number(left.loaded) || left.displayName.localeCompare(right.displayName))
     .filter((model) => !query || `${model.displayName} ${model.id} ${model.instanceId}`.toLowerCase().includes(query));
@@ -7080,27 +5865,6 @@ function renderProviderModelPicker() {
   }
 }
 
-async function openProviderModelPicker(forceRefresh = false) {
-  providerModelPickerTarget = "provider";
-  const role = elements.providerRole.value;
-  elements.providerModelDialogTitle.textContent = role === "image" ? "Choose image model" : role === "embedding" ? "Choose embedding model" : "Choose default model";
-  elements.providerModelDialogDescription.textContent = role === "image"
-    ? "Only image-capable models are shown when the provider advertises modality data. Active models appear first."
-    : role === "embedding"
-      ? "Only embedding models are shown when the provider offers a dedicated inventory. Active models appear first."
-      : "Active models appear first. You may also select an available model that is not currently loaded.";
-  elements.providerModelFilter.value = "";
-  elements.providerCustomModel.value = elements.providerDefaultModel.value;
-  elements.providerModelPickerStatus.textContent = discoveredProfileModels.length
-    ? `${discoveredProfileModels.length} cached model entries. Refresh the endpoint to update this inventory.`
-    : "Refresh the endpoint to browse its model inventory.";
-  elements.providerModelPickerStatus.className = "status";
-  openManagedModal(elements.providerModelDialog);
-  renderProviderModelPicker();
-  if (forceRefresh || !discoveredProfileModels.length) await refreshProviderModelsFromForm();
-  elements.providerModelFilter.focus();
-}
-
 async function openEmbeddingModelPicker(forceRefresh = false) {
   const provider = providers.find((item) => item.id === elements.embeddingProvider.value);
   if (!provider) {
@@ -7108,7 +5872,7 @@ async function openEmbeddingModelPicker(forceRefresh = false) {
     elements.embeddingStatus.textContent = "Select an embedding provider before choosing its model.";
     return;
   }
-  providerModelPickerTarget = "embedding";
+
   elements.providerModelDialogTitle.textContent = "Choose campaign embedding model";
   elements.providerModelDialogDescription.textContent = `Models advertised by ${provider.name}. Active models appear first; confirm that the selected model supports embeddings.`;
   elements.providerModelFilter.value = "";
@@ -7123,48 +5887,10 @@ async function openEmbeddingModelPicker(forceRefresh = false) {
   elements.providerModelFilter.focus();
 }
 
-async function refreshActiveModelPicker() {
-  if (providerModelPickerTarget === "embedding") await discoverEmbeddingModels();
-  else await refreshProviderModelsFromForm();
-}
-
 function applyCustomProviderModel() {
   const value = elements.providerCustomModel.value.trim();
   if (!value) return;
   chooseProviderModel(value);
-}
-
-function applyProfileModelContext() {
-  const selectedValue = elements.providerDefaultModel.value.trim();
-  const model = discoveredProfileModels.find((item) => profileModelValue(item) === selectedValue || item.id === selectedValue);
-  const contextLength = Number(model?.contextLength || 0);
-  if (contextLength > 0) {
-    elements.providerContextTokens.value = String(contextLength);
-    elements.providerContextTokens.readOnly = true;
-    elements.providerContextSource.textContent = `Locked to ${number(contextLength)} tokens advertised by ${model.displayName}.`;
-    elements.providerContextSource.className = "field-note api-supplied";
-    constrainProviderOutputReserve(contextLength);
-  } else {
-    elements.providerContextTokens.readOnly = false;
-    elements.providerOutputTokens.setCustomValidity("");
-    elements.providerContextSource.textContent = model
-      ? "The endpoint did not advertise a context length for this model; enter it manually."
-      : "Editable until a discovered model supplies a context length.";
-    elements.providerContextSource.className = contextLength ? "field-note api-supplied" : "field-note manual-entry";
-  }
-}
-
-function constrainProviderOutputReserve(contextLength) {
-  const maximumOutputTokens = contextLength - 513;
-  if (maximumOutputTokens < 128) {
-    elements.providerOutputTokens.setCustomValidity("This model does not leave the required 512 tokens of input context.");
-    return;
-  }
-  elements.providerOutputTokens.setCustomValidity("");
-  const requestedOutputTokens = Number(elements.providerOutputTokens.value);
-  if (!Number.isFinite(requestedOutputTokens) || requestedOutputTokens > maximumOutputTokens) {
-    elements.providerOutputTokens.value = String(maximumOutputTokens);
-  }
 }
 
 async function discoverProviderModels() {
@@ -7182,12 +5908,7 @@ async function discoverProviderModels() {
     }
     elements.modelSelect.disabled = false;
     const loaded = models.find((model) => model.loaded) || models[0];
-    if (loaded) {
-      elements.modelSelect.value = loaded.loaded ? loaded.instanceId : loaded.id;
-      applyDiscoveredProviderContext();
-    } else {
-      applyDiscoveredProviderContext();
-    }
+    if (loaded) elements.modelSelect.value = loaded.loaded ? loaded.instanceId : loaded.id;
     providerMessage(`${models.length} model entr${models.length === 1 ? "y" : "ies"} found. Loaded context length is used as the context-budget default when advertised.`, "success");
   } catch (error) {
     providerMessage(error.message || String(error), "error");
@@ -7202,107 +5923,21 @@ elements.providerSelect.addEventListener("change", () => {
   discoveredProviderModels = [];
   elements.modelSelect.replaceChildren(new Option("Discover models or use the profile default", ""));
   elements.modelSelect.disabled = true;
-  elements.providerContextTokens.readOnly = false;
-  elements.providerContextTokens.removeAttribute("aria-readonly");
-  elements.providerContextSource.textContent = "Editable until model discovery supplies a context length.";
-  elements.providerContextSource.className = "field-note";
+
+
+
+
   if (selectedImportSource && selectedImport?.kind === "infinite_worlds") {
     previewImportSource(selectedImportSource.sourceName, selectedImportSource.sourceText, elements.infiniteWorldsKind.value, selectedImportSource.origin).catch((error) => setStatus(error.message || String(error), "error"));
   }
 });
 
 elements.modelSelect.addEventListener("change", () => {
-  applyDiscoveredProviderContext();
+
   if (selectedImportSource && selectedImport?.kind === "infinite_worlds") {
     previewImportSource(selectedImportSource.sourceName, selectedImportSource.sourceText, elements.infiniteWorldsKind.value, selectedImportSource.origin).catch((error) => setStatus(error.message || String(error), "error"));
   }
 });
-
-elements.providerType.addEventListener("change", () => {
-  clearResponseFormatCapability();
-  const defaults = {
-    lmstudio: DEFAULT_LM_STUDIO_BASE_URL,
-    openrouter: "https://openrouter.ai/api/v1",
-    sogni: "https://api.sogni.ai",
-    sogni_sdk: "https://api.sogni.ai"
-  };
-  const suggested = defaults[elements.providerType.value];
-  if (suggested) elements.providerBaseUrl.value = suggested;
-  if (elements.providerType.value === "sogni" || elements.providerType.value === "sogni_sdk") {
-    if (elements.providerName.value === "Local LM Studio") elements.providerName.value = elements.providerType.value === "sogni_sdk" ? "Sogni Supernet SDK" : "Sogni Creative Workflow";
-    elements.providerRequestTimeoutMinutes.value = "0.5";
-    applySogniConfiguration({}, elements.providerType.value);
-  }
-  syncProviderRoleSettings({ applySuggestedDefaults: !editingProviderId });
-});
-
-elements.providerSogniSizePreset.addEventListener("change", () => {
-  const model = discoveredProfileModels.find((item) => profileModelValue(item) === elements.providerDefaultModel.value || item.id === elements.providerDefaultModel.value);
-  const preset = model?.imageOptions?.sizePresets.find((item) => item.id === elements.providerSogniSizePreset.value);
-  if (!preset) return;
-  elements.providerSogniWidth.value = String(preset.width);
-  elements.providerSogniHeight.value = String(preset.height);
-  elements.providerSogniAspectRatio.value = preset.ratio || elements.providerSogniAspectRatio.value;
-});
-
-elements.providerSogniNetwork.addEventListener("change", applySogniWorkerAvailability);
-
-elements.providerRole.addEventListener("change", () => {
-  discoveredProfileModels = [];
-  clearResponseFormatCapability();
-  syncProviderRoleSettings({ applySuggestedDefaults: !editingProviderId });
-});
-for (const control of [elements.providerBaseUrl, elements.providerApiKey, elements.providerStreaming, elements.providerResponseFormatPolicy]) {
-  control.addEventListener("input", clearResponseFormatCapability);
-  control.addEventListener("change", clearResponseFormatCapability);
-}
-for (const control of [elements.providerBaseUrl, elements.providerApiKey, elements.providerStreaming]) {
-  control.addEventListener("input", () => {
-    providerSelectionCredentialRevision += 1;
-    if (providerSelectionEditor) setProviderSelectionState({ type: "authorityChanged", ...providerSelectionAuthority(providers.find((item) => item.id === editingProviderId) || null) });
-  });
-}
-elements.providerResponseFormatPolicy.addEventListener("change", () => {
-  if (providerSelectionEditor?.mode === "model") {
-    setProviderSelectionState({ type: "modelDraftChanged", modelId: elements.providerDefaultModel.value.trim(), responseFormatPolicy: elements.providerResponseFormatPolicy.value });
-  }
-});
-elements.providerSelectionModel.addEventListener("change", () => {
-  if (!elements.providerSelectionModel.checked || !providerSelectionEditor) return;
-  setProviderSelectionState({ type: "modeChanged", mode: "model" });
-  clearResponseFormatCapability();
-  renderResponseFormatCapability(responseFormatCapabilityProfile);
-});
-elements.providerSelectionPreset.addEventListener("change", () => {
-  if (!elements.providerSelectionPreset.checked || !providerSelectionEditor) return;
-  setProviderSelectionState({ type: "modeChanged", mode: "preset" });
-  const selectedSlug = providerSelectionEditor.presetDraft.slug;
-  if (!providerSelectionEditor.list.presets.length) {
-    void loadProviderPresets().then(() => {
-      if (selectedSlug && providerSelectionEditor?.mode === "preset" && providerSelectionEditor.presetDraft.slug === selectedSlug) {
-        void loadProviderPresetDetail(selectedSlug);
-      }
-    });
-  } else if (selectedSlug) {
-    void loadProviderPresetDetail(selectedSlug);
-  }
-});
-elements.refreshProviderPresets.addEventListener("click", () => { void loadProviderPresets({ refresh: true }); });
-elements.loadMoreProviderPresets.addEventListener("click", () => {
-  if (providerSelectionEditor?.list.nextOffset !== null) void loadProviderPresets({ offset: providerSelectionEditor.list.nextOffset });
-});
-elements.providerPresetSelect.addEventListener("change", () => {
-  if (!providerSelectionEditor) return;
-  const slug = elements.providerPresetSelect.value;
-  setProviderSelectionState({ type: "presetDraftChanged", slug });
-  if (slug) void loadProviderPresetDetail(slug);
-});
-elements.providerTextOverrideMode.addEventListener("change", updateProviderOverrideIntent);
-for (const id of [...Object.values(providerOverrideFields), "providerOverrideContextTokens"]) {
-  elements[id].addEventListener("input", () => {
-    if (elements.providerTextOverrideMode.value === "explicit") updateProviderOverrideIntent();
-  });
-}
 
 elements.embeddingProvider.addEventListener("change", () => {
   const provider = providers.find((item) => item.id === elements.embeddingProvider.value);
@@ -8825,19 +7460,6 @@ elements.campaignWorldVersion.addEventListener("change", () => {
 elements.contextForm.addEventListener("submit", previewContext);
 elements.reindexMemory.addEventListener("click", rebuildMemory);
 elements.reindexEmbeddings.addEventListener("click", reindexSemanticRetrieval);
-if (elements.newProviderButton) {
-  elements.newProviderButton.addEventListener("click", () => {
-    resetProviderForm();
-    openEditDialog(elements.providerDialog);
-  });
-}
-elements.providerForm.addEventListener("submit", saveProvider);
-for (const check of elements.providers.querySelectorAll("[data-readiness-check]")) check.addEventListener("click", () => { void refreshProviderReadinessInventory(check.dataset.readinessCheck); });
-elements.cancelProviderEdit.addEventListener("click", () => {
-  if (elements.providerDialog) dismissEditDialog(elements.providerDialog);
-});
-elements.providerDialog.addEventListener("close", abortProviderPresetRequests);
-window.addEventListener("pagehide", abortProviderPresetRequests);
 window.addEventListener("beforeunload", (event) => {
   if (!campaignEditGuard.isDirty(campaignSettingsSnapshot())) return;
   event.preventDefault();
@@ -8874,20 +7496,10 @@ document.querySelectorAll(".tab-button").forEach(button => {
     if (targetPanel) targetPanel.classList.add("active");
   });
 });
-elements.refreshProviderModels.addEventListener("click", async (event) => { event.stopPropagation(); await openProviderModelPicker(true); });
-elements.providerDefaultModel.addEventListener("click", () => { void openProviderModelPicker(); });
-elements.providerDefaultModel.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openProviderModelPicker(); }
-});
 elements.closeProviderModelDialog.addEventListener("click", () => elements.providerModelDialog.close());
-elements.refreshProviderModelDialog.addEventListener("click", refreshActiveModelPicker);
+elements.refreshProviderModelDialog.addEventListener("click", discoverEmbeddingModels);
 elements.providerModelFilter.addEventListener("input", renderProviderModelPicker);
 elements.applyCustomProviderModel.addEventListener("click", applyCustomProviderModel);
-elements.providerDefaultModel.addEventListener("change", () => {
-  clearResponseFormatCapability();
-  applyProfileModelContext();
-  renderResponseFormatCapability(discoveredProfileModels.find((item) => profileModelValue(item) === elements.providerDefaultModel.value || item.id === elements.providerDefaultModel.value)?.responseFormatCapability);
-});
 elements.discoverModels.addEventListener("click", discoverProviderModels);
 elements.compression.addEventListener("change", () => {
   elements.compression.title = elements.compression.selectedOptions[0]?.title || "Choose how Chronicle fits history into the context budget.";
@@ -8920,56 +7532,40 @@ elements.illustrationSegmentPromptMode.addEventListener("change", syncIllustrati
 elements.discoverIllustrationModels.addEventListener("click", discoverIllustrationModels);
 elements.previewIllustrationBackfill.addEventListener("click", () => confirmIllustrationBackfill("missing"));
 elements.previewIllustrationRebuild.addEventListener("click", () => confirmIllustrationBackfill("rebuild"));
-elements.promptLibraryFilter?.addEventListener("input", renderPromptLibrary);
-elements.promptLibraryScope?.addEventListener("change", () => {
-  if (promptLibraryIsDirty()) {
-    elements.promptLibraryScope.value = promptLibraryActiveScope;
-    elements.promptLibraryStatus.textContent = "Save or discard the current edits before changing scope.";
-    elements.promptLibraryStatus.className = "status warning";
-    return;
-  }
-  selectedPromptTemplateKey = "";
-  void loadPromptLibrary();
-});
-elements.promptLibraryCampaign?.addEventListener("change", () => {
-  if (promptLibraryIsDirty()) {
-    elements.promptLibraryCampaign.value = promptLibraryActiveCampaignId;
-    elements.promptLibraryStatus.textContent = "Save or discard the current edits before changing campaigns.";
-    elements.promptLibraryStatus.className = "status warning";
-    return;
-  }
-  selectedPromptTemplateKey = "";
-  void loadPromptLibrary();
-});
-elements.promptLibraryEditor?.addEventListener("submit", savePromptLibraryTemplate);
-elements.promptLibraryReset?.addEventListener("click", resetPromptLibraryTemplate);
-elements.promptLibraryResetCampaigns?.addEventListener("click", resetAllCampaignPromptOverrides);
-elements.promptLibraryPreview?.addEventListener("click", () => { promptLibraryPreviewVisible = !promptLibraryPreviewVisible; void renderPromptLibraryPreview(); });
-elements.promptLibraryContent?.addEventListener("input", () => { renderPromptLibraryDirtyState(); schedulePromptLibraryPreview(); });
-elements.promptLibraryDiscard?.addEventListener("click", () => {
-  elements.promptLibraryContent.value = promptLibraryEditorBaseline;
-  renderPromptLibraryDirtyState();
-  schedulePromptLibraryPreview();
-});
-elements.promptLibraryPrevious?.addEventListener("click", () => scrollPromptLibrary(-1));
-elements.promptLibraryNext?.addEventListener("click", () => scrollPromptLibrary(1));
-window.addEventListener("beforeunload", (event) => {
-  if (!promptLibraryIsDirty()) return;
-  event.preventDefault();
-  event.returnValue = "";
-});
 async function loadSessionPreferences() {
-  const response = await api("/api/v1/session");
+  const response = await api("/api/v1/session", {signal: profileController.signal});
+  if (profileController.signal.aborted) return;
+  if (sessionUser?.id && response.user?.id && sessionUser.id !== response.user.id) {
+    window.dispatchEvent(new Event("app-identity-changed"));
+    return;
+  }
   sessionUser = response.user || null;
+  ownerDevice.activate(sessionUser);
+  updateStoryViewLink();
   systemArchiveOwnerId = typeof sessionUser?.id === "string" ? sessionUser.id : null;
   beginSystemArchiveRecoveryWhenReady();
   elements.newCampaignTurnControlStyle.value = normalizedTurnControlStyle(sessionUser?.settings?.defaultTurnControlStyle);
 }
 
+const profileController = new AbortController();
+const nexusDeviceFields = mountLegacyDeviceProfile(elements.nexusUserProfileForm, ownerDevice);
+window.addEventListener("app-identity-changed", () => {
+  profileController.abort();
+  nexusDeviceFields.dispose();
+  sessionUser = null;
+  elements.nexusUserProfileDisplayName.value = "";
+  document.body.replaceChildren();
+  window.location.reload();
+}, { once: true });
+const nexusReaderFields = mountReaderPreferenceFields(document);
+elements.nexusUserProfileForm.insertBefore(nexusReaderFields.element, elements.nexusUserProfileStatus);
 async function openNexusUserProfile() {
   try {
     if (!sessionUser) await loadSessionPreferences();
-    elements.nexusUserProfileDisplayName.value = sessionUser?.displayName || "Initial Owner";
+    if (!sessionUser?.id || profileController.signal.aborted) return;
+    nexusDeviceFields.activate(sessionUser, selectedCampaign?.id ?? null);
+    nexusReaderFields.set(sessionUser?.settings?.readerPreferences);
+    elements.nexusUserProfileDisplayName.value = sessionUser.displayName;
     elements.nexusUserProfileAutoSubmitChoices.checked = sessionUser?.settings?.autoSubmitTurnChoices !== false;
     elements.nexusUserProfileContinuousReading.checked = Boolean(sessionUser?.settings?.continuousReading);
     elements.nexusUserProfileDefaultTurnControlStyle.value = normalizedTurnControlStyle(sessionUser?.settings?.defaultTurnControlStyle);
@@ -8989,17 +7585,21 @@ async function saveNexusUserProfile(event) {
   elements.nexusUserProfileStatus.className = "status";
   try {
     const response = await api("/api/v1/users/me/profile", {
+      signal: profileController.signal,
       method: "PATCH",
       body: JSON.stringify({
         displayName,
         settings: {
+          readerPreferences: nexusReaderFields.get(),
           autoSubmitTurnChoices: elements.nexusUserProfileAutoSubmitChoices.checked,
           continuousReading: elements.nexusUserProfileContinuousReading.checked,
           defaultTurnControlStyle: normalizedTurnControlStyle(elements.nexusUserProfileDefaultTurnControlStyle.value)
         }
       })
     });
-    sessionUser = response.user || sessionUser;
+    if (profileController.signal.aborted) return;
+    if (response.user?.id !== sessionUser?.id) { window.dispatchEvent(new Event("app-identity-changed")); return; }
+    sessionUser = response.user;
     elements.newCampaignTurnControlStyle.value = normalizedTurnControlStyle(sessionUser?.settings?.defaultTurnControlStyle);
     elements.nexusUserProfileDialog.close();
   } catch (error) {

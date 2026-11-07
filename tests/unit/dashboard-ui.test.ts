@@ -163,7 +163,7 @@ describe("Nexus central dashboard", () => {
   it("keeps resume precedence in the established resolver and opens recent cards by ID", () => {
     expect(dashboardScript).toContain("function createDashboardCampaignCard(campaign, card = null)");
     expect(dashboardScript).toContain("resolveResumeCampaign(");
-    expect(dashboardScript).toContain('localStorage.setItem("infiniteQuestLastCampaignId", campaign.id)');
+    expect(dashboardScript).toContain('ownerDevice.setItem("infiniteQuestLastCampaignId", campaign.id)');
     expect(dashboardScript).toContain('window.location.assign(`/story/${encodeURIComponent(campaign.id)}`)');
   });
 });

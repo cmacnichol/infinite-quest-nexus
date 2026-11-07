@@ -1,3 +1,4 @@
+import { settingsBookmarkDestination } from "./settings-bookmark.js";
 export {
   createSelectionEditorState,
   reduceSelectionEditor,
@@ -48,7 +49,10 @@ if (typeof document !== "undefined" && document.querySelector("#dashboard")) {
   const bootMessage = document.getElementById("managementBootMessage");
   const reloadButton = document.getElementById("managementBootReload");
   reloadButton?.addEventListener("click", () => window.location.reload());
-  void import(/* @vite-ignore */ controllerUrl).then(() => {
+  const [oldSection] = location.hash.slice(1).split("?");
+  if (oldSection === "providers" || oldSection === "prompt-library") {
+    location.replace(settingsBookmarkDestination(location.hash));
+  } else void import(/* @vite-ignore */ controllerUrl).then(() => {
     interactiveRoot?.removeAttribute("inert");
     interactiveRoot?.setAttribute("aria-busy", "false");
     if (bootStatus) bootStatus.hidden = true;

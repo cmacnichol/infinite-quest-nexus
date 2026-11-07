@@ -753,7 +753,7 @@ describe("Story Player page shell", () => {
     expect(page.document.querySelector("[data-story-background]")?.textContent).toContain("A real world background.");
     expect(page.document.querySelector("[data-first-action]")?.textContent).toContain("Take the real first action.");
     expect(page.document.querySelector<HTMLButtonElement>('[data-action="begin-story"]')?.disabled).toBe(true);
-    expect(page.document.querySelector<HTMLAnchorElement>('[data-story-setup]')?.getAttribute("href")).toBe("/nexus/#providers");
+    expect(page.document.querySelector<HTMLAnchorElement>('[data-story-setup]')?.getAttribute("href")).toBe("/app/settings?section=providers");
     mounted.dispose();
   });
 
@@ -797,7 +797,7 @@ describe("Story Player page shell", () => {
     await settle();
 
     expect(page.document.querySelector<HTMLButtonElement>("[data-action='begin-story']")?.disabled).toBe(true);
-    expect(page.document.querySelector<HTMLAnchorElement>("[data-story-setup]")?.getAttribute("href")).toBe("/nexus/#providers");
+    expect(page.document.querySelector<HTMLAnchorElement>("[data-story-setup]")?.getAttribute("href")).toBe("/app/settings?section=providers");
     mounted.dispose();
   });
 
@@ -810,7 +810,7 @@ describe("Story Player page shell", () => {
     await settle();
 
     expect(page.document.querySelector<HTMLButtonElement>("[data-action='begin-story']")?.disabled).toBe(true);
-    expect(page.document.querySelector<HTMLAnchorElement>("[data-story-setup]")?.getAttribute("href")).toBe("/nexus/#providers");
+    expect(page.document.querySelector<HTMLAnchorElement>("[data-story-setup]")?.getAttribute("href")).toBe("/app/settings?section=providers");
     mounted.dispose();
   });
 

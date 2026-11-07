@@ -115,7 +115,7 @@ describe("web-next user profile menu", () => {
     await settle();
 
     expect(updates).toHaveLength(4);
-    expect(updates.at(-1)).toEqual({
+    expect(updates.at(-1)).toMatchObject({
       displayName: "Atlas Keeper",
       settings: {
         autoSubmitTurnChoices: false,

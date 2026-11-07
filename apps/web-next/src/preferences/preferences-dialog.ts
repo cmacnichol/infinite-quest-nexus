@@ -42,7 +42,8 @@ export function mountPreferencesDialog(root: HTMLElement, options: Readonly<{
   campaignId: string | null;
 }>): PreferencesDialog {
   const document = root.ownerDocument;
-  const dialog = mountDialog(document, { label: "Preferences" });
+  const dialog = mountDialog(document, { label: "User Profile" });
+  dialog.element.classList.add("device-profile-dialog");
   root.append(dialog.element);
 
   const browser = document.createElement("section");

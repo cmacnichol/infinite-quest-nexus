@@ -40,3 +40,27 @@ main[data-page="settings"] { padding: var(--edge, 32px); max-width: 1440px; marg
   .settings-revisions { gap: 8px 12px; font-size: .875rem; }
   .settings-actions button { flex: 1 1 100%; }
 }
+
+.settings-owner-editor .hidden, .settings-owner-editor [hidden] { display: none !important; }
+.settings-owner-editor :is(label,fieldset,.fieldset-content,.provider-profile > div,.prompt-library-item,.provider-model-choice > span) { display: grid; gap: .5rem; min-width: 0; }
+.settings-owner-editor :is(.section-heading,.provider-readiness-grid,.provider-profile,.button-row,.prompt-library-toolbar,.prompt-library-categories,.prompt-library-list) { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin-block: 1rem; }
+.settings-owner-editor .provider-readiness { flex: 1 1 13rem; align-self: stretch; padding-inline: 1rem; border-inline-start: 1px solid var(--rule); }
+.settings-owner-editor .provider-readiness p { margin-block: .4rem; display: grid; }
+.settings-owner-editor .provider-profile { padding-block: .75rem; border-block-start: 1px solid var(--rule); justify-content: space-between; overflow-wrap: anywhere; }
+.settings-owner-editor dialog { max-width: min(54rem, 95vw); max-height: 90dvh; box-sizing: border-box; overflow: auto; padding: clamp(.75rem, 2vw, 2rem); border: 1px solid var(--rule); background: var(--surface-entry); color: var(--text-primary); }
+.settings-owner-editor dialog::backdrop { background: rgb(0 0 0 / .58); }
+.settings-owner-editor fieldset { margin-block: 1rem; border: 1px solid var(--rule); padding: 1rem; }
+.settings-owner-editor :is(.fieldset-content,.provider-advanced-model-fields,.provider-text-override-fields) { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,14rem),1fr)); align-items: start; gap: 1rem; }
+.settings-owner-editor .text-model-setting:is(section,fieldset), .settings-owner-editor .fieldset-note { grid-column: 1 / -1; }
+.settings-owner-editor :is(textarea,pre) { width: 100%; box-sizing: border-box; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); background: var(--surface-entry); }
+.settings-owner-editor textarea { padding: .75rem; font: inherit; border: 1px solid var(--rule); }
+.settings-owner-editor .prompt-library-list { flex-wrap: nowrap; overflow-x: auto; align-items: stretch; }
+.settings-owner-editor .prompt-library-item { flex: 0 0 min(15rem,80%); text-align: start; }
+.settings-owner-editor .active { outline: 2px solid var(--accent); outline-offset: -2px; }
+.settings-owner-editor summary { cursor: pointer; padding-block: .75rem; }
+.settings-owner-editor .field-note { color: var(--text-secondary); font-size: .875rem; }
+.settings-owner-editor .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+
+.settings-owner-editor dialog, .settings-owner-editor .provider-dialog-header { background: var(--surface-entry-hover); }
+.settings-owner-editor .provider-dialog-header { position: sticky; inset-block-start: calc(-1 * clamp(.75rem, 2vw, 2rem)); z-index: 2; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--rule); padding-block: .5rem; margin: 0; }
+.settings-owner-editor .provider-dialog-header h2 { margin: 0; }

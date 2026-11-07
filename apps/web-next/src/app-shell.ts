@@ -77,6 +77,7 @@ export function renderAppShell(
             <label class="user-profile-check"><input id="user-profile-continuous-reading" type="checkbox" />Keep the full story in view while reading</label>
             <label class="user-profile-field">Default turn-control style
               <select id="user-profile-turn-style">
+                <option value="action_only">Actions only</option>
                 <option value="flexible_action">Action</option>
                 <option value="flexible_scene">Story Direction</option>
               </select>
@@ -94,20 +95,11 @@ export function renderAppShell(
   `;
 }
 
-export function initializeAppTheme(root: HTMLElement): ThemeController {
+export function initializeAppTheme(root: HTMLElement, storage: Pick<Storage, "getItem" | "setItem"> | null = null): ThemeController {
   const document = root.ownerDocument;
   const view = document.defaultView;
   const themeToggle = root.querySelector<HTMLButtonElement>(".theme-toggle");
   if (!themeToggle || !view) throw new Error("The theme control could not be initialized.");
-
-  let storage: Storage | null = null;
-  if (view.location) {
-    try {
-      storage = view.localStorage;
-    } catch {
-      // Theme switching remains available when storage access is blocked.
-    }
-  }
 
   const controller = initializeThemeControl(themeToggle, {
     root: document.documentElement,

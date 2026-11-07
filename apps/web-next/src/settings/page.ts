@@ -5,6 +5,9 @@ import { mountAppShell } from "../app-shell-lifecycle";
 import type { MountedPage } from "../world-library-page";
 import { SETTINGS_SECTIONS, type SettingsRoute } from "./sections";
 import { displayUnit, fromDisplayUnit, readableValue, readableRangeValue } from "./instance-editor";
+import { createOwnerSettingsApis } from "./owner-settings-api";
+import { mountProviderEditor } from "./provider-editor.js";
+import { mountPromptEditor } from "./prompt-editor.js";
 import "./settings.css";
 export { parseSettingsRoute } from "./sections";
 export type { SettingsRoute } from "./sections";
@@ -27,6 +30,7 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
   const content = root.querySelector<HTMLElement>(".settings-content")!;
   const nav = root.querySelector<HTMLElement>(".settings-nav")!;
   const session = createSettingsSession(options.api ?? createInstanceSettingsApi());
+  let ownerEditor: { dispose(): void } | null = null;
   let editing = false;
   let disposed = false; let review = false; let resetPreview = false; let validation: string[] = []; let reason = "";
   let campaigns: CampaignSummary[] | null = null; let campaignFailed = false;
@@ -42,17 +46,18 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
   const appendLink = (text: string, href: string) => { const link = node(document, "a", text, "settings-editor-link"); link.href = href; content.append(link); };
   function render() {
     if (disposed) return;
+    if (ownerEditor) return;
     const focus = (document.activeElement as HTMLElement | null)?.dataset?.focus;
     content.replaceChildren();
     const title = node(document, "h2", SETTINGS_SECTIONS.find(([key]) => key === route.section)![1]); title.id = "settings-section-title"; content.append(title);
     if (["providers", "prompts", "campaign"].includes(route.section)) {
       content.append(node(document, "p", route.section === "campaign" ? "Scope: selected campaign · your campaigns only" : "Scope: your account", "settings-scope"));
-      if (route.section === "providers") {
-        content.append(node(document, "p", "Text, embedding and image providers remain separate. Their existing editor manages endpoints, models and write-only credentials."));
-        appendLink("Open provider editor", "/nexus/#providers");
-      } else if (route.section === "prompts") {
-        content.append(node(document, "p", "Application and campaign prompt overrides retain their existing validation and save behavior."));
-        appendLink("Open Prompt Library", "/nexus/#prompt-library");
+      if (route.section === "providers" || route.section === "prompts") {
+        const host = node(document, "div", undefined, "settings-owner-editor");
+        content.append(host);
+        const ports = createOwnerSettingsApis();
+        ownerEditor = route.section === "providers" ? mountProviderEditor(host, ports.providers)
+          : mountPromptEditor(host, ports.prompts, route.campaignId, new URL(window.location.href).searchParams.get("prompt"));
       } else if (!campaigns) {
         content.append(node(document, "p", campaignFailed ? "Your campaigns could not be loaded. Reload to retry." : "Loading your campaigns…", "settings-status"));
       } else {
@@ -66,7 +71,7 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
         if (selected) { content.append(node(document, "p", "Open the campaign editor for Story Memory, context, illustrations and provider assignments. Each change applies only to this campaign.")); appendLink("Open campaign editor", `/app/campaigns/${selected.id}`); }
         else content.append(node(document, "p", route.campaignId ? "This campaign is unavailable to your account. Choose one of your campaigns." : "Choose a campaign before editing its settings."));
       }
-      content.append(node(document, "p", "These editors open in their existing destinations while Settings consolidation is in progress.", "settings-help")); return;
+      return;
     }
     const state = session.state;
     content.append(node(document, "p", "Scope: installation · shared across this deployment · restart required", "settings-scope"));
@@ -182,6 +187,8 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
     validation = [];
     review = false;
     resetPreview = false;
+    ownerEditor?.dispose();
+    ownerEditor = null;
     controller.abort();
     window.clearInterval(expiryTimer);
     window.removeEventListener("app-identity-changed", onIdentityChange);

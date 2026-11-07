@@ -18,7 +18,7 @@ export function mountShellMenus(
   if (!host || !profileHost || !nativeProfile) throw new Error("The shell menu hosts are missing.");
   const document = root.ownerDocument;
   let menu: MenuHandle | null = null;
-  const profileMenu = mountMenu(document, "Profile", [{ id: "preferences", label: "Preferences" }], () => {
+  const profileMenu = mountMenu(document, "Profile", [{ id: "preferences", label: "User Profile" }], () => {
     root.dispatchEvent(new Event("app-shell-open-preferences"));
   });
   let campaignId: string | null = null;
@@ -28,6 +28,12 @@ export function mountShellMenus(
   const onCampaignOpen = (): void => profileMenu.close();
   nativeProfile.hidden = true;
   profileHost.hidden = false;
+  const icon = nativeProfile.querySelector("svg")?.cloneNode(true) as SVGElement | undefined;
+  if (icon) {
+    icon.setAttribute("width", "20"); icon.setAttribute("height", "20");
+    icon.setAttribute("fill", "none"); icon.setAttribute("stroke", "currentColor"); icon.setAttribute("slot", "start");
+    profileMenu.element.querySelector("wa-button")?.prepend(icon);
+  }
   profileHost.append(profileMenu.element);
   profileMenu.element.addEventListener("wa-show", onProfileOpen);
 

@@ -1,0 +1,236 @@
+<section id="providers" class="card provider-card anchor-section provider-management" aria-label="Provider profiles">
+      <div class="section-heading">
+        <div>
+
+
+          <p>Add independent profiles for story text, Chronicle embeddings, and image generation. API keys are encrypted before storage and are never returned to this browser.</p>
+        </div>
+        <div class="button-row">
+          <button id="newProviderButton" class="button primary" type="button">New provider profile</button>
+        </div>
+      </div>
+      <div class="provider-readiness-grid" aria-label="Provider readiness">
+        <section class="provider-readiness" data-provider-readiness="text" aria-labelledby="textProviderReadinessTitle">
+          <h3 id="textProviderReadinessTitle">Story text</h3>
+          <p><span>Health</span><strong data-readiness-health>Unknown</strong></p>
+          <p><span>Model inventory</span><strong data-readiness-inventory>Not checked</strong></p>
+          <p><span>Structured output</span><strong data-readiness-capability>Not verified</strong></p>
+          <p class="provider-readiness-state" data-readiness-state>Not configured</p>
+          <button id="checkTextProviderInventory" class="button secondary compact-button" type="button" data-readiness-check="text">Check model inventory</button>
+        </section>
+        <section class="provider-readiness" data-provider-readiness="image" aria-labelledby="imageProviderReadinessTitle">
+          <h3 id="imageProviderReadinessTitle">Illustrations</h3>
+          <p><span>Health</span><strong data-readiness-health>Unknown</strong></p>
+          <p><span>Model inventory</span><strong data-readiness-inventory>Not checked</strong></p>
+          <p><span>Structured output</span><strong data-readiness-capability>Not applicable</strong></p>
+          <p class="provider-readiness-state" data-readiness-state>Not configured</p>
+          <button id="checkImageProviderInventory" class="button secondary compact-button" type="button" data-readiness-check="image">Check model inventory</button>
+        </section>
+        <section class="provider-readiness" data-provider-readiness="embedding" aria-labelledby="embeddingProviderReadinessTitle">
+          <h3 id="embeddingProviderReadinessTitle">Chronicle embeddings</h3>
+          <p><span>Health</span><strong data-readiness-health>Unknown</strong></p>
+          <p><span>Model inventory</span><strong data-readiness-inventory>Not checked</strong></p>
+          <p><span>Structured output</span><strong data-readiness-capability>Not applicable</strong></p>
+          <p class="provider-readiness-state" data-readiness-state>Not configured</p>
+          <button id="checkEmbeddingProviderInventory" class="button secondary compact-button" type="button" data-readiness-check="embedding">Check model inventory</button>
+        </section>
+      </div>
+      <div id="providerProfileList" class="provider-profile-list"><p class="muted">Loading provider profiles…</p></div>
+      <div id="providerStatus" class="status" role="status" aria-live="polite"></div>
+    </section>
+<dialog id="providerDialog" class="confirm-dialog provider-dialog-modal" aria-labelledby="providerDialogTitle">
+    <div class="provider-dialog-header provider-dialog-heading section-heading">
+      <h2 id="providerDialogTitle">Provider Profile</h2>
+      <button type="button" id="closeProviderProfile" aria-label="Close provider profile">Close</button>
+    </div>
+    <form id="providerForm" class="provider-form">
+      <fieldset>
+        <legend>Connection Settings</legend>
+        <div class="fieldset-content">
+          <label title="A unique, recognizable name used when assigning this provider profile to campaigns.">Profile name<input id="providerName" required maxlength="120" value="Local LM Studio"></label>
+          <label title="The API protocol and provider-specific adapter Nexus uses for model discovery and generation.">Provider
+            <select id="providerType">
+              <option value="lmstudio">LM Studio native</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="sogni">Sogni Creative Workflow (REST)</option>
+              <option value="sogni_sdk">Sogni Supernet SDK</option>
+              <option value="manifest">Manifest</option>
+              <option value="openai_compatible">OpenAI-compatible</option>
+            </select>
+          </label>
+          <label title="Limits this profile to one provider purpose so credentials and endpoints remain independent.">Role
+            <select id="providerRole">
+              <option value="text">Story text</option>
+              <option value="embedding">Chronicle embeddings</option>
+              <option value="image">Illustrations</option>
+            </select>
+            <span id="providerRoleNote" class="field-note">Story text providers generate narration and other text workflows.</span>
+          </label>
+          <label title="The endpoint root Nexus calls from the server. Do not include a model-specific path.">Base URL<input id="providerBaseUrl" required type="url" value=""></label>
+          <label title="Bearer credential sent only to this provider. Leave blank for unauthenticated local endpoints or while editing to retain the stored key.">API key (optional for local endpoints)<input id="providerApiKey" type="password" autocomplete="off"></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Model Configuration</legend>
+        <div class="fieldset-content provider-model-settings">
+          <fieldset id="providerTextSelectionMode" class="text-model-setting provider-selection-mode hidden" aria-describedby="providerTextSelectionSupport">
+            <legend>Selection type</legend>
+            <label><input id="providerSelectionModel" type="radio" name="providerSelectionMode" value="model" checked> Model</label>
+            <label><input id="providerSelectionPreset" type="radio" name="providerSelectionMode" value="preset"> Preset</label>
+          </fieldset>
+          <p id="providerTextSelectionSupport" class="text-model-setting provider-selection-support field-note hidden" aria-live="polite">This server does not advertise native text execution plans. Model/Preset selection is unavailable until the server is upgraded.</p>
+          <label id="providerModelSelectionField" class="model-discovery-field" title="The model Nexus uses when a campaign does not request a model override.">
+            <span class="field-label-row"><span>Default model</span><button id="refreshProviderModels" class="mini-icon-button" type="button" aria-label="Refresh models from endpoint" title="Refresh active and inactive models from this endpoint">↻</button></span>
+            <input id="providerDefaultModel" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose a model">
+          </label>
+          <section id="providerPresetSelectionPanel" class="provider-preset-selection text-model-setting hidden" aria-labelledby="providerPresetSelectionTitle">
+            <div class="field-label-row"><strong id="providerPresetSelectionTitle">Preset</strong><button id="refreshProviderPresets" class="mini-icon-button" type="button" aria-label="Refresh presets from OpenRouter" title="Refresh the OpenRouter preset inventory">↻</button></div>
+            <label><span class="sr-only">Preset</span><select id="providerPresetSelect" aria-label="Preset"><option value="">Choose a preset</option></select></label>
+            <div class="button-row"><button id="loadMoreProviderPresets" class="button secondary compact-button hidden" type="button">Load more</button></div>
+            <p id="providerPresetStatus" class="field-note" role="status" aria-live="polite">Choose Refresh to load presets.</p>
+          </section>
+
+        </div>
+      </fieldset>
+      <details id="providerAdvancedSettings" class="provider-advanced-settings">
+        <summary>Advanced model and provider settings</summary>
+        <div class="provider-advanced-fields">
+          <div class="provider-advanced-model-fields">
+            <label class="text-model-setting" title="Maximum combined prompt and response capacity. Selecting a discovered model applies the endpoint-advertised value automatically.">Context window
+              <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
+              <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>
+            </label>
+            <label class="text-model-setting" title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
+            <label class="text-model-setting" title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
+            <label id="providerResponseFormatPolicyField" class="text-model-setting" title="Selects the response format for future text jobs. Nexus verifies schema compatibility on the server before dispatch.">Structured output
+              <select id="providerResponseFormatPolicy" aria-describedby="providerResponseFormatPolicyNote">
+                <option value="legacy">Legacy JSON</option>
+                <option value="auto">Use schema when verified</option>
+                <option value="required">Require verified schema</option>
+              </select>
+              <span id="providerResponseFormatPolicyNote" class="field-note">Required blocks a new job before dispatch when server verification is unavailable. Changes apply to future jobs; pending jobs retain their frozen configuration and may require a compatible profile to resume.</span>
+            </label>
+            <div id="providerResponseFormatCapability" class="text-model-setting field-note" aria-live="polite">Schema compatibility is unknown until the server returns a capability summary.</div>
+            <section id="providerPresetDetail" class="provider-preset-detail text-model-setting hidden" aria-live="polite">
+              <h3>Structured Outputs · Trusted preset</h3>
+              <p>Nexus requests the complete operation schema without a local model capability gate. A provider schema rejection is surfaced without a standard-JSON retry.</p>
+              <dl>
+                <div><dt>Standard prompt</dt><dd id="providerPresetPrompt">Choose a preset to inspect its standard prompt.</dd></div>
+                <div><dt>Version</dt><dd id="providerPresetVersion">Unknown</dd></div>
+                <div><dt>Ordered models</dt><dd id="providerPresetModels">Unknown</dd></div>
+                <div><dt>Provider policy</dt><dd id="providerPresetPolicy">Unknown</dd></div>
+                <div><dt>Configured and effective limits</dt><dd id="providerPresetLimits">Unknown</dd></div>
+                <div><dt>Preset parameters</dt><dd id="providerPresetParameters">Inherited</dd></div>
+              </dl>
+            </section>
+            <section id="providerTextOverrides" class="provider-text-overrides text-model-setting hidden" aria-labelledby="providerTextOverridesTitle">
+              <div class="field-label-row"><strong id="providerTextOverridesTitle">Request overrides</strong></div>
+              <label>Override behavior<select id="providerTextOverrideMode"><option value="preserve">Keep saved setting</option><option value="inherit">Inherit selected preset/model</option><option value="explicit">Use explicit overrides</option></select></label>
+              <div id="providerTextOverrideFields" class="provider-text-override-fields hidden">
+                <label>Temperature<input id="providerOverrideTemperature" type="number" min="0" max="2" step="0.01" placeholder="Inherit"></label>
+                <label>Top P<input id="providerOverrideTopP" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
+                <label>Top K<input id="providerOverrideTopK" type="number" min="0" step="1" placeholder="Inherit"></label>
+                <label>Frequency penalty<input id="providerOverrideFrequencyPenalty" type="number" min="-2" max="2" step="0.01" placeholder="Inherit"></label>
+                <label>Presence penalty<input id="providerOverridePresencePenalty" type="number" min="-2" max="2" step="0.01" placeholder="Inherit"></label>
+                <label>Repetition penalty<input id="providerOverrideRepetitionPenalty" type="number" min="0.01" step="0.01" placeholder="Inherit"></label>
+                <label>Min P<input id="providerOverrideMinP" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
+                <label>Top A<input id="providerOverrideTopA" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
+                <label>Seed<input id="providerOverrideSeed" type="number" min="0" step="1" placeholder="Inherit"></label>
+                <label>Max tokens<input id="providerOverrideMaxTokens" type="number" min="1" step="1" placeholder="Inherit"></label>
+                <label>Max completion tokens<input id="providerOverrideMaxCompletionTokens" type="number" min="1" step="1" placeholder="Inherit"></label>
+                <label>Conservative context window<input id="providerOverrideContextTokens" type="number" min="1" max="4000000" step="1" placeholder="Inherit"></label>
+              </div>
+              <p class="field-note">Inheritance uses the selected preset or model profile. Clear restores inheritance; normal profile defaults are kept separate.</p>
+            </section>
+          </div>
+          <fieldset id="providerSogniSettings" class="hidden" aria-hidden="true">
+            <legend>Sogni illustration defaults</legend>
+            <p class="fieldset-note">These non-secret defaults are stored with this profile. Model discovery may not list every image model, so the model picker also accepts a manual model ID.</p>
+            <div class="fieldset-content">
+              <label>Images per job
+                <select id="providerSogniImageCount"><option value="1">1 image</option><option value="2">2 images</option></select>
+              </label>
+              <label>Default width<input id="providerSogniWidth" type="number" min="256" max="8192" step="8" value="1280"></label>
+              <label>Default height<input id="providerSogniHeight" type="number" min="256" max="8192" step="8" value="720"></label>
+              <label>Aspect ratio<input id="providerSogniAspectRatio" maxlength="10" value="16:9" pattern="[0-9]{1,3}:[0-9]{1,3}"></label>
+              <label>Output format
+                <select id="providerSogniOutputFormat"><option value="png">PNG</option><option value="jpeg">JPEG</option><option id="providerSogniWebpFormat" value="webp">WebP</option></select>
+              </label>
+              <label>Quality
+                <select id="providerSogniQuality"><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
+              </label>
+              <div id="providerSogniSdkSettings" class="fieldset-content hidden" aria-hidden="true">
+                <label title="Fast uses high-end GPU workers for quicker generation at a higher cost. Relaxed uses Mac workers for slower generation at a lower cost.">Worker type
+                  <select id="providerSogniNetwork" aria-describedby="providerSogniWorkerTypeNote"><option value="fast" title="High-end GPU workers that generate images faster at a higher cost.">Fast GPU workers</option><option value="relaxed" title="Mac workers that generate images more slowly at a lower cost.">Relaxed Mac workers</option></select>
+                  <span id="providerSogniWorkerTypeNote" class="field-note">Fast uses high-end GPU workers for quicker image generation at a higher cost.</span>
+                </label>
+                <label>Token type<select id="providerSogniTokenType"><option value="auto">Automatic</option><option value="sogni">SOGNI</option><option value="spark">Spark</option></select></label>
+                <label>Content filter<select id="providerSogniContentFilter"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
+                <label>Size preset<select id="providerSogniSizePreset"><option value="custom">Custom dimensions</option></select></label>
+                <label>Steps<input id="providerSogniSteps" type="number" min="1" max="500" placeholder="Model default"></label>
+                <label>Guidance<input id="providerSogniGuidance" type="number" min="0" max="100" step="0.1" placeholder="Model default"></label>
+                <label>Fixed seed<input id="providerSogniSeed" type="number" min="0" max="4294967295" placeholder="Random"></label>
+                <label>Sampler<select id="providerSogniSampler"><option value="">Model default</option></select></label>
+                <label>Scheduler<select id="providerSogniScheduler"><option value="">Model default</option></select></label>
+                <label>Preview count<input id="providerSogniPreviewCount" type="number" min="0" max="10" value="0"></label>
+              </div>
+              <label>Initial poll interval (seconds)<input id="providerSogniPollIntervalSeconds" type="number" min="1" max="30" step="1" value="2"></label>
+              <label>Maximum poll interval (seconds)<input id="providerSogniMaximumPollIntervalSeconds" type="number" min="1" max="30" step="1" value="10"></label>
+              <label>Generation timeout (seconds)<input id="providerSogniGenerationTimeoutSeconds" type="number" min="30" max="600" step="5" value="180"></label>
+              <label>Submission attempts<input id="providerSogniMaximumAttempts" type="number" min="1" max="5" step="1" value="3"></label>
+              <label class="toggle-field"><input id="providerSogniModelDiscoveryEnabled" type="checkbox" checked> Attempt model discovery</label>
+            </div>
+            <p id="providerSogniRestNote" class="fieldset-note">This Creative Workflow provider does not support NSFW content or disabling Sogni’s content filtering.</p>
+            <p id="providerSogniSdkNote" class="fieldset-note hidden">The SDK provider defaults content filtering to enabled. Disabling it maps explicitly to Sogni’s <code>disableNSFWFilter</code> project option.</p>
+          </fieldset>
+          <label title="Maximum wall-clock time Nexus waits for one provider HTTP request, including response headers and body. Increase this for slower local generation.">
+            Request timeout (minutes)
+            <input id="providerRequestTimeoutMinutes" type="number" min="0.1" max="60" step="0.1" value="5" required>
+            <span class="field-note">Defaults to 5 minutes, or 30 seconds for a new Sogni profile. When reached, Nexus closes the request and records an explicit timeout diagnostic.</span>
+          </label>
+        </div>
+      </details>
+      <fieldset>
+        <legend>Profile behavior</legend>
+        <div class="fieldset-content">
+          <label class="toggle-field" title="Enables real-time token streaming for compatible models during story turn generation, allowing live narration text updates on the frontend."><input id="providerStreaming" type="checkbox"> Streaming</label>
+          <label class="toggle-field" title="Disabled profiles remain stored but cannot be selected for new provider work."><input id="providerEnabled" type="checkbox" checked> Profile enabled</label>
+          <label class="toggle-field" title="Used when this provider role has no campaign-specific assignment."><input id="providerIsDefault" type="checkbox"> Use as my default profile for this role</label>
+        </div>
+      </fieldset>
+      <div class="button-row confirm-actions">
+        <button id="cancelProviderEdit" class="button secondary" type="button">Cancel</button>
+        <p id="providerEditorStatus" role="status" aria-live="polite"></p>
+        <button id="saveProvider" class="button primary" type="submit">Save provider</button>
+      </div>
+    </form>
+  </dialog>
+<dialog id="providerModelDialog" class="confirm-dialog provider-model-dialog" aria-labelledby="providerModelDialogTitle">
+    <div class="provider-model-dialog-body">
+      <div class="section-heading">
+        <div>
+          <h2 id="providerModelDialogTitle">Choose default model</h2>
+          <p id="providerModelDialogDescription">Active models appear first. You may also select an available model that is not currently loaded.</p>
+        </div>
+        <button id="closeProviderModelDialog" class="icon-button" type="button" aria-label="Close model picker">×</button>
+      </div>
+      <div class="provider-model-picker-tools">
+        <label title="Filters the endpoint inventory by display name, base model ID, or loaded instance ID.">Filter models<input id="providerModelFilter" type="search" placeholder="Search by model name or ID"></label>
+        <button id="refreshProviderModelDialog" class="button secondary" type="button">↻ Refresh endpoint</button>
+      </div>
+      <div id="providerModelPickerStatus" class="status">Refresh the endpoint to browse its model inventory.</div>
+      <div id="providerModelPickerList" class="provider-model-picker-list"></div>
+      <div class="provider-custom-model-row">
+        <label title="Use this when a compatible endpoint accepts a model ID that it does not advertise in model discovery.">Custom model ID<input id="providerCustomModel" placeholder="Enter a model ID not reported by the endpoint"></label>
+        <button id="applyCustomProviderModel" class="button secondary" type="button">Use custom ID</button>
+      </div>
+    </div>
+  </dialog>
+<dialog id="discardChangesDialog" aria-labelledby="discardChangesTitle">
+  <form method="dialog">
+    <h2 id="discardChangesTitle">Discard unsaved changes?</h2>
+    <p>Keep editing or discard your changes and close this profile.</p>
+    <button value="keep" autofocus>Keep editing</button>
+    <button value="discard">Discard changes</button>
+  </form>
+</dialog>

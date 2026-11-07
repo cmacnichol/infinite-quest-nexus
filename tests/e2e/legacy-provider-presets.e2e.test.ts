@@ -4,6 +4,7 @@ import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 import { CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY } from "../../packages/contracts/src/provider-profile-view.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
+const settingsUrl = `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}/app/settings?section=providers`;
 const screenshots = process.env.PLAYWRIGHT_LEGACY_PROVIDER_PRESET_SCREENSHOT_DIR ?? ".superpowers/sdd/2026-09-21-native-preset-audit-fixes/task-4-5-screenshots";
 
 type Provider = Record<string, unknown> & {
@@ -54,12 +55,13 @@ async function installSettingsApi(page: Page, { nativeSupport = true, metadataGa
       if (metadataGate) await metadataGate;
       return route.fulfill({ contentType: "application/json", body: JSON.stringify({ application: { version: "test" }, capabilities: nativeSupport ? { nativeTextExecutionPlans: true } : {} }) });
     }
+    if (url.pathname.endsWith("/models") || url.pathname.endsWith("/discover-models")) return route.fulfill({json: {models: []}});
     if (url.pathname === "/api/v1/providers" && request.method() === "GET") {
       return route.fulfill({ contentType: "application/json", body: JSON.stringify({ providers }) });
     }
     if (url.pathname === "/api/v1/providers" && request.method() === "POST") {
       const body = request.postDataJSON() as Record<string, unknown>;
-      writes.push(body);
+      writes.push(structuredClone(body));
       const created = { ...providerFixture(), ...body, id: "44444444-4444-4444-8444-444444444444", hasApiKey: Boolean(body.apiKey), createdAt: now, updatedAt: now } as Provider;
       providers.push(created);
       return route.fulfill({ contentType: "application/json", body: JSON.stringify(created) });
@@ -75,8 +77,9 @@ async function installSettingsApi(page: Page, { nativeSupport = true, metadataGa
     }
     if (url.pathname === `/api/v1/providers/${provider.id}` && request.method() === "PATCH") {
       const body = request.postDataJSON() as Record<string, unknown>;
-      writes.push(body);
+      writes.push(structuredClone(body));
       Object.assign(provider, body, { updatedAt: new Date(Date.now() + 1000).toISOString() });
+      if (provider.configuration.textExecutionOverrides === null) delete provider.configuration.textExecutionOverrides;
       return route.fulfill({ contentType: "application/json", body: JSON.stringify(provider) });
     }
     return route.fulfill({ contentType: "application/json", body: JSON.stringify({}) });
@@ -98,7 +101,7 @@ test("provider settings save and reopen a trusted native preset through the type
     if (response.status() >= 400 && path !== "/vendor/photoswipe/photoswipe.css") runtimeErrors.push(`${response.status()} ${path}`);
   });
   const api = await installSettingsApi(page);
-  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.goto(settingsUrl);
   await page.waitForTimeout(500);
   expect(runtimeErrors).toEqual([]);
   await expect(page.locator("#providerProfileList")).toContainText("OpenRouter text");
@@ -163,6 +166,7 @@ test("provider settings save and reopen a trusted native preset through the type
   await expect(page.getByRole("radio", { name: "Preset", exact: true })).toBeChecked();
   await expect(page.locator("#providerModelSelectionField")).toBeHidden();
   await expect(page.getByRole("combobox", { name: "Preset", exact: true })).toHaveValue("nexus-story");
+  await page.locator("#refreshProviderPresets").click();
   await expect(page.locator("#providerPresetPrompt")).toHaveText("Write with restrained tension.");
   await expect(page.locator("#providerTextOverrideMode")).toHaveValue("preserve");
   await expect(page.locator("#providerOverrideTemperature")).toHaveValue("0.31");
@@ -186,7 +190,7 @@ test("provider settings save and reopen a trusted native preset through the type
 
 test("a new OpenRouter text profile starts in Required Model mode and saves a typed custom ID", async ({ page }) => {
   const api = await installSettingsApi(page);
-  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.goto(settingsUrl);
   await page.getByRole("button", { name: "New provider profile" }).click();
   await page.locator("#providerName").fill("New OpenRouter");
   await page.locator("#providerType").selectOption("openrouter");
@@ -215,10 +219,11 @@ test("settings retain unavailable saved presets and explain an older server", as
     defaultModel: "@preset/retired-story",
     textSelection: { kind: "openrouter_preset", slug: "retired-story" }
   });
-  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.goto(settingsUrl);
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).click();
   await expect(page.getByRole("radio", { name: "Preset", exact: true })).toBeChecked();
   await expect(page.getByRole("combobox", { name: "Preset", exact: true })).toHaveValue("retired-story");
+  await page.locator("#refreshProviderPresets").click();
   await expect(page.locator("#providerPresetStatus")).toContainText("Saved preset retired-story is unavailable");
   await expect(page.getByRole("combobox", { name: "Preset", exact: true }).locator("option:checked")).toContainText("unavailable");
   await expect(page.locator("#providerModelSelectionField")).toBeHidden();
@@ -247,7 +252,7 @@ test("settings preserve a saved preset while native capability metadata is still
   const metadataGate = new Promise<void>((resolve) => { releaseMetadata = resolve; });
   const api = await installSettingsApi(page, { metadataGate });
   Object.assign(api.provider, { defaultModel: "@preset/loading-story", textSelection: { kind: "openrouter_preset", slug: "loading-story" } });
-  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.goto(settingsUrl);
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).click();
   await expect(page.locator("#providerTextSelectionSupport")).toContainText("Checking whether");
   await expect(page.locator("#providerModelSelectionField")).toBeHidden();
@@ -262,10 +267,10 @@ test("settings show bounded preset field diagnostics without remote private text
   const api = await installSettingsApi(page);
   await page.route(`**/api/v1/providers/${api.provider.id}/presets/nexus-story`, (route) => route.fulfill({
     status: 422, contentType: "application/json",
-    body: JSON.stringify({ code: "preset_config_unsupported", details: { code: "preset_config_unsupported", field: "stop" },
+    body: JSON.stringify({ error: "Unprocessable Entity", correlationId: "fixture", code: "preset_config_unsupported", details: { code: "preset_config_unsupported", field: "stop" },
       message: "PRIVATE_REMOTE_CANARY" })
   }));
-  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.goto(settingsUrl);
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).click();
   await openProviderAdvancedSettings(page);
   await page.getByRole("radio", { name: "Preset", exact: true }).check();
@@ -297,7 +302,7 @@ test("stale preset list and detail completions cannot replace newer credential o
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ presets: [{ slug: "stale-list", name: "Stale", status: "active", designatedVersionId: "old", updatedAt: now }], totalCount: 1, offset: 0, nextOffset: null }) });
   };
   await page.route(listPattern, delayedList);
-  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.goto(settingsUrl);
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   await page.getByRole("radio", { name: "Preset", exact: true }).check();
   await expect(page.locator("#providerPresetStatus")).toContainText("Loading OpenRouter presets");
@@ -349,7 +354,7 @@ test("settings abort list and detail requests when endpoint or credential author
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ presets: [], totalCount: 0, offset: 0, nextOffset: null }) });
   };
   await page.route(listPattern, delayedList);
-  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.goto(settingsUrl);
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).click();
   await page.getByRole("radio", { name: "Preset", exact: true }).check();
   await expect(page.locator("#providerPresetStatus")).toContainText("Loading OpenRouter presets");

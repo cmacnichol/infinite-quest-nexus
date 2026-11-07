@@ -138,7 +138,7 @@ test("create and start opens the committed campaign ID", async ({ page }) => {
   await page.getByRole("button", { name: "Create and start" }).click();
   await expect(page).toHaveURL(/\/story\/created-campaign$/u);
   expect(api.creates).toHaveLength(1);
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("infiniteQuestLastCampaignId"))).toBe("created-campaign");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("infinite-quest.user.10000000-0000-4000-8000-0000000003e7.infiniteQuestLastCampaignId"))).toBe("created-campaign");
 });
 
 test("Enter uses the safe Create only default and leaves the user in management", async ({ page }) => {
@@ -173,7 +173,7 @@ test("double submission makes one POST and a failed post-commit refresh offers t
   await page.addInitScript(() => {
     const originalSetItem = Storage.prototype.setItem;
     Storage.prototype.setItem = function (key, value) {
-      if (key === "infiniteQuestLastCampaignId") throw new Error("Storage unavailable.");
+      if (key === "infinite-quest.user.10000000-0000-4000-8000-0000000003e7.infiniteQuestLastCampaignId") throw new Error("Storage unavailable.");
       originalSetItem.call(this, key, value);
     };
   });

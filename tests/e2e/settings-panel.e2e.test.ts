@@ -86,8 +86,8 @@ test(`${mode} foreign campaign route cannot create an editor and blocked storage
   await page.addInitScript(() => { Object.defineProperty(window, "localStorage", { get() { throw new Error("blocked"); } }); });
   await page.goto(`${base}/app/settings?section=campaign&campaignId=99999999-9999-4999-8999-999999999999`);
   await expect(page.getByText("This campaign is unavailable to your account.", { exact: false })).toBeVisible(); await expect(page.getByRole("link", { name: "Open campaign editor" })).toHaveCount(0);
-  await page.goto(`${base}/app/settings?section=providers`); await expect(page.getByRole("link", { name: "Open provider editor" })).toBeVisible();
-  await expect(page.locator('.settings-content input[type="password"]')).toHaveCount(0);
+  await page.goto(`${base}/app/settings?section=providers`); await expect(page.getByRole("button", { name: "New provider profile" })).toBeVisible();
+  await expect(page.locator('.settings-content input[type="password"]')).toBeHidden();
 });
 
 test(`${mode} retention accepts arbitrary whole seconds from minute-aligned saved defaults`, async ({ page }) => {

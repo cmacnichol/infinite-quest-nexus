@@ -57,7 +57,7 @@ test("character workspace retains its prompt and renders a safe provider recover
   const status = page.locator("[data-character-generation-status]");
   await expect(status).toHaveAttribute("role", "alert");
   await expect(status).toContainText("Provider Setup");
-  await expect(status.locator('a[href="/nexus/#providers"]')).toBeVisible();
+  await expect(status.locator('a[href="/app/settings?section=providers"]')).toBeVisible();
   await expect(status).toContainText("character-correlation");
   await expect(page.locator('[data-character-prompt="compact"]')).toHaveValue("Keep this character concept");
   await expect(status).not.toContainText("private-provider.example");

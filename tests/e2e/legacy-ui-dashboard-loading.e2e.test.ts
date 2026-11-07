@@ -48,7 +48,8 @@ test("providers_route_does_not_fetch_world_details", async ({ page }) => {
   await page.goto(`${origin}/nexus/index.html#providers`);
 
   await expect(page.locator("#providerProfileList")).toBeVisible();
-  await waitForInitialLists(api.requests);
+  await expect.poll(() => api.requests.some(request => request.path === "/api/v1/providers" && request.finishedAt !== undefined)).toBe(true);
+  expect(api.requests.filter(request => request.path === "/api/v1/worlds")).toHaveLength(0);
   expect(detailRequests(api.requests)).toHaveLength(0);
   expectReadOnlyDashboardTraffic(api.requests, api.writes);
 });

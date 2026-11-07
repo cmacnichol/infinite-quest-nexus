@@ -1,8 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const screenshots = "docs/review/assets/structured-output";
+const screenshots = "docs/review/assets/settings-panel";
 
-type Provider = {
+type Provider = Record<string, unknown> & {
   id: string;
   name: string;
   providerType: string;
@@ -34,7 +34,7 @@ const capability = (status: "verified" | "advertised" | "unsupported" | "unknown
   model: "safe-model",
   expectedRegistryDigest: "bounded-digest",
   advertisedAt: new Date(Date.now() - 1_000).toISOString(),
-  operations: [{ operation: "story", streaming: true, status, reason: status === "unsupported" ? "schema_incompatible" : "available", schemaVersion: null, schemaHash: null, verifiedAt: status === "verified" ? new Date(Date.now() - 1_000).toISOString() : null, expiresAt: status === "verified" ? new Date(Date.now() + expiresInMs).toISOString() : null }]
+  operations: [{ operation: "story", streaming: true, status, reason: status === "unsupported" ? "schema_incompatible" : "available", schemaVersion: "story-native-v1", schemaHash: "1".repeat(64), verifiedAt: status === "verified" ? new Date(Date.now() - 1_000).toISOString() : null, expiresAt: status === "verified" ? new Date(Date.now() + expiresInMs).toISOString() : null }]
 });
 
 async function installProviderApi(page: Page) {
@@ -44,7 +44,8 @@ async function installProviderApi(page: Page) {
     if (message.type() === "error") runtimeErrors.push(message.text());
   });
   const providers: Provider[] = [{
-    id: "text-a", name: "Text A", providerType: "openrouter", providerRole: "text", baseUrl: "https://provider.invalid", defaultModel: "safe-model", contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0.8, requestTimeoutMs: 300000, configuration: {}, enabled: true, isDefault: true
+    healthStatus: "healthy", consecutiveFailures: 0, lastHealthCheckAt: null, lastHealthError: null, hasApiKey: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    id: "11111111-1111-4111-8111-111111111111", name: "Text A", providerType: "openrouter", providerRole: "text", baseUrl: "https://provider.invalid", defaultModel: "safe-model", contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0.8, requestTimeoutMs: 300000, configuration: {}, enabled: true, isDefault: true
   }];
   const writes: Record<string, unknown>[] = [];
   let modelCapability = capability("verified");
@@ -53,7 +54,7 @@ async function installProviderApi(page: Page) {
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === "/api/v1/providers" && request.method() === "GET") return route.fulfill({ contentType: "application/json", body: JSON.stringify({ providers }) });
-    if (url.pathname === "/api/v1/providers/text-a/models" && request.method() === "GET") {
+    if (url.pathname === "/api/v1/providers/11111111-1111-4111-8111-111111111111/models" && request.method() === "GET") {
       return route.fulfill({ contentType: "application/json", body: JSON.stringify({ models: [{ id: "safe-model", displayName: "Safe model", loaded: true, instanceId: "safe-model", contextLength: 32768, responseFormatCapability: modelCapability }] }) });
     }
     if (url.pathname.startsWith("/api/v1/providers/") && request.method() === "PATCH") {
@@ -68,13 +69,13 @@ async function installProviderApi(page: Page) {
   return {
     providers, writes, runtimeErrors,
     setModelCapability: (value: ReturnType<typeof capability>) => { modelCapability = value; },
-    holdNextModelDiscovery: async () => page.route("**/api/v1/providers/text-a/models", async (route) => { heldModelRoute = route; await page.unroute("**/api/v1/providers/text-a/models"); }),
+    holdNextModelDiscovery: async () => page.route("**/api/v1/providers/11111111-1111-4111-8111-111111111111/models", async (route) => { heldModelRoute = route; await page.unroute("**/api/v1/providers/11111111-1111-4111-8111-111111111111/models"); }),
     resolveHeldModelDiscovery: async () => { const route = heldModelRoute; heldModelRoute = null; if (route) await route.fulfill({ contentType: "application/json", body: JSON.stringify({ models: [{ id: "safe-model", displayName: "Safe model", loaded: true, instanceId: "safe-model", contextLength: 32768, responseFormatCapability: modelCapability }] }) }); }
   };
 }
 
 async function openTextAProviderEditor(page: Page) {
-  await expect(page.locator('#managementInteractiveRoot:not([inert])[aria-busy="false"]')).toBeVisible();
+  await expect(page.locator('.settings-owner-editor')).toBeVisible();
   const row = page.locator("#providerProfileList .provider-profile").filter({ hasText: "Text A" });
   await expect(row).toBeVisible();
   await expect(row.getByText("Text A", { exact: true })).toBeVisible();
@@ -88,7 +89,7 @@ async function openTextAProviderEditor(page: Page) {
 test("Nexus defaults absent policy to Required while saving explicit compatibility choices", async ({ page }) => {
   const api = await installProviderApi(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/nexus/index.html#providers`);
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}/app/settings?section=providers`);
   await openTextAProviderEditor(page);
   await expect(page.locator("#providerResponseFormatPolicy")).toHaveValue("required");
   await page.locator("#providerForm").evaluate((form: HTMLFormElement) => form.requestSubmit());
@@ -106,10 +107,10 @@ test("Nexus defaults absent policy to Required while saving explicit compatibili
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("Verified schema coverage");
   await page.locator("#closeProviderModelDialog").click();
   await expect(page.locator("#providerModelDialog")).not.toBeVisible();
-  await page.screenshot({ path: `${screenshots}/settings-desktop-verified.png`, fullPage: true });
+  await page.screenshot({ path: `${screenshots}/settings-desktop-verified.png`, fullPage: false });
   await page.locator("#providerResponseFormatPolicy").selectOption("required");
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("unknown");
-  await page.screenshot({ path: `${screenshots}/settings-desktop-required.png`, fullPage: true });
+  await page.screenshot({ path: `${screenshots}/settings-desktop-required.png`, fullPage: false });
   await page.locator("#providerForm").evaluate((form: HTMLFormElement) => form.requestSubmit());
   await expect.poll(() => api.writes.length).toBe(3);
   expect((requiredAt(api.writes, 2, "required provider save").configuration as Record<string, unknown>).textResponseFormatPolicy).toBe("required");
@@ -125,7 +126,7 @@ test("Nexus defaults absent policy to Required while saving explicit compatibili
 
 test("Nexus fences saved-profile and cached-picker capability evidence after relevant edits", async ({ page }) => {
   const api = await installProviderApi(page);
-  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/nexus/index.html#providers`);
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}/app/settings?section=providers`);
   await openTextAProviderEditor(page);
   await page.locator("#refreshProviderModels").click();
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("Verified schema coverage");
@@ -146,20 +147,20 @@ test("Nexus fences saved-profile and cached-picker capability evidence after rel
 test("Nexus displays only server capability state and hides policy controls for illustrations", async ({ page }) => {
   const api = await installProviderApi(page);
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/nexus/index.html#providers`);
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}/app/settings?section=providers`);
   await openTextAProviderEditor(page);
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("unknown");
   await expect(page.locator("#providerResponseFormatCapability")).not.toContainText("bounded-digest");
   await page.locator("#providerType").evaluate((control: HTMLSelectElement) => { control.value = "sogni"; control.dispatchEvent(new Event("change", { bubbles: true })); });
   await expect(page.locator("#providerResponseFormatPolicy")).toBeHidden();
-  await page.screenshot({ path: `${screenshots}/settings-mobile-illustration.png`, fullPage: true });
+  await page.screenshot({ path: `${screenshots}/settings-mobile-illustration.png`, fullPage: false });
   expect(requiredAt(api.providers, 0, "fixture provider").responseFormatCapability).toBeUndefined();
   expect(relevantRuntimeErrors(api.runtimeErrors)).toEqual([]);
 });
 
 test("Nexus fences discovery to the current model configuration and presents finite server statuses", async ({ page }) => {
   const api = await installProviderApi(page);
-  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/nexus/index.html#providers`);
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}/app/settings?section=providers`);
   await openTextAProviderEditor(page);
   await page.locator("#refreshProviderModels").click();
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("Verified schema coverage");
@@ -172,8 +173,8 @@ test("Nexus fences discovery to the current model configuration and presents fin
   api.setModelCapability({
     ...capability("verified"),
     operations: [
-      { operation: "story", streaming: true, status: "unsupported", reason: "schema_incompatible", schemaVersion: null, schemaHash: null, verifiedAt: null, expiresAt: null },
-      { operation: "choices", streaming: false, status: "verified", reason: "available", schemaVersion: null, schemaHash: null, verifiedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() }
+      { operation: "story", streaming: true, status: "unsupported", reason: "schema_incompatible", schemaVersion: "story-native-v1", schemaHash: "1".repeat(64), verifiedAt: null, expiresAt: null },
+      { operation: "choices", streaming: false, status: "verified", reason: "available", schemaVersion: "story-native-v1", schemaHash: "1".repeat(64), verifiedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() }
     ]
   });
   await page.locator("#refreshProviderModelDialog").click();
