@@ -1,3 +1,4 @@
+import { archivePolicySnapshotSchema, historicalArchivePolicy, type ArchivePolicySnapshot } from "../../contracts/src/archive-policy.js";
 import {
   systemUploadViewSchema,
   type SystemArchiveUploadView
@@ -16,6 +17,7 @@ type SystemArchiveUploadRow = Readonly<{
   content_hash: string;
   staged_input_id: string | null;
   expires_at: Date;
+  policy_snapshot: ArchivePolicySnapshot | null;
 }>;
 
 type SystemArchiveUploadChunkRow = Readonly<{
@@ -50,6 +52,7 @@ export type SystemArchiveUploadAssembly = Readonly<{
   byteLength: number;
   sha256: string;
   expiresAt: string;
+  policy?: ArchivePolicySnapshot;
   chunks: readonly Readonly<{
     index: number;
     offset: number;
@@ -64,6 +67,7 @@ export type SystemArchiveUploadSession = Readonly<{
   status: "created" | "uploading" | "completed" | "expired" | "failed";
   byteLength: number;
   sha256: string;
+  policy?: ArchivePolicySnapshot;
 }>;
 
 export type CompleteSystemArchiveUploadRequest = Readonly<{
@@ -97,10 +101,11 @@ export interface SystemArchiveUploadRepository {
 
 type SystemArchiveUploadRepositoryOptions = Readonly<{
   uploadTtlSeconds: number;
+  policy?: ArchivePolicySnapshot;
 }>;
 
 const UPLOAD_COLUMNS = `id,owner_user_id,filesystem_operation_id,status,byte_length,
-  received_bytes,content_hash,staged_input_id,expires_at`;
+  received_bytes,content_hash,staged_input_id,expires_at,policy_snapshot`;
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 
 function repositoryError(
@@ -145,13 +150,18 @@ function toView(row: SystemArchiveUploadRow): SystemArchiveUploadView {
   });
 }
 
+function uploadPolicy(row: SystemArchiveUploadRow): ArchivePolicySnapshot {
+  return row.policy_snapshot ? archivePolicySnapshotSchema.parse(row.policy_snapshot) : historicalArchivePolicy("system");
+}
+
 function toSession(row: SystemArchiveUploadRow): SystemArchiveUploadSession {
   return Object.freeze({
     uploadId: row.id,
     filesystemOperationId: row.filesystem_operation_id,
     status: row.status,
     byteLength: Number(row.byte_length),
-    sha256: row.content_hash
+    sha256: row.content_hash,
+    policy: uploadPolicy(row)
   });
 }
 
@@ -197,6 +207,7 @@ function assemblyFromRows(
     byteLength,
     sha256: upload.content_hash,
     expiresAt: upload.expires_at.toISOString(),
+    policy: uploadPolicy(upload),
     chunks: Object.freeze(ordered)
   });
 }
@@ -205,16 +216,15 @@ async function renewUploadAuthority(
   client: DatabaseClient,
   owner: OwnerScope,
   uploadId: string,
-  filesystemOperationId: string,
-  uploadTtlSeconds: number
+  filesystemOperationId: string
 ): Promise<SystemArchiveUploadRow> {
   const updated = await client.query<SystemArchiveUploadRow>(
     `UPDATE system_archive_uploads
-        SET expires_at=clock_timestamp()+($4::text || ' seconds')::interval,
+        SET expires_at=CASE WHEN policy_snapshot IS NULL THEN expires_at ELSE clock_timestamp()+((policy_snapshot->>'uploadTtlSeconds') || ' seconds')::interval END,
             updated_at=clock_timestamp()
       WHERE id=$1 AND owner_user_id=$2 AND filesystem_operation_id=$3
      RETURNING ${UPLOAD_COLUMNS}`,
-    [uploadId, owner.ownerUserId, filesystemOperationId, uploadTtlSeconds]
+    [uploadId, owner.ownerUserId, filesystemOperationId]
   );
   const row = updated.rows[0];
   if (!row) throw new Error("System Archive upload authority renewal lost its session.");
@@ -234,8 +244,7 @@ async function renewUploadAuthority(
 async function lockedAssembly(
   client: DatabaseClient,
   owner: OwnerScope,
-  uploadId: string,
-  uploadTtlSeconds: number
+  uploadId: string
 ): Promise<Readonly<{
   upload: SystemArchiveUploadRow;
   assembly: SystemArchiveUploadAssembly;
@@ -261,8 +270,7 @@ async function lockedAssembly(
     client,
     owner,
     uploadId,
-    upload.filesystem_operation_id,
-    uploadTtlSeconds
+    upload.filesystem_operation_id
   );
   return Object.freeze({
     upload: renewed,
@@ -275,6 +283,10 @@ export function createPostgresSystemArchiveUploadRepository(
   options: SystemArchiveUploadRepositoryOptions
 ): SystemArchiveUploadRepository {
   requireSafeInteger(options.uploadTtlSeconds, "System Archive upload TTL", 1);
+  const policy = archivePolicySnapshotSchema.parse(options.policy ?? {
+    ...historicalArchivePolicy("system"), settingsRevision: "environment", uploadTtlSeconds: options.uploadTtlSeconds,
+  });
+  if (policy.uploadTtlSeconds !== options.uploadTtlSeconds) throw new Error("system_archive_upload_policy_ttl_mismatch");
 
   return {
     async createUpload(owner, request) {
@@ -285,11 +297,12 @@ export function createPostgresSystemArchiveUploadRepository(
         return await withTransaction(pool, async (client) => {
           const result = await client.query<SystemArchiveUploadRow>(
             `INSERT INTO system_archive_uploads (
-               owner_user_id,handle_token_hash,filesystem_operation_id,byte_length,content_hash,expires_at
-             ) VALUES ($1,$2,$3,$4,$5,clock_timestamp()+($6::text || ' seconds')::interval)
+               owner_user_id,handle_token_hash,filesystem_operation_id,byte_length,content_hash,expires_at,policy_snapshot
+             ) VALUES ($1,$2,$3,$4,$5,clock_timestamp()+($6::text || ' seconds')::interval,$7::jsonb)
              RETURNING ${UPLOAD_COLUMNS}`,
             [owner.ownerUserId, request.handleTokenHash, request.filesystemOperationId,
-              request.byteLength, request.sha256, options.uploadTtlSeconds]
+              request.byteLength, request.sha256, options.uploadTtlSeconds,
+              JSON.stringify(policy)]
           );
           const row = result.rows[0];
           if (!row) throw new Error("System Archive upload creation did not return a session.");
@@ -446,8 +459,7 @@ export function createPostgresSystemArchiveUploadRepository(
             client,
             owner,
             request.uploadId,
-            upload.filesystem_operation_id,
-            options.uploadTtlSeconds
+            upload.filesystem_operation_id
           );
           return toView(renewed);
         }
@@ -478,11 +490,11 @@ export function createPostgresSystemArchiveUploadRepository(
         const updated = await client.query<SystemArchiveUploadRow>(
           `UPDATE system_archive_uploads
               SET status='uploading',received_bytes=received_bytes+$2,
-                  expires_at=clock_timestamp()+($3::text || ' seconds')::interval,
+                  expires_at=CASE WHEN policy_snapshot IS NULL THEN expires_at ELSE clock_timestamp()+((policy_snapshot->>'uploadTtlSeconds') || ' seconds')::interval END,
                   updated_at=clock_timestamp()
             WHERE id=$1
            RETURNING ${UPLOAD_COLUMNS}`,
-          [request.uploadId, request.bytes, options.uploadTtlSeconds]
+          [request.uploadId, request.bytes]
         );
         const row = updated.rows[0];
         if (!row) throw new Error("System Archive chunk persistence lost its upload session.");
@@ -528,7 +540,7 @@ export function createPostgresSystemArchiveUploadRepository(
 
     async getAssembly(owner, uploadId) {
       return withTransaction(pool, async (client) => (
-        await lockedAssembly(client, owner, uploadId, options.uploadTtlSeconds)
+        await lockedAssembly(client, owner, uploadId)
       ).assembly);
     },
 
@@ -537,8 +549,7 @@ export function createPostgresSystemArchiveUploadRepository(
         const { upload, assembly } = await lockedAssembly(
           client,
           owner,
-          request.uploadId,
-          options.uploadTtlSeconds
+          request.uploadId
         );
         const staged = await client.query<{
           id: string;

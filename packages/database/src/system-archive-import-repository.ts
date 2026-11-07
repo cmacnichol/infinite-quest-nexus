@@ -1,3 +1,4 @@
+import { archivePolicySnapshotSchema, historicalArchivePolicy, requireCompatibleArchivePreview, type ArchivePolicySnapshot } from "../../contracts/src/archive-policy.js";
 import { createHash, randomBytes } from "node:crypto";
 import {
   SYSTEM_ARCHIVE_DOMAINS,
@@ -82,6 +83,7 @@ export type SystemArchiveImportJobAuthority = Readonly<{
   report: Readonly<Record<string, unknown>> | null;
   rebuildCampaignIds: readonly string[];
   rebuildAssetIds: readonly string[];
+  policy?: ArchivePolicySnapshot;
 }>;
 
 export type SystemArchiveImportResult = Readonly<{
@@ -2114,6 +2116,7 @@ async function normalizeImportedIllustrations(
 
 export function createPostgresSystemArchiveImportRepository(
   pool: DatabasePool,
+  policy?: ArchivePolicySnapshot,
 ): SystemArchiveImportRepository {
   const repository: SystemArchiveImportRepository = {
     async destinationFingerprint(owner, request) {
@@ -2206,9 +2209,9 @@ export function createPostgresSystemArchiveImportRepository(
         }
         const inserted = await client.query<{ id: string }>(
           `INSERT INTO system_archive_jobs (
-             owner_user_id,kind,status,idempotency_key_hash,staged_input_id,progress,report
+             owner_user_id,kind,status,idempotency_key_hash,staged_input_id,progress,report,policy_snapshot
            )
-           SELECT upload.owner_user_id,'import','previewed',$3,upload.staged_input_id,$4::jsonb,$5::jsonb
+           SELECT upload.owner_user_id,'import','previewed',$3,upload.staged_input_id,$4::jsonb,$5::jsonb,$6::jsonb
              FROM system_archive_uploads upload
              JOIN portable_staged_inputs staged
                ON staged.id=upload.staged_input_id
@@ -2228,7 +2231,8 @@ export function createPostgresSystemArchiveImportRepository(
               destinationFingerprint: current,
               expiresAt
             }),
-            JSON.stringify(projection)
+            JSON.stringify(projection),
+            JSON.stringify(policy ?? historicalArchivePolicy("system"))
           ]
         );
         const row = inserted.rows[0];
@@ -2268,10 +2272,11 @@ export function createPostgresSystemArchiveImportRepository(
           upload_expires_at: Date;
           progress: unknown;
           report: unknown;
+          policy_snapshot: ArchivePolicySnapshot | null;
         }>(
           `SELECT job.id,job.staged_input_id,upload.id AS upload_id,job.status,
                   upload.status AS upload_status,upload.expires_at AS upload_expires_at,
-                  job.progress,job.report
+                  job.progress,job.report,job.policy_snapshot
              FROM system_archive_jobs job
              JOIN system_archive_uploads upload
                ON upload.owner_user_id=job.owner_user_id
@@ -2291,6 +2296,8 @@ export function createPostgresSystemArchiveImportRepository(
         );
         const row = selected.rows[0];
         if (!row) throw repositoryError("System Archive preview authority is unavailable or expired.", 409);
+        if (policy && row.status === "previewed") requireCompatibleArchivePreview(
+          row.policy_snapshot ? archivePolicySnapshotSchema.parse(row.policy_snapshot) : historicalArchivePolicy("system"), policy);
         const progress = row.progress as Partial<{
           archiveFingerprint: unknown;
           destinationFingerprint: unknown;
@@ -2365,8 +2372,9 @@ export function createPostgresSystemArchiveImportRepository(
         status: SystemArchiveImportJobAuthority["status"];
         progress: unknown;
         report: unknown;
+        policy_snapshot: ArchivePolicySnapshot | null;
       }>(
-        `SELECT job.id,job.staged_input_id,upload.id AS upload_id,job.status,job.progress,job.report
+        `SELECT job.id,job.staged_input_id,upload.id AS upload_id,job.status,job.progress,job.report,job.policy_snapshot
            FROM system_archive_jobs job
            JOIN system_archive_uploads upload
              ON upload.owner_user_id=job.owner_user_id
@@ -2382,7 +2390,7 @@ export function createPostgresSystemArchiveImportRepository(
       );
       const row = selected.rows[0];
       if (!row) throw repositoryError("System Archive import staging authority is unavailable.", 409);
-      return parseImportJobAuthority(row);
+      return { ...parseImportJobAuthority(row), policy: row.policy_snapshot ? archivePolicySnapshotSchema.parse(row.policy_snapshot) : historicalArchivePolicy("system") };
     },
 
     async withAtomicImport(owner, request, work) {

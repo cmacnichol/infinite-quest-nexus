@@ -30,6 +30,8 @@ export type ArchiveLimits = {
 };
 
 export type RuntimeConfig = {
+  /** Active installation revision; internal transfer provenance, never portable. */
+  instanceSettingsRevision?: string;
   logLevel?: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
   settingsManagementEnabled?: boolean;
   settingsManagementKeyFile?: string | undefined;

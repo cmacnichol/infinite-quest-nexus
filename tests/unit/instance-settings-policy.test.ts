@@ -15,6 +15,23 @@ export function policyFixture(): DeploymentSettingsPolicy {
 }
 
 describe("installation settings policy", () => {
+  it("rejects an enabled archive whose upload ceiling cannot hold one allowed chunk", () => {
+    const settings = settingsFixture();
+    settings.systemArchiveLimits.maxCompressedBytes = settings.systemArchiveChunkBytes - 1;
+    expect(resolveInstanceSettings(settings, policyFixture(), workerCapacity)).toMatchObject({ ok: false, errors: [{ code: "archive_chunk_capacity", field: "systemArchiveChunkBytes" }] });
+    settings.systemArchiveLimits.maxCompressedBytes = settings.systemArchiveChunkBytes;
+    expect(resolveInstanceSettings(settings, policyFixture(), workerCapacity).ok).toBe(true);
+  });
+  it("does not apply archive admission dependencies while the capability is disabled", () => {
+    const settings = settingsFixture(); settings.systemArchiveLimits.maxCompressedBytes = 1;
+    const policy = policyFixture();
+    expect(resolveInstanceSettings({ ...settings, systemArchiveEnabled: false }, policy, workerCapacity).ok).toBe(true);
+    policy.featureGates.systemArchiveEnabled = false;
+    const resolved = resolveInstanceSettings(settings, policy, workerCapacity);
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) expect(resolved.effective.systemArchiveEnabled).toBe(false);
+  });
+
   it.each(["castAutoMatchEnabled", "systemArchiveEnabled", "aiAuthoringJobsEnabled", "worldSharingEnabled"] as const)("honors the direct %s emergency gate", (key) => {
     const policy = policyFixture();
     policy.featureGates[key] = false;

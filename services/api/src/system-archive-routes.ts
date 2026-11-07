@@ -56,6 +56,7 @@ export interface SystemArchiveDownloadPort {
 
 export type SystemArchiveRouteOptions = Readonly<{
   enabled: boolean;
+  uploadAdmission?(owner: OwnerScope, uploadId: string, contentLength: number): Promise<void>;
   application: SystemArchiveApplication;
   downloads: SystemArchiveDownloadPort;
   resolveOwner(): Promise<OwnerScope>;
@@ -128,6 +129,8 @@ const SAFE_BOUNDARY_ERRORS: Readonly<Record<string, Readonly<{
   "system-archive-upload-offset-conflict": { statusCode: 409, message: "System Archive chunk does not begin at the durable upload prefix." },
   "system-archive-preview-not-found": { statusCode: 404, message: "System Archive preview was not found." },
   "system-archive-preview-expired": { statusCode: 410, message: "System Archive preview has expired." },
+  "system-archive-upload-restart-required": { statusCode: 409, message: "System Archive policy changed; restart this transfer." },
+  "archive-preview-stale": { statusCode: 409, message: "Transfer policy changed; create a fresh preview." },
   "system-archive-preview-stale": { statusCode: 409, message: "System Archive preview authority is stale." },
   "system-archive-export-conflict": { statusCode: 409, message: "A conflicting System Archive export is active." },
 });
@@ -481,6 +484,15 @@ export async function registerSystemArchiveRoutes(
 
   app.put("/api/v1/system-imports/uploads/:uploadId/chunks/:index", {
     bodyLimit: options.limits.chunkBytes,
+    preParsing: async (request, _reply, payload) => {
+      const { uploadId } = chunkParameterSchema.parse(request.params);
+      const contentLength = Number(requireHeader(request.headers["content-length"], "Content-Length"));
+      if (!Number.isSafeInteger(contentLength) || contentLength < 1 || contentLength > options.limits.chunkBytes) {
+        throw httpError("System Archive chunk exceeds the configured limit.", 413, "system-archive-chunk-too-large");
+      }
+      if (options.uploadAdmission) await atBoundary("put-chunk", async () => options.uploadAdmission!(await options.resolveOwner(), uploadId, contentLength));
+      return payload;
+    },
   }, async (request) => {
     const { uploadId, index } = chunkParameterSchema.parse(request.params);
     if (!Buffer.isBuffer(request.body)) {

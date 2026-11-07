@@ -47,3 +47,5 @@ export * from "./activity.js";
 export * from "./characters-workspace.js";
 
 export * from "./instance-settings.js";
+
+export * from "./archive-policy.js";

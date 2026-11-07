@@ -24,6 +24,11 @@ function fixture() {
   return { actor, state, writes, repository, useCases: createSettingsUseCases(repository, policyFixture(), resolveInstanceSettings) };
 }
 describe("settings application boundary", () => {
+  it("rejects incompatible archive capacity before a revision write", async () => {
+    const { useCases, actor, writes } = fixture();
+    await expect(useCases.propose({ expectedRequestedRevision: "1", changes: { systemArchiveLimits: { maxCompressedBytes: 1 } }, reason: "archive-capacity" }, actor)).rejects.toThrow("settings_policy_rejected");
+    expect(writes).toHaveLength(0);
+  });
   it("requires an explicit policy resolver instead of silently selecting one", () => {
     const { repository } = fixture();
     expect(() => Reflect.apply(createSettingsUseCases, undefined, [repository, policyFixture()])).toThrow("settings_policy_resolver_required");

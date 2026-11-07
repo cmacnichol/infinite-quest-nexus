@@ -880,6 +880,7 @@ export async function buildServer({
       enabled: true,
       application: apiSystemArchive.application,
       downloads: apiSystemArchive.downloads,
+      ...(apiSystemArchive.uploadAdmission ? { uploadAdmission: apiSystemArchive.uploadAdmission } : {}),
       resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) }),
       limits: {
         chunkBytes: config.systemArchiveChunkBytes!,

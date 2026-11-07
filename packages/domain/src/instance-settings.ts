@@ -50,7 +50,7 @@ export const INSTANCE_SETTING_FIELDS: readonly RegistryField[] = [
   const bounds = INSTANCE_SETTINGS_NUMERIC_BOUNDS[field.key as SettingsNumericKey];
   return { ...field, ...(bounds ? { minimum: bounds.min, maximum: bounds.max } : {}) } as RegistryField;
 });
-export type SettingsResolutionError = { code: "invalid_settings" | "invalid_policy" | "invalid_capacity" | "policy_bound" | "reviewed_bound" | "pool_capacity" | "rate_policy"; field?: SettingsFieldKey };
+export type SettingsResolutionError = { code: "invalid_settings" | "invalid_policy" | "invalid_capacity" | "policy_bound" | "reviewed_bound" | "archive_chunk_capacity" | "pool_capacity" | "rate_policy"; field?: SettingsFieldKey };
 export type SettingsResolution = { ok: true; effective: InstanceSettings; fields: SettingsFieldDescriptor[] } | { ok: false; errors: SettingsResolutionError[] };
 function valueAt(settings: InstanceSettings, key: SettingsFieldKey): boolean | number | InstanceSettings["logLevel"] {
   const [group, property] = key.split(".");
@@ -91,6 +91,11 @@ export function resolveInstanceSettings(requested: InstanceSettings, policy: Dep
       effective[child as SettingsFeatureKey] = false;
       if (!locks.has(child as SettingsFeatureKey)) locks.set(child as SettingsFeatureKey, "dependency_disabled");
     }
+  }
+  // Both the API route and resumable coordinator require this same capacity.
+  // Evaluate after capability gates: a disabled archive has no upload admission.
+  if (effective.systemArchiveEnabled && effective.systemArchiveChunkBytes > effective.systemArchiveLimits.maxCompressedBytes) {
+    return { ok: false, errors: [{ code: "archive_chunk_capacity", field: "systemArchiveChunkBytes" }] };
   }
   return { ok: true, effective, fields: INSTANCE_SETTING_FIELDS.map((field) => ({
     ...field, scope: "installation", effectiveValue: valueAt(effective, field.key),

@@ -478,6 +478,9 @@ export async function registerArchiveRoutes(app: FastifyInstance, options: Archi
         destination,
       });
     } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "archive-preview-stale") {
+        throw new ArchiveError("archive-preview-stale", "Transfer limits changed; create a fresh preview.", 409);
+      }
       if (error instanceof Error
         && (("code" in error && error.code === "import_idempotency_mismatch")
           || error.message === "archive_unavailable")) {

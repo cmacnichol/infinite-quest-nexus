@@ -46,7 +46,7 @@ export function resolveRuntimeSettingsState(state:SettingsState, bootstrap:Runti
   // Emergency deployment disables are honored but divergence cannot become healthy.
   const permitted=resolveInstanceSettings(state.active,policy,{role:bootstrap.role,databaseMaxConnections:bootstrap.databaseMaxConnections});
   if(!permitted.ok || settingsDigest(resolved.effective)!==settingsDigest(permitted.effective)) throw new Error('settings_deployment_divergence');
-  const config=mergeRuntimeSettings(bootstrap,resolved.effective);
+  const config={...mergeRuntimeSettings(bootstrap,resolved.effective),instanceSettingsRevision:state.activeRevision};
   return {config,mode:'database',activeRevision:state.activeRevision,policyDigest:settingsDigest(policy),activationEpoch:state.activationEpoch,effectiveDigest:settingsDigest(resolved.effective)};
 }
 export async function loadActiveRuntimeSettings(pool:DatabasePool,bootstrap:RuntimeConfig,policy?:DeploymentSettingsPolicy):Promise<ResolvedRuntimeSettings> {
