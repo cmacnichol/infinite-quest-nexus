@@ -158,9 +158,10 @@ it("rejects blank and overlong profile names without a network write", async () 
 it("does not update a disposed profile editor when an authorized save resolves", async () => {
   const { document, window } = parseHTML("<body></body>");
   const pending = deferred<typeof PROFILE>();
+  const saves = vi.fn().mockReturnValue(pending.promise);
   const editor = mountProfileEditor(document, {
     load: vi.fn().mockResolvedValue(PROFILE),
-    save: vi.fn().mockReturnValue(pending.promise)
+    save: saves
   });
   document.body.append(editor.element);
   await editor.load();
@@ -168,12 +169,18 @@ it("does not update a disposed profile editor when an authorized save resolves",
   name.value = "Draft retained";
   name.dispatchEvent(new window.Event("input", { bubbles: true }));
   await Promise.resolve();
+  name.value = "Queued draft";
+  name.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await vi.waitFor(() => expect(saves).toHaveBeenCalledTimes(1));
+  const signal = saves.mock.calls[0]![1] as AbortSignal;
   editor.dispose();
+  expect(signal.aborted).toBe(true);
   pending.resolve({ ...PROFILE, displayName: "Server response" });
   await Promise.resolve();
   await Promise.resolve();
 
-  expect(name.value).toBe("Draft retained");
+  expect(name.value).toBe("");
+  expect(saves).toHaveBeenCalledTimes(1);
 });
 
 it("preserves a pending draft through reopen when its save later fails", async () => {

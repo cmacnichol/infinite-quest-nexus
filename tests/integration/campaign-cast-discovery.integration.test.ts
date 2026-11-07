@@ -1035,7 +1035,15 @@ describe("durable cast discovery", () => {
     await pool.query("UPDATE campaign_cast_discovery_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [first.id]);
     const recovered = (await createCastDiscoveryJobRepository(pool, () => true).claim("after-restart"))!;
     expect(recovered.execution.admission?.identityPolicy).toBe(identityPolicy);
-    await jobs.publish(recovered);
+    expect(recovered.execution.plan.protocolVersion).toBe("cast-discovery-v1");
+    expect(recovered.execution.admission?.promptIdentifier).toBe(identityPolicy === "unique_name" ? "cast-discovery-prompt-v2" : "cast-discovery-prompt-v1");
+    // Restart with automatic matching off: publication must honor the admitted
+    // policy and checkpoint, while discovery remains independently available.
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [recovered.id]);
+    const restarted = createWorkerCampaignCastApplication(pool, { castDiscoveryEnabled: true, castAutoMatchEnabled: false, castBackfillEnabled: false }, {
+      async execute() { throw new Error("Frozen checkpoint must not redispatch"); }
+    });
+    expect(await restarted.runNext("auto-match-disabled-after-restart")).toBe(true);
     const detail = await cast.detail(f.scope, created.character.id);
     expect(detail.autoMatches).toHaveLength(identityPolicy === "unique_name" ? 1 : 0);
     expect(detail.observations).toHaveLength(identityPolicy === "unique_name" ? 1 : 0);

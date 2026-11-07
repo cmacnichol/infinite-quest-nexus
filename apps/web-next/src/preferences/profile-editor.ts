@@ -1,3 +1,4 @@
+import { mountReaderPreferenceFields } from "../../../shared-ui/profile/profile-controls.js";
 import {
   userProfileUpdateSchema,
   type UserProfile,
@@ -5,8 +6,8 @@ import {
 } from "@infinite-quest/contracts";
 
 export interface ProfilePort {
-  load(): Promise<UserProfile>;
-  save(update: UserProfileUpdate): Promise<UserProfile>;
+  load(signal?: AbortSignal): Promise<UserProfile>;
+  save(update: UserProfileUpdate, signal?: AbortSignal): Promise<UserProfile>;
 }
 
 export interface ProfileEditor {
@@ -72,7 +73,8 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
     option.textContent = label;
     turnStyle.append(option);
   }
-  fields.append(displayName, autoSubmit, continuousReading, appliesOnNextLoad, turnStyle);
+  const reader = mountReaderPreferenceFields(document);
+  fields.append(displayName, autoSubmit, continuousReading, appliesOnNextLoad, turnStyle, reader.element);
 
   const status = document.createElement("p");
   status.dataset.profileStatus = "";
@@ -85,6 +87,7 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
   retry.dataset.profileRetry = "";
   element.append(heading, fields, status, retry);
 
+  const controller = new AbortController();
   let disposed = false;
   let loaded = false;
   let editRevision = 0;
@@ -106,6 +109,7 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
   };
 
   const applyProfile = (profile: UserProfile): void => {
+    reader.set(profile.settings.readerPreferences);
     setControlValue(displayName, profile.displayName);
     autoSubmit.checked = profile.settings.autoSubmitTurnChoices;
     continuousReading.checked = profile.settings.continuousReading;
@@ -124,7 +128,8 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
       settings: {
         autoSubmitTurnChoices: autoSubmit.checked === true,
         continuousReading: continuousReading.checked === true,
-        defaultTurnControlStyle: controlValue(turnStyle)
+        defaultTurnControlStyle: controlValue(turnStyle),
+        readerPreferences: reader.get()
       }
     });
     if (!parsed.success) {
@@ -138,9 +143,10 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
 
   const queueSave = (update: UserProfileUpdate, requestRevision: number): void => {
     saveQueue = saveQueue.catch(() => undefined).then(async () => {
-      if (!disposed && requestRevision === editRevision) setStatus("Saving profile…", "saving");
+      if (disposed) return;
+      if (requestRevision === editRevision) setStatus("Saving profile…", "saving");
       try {
-        const saved = await port.save(update);
+        const saved = await port.save(update, controller.signal);
         if (!disposed && requestRevision === editRevision) {
           if (unsavedRevision === requestRevision) unsavedRevision = null;
           applySavedSettings(saved);
@@ -174,7 +180,7 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
     setFieldsDisabled(true);
     setStatus("Loading profile…", "saving");
     try {
-      const profile = await port.load();
+      const profile = await port.load(controller.signal);
       if (disposed || requestRevision !== loadRevision) return;
       if (unsavedRevision !== null || requestEditRevision !== editRevision) {
         setFieldsDisabled(false);
@@ -199,6 +205,7 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
   autoSubmit.addEventListener("change", saveCurrent);
   continuousReading.addEventListener("change", saveCurrent);
   turnStyle.addEventListener("change", saveCurrent);
+  reader.element.addEventListener("change", saveCurrent);
   retry.addEventListener("click", () => {
     if (failedSave && failedSave.revision === editRevision) {
       queueSave(failedSave.update, failedSave.revision);
@@ -213,6 +220,9 @@ export function mountProfileEditor(document: Document, port: ProfilePort): Profi
     dispose() {
       if (disposed) return;
       disposed = true;
+      controller.abort();
+      failedSave = null;
+      displayName.value = "";
       ++editRevision;
       ++loadRevision;
       setFieldsDisabled(true);

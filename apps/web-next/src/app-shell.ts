@@ -3,7 +3,7 @@ import type { ThemeController } from "./theme";
 import type { DisplayPreferencesStore } from "./preferences/display-preferences";
 import type { UiImplementation } from "./ui/feature-policy";
 
-export type AppNavigation = "world-library" | "world-editor" | "campaigns" | "story" | "data-transfer" | "setup";
+export type AppNavigation = "world-library" | "world-editor" | "campaigns" | "story" | "data-transfer" | "setup" | "settings";
 
 /** Static application-owned header content. Page data must never be interpolated here. */
 export interface AppShellOptions {
@@ -38,7 +38,7 @@ export function renderAppShell(
           <a href="/app/campaigns"${currentAttribute(currentNavigation, "campaigns")}>Campaigns</a>
           <a href="${storyHref}"${currentAttribute(currentNavigation, "story")}>Story</a>
           <a href="/app/data-transfer"${currentAttribute(currentNavigation, "data-transfer")}>Data Transfer</a>
-          <a href="/nexus/#providers"${currentAttribute(currentNavigation, "setup")}>Setup</a>
+          <a data-settings-link href="/app/settings"${currentAttribute(currentNavigation, "settings")}>Settings</a>
         </nav>
         <a class="story-link" href="${storyHref}">
           Enter story
@@ -77,6 +77,7 @@ export function renderAppShell(
             <label class="user-profile-check"><input id="user-profile-continuous-reading" type="checkbox" />Keep the full story in view while reading</label>
             <label class="user-profile-field">Default turn-control style
               <select id="user-profile-turn-style">
+                <option value="action_only">Actions only</option>
                 <option value="flexible_action">Action</option>
                 <option value="flexible_scene">Story Direction</option>
               </select>
@@ -94,20 +95,11 @@ export function renderAppShell(
   `;
 }
 
-export function initializeAppTheme(root: HTMLElement): ThemeController {
+export function initializeAppTheme(root: HTMLElement, storage: Pick<Storage, "getItem" | "setItem"> | null = null): ThemeController {
   const document = root.ownerDocument;
   const view = document.defaultView;
   const themeToggle = root.querySelector<HTMLButtonElement>(".theme-toggle");
   if (!themeToggle || !view) throw new Error("The theme control could not be initialized.");
-
-  let storage: Storage | null = null;
-  if (view.location) {
-    try {
-      storage = view.localStorage;
-    } catch {
-      // Theme switching remains available when storage access is blocked.
-    }
-  }
 
   const controller = initializeThemeControl(themeToggle, {
     root: document.documentElement,

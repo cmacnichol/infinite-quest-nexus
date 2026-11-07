@@ -5,6 +5,7 @@ services:
     image: ${NEXUS_IMAGE:-ghcr.io/cmacnichol/infinite-quest-nexus:latest}
     command: ["node", "dist/services/runtime/src/main.js", "api"]
     environment:
+      # Opt-in config/key mounts: see instance-settings.override.yaml.
       APP_ROLE: api
       APP_PORT: 8080
       DATABASE_URL_FILE: /run/secrets/infinitequest_database_url
@@ -61,6 +62,7 @@ services:
       update_config:
         parallelism: 1
         delay: 10s
+        # In database mode approve the third transient API pool via maximumReplicas: 3.
         order: start-first
         failure_action: rollback
         monitor: 30s

@@ -19,7 +19,7 @@ async function settle(): Promise<void> {
 async function boot(loader: () => Promise<void>) {
   const { document } = parseHTML('<html><body><div id="app"></div></body></html>');
   const window = new EventTarget() as EventTarget & Pick<Window, "location" | "document">;
-  Object.assign(window, { location: { pathname: "/app/", search: "" }, document });
+  Object.assign(window, { location: new URL("http://localhost/app/"), document });
   mocked.loader = loader;
   mocked.mount.mockClear();
   const previous = new Map<PropertyKey, PropertyDescriptor | undefined>();

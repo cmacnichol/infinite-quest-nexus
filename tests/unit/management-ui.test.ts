@@ -1,3 +1,4 @@
+import { writeCampaignSettings } from "../../packages/client-web/src/campaign-settings-writes.js";
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
@@ -7,6 +8,11 @@ const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/src/story.js", "utf8");
 const managementHtml = readFileSync("apps/web/public/index.html", "utf8");
 const managementScript = readFileSync("apps/web/src/nexus.js", "utf8");
+const providerHtml = readFileSync("apps/web-next/src/settings/provider-editor.html", "utf8");
+const providerScript = readFileSync("apps/web-next/src/settings/provider-editor.js", "utf8");
+const promptHtml = readFileSync("apps/web-next/src/settings/prompt-editor.html", "utf8");
+const promptScript = readFileSync("apps/web-next/src/settings/prompt-editor.js", "utf8");
+const splitEditorFunctions = [managementScript, providerScript, promptScript].map(source => source.replace(/^  /gm, "")).join("\n");
 const managementCss = readFileSync("apps/web/public/nexus.css", "utf8");
 const { document: managementDocument } = parseHTML(managementHtml);
 const imageLibraryScript = readFileSync("apps/web/public/image-library-browser.js", "utf8");
@@ -28,14 +34,15 @@ function managementFunctionWithBindings<T extends (...args: never[]) => unknown>
 
 function managementFunctions<T extends Record<string, (...args: never[]) => unknown>>(names: string[], bindings: Record<string, unknown>): T {
   const sources = names.map((name) => {
-    const start = managementScript.indexOf(`function ${name}(`);
-    const definitionStart = managementScript.slice(start - 6, start) === "async " ? start - 6 : start;
-    const nextFunction = /\n(?:async )?function /.exec(managementScript.slice(start + 1));
+    const start = splitEditorFunctions.indexOf(`function ${name}(`);
+    const definitionStart = splitEditorFunctions.slice(start - 6, start) === "async " ? start - 6 : start;
+    const nextFunction = /\n(?:async )?function /.exec(splitEditorFunctions.slice(start + 1));
     const end = nextFunction ? start + 1 + nextFunction.index : -1;
     if (start < 0 || end < 0) throw new Error(`Unable to locate management function ${name}.`);
-    return managementScript.slice(definitionStart, end);
+    return splitEditorFunctions.slice(definitionStart, end);
   });
   const resolvedBindings = {
+    writeCampaignSettings,
     campaignSectionLoader: { setSelection: vi.fn(), invalidate: vi.fn() },
     loadCampaignSettingsSectionForPanel: vi.fn(),
     setCampaignSettingsSectionContentVisibility: vi.fn(),
@@ -77,8 +84,8 @@ describe("Nexus management UI contracts", () => {
   it("keeps text model and preset selection in settings rather than individual turns", () => {
     expect(storyScript).not.toContain("turnTextSelectionPanel");
     expect(storyScript).not.toContain("storyTextSelectionRequest");
-    expect(managementHtml).toContain('id="providerSelectionPreset"');
-    expect(managementHtml).toContain('id="providerDefaultModel"');
+    expect(providerHtml).toContain('id="providerSelectionPreset"');
+    expect(providerHtml).toContain('id="providerDefaultModel"');
   });
   it("ignores an old campaign world response after another campaign is selected", async () => {
     const { document } = parseHTML(managementHtml);
@@ -574,6 +581,7 @@ describe("Nexus management UI contracts", () => {
       STORY_MEMORY_LEVELS: ["off", "standard", "enhanced", "max"],
       elements,
       api,
+      campaignMemoryApi: { update: () => pendingSave.promise },
       readCampaignStoryMemorySettings: (settings: typeof oldSettings) => settings,
       renderCampaignStoryMemorySettings,
       campaignMessage: vi.fn()
@@ -582,10 +590,8 @@ describe("Nexus management UI contracts", () => {
 
     functions.setCampaignSettingsSectionFeedback("story", "loading", "Loading Story behavior…", 1, campaignId);
     const saving = functions.saveCampaignStoryMemory();
-    await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(1));
-    expect(api).toHaveBeenCalledWith(`/api/v1/campaigns/${campaignId}/story-memory`, expect.objectContaining({ method: "PUT" }));
     const sectionRead = campaignSectionLoader.loadSection("story").catch((error: unknown) => error);
-    await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(1));
     pendingSave.resolve(savedSettings);
     await saving;
     expect(renderCampaignStoryMemorySettings).toHaveBeenCalledWith(savedSettings);
@@ -920,12 +926,12 @@ describe("Nexus management UI contracts", () => {
     const snapshotSource = managementScript.slice(snapshotStart, snapshotEnd);
     expect(snapshotSource).toContain("title: elements.campaignTitle.value");
     expect(snapshotSource).toContain("status: elements.campaignStatus.value");
-    expect(snapshotSource).toContain("textProviderProfileId: elements.campaignTextProvider.value || null");
-    expect(snapshotSource).toContain("turnControlStyle: elements.campaignTurnControlStyle.value");
-    expect(snapshotSource).toContain("storyLengthProfile: elements.campaignStoryLengthProfile.value");
-    expect(snapshotSource).toContain("storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)");
-    expect(saveSource).toContain("...snapshot");
-    expect(saveSource).toContain("savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle)");
+    expect(snapshotSource).not.toContain("textProviderProfileId: elements.campaignTextProvider.value || null");
+    expect(snapshotSource).not.toContain("turnControlStyle: elements.campaignTurnControlStyle.value");
+    expect(snapshotSource).not.toContain("storyLengthProfile: elements.campaignStoryLengthProfile.value");
+    expect(snapshotSource).not.toContain("storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)");
+    expect(saveSource).toContain("title:snapshot.title,status:snapshot.status");
+    expect(saveSource).not.toContain("savedTurnControlStyle(");
     expect(saveSource).not.toContain("campaignWorldVersion");
   });
 
@@ -962,7 +968,7 @@ describe("Nexus management UI contracts", () => {
       elements,
       document,
       window: { matchMedia: () => ({ matches: false }) },
-      localStorage: { getItem: () => null, removeItem: vi.fn() },
+      ownerDevice: { getItem: () => null, removeItem: vi.fn() },
       CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
       campaignSelectionRequest: 0,
       activeCampaignSettingsPanel: "overview",
@@ -1074,7 +1080,7 @@ describe("Nexus management UI contracts", () => {
       selectedCampaign: { id: "deleted-campaign", title: "Deleted campaign" },
       campaignSettingsSnapshot: () => ({}),
       selectedWorld: null,
-      localStorage: { getItem: () => null, removeItem: vi.fn() },
+      ownerDevice: { getItem: () => null, removeItem: vi.fn() },
       canLeaveCampaignEditor: async () => true,
       campaignEditGuard: { reset: () => undefined },
       renderCampaignSaveFeedback: () => undefined,
@@ -1109,32 +1115,32 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("navigates to provider management with an anchor", () => {
-    expect(storyHtml).toContain('<a id="btnGettingConfigureProviders" class="buttonish accent grow" href="/nexus/#providers">Open Provider Management in Nexus</a>');
+    expect(storyHtml).toContain('<a id="btnGettingConfigureProviders" class="buttonish accent grow" href="/app/settings?section=providers">Open Provider Management in Nexus</a>');
   });
 
   it("provides one Setup entrypoint for application and campaign prompt templates", () => {
     expect(managementHtml).toContain('id="navPromptLibrary"');
-    expect(managementHtml).toContain('id="prompt-library"');
-    expect(managementHtml).toContain('id="promptLibraryScope"');
-    expect(managementHtml).toContain('id="promptLibraryContent"');
-    expect(managementHtml).toContain('id="promptLibraryPreview"');
-    expect(managementHtml).toContain('id="promptLibraryPreviewContent"');
-    expect(managementHtml).toContain('id="promptLibraryCampaign"');
-    expect(managementHtml).toContain('id="promptLibraryCategories"');
-    expect(managementHtml).toContain('id="promptLibraryPrevious"');
-    expect(managementHtml).toContain('id="promptLibraryNext"');
-    expect(managementHtml).toContain('id="promptLibraryDiscard"');
-    expect(managementHtml).toContain('id="promptLibraryUnsaved"');
-    expect(managementScript).toContain('function loadPromptLibrary()');
-    expect(managementScript).toContain('"/api/v1/prompt-library/preview"');
-    expect(managementScript).toContain("promptLibraryEditorBaseline");
-    expect(managementScript).toContain("promptLibraryIsDirty()");
-    expect(managementScript).toContain('"/api/v1/prompt-library/overrides"');
+    expect(promptHtml).toContain('id="prompt-library"');
+    expect(promptHtml).toContain('id="promptLibraryScope"');
+    expect(promptHtml).toContain('id="promptLibraryContent"');
+    expect(promptHtml).toContain('id="promptLibraryPreview"');
+    expect(promptHtml).toContain('id="promptLibraryPreviewContent"');
+    expect(promptHtml).toContain('id="promptLibraryCampaign"');
+    expect(promptHtml).toContain('id="promptLibraryCategories"');
+    expect(promptHtml).toContain('id="promptLibraryPrevious"');
+    expect(promptHtml).toContain('id="promptLibraryNext"');
+    expect(promptHtml).toContain('id="promptLibraryDiscard"');
+    expect(promptHtml).toContain('id="promptLibraryUnsaved"');
+    expect(promptScript).toContain('function loadPromptLibrary()');
+    expect(promptScript).toContain('ports.preview(');
+    expect(promptScript).toContain("promptLibraryEditorBaseline");
+    expect(promptScript).toContain("promptLibraryIsDirty()");
+    expect(promptScript).toContain('ports.save(');
     expect(managementCss).toContain(".prompt-library-toolbar label.hidden { display: none; }");
   });
 
   it("sends the selected campaign to the effective-prompt preview only in campaign scope", async () => {
-    const { document } = parseHTML(managementHtml);
+    const { document } = parseHTML(promptHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
     const template = { key: "story_system" };
     const calls: Array<Record<string, unknown>> = [];
@@ -1145,7 +1151,7 @@ describe("Nexus management UI contracts", () => {
     const run = async (campaignId: string) => {
       const functions = managementFunctions<{ renderPromptLibraryPreview: () => Promise<void> }>(
         ["renderPromptLibraryPreview"], {
-          elements, api, promptLibrarySelectedTemplate: () => template,
+          elements, ports: { preview: (body: unknown) => api("", {body: JSON.stringify(body)}) }, signal: new AbortController().signal, promptLibrarySelectedTemplate: () => template,
           promptLibraryPreviewVisible: true, promptLibraryPreviewSequence: 0,
           promptLibraryCampaignId: () => campaignId
         });
@@ -1245,7 +1251,7 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("renders retained intent provenance without provider actions while active profiles remain actionable", () => {
-    const { document } = parseHTML(managementHtml);
+    const { document } = parseHTML(providerHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
     const api = vi.fn();
     const { renderProviderProfiles } = managementFunctions<{
@@ -1344,28 +1350,28 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("configures Sogni as an independent illustration provider without exposing stored secrets", () => {
-    expect(managementHtml).toContain('<option value="sogni">Sogni Creative Workflow (REST)</option>');
-    expect(managementHtml).toContain('<option value="sogni_sdk">Sogni Supernet SDK</option>');
-    expect(managementHtml).toContain('id="providerSogniSettings" class="hidden" aria-hidden="true"');
-    expect(managementHtml).toContain('id="providerSogniImageCount"');
-    expect(managementHtml).toContain('<option value="2">2 images</option>');
-    expect(managementHtml).toContain('id="providerSogniModelDiscoveryEnabled"');
-    expect(managementHtml).not.toContain('id="providerSogniSensitiveContentFilter"');
-    expect(managementHtml).toContain("This Creative Workflow provider does not support NSFW content");
-    expect(managementHtml).toContain('id="providerSogniContentFilter"');
-    expect(managementScript).toContain('contentFilter: "enabled"');
-    expect(managementHtml).not.toContain('id="providerSogniSupportsSafeContentFilter"');
-    expect(managementScript).toContain('sogni: "https://api.sogni.ai"');
-    expect(managementScript).toContain('maximumPollIntervalMs: Math.round(Number(elements.providerSogniMaximumPollIntervalSeconds.value) * 1000)');
-    expect(managementScript).toContain('generationTimeoutMs: Math.round(Number(elements.providerSogniGenerationTimeoutSeconds.value) * 1000)');
-    expect(managementScript).toContain('elements.providerApiKey.value = "";');
-    expect(managementScript).not.toContain('elements.providerApiKey.value = provider.');
+    expect(providerHtml).toContain('<option value="sogni">Sogni Creative Workflow (REST)</option>');
+    expect(providerHtml).toContain('<option value="sogni_sdk">Sogni Supernet SDK</option>');
+    expect(providerHtml).toContain('id="providerSogniSettings" class="hidden" aria-hidden="true"');
+    expect(providerHtml).toContain('id="providerSogniImageCount"');
+    expect(providerHtml).toContain('<option value="2">2 images</option>');
+    expect(providerHtml).toContain('id="providerSogniModelDiscoveryEnabled"');
+    expect(providerHtml).not.toContain('id="providerSogniSensitiveContentFilter"');
+    expect(providerHtml).toContain("This Creative Workflow provider does not support NSFW content");
+    expect(providerHtml).toContain('id="providerSogniContentFilter"');
+    expect(providerScript).toContain('contentFilter: "enabled"');
+    expect(providerHtml).not.toContain('id="providerSogniSupportsSafeContentFilter"');
+    expect(providerScript).toContain('sogni: "https://api.sogni.ai"');
+    expect(providerScript).toContain('maximumPollIntervalMs: Math.round(Number(elements.providerSogniMaximumPollIntervalSeconds.value) * 1000)');
+    expect(providerScript).toContain('generationTimeoutMs: Math.round(Number(elements.providerSogniGenerationTimeoutSeconds.value) * 1000)');
+    expect(providerScript).toContain('elements.providerApiKey.value = "";');
+    expect(providerScript).not.toContain('elements.providerApiKey.value = provider.');
   });
 
   it("routes illustration refinement customization through the central Prompt Library", () => {
     expect(managementHtml).toContain('id="navPromptLibrary"');
-    expect(managementHtml).toContain('id="promptLibraryScope"');
-    expect(managementHtml).toContain('id="promptLibraryContent"');
+    expect(promptHtml).toContain('id="promptLibraryScope"');
+    expect(promptHtml).toContain('id="promptLibraryContent"');
     expect(managementHtml).toContain("The AI refinement prompt is edited in the Prompt Library (Illustration refinement), where campaign overrides apply to every segment job.");
     expect(managementHtml).not.toContain('<textarea id="illustrationRefinementPrompt"');
     expect(managementHtml).not.toContain('id="illustrationPromptDialog"');
@@ -1379,17 +1385,17 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("artStyle: elements.illustrationArtStyle.value");
     expect(managementScript).toContain("negativePrompt: elements.illustrationNegativePrompt.value");
     expect(managementScript).toContain("function openIllustrationPromptEditor()");
-    expect(managementScript).toContain('selectedPromptTemplateKey = "illustration_refinement"');
+    expect(managementScript).toContain('campaignId=${encodeURIComponent(selectedCampaign.id)}&prompt=illustration_refinement');
     expect(managementScript).toContain('elements.illustrationSegmentPromptMode.value === "ai_refined"');
   });
 
   it("hides text-generation limits for every illustration provider role", () => {
-    expect(managementHtml.match(/class="text-model-setting"/g)).toHaveLength(4);
-    expect(managementScript).toContain('const illustration = elements.providerRole.value === "image";');
-    expect(managementScript).toContain('field.classList.toggle("hidden", illustration)');
-    expect(managementScript).toContain('field.hidden = illustration');
+    expect(providerHtml.match(/class="text-model-setting"/g)).toHaveLength(4);
+    expect(providerScript).toContain('const illustration = elements.providerRole.value === "image";');
+    expect(providerScript).toContain('field.classList.toggle("hidden", illustration)');
+    expect(providerScript).toContain('field.hidden = illustration');
     expect(managementCss).toContain('.provider-form .text-model-setting.hidden { display: none; }');
-    expect(managementScript).toContain('...(!isIllustrationProviderForm() ? {');
+    expect(providerScript).toContain('...(!isIllustrationProviderForm() ? {');
   });
 
   it("offers retained images for world covers but not manual story illustration selection", () => {
@@ -1422,7 +1428,7 @@ describe("Nexus management UI contracts", () => {
     expect(storyHtml).toContain('src="/nexus/nexus-mark.png"');
     expect(storyHtml).toContain('id="btnNexusDashboard"');
     expect(storyHtml).toContain('href="/nexus/#world-library"');
-    expect(storyHtml).toContain('href="/nexus/#providers"');
+    expect(storyHtml).toContain('href="/app/settings?section=providers"');
     expect(storyHtml).not.toContain("modelSettingsDialog");
     expect(storyHtml).not.toContain("infiniteWorldsImportDialog");
     expect(storyHtml).not.toContain('id="importFile"');
@@ -1431,7 +1437,7 @@ describe("Nexus management UI contracts", () => {
 
   it("keeps management navigation separate from authoritative story persistence", () => {
     expect(storyHtml).toContain('id="btnWorldManagement" href="/nexus/#world-library"');
-    expect(storyHtml).toContain('id="btnProviderSetup" href="/nexus/#providers"');
+    expect(storyHtml).toContain('id="btnProviderSetup" href="/app/settings?section=providers"');
     expect(storyScript).not.toContain("localStorage.setItem(\"storyState\"");
     expect(storyScript).not.toContain("syncInlineWorldEditorState");
   });
@@ -1656,28 +1662,28 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("keeps Provider Management dedicated to profiles and campaign provider assignments in World Management", () => {
-    expect(managementHtml).toContain('class="card provider-card anchor-section provider-management"');
+    expect(providerHtml).toContain('class="card provider-card anchor-section provider-management"');
     expect(managementHtml).toContain('class="card world-library-card anchor-section world-management"');
-    expect(managementHtml).toContain('id="providerIsDefault"');
-    expect(managementHtml).toContain('id="providerTemperature"');
-    expect(managementHtml).toContain('id="refreshProviderModels"');
+    expect(providerHtml).toContain('id="providerIsDefault"');
+    expect(providerHtml).toContain('id="providerTemperature"');
+    expect(providerHtml).toContain('id="refreshProviderModels"');
     expect(managementHtml).toContain('id="providerModelDialog"');
     expect(managementHtml).toContain('id="providerModelPickerList"');
-    expect(managementHtml).toContain('>Worker type');
-    expect(managementHtml).toContain('id="providerSogniWorkerTypeNote"');
-    expect(managementHtml).toContain('High-end GPU workers that generate images faster at a higher cost.');
+    expect(providerHtml).toContain('>Worker type');
+    expect(providerHtml).toContain('id="providerSogniWorkerTypeNote"');
+    expect(providerHtml).toContain('High-end GPU workers that generate images faster at a higher cost.');
     expect(managementHtml).not.toContain('id="providerDiscoveredModel"');
-    expect(managementHtml).toContain('provider-model-settings');
-    expect(managementHtml).toContain('title="Maximum combined prompt and response capacity.');
+    expect(providerHtml).toContain('provider-model-settings');
+    expect(providerHtml).toContain('title="Maximum combined prompt and response capacity.');
     expect(managementHtml).not.toContain('id="generationForm"');
     expect(managementHtml).not.toContain('id="storyAction"');
     expect(managementHtml).not.toContain("Generate next turn");
     expect(managementScript).not.toContain("async function generateTurn(event)");
-    expect(managementHtml).toContain('id="providerProfileList"');
-    expect(managementHtml).toContain('id="providerAdvancedSettings"');
-    expect(managementHtml).toContain('id="providerRequestTimeoutMinutes"');
+    expect(providerHtml).toContain('id="providerProfileList"');
+    expect(providerHtml).toContain('id="providerAdvancedSettings"');
+    expect(providerHtml).toContain('id="providerRequestTimeoutMinutes"');
     expect(managementHtml).toContain('value="5"');
-    expect(managementScript).toContain("requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000)");
+    expect(providerScript).toContain("requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000)");
     expect(managementHtml).toContain('id="campaignTextProvider"');
     expect(managementHtml).toContain('id="campaignImageProvider"');
     expect(managementHtml).toContain('id="campaignStoryLengthProfile"');
@@ -1687,32 +1693,31 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('value="flexible_scene">Story Direction');
     expect(managementHtml).toContain('value="brief">Brief — 250–450 words');
     expect(managementHtml).toContain('value="extended">Extended — 1,200–2,000 words');
-    expect(managementScript).toContain('storyLengthProfile: elements.campaignStoryLengthProfile.value');
+    expect(managementHtml).toContain('data-campaign-settings-group="story"');
     expect(managementScript).toContain('turnControlStyle: normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value)');
     expect(managementScript).toContain("function campaignSettingsSnapshot()");
-    expect(managementScript).toContain("...snapshot");
-    expect(managementScript).toContain("savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle)");
+    expect(managementScript).toContain("title:snapshot.title,status:snapshot.status");
+    expect(managementScript).not.toContain("savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle)");
     const applyViewStart = managementScript.indexOf("function applyManagementView(hash");
     const applyViewEnd = managementScript.indexOf("\nfunction isManagementRouteHash", applyViewStart);
     const applyViewSource = managementScript.slice(applyViewStart, applyViewEnd);
-    expect(applyViewSource).toContain("elements.providers.hidden = !providerView;");
+    expect(applyViewSource).toContain("settingsBookmarkDestination(hash)");
     expect(applyViewSource).toContain('elements["world-library"].hidden = route.view !== "worlds";');
-    expect(applyViewSource).toContain('elements["prompt-library"].hidden = !promptLibraryView;');
     expect(managementCss).toContain('body[data-management-view="dashboard"] .world-management');
     expect(managementCss).toContain('body[data-management-view="providers"] .world-management');
     expect(managementCss).toContain('body[data-management-view="worlds"] .provider-management');
     expect(managementScript).toContain('provider.isDefault');
     expect(managementScript).toContain('available.length === 1');
-    expect(managementScript).toContain("async function refreshProviderModelsFromForm()");
+    expect(providerScript).toContain("async function refreshProviderModelsFromForm()");
     expect(managementScript).toContain('state.textContent = model.loaded ? "Active" : "Not active"');
     expect(managementScript).toContain("function profileModelValue(model)");
-    expect(managementScript).toContain("function applySogniWorkerTypeOptions(model)");
-    expect(managementScript).toContain('elements.providerSogniNetwork.addEventListener("change", applySogniWorkerAvailability)');
-    expect(managementScript).toContain("async function openProviderModelPicker(forceRefresh = false)");
-    expect(managementScript).toContain('elements.providerContextTokens.readOnly = true');
+    expect(providerScript).toContain("function applySogniWorkerTypeOptions(model)");
+    expect(providerScript).toContain('elements.providerSogniNetwork.addEventListener("change", applySogniWorkerAvailability)');
+    expect(providerScript).toContain("async function openProviderModelPicker(forceRefresh = false)");
+    expect(providerScript).toContain('elements.providerContextTokens.readOnly = true');
     expect(managementScript).toContain('method: "DELETE"');
     expect(managementScript).toContain('const hasBody = options.body !== undefined && options.body !== null');
-    expect(managementScript).toContain('method: editingProviderId ? "PATCH" : "POST"');
+    expect(providerScript).toContain("await ports.save(editingProviderId");
     expect(storyScript).not.toContain('/provider-text/generate');
     expect(storyScript).toContain('composition.workflow.submit');
     expect(managementHtml).not.toContain('value="text-embedding-nomic-embed-text-v1.5"');
@@ -1722,9 +1727,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="embeddingModel" maxlength="500" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog"');
     expect(managementHtml).not.toContain('id="embeddingModels"');
     expect(managementScript).toContain("function populateEmbeddingProviderSelect()");
-    expect(managementScript).toContain('providerModelPickerTarget === "embedding"');
+    expect(managementScript).toContain("const discoveredModels = discoveredEmbeddingModels");
     expect(managementScript).toContain("async function openEmbeddingModelPicker(forceRefresh = false)");
-    expect(managementScript).toContain("async function refreshActiveModelPicker()");
+    expect(managementScript).toContain('elements.refreshProviderModelDialog.addEventListener("click", discoverEmbeddingModels)');
     expect(managementScript).toContain("Text fallback ·");
   });
 
@@ -1736,7 +1741,7 @@ describe("Nexus management UI contracts", () => {
     expect(normalize("flexible_scene")).toBe("flexible_scene");
   });
 
-  it("saves a stale legacy Auto settings value as Action through the campaign handler", async () => {
+  it("preserves a legacy Auto style through an unrelated campaign title edit", async () => {
     const { document } = parseHTML(managementHtml);
     const api = vi.fn().mockResolvedValue({});
     const campaignMessage = vi.fn();
@@ -1767,12 +1772,7 @@ describe("Nexus management UI contracts", () => {
 
     await saveSelectedCampaign({ preventDefault: vi.fn() });
 
-    expect(JSON.parse(api.mock.calls[0]?.[1].body)).toMatchObject({
-      turnControlStyle: "flexible_action",
-      expectedTurnControlStyle: "flexible_auto",
-      expectedActiveTurnNumber: 4,
-      expectedStateRevision: 7
-    });
+    expect(JSON.parse(api.mock.calls[0]?.[1].body)).toEqual({title:"Campaign",status:"active"});
     expect(api).toHaveBeenCalledTimes(1);
   });
 
@@ -1854,9 +1854,9 @@ describe("Nexus management UI contracts", () => {
 
   it("documents compression and locks only API-supplied context", () => {
     expect(managementHtml.match(/option value="(?:auto|full|balanced|compact|summary)" title=/g)).toHaveLength(5);
-    expect(managementScript).toContain("providerContextTokens.readOnly = true");
-    expect(managementScript).toContain("providerContextTokens.readOnly = false");
-    expect(managementScript).toContain("did not advertise a context length");
+    expect(providerScript).toContain("providerContextTokens.readOnly = true");
+    expect(providerScript).toContain("providerContextTokens.readOnly = false");
+    expect(providerScript).toContain("did not advertise a context length");
     expect(managementScript).toContain('const textProvider = effectiveCampaignProvider("text")');
     expect(managementScript).toContain("clampedMemoryContextBudget(elements.budgetTokens.value)");
   });
@@ -1878,7 +1878,8 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="illustrationConfidenceProfile"');
     expect(managementScript).toContain('elements.illustrationSourcePolicy.disabled = !selectedCampaign');
     expect(managementScript).toContain('function illustrationPolicyUsesProvider');
-    expect(managementScript).toContain('body: JSON.stringify({ imageProviderProfileId: elements.campaignImageProvider.value || null })');
+    expect(managementScript).not.toContain('writeCampaignSettings(api, campaignId, "behavior", { imageProviderProfileId:');
+    expect(managementScript).toContain('elements.campaignImageProvider.value = config.providerProfileId || ""');
   });
 
   it("keeps segment prompt preferences editable when automatic illustrations are off", () => {
@@ -2395,20 +2396,21 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("saves prompt overrides without a compatibility checkbox", () => {
-    expect(managementHtml).not.toContain("promptLibraryCompatibilityAcknowledgement");
-    expect(managementHtml).not.toContain("I acknowledge this exact prompt must produce the required shape.");
-    expect(managementScript).not.toContain("Acknowledge the required output shape before saving this prompt.");
-    expect(managementScript).not.toContain("compatibilityAcknowledgement");
-    expect(managementHtml).toContain("promptLibraryRequiredShape");
+    expect(promptHtml).not.toContain("promptLibraryCompatibilityAcknowledgement");
+    expect(promptHtml).not.toContain("I acknowledge this exact prompt must produce the required shape.");
+    expect(promptScript).not.toContain("Acknowledge the required output shape before saving this prompt.");
+    expect(promptScript).not.toContain("compatibilityAcknowledgement");
+    expect(promptHtml).toContain("promptLibraryRequiredShape");
   });
 
   it("flags an unacknowledged prompt override and stays quiet for an acknowledged one", () => {
-    const { document } = parseHTML(managementHtml);
+    const { document } = parseHTML(promptHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
     const baseTemplate = { key: "story_system", title: "Story writer", category: "Story Engine", description: "", variables: [], maxLength: 10000, campaignOverrideAllowed: true,
       effectiveSource: "application", effectiveContent: "Saved instructions", compatibility: { acknowledged: true, requiredShapeVersion: "v2", requiredShapePreview: "{}" } };
     const harness = (template: typeof baseTemplate) => managementFunctions<{ renderPromptLibrary: (load?: boolean) => void }>(
-      ["renderPromptLibrary"], {
+      ["renderPromptLibrary", "syncMutationControls"], {
+        mutationPending: false,
         document, elements, promptLibrary: { templates: [template] }, promptLibraryCategory: "All", selectedPromptTemplateKey: template.key,
         promptLibrarySelectedTemplate: () => template, syncPromptLibraryCampaigns: () => {}, promptLibraryCampaignId: () => "",
         promptLibraryEditorContext: "", promptLibraryEditorBaseline: "", renderPromptLibraryDirtyState: () => {}, promptLibraryPreviewVisible: false,
@@ -2424,12 +2426,13 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("resets unsaved prompt edits when renderPromptLibrary loads with fresh data", () => {
-    const { document } = parseHTML(managementHtml);
+    const { document } = parseHTML(promptHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
     const template = { key: "story_system", title: "Story writer", category: "Story Engine", description: "", variables: [], maxLength: 10000, campaignOverrideAllowed: true,
       effectiveSource: "application", effectiveContent: "Saved instructions", compatibility: { acknowledged: true, requiredShapeVersion: "v2", requiredShapePreview: "{}" } };
     const functions = managementFunctions<{ renderPromptLibrary: (load?: boolean) => void }>(
-      ["renderPromptLibrary"], {
+      ["renderPromptLibrary", "syncMutationControls"], {
+        mutationPending: false,
         document, elements, promptLibrary: { templates: [template] }, promptLibraryCategory: "All", selectedPromptTemplateKey: template.key,
         promptLibrarySelectedTemplate: () => template, syncPromptLibraryCampaigns: () => {}, promptLibraryCampaignId: () => "",
         promptLibraryEditorContext: "", promptLibraryEditorBaseline: "", renderPromptLibraryDirtyState: () => {}, promptLibraryPreviewVisible: false,

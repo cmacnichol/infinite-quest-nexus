@@ -1,3 +1,4 @@
+import { browserDeviceStorage } from "@infinite-quest/client-web";
 import { createCharactersWorkspace } from "./characters-workspace";
 import {
   buildCurrentStateUpdate,
@@ -49,14 +50,6 @@ const storyPlayerMarkup = `
     </section>
   </main>
 `;
-
-function browserStorage(root: HTMLElement): Pick<Storage, "getItem" | "setItem" | "removeItem"> | null {
-  try {
-    return root.ownerDocument.defaultView?.localStorage ?? null;
-  } catch {
-    return null;
-  }
-}
 
 function errorPhase(error: unknown): StoryUiPhase {
   return typeof error === "object" && error !== null && "status" in error && error.status === 404
@@ -154,8 +147,10 @@ export function mountStoryPlayerPage(
   const theme = shell.theme;
   const displayPreferences = shell.display;
   root.querySelector<HTMLElement>('main[data-page="story-player"]')?.setAttribute("data-ui-implementation", selectedUiImplementation);
-  const ui = createStoryUiModel({ viewTurnNumber: route.turnNumber }, browserStorage(root));
-  const storyResumeStore = options.storyResumeStore ?? createStoryResumeStore(browserStorage(root));
+  const ui = createStoryUiModel({ viewTurnNumber: route.turnNumber });
+  const unsubscribeWidth = displayPreferences.subscribe(state => ui.setReadingWidth(state.storyWidth === "comfortable" ? "narrow" : state.storyWidth === "full" ? "wide" : "standard"));
+  const resumeStorage = browserDeviceStorage(root.ownerDocument.defaultView);
+  const storyResumeStore = options.storyResumeStore ?? createStoryResumeStore(resumeStorage);
   let campaigns: readonly CampaignSummary[] = [];
   let selectedCampaign: CampaignSummary | null = null;
   let canBeginStory = false;
@@ -1343,6 +1338,7 @@ export function mountStoryPlayerPage(
         ui.setPhase("not_found");
         return;
       }
+      resumeStorage.activate(session?.user ?? null);
       const continuousReading = session?.user?.settings?.continuousReading === true;
       autoSubmitTurnChoices = session?.user?.settings?.autoSubmitTurnChoices === true;
       ui.setContinuousReading(continuousReading);
@@ -1368,7 +1364,7 @@ export function mountStoryPlayerPage(
     const actionTarget = target as Element;
     const width = actionTarget.closest<HTMLButtonElement>("[data-reading-width]")?.dataset.readingWidth;
     if (width === "narrow" || width === "standard" || width === "wide") {
-      ui.setReadingWidth(width);
+      displayPreferences.setStoryWidth(width === "narrow" ? "comfortable" : width === "wide" ? "full" : "wide");
       const activated = root.querySelector<HTMLButtonElement>(`[data-reading-width="${width}"]`);
       root.querySelector<HTMLElement>("[data-reading-width-status]")!.textContent = `Reading width set to ${width[0].toUpperCase() + width.slice(1)}.`;
       activated?.focus();
@@ -1532,7 +1528,11 @@ export function mountStoryPlayerPage(
   root.addEventListener("click", onClick);
   toolsDisclosure?.addEventListener("click", onToolsClick);
   render();
-  void load();
+  void load().then(() => {
+    if (!disposed && root.ownerDocument.defaultView?.location?.hash === "#characters" && projection.campaign) {
+      charactersWorkspace.open(projection.campaign.id, toolsDisclosure?.querySelector<HTMLElement>("summary"));
+    }
+  });
 
   return {
     dispose() {
@@ -1554,6 +1554,7 @@ export function mountStoryPlayerPage(
       quietLeaf?.dispose();
       disposeToolsDisclosure();
       tools.dispose();
+      unsubscribeWidth();
       ui.dispose();
       shell.dispose();
     }

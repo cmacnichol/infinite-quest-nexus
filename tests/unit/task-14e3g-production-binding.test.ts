@@ -1,3 +1,4 @@
+import { runtimeConfigFixture } from "../fixtures/instance-settings.js";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { createApiAssetComposition } from "../../services/runtime/src/api-asset-composition.js";
@@ -399,7 +400,7 @@ describe("Task 14e3g production binding", () => {
 
     const result = await createApiPortableImportExportComposition({
       pool: {} as never,
-      config: { archiveStorageRoot: "/archive", assetStorageRoot: "/assets" } as never,
+      config: { ...runtimeConfigFixture(), archiveStorageRoot: "/archive", assetStorageRoot: "/assets" },
       memory: {} as never,
       providers: { generateCyoaWorld } as never,
       leaseOwner: "api-test-owner",
@@ -500,7 +501,7 @@ describe("Task 14e3g production binding", () => {
     };
     await createApiPortableImportExportComposition({
       pool: {} as never,
-      config: { archiveStorageRoot: "/archive", assetStorageRoot: "/assets" } as never,
+      config: { ...runtimeConfigFixture(), archiveStorageRoot: "/archive", assetStorageRoot: "/assets" },
       memory: {} as never,
       providers: providers as never,
       leaseOwner: "api-story-enrichment",
@@ -645,8 +646,6 @@ describe("Task 14e3g production binding", () => {
       readPrivateCompositionParitySources(process.cwd()),
     );
 
-    expect(violations).not.toContain(
-      "services/worker/src/worker.ts: private asset-maintenance composition must remain unbound until e3g",
-    );
-  });
+    expect(violations).toEqual([]);
+  }, 60_000); // Parses the production source graph, including on shared CI runners.
 });

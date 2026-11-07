@@ -776,13 +776,8 @@ test("overview_save_preserves_nondefault_story_metadata_before_story_tab_opens",
   await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "saved");
 
   const save = api.writes.find((write) => write.method === "PATCH" && write.path === `/api/v1/campaigns/${campaignId(fixture)}`);
-  expect(save?.body).toMatchObject({
-    title: "Overview title saved",
-    textProviderProfileId: "10000000-0000-4000-8000-000000000384",
-    turnControlStyle: "flexible_scene",
-    storyLengthProfile: "extended",
-    storyContextBudgetTokens: 64_000
-  });
+  expect(save?.body).toEqual({ title: "Overview title saved", status: selected.status });
+  expect(selected).toMatchObject({ storyLengthProfile: "extended", storyContextBudgetTokens: 64_000 });
   expect(reads(api, pathFor(campaignId(fixture), "story-memory"))).toHaveLength(0);
 });
 

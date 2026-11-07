@@ -204,3 +204,7 @@ export const importProgressNotFoundResponseSchema = z.object({
 export type ImportProgressQuery = z.infer<typeof importProgressQuerySchema>;
 export type ImportProgressReport = z.infer<typeof importProgressResponseSchema>;
 export type ImportProgressNotFoundResponse = z.infer<typeof importProgressNotFoundResponseSchema>;
+
+/** Shared transport paths for rate admission and registration of the migration API. */
+export const LEGACY_STORY_IMPORT_PATH = "/api/v1/imports/legacy-story";
+export const LEGACY_STORY_PREVIEW_PATH = LEGACY_STORY_IMPORT_PATH + "/preview";

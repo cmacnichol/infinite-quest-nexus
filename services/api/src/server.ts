@@ -1,3 +1,7 @@
+import { installRequestAdmission, type RequestAdmissionPort } from "./request-admission.js";
+import { registerInstanceSettingsRoutes } from "./instance-settings-routes.js";
+import { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest } from "../../runtime/src/instance-settings.js";
+import { createInstanceSettingsHttpComposition } from "./instance-settings-composition.js";
 import { createCastContextPreview } from "../../runtime/src/campaign-cast-context-preview.js";
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -21,7 +25,7 @@ import type {
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { clearStoryMemoryEnrollment, readStoryMemorySettings, saveStoryMemoryEnrollment, saveStoryMemorySettings } from "../../../packages/database/src/story-memory-policy-repository.js";
 import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
-import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema } from "../../../packages/contracts/src/imports.js";
+import { LEGACY_STORY_IMPORT_PATH, LEGACY_STORY_PREVIEW_PATH, infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, castContextPreviewRequestSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
 import {
   campaignBranchSchema,
@@ -177,6 +181,9 @@ import {
 } from "../../../packages/application/src/imports/index.js";
 
 export type BuildServerOptions = {
+  requestAdmission?: RequestAdmissionPort;
+  settingsBootstrap?: RuntimeConfig;
+  settingsReadiness?: () => Promise<boolean>;
   config: RuntimeConfig;
   pool: DatabasePool;
   generation: GenerationApplication;
@@ -680,6 +687,9 @@ async function generationLifecycleLogContext(
 }
 
 export async function buildServer({
+  requestAdmission,
+  settingsBootstrap,
+  settingsReadiness,
   config,
   pool,
   generation,
@@ -717,7 +727,7 @@ export async function buildServer({
     return { ownerUserId, campaignId: segment.campaign_id, turnId: segment.turn_id, segmentId };
   };
   const app = Fastify({
-    logger: createLoggerOptions(),
+    logger: createLoggerOptions(config.logLevel),
     bodyLimit: config.security.apiDefaultBodyLimitBytes,
     trustProxy: config.security.trustProxyHops > 0
       ? (_address, hop) => hop < config.security.trustProxyHops
@@ -725,6 +735,7 @@ export async function buildServer({
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
+  registerInstanceSettingsRoutes(app, { ...createInstanceSettingsHttpComposition(pool, settingsBootstrap ?? config, config, { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest }), resolveActor: async () => initialOwnerId(pool) });
   const memoryAdapter = createMemoryApplicationAdapter(pool, memory, createCastContextPreview(pool, config));
   const turnCorrections = createTurnCorrectionApplication({
     corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation,
@@ -832,6 +843,7 @@ export async function buildServer({
   });
 
   installRequestSecurity(app, config);
+  const admissionReadiness=installRequestAdmission(app, pool, config, requestAdmission);
   registerSystemImportGate(app, {
     pool,
     enabled: config.systemArchiveEnabled ?? false,
@@ -873,6 +885,7 @@ export async function buildServer({
       enabled: true,
       application: apiSystemArchive.application,
       downloads: apiSystemArchive.downloads,
+      ...(apiSystemArchive.uploadAdmission ? { uploadAdmission: apiSystemArchive.uploadAdmission } : {}),
       resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) }),
       limits: {
         chunkBytes: config.systemArchiveChunkBytes!,
@@ -990,6 +1003,8 @@ export async function buildServer({
   app.get("/health/live", async () => ({ status: "ok", role: config.role }));
   app.get("/health/ready", async (_request, reply) => {
     try {
+      if (!admissionReadiness.isReady()) return reply.code(503).send({ status: "not_ready", reason: "request admission unavailable" });
+      if (settingsReadiness && !await settingsReadiness()) return reply.code(503).send({ status: "not_ready", reason: "settings runtime incompatible" });
       const result = await pool.query<{ database_version: string; vector_version: string | null }>(
         `SELECT current_setting('server_version') AS database_version,
                 (SELECT extversion FROM pg_extension WHERE extname = 'vector') AS vector_version`
@@ -1189,7 +1204,7 @@ export async function buildServer({
     providers.delete(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId))
   ));
 
-  app.post("/api/v1/imports/legacy-story/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => {
+  app.post(LEGACY_STORY_PREVIEW_PATH, { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => {
     const preview = await previewPortableLegacyStory({
       portable: apiPortable.portable,
       pool,
@@ -1384,9 +1399,9 @@ export async function buildServer({
       }));
   });
 
+  // Owners retain access to manage and revoke existing links while sharing is disabled.
   const worldShares = createWorldShareLinkService(pool);
   app.get<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/share-links", async (request, reply) => {
-    if (config.worldSharingEnabled !== true) return reply.code(404).send({ error: "World sharing is disabled." });
     return { shares: await worldShares.list(await initialOwnerId(pool), uuidSchema.parse(request.params.worldId)) };
   });
   app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/share-links", async (request, reply) => {
@@ -1403,7 +1418,6 @@ export async function buildServer({
       : reply.code(404).send({ error: "The selected published world version was not found." });
   });
   app.delete<{ Params: { worldId: string; shareId: string } }>("/api/v1/worlds/:worldId/share-links/:shareId", async (request, reply) => {
-    if (config.worldSharingEnabled !== true) return reply.code(404).send({ error: "World sharing is disabled." });
     const revoked = await worldShares.revoke(
       await initialOwnerId(pool),
       uuidSchema.parse(request.params.worldId),

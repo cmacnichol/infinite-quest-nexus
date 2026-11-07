@@ -1217,7 +1217,7 @@ export function mountWorldCreationPage(
         }), " ");
         const setup = document.createElement("a");
         setup.dataset.generationProviderSetup = "";
-        setup.href = "/nexus/#providers";
+        setup.href = "/app/settings?section=providers";
         setup.textContent = "Provider Setup";
         generationStatus.append(setup, ", then try again.");
       } else if (error instanceof WorldCreationApiError && error.authoringFailure) {

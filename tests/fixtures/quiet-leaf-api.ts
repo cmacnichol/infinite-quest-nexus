@@ -22,9 +22,10 @@ export async function installStoryApi(page: Page, options: QuietLeafFixtureOptio
   let user = payloads.session.user;
   let profileUpdates = 0;
 
+  const allowedOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43175"}`;
   page.on("request", request => {
     const url = new URL(request.url());
-    if (url.protocol.startsWith("http") && url.origin !== "http://127.0.0.1:43175") {
+    if (url.protocol.startsWith("http") && url.origin !== allowedOrigin) {
       unexpected.push(`external request: ${request.method()} ${url.href}`);
     }
   });

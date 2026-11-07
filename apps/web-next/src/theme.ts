@@ -16,6 +16,7 @@ export interface ThemeEnvironment {
 
 export interface ThemeController {
   current(): Theme;
+  reload?(): void;
   set(theme: Theme): Theme;
   toggle(): Theme;
   subscribe(listener: (theme: Theme) => void): () => void;
@@ -97,6 +98,11 @@ export function createThemeController(
 
   const controller: ThemeController = {
     current: () => theme,
+    reload() {
+      const stored = readStoredTheme(environment.storage);
+      hasManualPreference = stored !== null;
+      commit(resolveTheme(stored, systemPrefersDark(environment.mediaQuery)));
+    },
     set: (selected: Theme) => {
       hasManualPreference = true;
       writeStoredTheme(environment.storage, selected);

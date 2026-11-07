@@ -170,6 +170,33 @@ function memoryStorage(): Storage & { entries(): Array<[string, string]> } {
 afterEach(() => vi.restoreAllMocks());
 
 describe("web-next Data Transfer API", () => {
+  it.each([false, true])("uses the negotiated 1 MiB ceiling and durable index for resumed=%s", async (resume) => {
+    const cap = 1024 * 1024, size = cap * 2.5;
+    const file = new File([new Uint8Array(size)], "bounded.zip", { type: "application/zip" });
+    const storage = memoryStorage();
+    if (resume) storage.setItem(`infiniteQuest.systemArchiveUpload.v1:${size}:${await sha256File(file)}`, JSON.stringify({ id: UPLOAD_ID, byteLength: size, sha256: await sha256File(file), chunkBytes: 4 * cap }));
+    let offset = resume ? cap * 1.5 : 0, index = resume ? 1 : 0;
+    const chunks: Array<{ index: number; bytes: number; range: string }> = [];
+    const view = () => upload({ byteLength: size, receivedBytes: offset, status: offset === size ? "completed" : "uploading", chunkBytes: cap, nextChunkIndex: index } as never);
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = String(input);
+      if (url === "/api/v1/system-imports/uploads") return new Response(JSON.stringify(view()), { status: 201 });
+      if (url.endsWith(`/uploads/${UPLOAD_ID}`)) return new Response(JSON.stringify(view()));
+      if (url.endsWith("/complete")) return new Response(JSON.stringify(view()));
+      const match = /chunks\/(\d+)$/u.exec(url);
+      if (!match) throw new Error("unexpected_request");
+      const bytes = (init.body as Uint8Array).byteLength;
+      chunks.push({ index: Number(match[1]), bytes, range: (init.headers as Record<string,string>)["Content-Range"]! });
+      expect(Number(match[1])).toBe(index); expect(bytes).toBeLessThanOrEqual(cap);
+      offset += bytes; index++;
+      return new Response(JSON.stringify(view()));
+    });
+    await expect(createDataTransferApi({ fetchImpl, storage }).createUpload(file)).resolves.toMatchObject({ status: "completed", receivedBytes: size });
+    expect(chunks.map(value => value.bytes)).toEqual(resume ? [cap] : [cap, cap, cap / 2]);
+    expect(chunks[0]?.index).toBe(resume ? 1 : 0);
+    if (resume) expect(chunks[0]?.range).toBe(`bytes ${cap * 1.5}-${size - 1}/${size}`);
+  });
+
   it("hashes files incrementally and uploads resumable bounded chunks without opening ZIP entries", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {

@@ -1357,25 +1357,6 @@ function createPostgresCampaignRepository(
       );
       const row = updated.rows[0];
       if (!row) return failure("campaign_not_found", { campaignId: scope.campaignId });
-      if (request.imageProviderProfileId !== undefined) {
-        const effectiveImage = await client.query<{ id: string; default_model: string }>(
-          `SELECT id, default_model FROM provider_profiles
-            WHERE owner_user_id = $1 AND provider_role = 'image' AND enabled = true
-              AND ($2::uuid IS NULL OR id = $2)
-            ORDER BY CASE WHEN id = $2 THEN 0 WHEN is_default THEN 1 ELSE 2 END, name
-            LIMIT 1`,
-          [scope.ownerUserId, request.imageProviderProfileId]
-        );
-        const profile = effectiveImage.rows[0];
-        if (profile) {
-          await client.query(
-            `UPDATE campaign_illustration_configs SET provider_profile_id = $3,
-               model = COALESCE(NULLIF($4, ''), model), updated_at = now()
-              WHERE campaign_id = $1 AND owner_user_id = $2`,
-            [scope.campaignId, scope.ownerUserId, profile.id, profile.default_model]
-          );
-        }
-      }
       if (changingTurnControlStyle) {
         await client.query(
           "DELETE FROM model_chains WHERE campaign_id = $1 AND owner_user_id = $2",

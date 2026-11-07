@@ -1,3 +1,5 @@
+import { archivePolicySnapshotSchema, historicalArchivePolicy, stricterArchiveLimits, type ArchivePolicySnapshot } from "../../../packages/contracts/src/archive-policy.js";
+import { runtimeArchivePolicy } from "./archive-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { statfs } from "node:fs/promises";
@@ -115,6 +117,7 @@ type SpoolEntry = Readonly<{
 
 export interface SystemArchiveArtifactPublisherPort {
   publishSystemArchive(input: Readonly<{
+    policy?: ArchivePolicySnapshot;
     ownerUserId: string;
     contentFingerprint: string;
     byteLength: number;
@@ -128,6 +131,7 @@ export type FilesystemSystemArchiveWriter = SystemArchiveWriterPort & Readonly<{
 }>;
 
 export type FilesystemSystemArchiveWriterOptions = Readonly<{
+  policy?: ArchivePolicySnapshot;
   limits: ArchiveLimits;
   staging: SystemArchiveStagingPort;
   now?: () => Date;
@@ -642,6 +646,7 @@ export interface SystemArchiveUploadStoragePort {
     ownerUserId: string;
     uploadId: string;
     assemblyOperationId: string;
+    activitySeconds?: number;
     index: number;
     offset: number;
     bytes: Uint8Array;
@@ -737,6 +742,15 @@ export function createSystemArchiveUploadService(
         });
       }
       const session = await options.uploads.getUploadSession(owner, request.uploadId);
+      const stored = session.policy ?? historicalArchivePolicy("system");
+      if (session.byteLength > options.maximumBytes) {
+        throw Object.assign(new Error("System Archive policy changed; restart this transfer."), {
+          statusCode: 409, code: "system-archive-upload-restart-required", retryable: true,
+        });
+      }
+      if (request.bytes.byteLength > stored.chunkBytes) {
+        throw Object.assign(new Error("System Archive chunk exceeds the session contract."), { statusCode: 413 });
+      }
       if (!Number.isSafeInteger(request.index) || request.index < 0 || request.index > 2_147_483_647
         || !Number.isSafeInteger(request.offset) || request.offset < 0
         || !Number.isSafeInteger(request.offset + request.bytes.byteLength)
@@ -747,6 +761,7 @@ export function createSystemArchiveUploadService(
         ownerUserId: owner.ownerUserId,
         uploadId: request.uploadId,
         assemblyOperationId: session.filesystemOperationId,
+        activitySeconds: stored.uploadTtlSeconds,
         index: request.index,
         offset: request.offset,
         bytes: request.bytes,
@@ -772,7 +787,10 @@ export function createSystemArchiveUploadService(
     },
 
     async completeUpload(owner, uploadId) {
-      const assembly = await options.uploads.getAssembly(owner, uploadId);
+      const assembly = await options.uploads.getAssembly(owner, uploadId, options.maximumBytes);
+      if (assembly.byteLength > options.maximumBytes) {
+        throw Object.assign(new Error("System Archive policy changed; restart this transfer."), { statusCode: 409, code: "system-archive-upload-restart-required", retryable: true });
+      }
       const staged = await options.storage.assemble({ ownerUserId: owner.ownerUserId, assembly });
       if (staged.byteLength !== assembly.byteLength || staged.sha256 !== assembly.sha256) {
         await staged.rollback().catch(() => undefined);
@@ -838,7 +856,7 @@ export function createPrivateSystemArchiveUploadStorage(
         filesystemOperationId: input.assemblyOperationId,
         leaseOwner: options.leaseOwner,
         leaseSeconds: options.leaseSeconds,
-        activitySeconds: options.uploadTtlSeconds,
+        activitySeconds: input.activitySeconds ?? options.uploadTtlSeconds,
         offset: input.offset,
         bytes: input.bytes,
         sha256: input.sha256,
@@ -851,7 +869,7 @@ export function createPrivateSystemArchiveUploadStorage(
         filesystemOperationId: input.assembly.filesystemOperationId,
         leaseOwner: options.leaseOwner,
         leaseSeconds: options.leaseSeconds,
-        activitySeconds: options.uploadTtlSeconds,
+        activitySeconds: input.assembly.policy?.uploadTtlSeconds ?? options.uploadTtlSeconds,
         byteLength: input.assembly.byteLength,
         sha256: input.assembly.sha256,
       });
@@ -1285,7 +1303,9 @@ export function createSystemArchiveImportExecutionService(
       }
 
       await options.source.withCompletedUpload(owner, authority.uploadId, async (staged) => {
-        const inspection = await inspectSystemArchiveForPreview(staged, options.limits);
+        const limits = stricterArchiveLimits(authority.policy ?? historicalArchivePolicy("system"),
+          { ...historicalArchivePolicy("system"), limits: options.limits });
+        const inspection = await inspectSystemArchiveForPreview(staged, limits);
         if (inspection.archiveFingerprint !== authority.archiveFingerprint) {
           throw importFailure("archive-checksum-mismatch", "System Archive changed after its preview was authorized.");
         }
@@ -1304,11 +1324,11 @@ export function createSystemArchiveImportExecutionService(
           throw importFailure("archive-storage-insufficient", "System Archive capacity changed after preview.");
         }
 
-        const container = await inspectArchiveContainer(staged, options.limits);
+        const container = await inspectArchiveContainer(staged, limits);
         const manifestBytes = await readVerifiedContainerEntry(
           container,
           "manifest.json",
-          options.limits.maxManifestBytes,
+          limits.maxManifestBytes,
         );
         const manifest = systemArchiveManifestSchema.parse(parseJson(manifestBytes, "System Archive manifest"));
         if (manifest.archiveType !== "system" || manifest.contentFingerprint !== authority.archiveFingerprint) {
@@ -1319,10 +1339,10 @@ export function createSystemArchiveImportExecutionService(
         const systemBytes = await readVerifiedContainerEntry(
           container,
           systemEntry.path,
-          Math.min(options.limits.maxManifestBytes, options.limits.maxJsonEntryBytes),
+          Math.min(limits.maxManifestBytes, limits.maxJsonEntryBytes),
         );
         const systemPayload = systemArchivePayloadSchema.parse(parseJson(systemBytes, "System Archive system payload"));
-        const prepared = await prepareSystemOriginals(options, owner.ownerUserId, job, container, manifest);
+        const prepared = await prepareSystemOriginals({ ...options, limits }, owner.ownerUserId, job, container, manifest);
         const attached: PrivateAttachedAssetPublication[] = [];
         let authorityCommitted = false;
         let committedAuthority: SystemArchiveImportJobAuthority | null = null;
@@ -1368,13 +1388,13 @@ export function createSystemArchiveImportExecutionService(
               container,
               manifest,
               inspection.payloadFormatVersion,
-              options.limits,
+              limits,
             );
             for (const publication of prepared) {
               const bytes = await readSystemOriginal(
                 container,
                 publication.entry,
-                options.limits.maxOriginalImageBytes,
+                limits.maxOriginalImageBytes,
               );
               const command = publicationCommand(owner.ownerUserId, job, publication.asset, bytes);
               const persisted = await options.assetPublications.attachPublication(
@@ -1492,6 +1512,7 @@ export type SystemArchiveImportCompositionOptions = Readonly<{
   limits: ArchiveLimits;
   destinationApplicationVersion: string;
   uploadTtlSeconds: number;
+  policy?: ArchivePolicySnapshot;
   chunkBytes: number;
   maximumUploadBytes: number;
   leaseOwner: string;
@@ -1510,8 +1531,9 @@ export function createSystemArchiveImportComposition(
 }> {
   const uploadRepository = createPostgresSystemArchiveUploadRepository(options.pool, {
     uploadTtlSeconds: options.uploadTtlSeconds,
+    ...(options.policy ? { policy: options.policy } : {}),
   });
-  const importRepository = createPostgresSystemArchiveImportRepository(options.pool);
+  const importRepository = createPostgresSystemArchiveImportRepository(options.pool, options.policy);
   const privateRepository = createPostgresSystemArchivePrivateStorageRepository(options.pool);
   const previewSource = createPrivateSystemArchivePreviewSource({
     archiveRoot: options.archiveRoot,
@@ -1966,6 +1988,7 @@ export async function createFilesystemSystemArchiveWriter(
           return Object.freeze({ status: "cancelled" as const });
         }
         const persisted = await options.publisher.publishSystemArchive({
+          ...(options.policy ? { policy: options.policy } : {}),
           ownerUserId: input.manifest.sourceOwner.sourceId,
           contentFingerprint: input.contentFingerprint,
           byteLength: finalArchive.byteLength,
@@ -2063,11 +2086,18 @@ export function createSystemArchiveComposition(options: SystemArchiveComposition
   const jobs = createPostgresSystemArchiveExportJobPort(options.pool);
   return Object.freeze({
     async runSystemExport(job) {
+      const { rows: [record] } = await options.pool.query<{ policy_snapshot: unknown }>(
+        "SELECT policy_snapshot FROM system_archive_jobs WHERE id=$1 AND owner_user_id=$2 AND kind='export'",
+        [job.id, job.ownerUserId],
+      );
+      const stored = record?.policy_snapshot ? archivePolicySnapshotSchema.parse(record.policy_snapshot) : historicalArchivePolicy("system");
+      const limits = stricterArchiveLimits(stored, { ...stored, limits: options.limits });
       const writer = await createFilesystemSystemArchiveWriter({
-        limits: options.limits,
+        policy: stored,
+        limits,
         staging: createPrivateSystemArchiveStaging(options.storage, {
           leaseOwner: job.leaseOwner,
-          artifactTtlSeconds: options.artifactTtlSeconds,
+          artifactTtlSeconds: stored.artifactTtlSeconds,
           ...(options.now === undefined ? {} : { now: options.now }),
         }),
         publisher: options.publisher,
@@ -2194,9 +2224,10 @@ export function createSystemArchiveArtifactPublisher(
       });
       const issued = await storage.adapter.publishPortableExport({
         exportScope: scope,
+        ...(input.policy ? { policy: input.policy } : {}),
         operationScopeId: `system-archive-export:${input.contentFingerprint}:${randomUUID()}`,
         leaseOwner: options.leaseOwner,
-        expiresAt: new Date(now().getTime() + options.artifactTtlSeconds * 1_000).toISOString(),
+        expiresAt: new Date(now().getTime() + (input.policy?.artifactTtlSeconds ?? options.artifactTtlSeconds) * 1_000).toISOString(),
         contentType: "application/zip",
         byteLength: input.byteLength,
         source: input.source,
@@ -2220,6 +2251,7 @@ export function createSystemArchiveArtifactPublisher(
 }
 
 export type ApiSystemArchiveComposition = Readonly<{
+  uploadAdmission?(owner: OwnerScope, uploadId: string, contentLength: number): Promise<void>;
   application: SystemArchiveApplication;
   downloads: SystemArchiveDownloadPort;
 }>;
@@ -2234,9 +2266,10 @@ export function createApiSystemArchiveComposition(options: Readonly<{
   if (uploadTtlSeconds === undefined || chunkBytes === undefined) {
     throw new Error("system_archive_config_incomplete");
   }
-  const jobs = createPostgresSystemArchiveJobRepository(options.pool);
-  const uploadRepository = createPostgresSystemArchiveUploadRepository(options.pool, { uploadTtlSeconds });
-  const importRepository = createPostgresSystemArchiveImportRepository(options.pool);
+  const policy = runtimeArchivePolicy(options.config, "system");
+  const jobs = createPostgresSystemArchiveJobRepository(options.pool, policy);
+  const uploadRepository = createPostgresSystemArchiveUploadRepository(options.pool, { uploadTtlSeconds, policy });
+  const importRepository = createPostgresSystemArchiveImportRepository(options.pool, policy);
   const privateRepository = createPostgresSystemArchivePrivateStorageRepository(options.pool);
   const leaseOwner = `api-system-archive-${randomUUID()}`;
   const leaseSeconds = Math.min(options.config.workerLeaseSeconds, 300);
@@ -2344,5 +2377,14 @@ export function createApiSystemArchiveComposition(options: Readonly<{
     },
   };
   const downloads = Object.freeze(downloadImplementation);
-  return Object.freeze({ application, downloads });
+  return Object.freeze({ application, downloads,
+    async uploadAdmission(owner: OwnerScope, uploadId: string, contentLength: number) {
+      const session = await uploadRepository.getUploadSession(owner, uploadId);
+      const stored = session.policy ?? historicalArchivePolicy("system");
+      if (session.byteLength > policy.limits.maxCompressedBytes) {
+        throw Object.assign(new Error("System Archive policy changed; restart this transfer."), { statusCode: 409, code: "system-archive-upload-restart-required" });
+      }
+      if (contentLength > stored.chunkBytes) throw Object.assign(new Error("System Archive chunk exceeds its original contract."), { statusCode: 413 });
+    },
+  });
 }

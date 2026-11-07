@@ -600,7 +600,7 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
     reader.append(background, firstAction, begin);
     if (!state.canBeginStory) {
       const setup = element(document, "a", "story-setup", "Set up a text provider");
-      setup.href = "/nexus/#providers";
+      setup.href = "/app/settings?section=providers";
       setup.dataset.storySetup = "";
       reader.append(setup);
     }
@@ -664,7 +664,7 @@ export function renderStoryContent(document: Document, state: StoryPlayerViewSta
     content.push(background, firstAction, begin);
     if (!state.canBeginStory) {
       const setup = element(document, "a", "story-setup", "Set up a text provider");
-      setup.href = "/nexus/#providers";
+      setup.href = "/app/settings?section=providers";
       setup.dataset.storySetup = "";
       content.push(setup);
     }
@@ -1018,6 +1018,12 @@ function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialog
       dialog.append(fields, status, save);
     }
   } else if (active === "story-memory") {
+    const campaignId = state.projection.campaign?.id;
+    if (campaignId) {
+      const link = element(document, "a", undefined, "Campaign settings");
+      link.href = "/app/settings?" + new URLSearchParams({section:"campaign",campaignId,returnTo:storyPlayerPath(campaignId, state.route.turnNumber ?? undefined)});
+      dialog.append(link);
+    }
     const settings = state.storyMemorySettings;
     if (settings === null) dialog.append(element(document, "p", "story-status", state.storyMemoryError ?? "Loading campaign memory settings…"));
     else {

@@ -1366,6 +1366,9 @@ export const systemUploadViewSchema = z.object({
   status: z.enum(["created", "uploading", "completed", "expired", "failed"]),
   byteLength: nonnegativeSafeIntegerSchema,
   receivedBytes: nonnegativeSafeIntegerSchema,
+  // Additive negotiation: optional only to read older server responses.
+  chunkBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  nextChunkIndex: nonnegativeSafeIntegerSchema.optional(),
   expiresAt: z.iso.datetime({ offset: true })
 }).strict().superRefine((upload, context) => {
   if (upload.receivedBytes > upload.byteLength) {

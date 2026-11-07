@@ -64,6 +64,20 @@ describe("cast discovery runtime execution", () => {
     expect(saved.admission?.frozenResponseContracts.contracts["cast_discovery:nonstream"]).toBeDefined();
     expect(f.execution.execute).not.toHaveBeenCalled(); expect(f.ports.resolvePreset).toHaveBeenCalledTimes(1);
   });
+  it("defaults to strict/v1 and keeps admitted unique-name/v2 work valid after the preference changes", async () => {
+    const f = fixture();
+    const strict = await prepareCastDiscoveryExecution({ ownerUserId: id, ...f });
+    expect(strict.admission).toMatchObject({ identityPolicy: "strict", promptIdentifier: "cast-discovery-prompt-v1" });
+    const frozen = await prepareCastDiscoveryExecution({ ownerUserId: id, ...f, identityPolicy: "unique_name" });
+    const later = await prepareCastDiscoveryExecution({ ownerUserId: id, ...f, identityPolicy: "strict" });
+    expect(later.admission?.identityPolicy).toBe("strict");
+    expect(frozen.plan.protocolVersion).toBe("cast-discovery-v1");
+    const c = await claim(); c.value.execution = frozen;
+    const execute = vi.fn<PreparedAuthoringTextExecutor["execute"]>(async () => result);
+    await createCastDiscoveryExtractor({ executor: { execute } }).extract(c.value);
+    expect(frozen.admission).toMatchObject({ identityPolicy: "unique_name", promptIdentifier: "cast-discovery-prompt-v2" });
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
   it("freezes matching guidance and rejects policy changes before dispatch", async () => {
     const f = fixture(), saved = await prepareCastDiscoveryExecution({ ownerUserId: id, ...f, identityPolicy: "unique_name" });
     expect(saved.admission).toMatchObject({ identityPolicy: "unique_name", promptIdentifier: "cast-discovery-prompt-v2" });

@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { createInstanceSettingsRepository } from "../../packages/database/src/instance-settings-repository.js";
+import { settingsFixture } from "../fixtures/instance-settings.js";
 import { createReadStream } from "node:fs";
 import { DEFAULT_ILLUSTRATION_NEGATIVE_PROMPT } from "../../packages/contracts/src/generation.js";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
@@ -590,7 +592,23 @@ integration("deterministic owner-wide System Archive export", () => {
        ) VALUES ($1,$2,$3,0),($1,$2,$4,1)`,
       [segment.rows[0]!.id, ownerUserId, originals[1]!.id, originals[2]!.id],
     );
+    const localSettings = createInstanceSettingsRepository(pool);
+    const actor = { userId: ownerUserId, cliReference: "archive-settings-test-operator" };
+    const installationId = randomUUID(), snapshot = settingsFixture(), policyDigest = sha256("private-policy-file-content");
+    await localSettings.seed({ installationId, snapshot, actor, policyDigest, seedDigest: sha256("private-settings-seed") });
+    const tokenDigest = sha256("test-management-session-token");
+    await pool.query(`INSERT INTO settings_operator_sessions(actor_user_id,token_digest,csrf_digest,key_fingerprint,expires_at)
+      VALUES($1,$2,$3,$4,now()+interval '10 minutes')`, [ownerUserId, tokenDigest, sha256("private-csrf"), sha256("private-key")]);
+    await pool.query("INSERT INTO settings_unlock_attempts VALUES('archive-settings-attempt-marker',now(),1)");
+    await pool.query(`INSERT INTO instance_settings_runtime_reports(process_id,role,build_version,protocol_version,policy_digest,activation_epoch,effective_configuration_digest,readiness_state)
+      VALUES(gen_random_uuid(),'all','archive-settings-process-marker',1,$1,0,$1,'ready')`, [policyDigest]);
     const exported = await exportArchive();
+    const { serialized } = await archiveText(exported.bytes);
+    for (const marker of [installationId, policyDigest, tokenDigest, actor.cliReference, "archive-settings-attempt-marker", "archive-settings-process-marker", "workerGenerationConcurrency"]) {
+      expect(serialized).not.toContain(marker);
+    }
+    // Simulate destination-local policy diverging from the source snapshot.
+    await localSettings.propose({ expectedRequestedRevision: "1", snapshot: { ...snapshot, logLevel: "warn" }, actor, reason: "destination-policy" });
     productionImportFixture = Object.freeze({
       bytes: exported.bytes,
       contentFingerprint: exported.result.artifact.contentFingerprint,
@@ -4821,6 +4839,11 @@ integration("deterministic owner-wide System Archive export", () => {
       const exported = productionImportArchive();
       await resetSystemImportDestination();
 
+      const settingsTables = ["instance_settings_state", "instance_settings_revisions", "instance_settings_events",
+        "instance_settings_runtime_reports", "settings_operator_sessions", "settings_unlock_attempts"] as const;
+      const readInstallation = () => Promise.all(settingsTables.map(async table =>
+        (await pool.query("SELECT to_jsonb(t) AS row FROM " + table + " t ORDER BY to_jsonb(t)::text")).rows));
+      const destinationSettings = await readInstallation();
       const privateRoot = await mkdtemp(join(tmpdir(), "infinitequest-system-import-production-"));
       const privateArchiveRoot = join(privateRoot, "archive");
       const privateAssetRoot = join(privateRoot, "assets");
@@ -4871,7 +4894,12 @@ integration("deterministic owner-wide System Archive export", () => {
           300,
         );
         expect(claimed).toMatchObject({ kind: "import", status: "revalidating" });
-        await composition.imports.runSystemImport(claimed!);
+        const calls = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("import attempted external discovery"));
+        try {
+          await composition.imports.runSystemImport(claimed!);
+          expect(calls).not.toHaveBeenCalled();
+        } finally { calls.mockRestore(); }
+        expect(await readInstallation()).toEqual(destinationSettings);
 
         await expect(pool.query<{ status: string }>(
           "SELECT status FROM system_archive_jobs WHERE id=$1",

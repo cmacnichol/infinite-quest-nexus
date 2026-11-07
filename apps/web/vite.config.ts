@@ -4,6 +4,10 @@ import { defineConfig } from "vite";
 export default defineConfig({
   base: "/nexus/",
   publicDir: "public",
+  // Playwright serves the two clients on separate ports. Match their shared production origin.
+  ...(process.env.PLAYWRIGHT_WEB_NEXT_PORT ? {server: {proxy: {
+    "/app": `http://127.0.0.1:${Number(process.env.PLAYWRIGHT_WEB_NEXT_PORT)}`
+  }}} : {}),
   plugins: [{
     name: "legacy-management-development-entry",
     configureServer(server) {

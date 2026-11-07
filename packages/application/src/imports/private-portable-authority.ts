@@ -1,3 +1,4 @@
+import { archivePolicySnapshotSchema, type ArchivePolicySnapshot } from "@infinite-quest/contracts";
 import type { ImportOwnerScope, PortableArchiveExportRetrieval, PortableStagedInput } from "./types.js";
 import type {
   AttachedFilesystemOperation,
@@ -26,6 +27,7 @@ export type PrivatePortableStagedIssuance = Readonly<{
 
 export type PrivatePortableExportIssuance = PrivatePortableStagedIssuance & Readonly<{
   exportScope: PortableExportScope;
+  policy?: ArchivePolicySnapshot;
   contentType: "application/zip" | "application/json";
   [privatePortableExportIssuanceBrand]: true;
 }>;
@@ -118,6 +120,7 @@ export function bindPrivateAtomicExportIssuance(
   exportScope: PortableExportScope,
   contentType: "application/zip" | "application/json",
   attachment: PrivateFilesystemCandidateAttachment,
+  policy?: ArchivePolicySnapshot,
 ): PrivatePortableExportIssuance {
   requireExportScope(exportScope);
   const expectedContentType = exportScope.exportKind === "campaign_zip"
@@ -130,6 +133,7 @@ export function bindPrivateAtomicExportIssuance(
   return Object.freeze({
     ...issuance,
     exportScope: Object.freeze({ ...exportScope }),
+    ...(policy ? { policy: archivePolicySnapshotSchema.parse(policy) } : {}),
     contentType
   }) as PrivatePortableExportIssuance;
 }

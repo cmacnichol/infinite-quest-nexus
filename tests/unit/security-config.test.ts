@@ -322,3 +322,29 @@ describe("System Archive configuration", () => {
     }
   });
 });
+
+it("keeps management deployment-only, disabled by default, and key-file-only", () => {
+  delete process.env.SETTINGS_MANAGEMENT_ENABLED;
+  delete process.env.SETTINGS_MANAGEMENT_KEY_FILE;
+  process.env.DATABASE_URL = "postgresql://fixture@localhost/fixture";
+  process.env.SETTINGS_MANAGEMENT_KEY = "never-load-direct-key";
+  expect(loadRuntimeConfig()).toMatchObject({settingsManagementEnabled:false,settingsManagementKeyFile:undefined});
+  process.env.SETTINGS_MANAGEMENT_ENABLED = "true";
+  process.env.SETTINGS_MANAGEMENT_KEY_FILE = "/run/secrets/settings-management";
+  expect(loadRuntimeConfig()).toMatchObject({settingsManagementEnabled:true,settingsManagementKeyFile:"/run/secrets/settings-management"});
+  expect(JSON.stringify(loadRuntimeConfig())).not.toContain("never-load-direct-key");
+});
+
+// These remain deployment ceilings after migrating preferences to the database.
+it.each([
+  ["AI_AUTHORING_JOBS_ENABLED", "aiAuthoringJobsEnabled"],
+  ["AI_STORY_SOURCE_AUTHORING_ENABLED", "aiStorySourceAuthoringEnabled"],
+  ["CAST_EDITING_ENABLED", "castEditingEnabled"], ["CAST_DISCOVERY_ENABLED", "castDiscoveryEnabled"],
+  ["CAST_AUTO_MATCH_ENABLED", "castAutoMatchEnabled"], ["CAST_CONTEXT_ENABLED", "castContextEnabled"],
+  ["CAST_BACKFILL_ENABLED", "castBackfillEnabled"], ["WORLD_SHARING_ENABLED", "worldSharingEnabled"],
+  ["SYSTEM_ARCHIVE_ENABLED", "systemArchiveEnabled"]
+] as const)("retains explicit deployment disable %s", (environmentName, field) => {
+  minimumEnvironment();
+  process.env[environmentName] = "false";
+  expect(loadRuntimeConfig()[field]).toBe(false);
+});

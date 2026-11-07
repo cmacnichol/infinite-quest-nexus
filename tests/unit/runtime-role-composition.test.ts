@@ -124,6 +124,18 @@ function dependencies(controller: AbortController) {
 }
 
 describe("runtime role generation composition", () => {
+  it("loads settings after schema readiness and passes resolved config to providers and worker", async () => {
+    const controller = new AbortController(), { values } = dependencies(controller);
+    const resolved = { ...config("worker"), textProviderConcurrency: 7 };
+    const dispose = vi.fn(async () => undefined);
+    const resolveSettings = vi.fn(async () => ({ config: resolved, dispose }));
+    await dispatchRuntimeRole(config("worker"), pool, controller.signal, { ...values, resolveSettings }, providerTransport, generationEvents);
+    expect(values.waitForDatabaseMigrations.mock.invocationCallOrder[0]).toBeLessThan(resolveSettings.mock.invocationCallOrder[0]!);
+    expect(resolveSettings.mock.invocationCallOrder[0]).toBeLessThan(values.createWorkerProviders.mock.invocationCallOrder[0]!);
+    expect(values.createWorkerProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport, resolved);
+    expect(values.runWorker).toHaveBeenCalledWith(pool, resolved, controller.signal, expect.any(Object));
+    expect(dispose).toHaveBeenCalledOnce();
+  });
   it.each(["api", "all"] as const)("forwards cast context capability to new-job capture in the %s role", async (role) => {
     const controller = new AbortController(), { values } = dependencies(controller);
     await dispatchRuntimeRole({ ...config(role), castContextEnabled: true }, pool, controller.signal, values, providerTransport, generationEvents);
@@ -191,7 +203,7 @@ describe("runtime role generation composition", () => {
     await dispatchRuntimeRole(config("api"), pool, controller.signal, values, providerTransport, generationEvents);
 
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
-    expect(values.createApiProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport);
+    expect(values.createApiProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport, expect.objectContaining({ credentialEncryptionKey: "role-secret" }));
     expect(values.createWorkerProviders).not.toHaveBeenCalled();
     expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders, defaultStoryMemoryOperatorConfig);
     expect(values.createApiIllustration).toHaveBeenCalledWith(pool, apiIllustrationProviders);
@@ -228,7 +240,7 @@ describe("runtime role generation composition", () => {
       17_000
     );
     expect(values.createWorkerGeneration).toHaveBeenCalledOnce();
-    expect(values.createWorkerProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport);
+    expect(values.createWorkerProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport, expect.objectContaining({ credentialEncryptionKey: "role-secret" }));
     expect(values.createApiProviders).not.toHaveBeenCalled();
     expect(values.createApiIllustration).toHaveBeenCalledWith(pool, workerIllustrationProviders);
     expect(values.createApiMemory).toHaveBeenCalledWith(pool, workerChronicleProviders);
@@ -262,8 +274,8 @@ describe("runtime role generation composition", () => {
     await dispatchRuntimeRole(config("all"), pool, controller.signal, values, providerTransport, generationEvents);
 
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
-    expect(values.createApiProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport);
-    expect(values.createWorkerProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport);
+    expect(values.createApiProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport, expect.objectContaining({ credentialEncryptionKey: "role-secret" }));
+    expect(values.createWorkerProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport, expect.objectContaining({ credentialEncryptionKey: "role-secret" }));
     expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders, defaultStoryMemoryOperatorConfig);
     expect(values.createApiWorldCampaign).toHaveBeenCalledOnce();
     expect(values.createApiWorldCampaign).toHaveBeenCalledWith(pool, apiProviders);
@@ -331,4 +343,10 @@ describe("runtime role generation composition", () => {
     expect(values.runWorker).not.toHaveBeenCalled();
     expect(values.waitForDatabaseMigrations).not.toHaveBeenCalled();
   });
-});
+});    it.each(["api", "all"] as const)("preserves original deployment gates for installation edits in %s", async (role) => {
+      const controller = new AbortController(), { values } = dependencies(controller);
+      const bootstrap = { ...config(role), castEditingEnabled: true };
+      const effective = { ...bootstrap, castEditingEnabled: false };
+      await dispatchRuntimeRole(bootstrap, pool, controller.signal, { ...values, resolveSettings: async () => ({config:effective,bootstrap,dispose:async()=>{}}) }, providerTransport, generationEvents);
+      expect(values.buildServer).toHaveBeenCalledWith(expect.objectContaining({config:effective,settingsBootstrap:bootstrap}));
+    });

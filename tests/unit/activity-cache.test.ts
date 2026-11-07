@@ -17,8 +17,9 @@ describe("activity cache", () => {
   it("prunes 1001 events and 201 observations and expires at seven days", async () => {
     let time = now;
     const cache = createMemoryActivityCache({ now: () => time, isoAt: (value) => new Date(value).toISOString() });
-    await cache.merge(scope, { events: Array.from({length:1001}, (_,i)=>event(i+1)) });
+    // Populate observations first to avoid reprocessing the event history on each insertion.
     for (let i = 1; i <= 201; i++) await cache.merge(scope, { observation: observation(i) });
+    await cache.merge(scope, { events: Array.from({length:1001}, (_,i)=>event(i+1)) });
     const snapshot = await cache.read(scope);
     expect(snapshot.events).toHaveLength(1000); expect(snapshot.events.at(-1)?.sequence).toBe("2");
     expect(snapshot.observations).toHaveLength(200); expect(snapshot.localSequence).toBe("201");

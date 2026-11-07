@@ -247,8 +247,8 @@ export function createPostgresSecureStorageRepository(
       `INSERT INTO portable_export_artifacts (
          owner_user_id,retrieval_token_hash,filesystem_operation_id,export_kind,
          campaign_id,world_id,world_version_id,content_type,content_hash,
-         byte_length,status,expires_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'ready',$11)`,
+         byte_length,status,expires_at,policy_snapshot
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'ready',$11,$12::jsonb)`,
       [
         issuance.owner.ownerUserId,
         sha256(retrieval),
@@ -260,7 +260,8 @@ export function createPostgresSecureStorageRepository(
         issuance.contentType,
         issuance.attachment.descriptor.contentHash,
         issuance.attachment.descriptor.byteLength,
-        issuance.expiresAt
+        issuance.expiresAt,
+        JSON.stringify(issuance.policy ?? null)
       ],
     );
     const attached = await candidates.attachCandidate(client, issuance.attachment);

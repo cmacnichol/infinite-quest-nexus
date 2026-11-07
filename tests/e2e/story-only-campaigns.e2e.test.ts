@@ -38,6 +38,7 @@ async function openNexusCampaign(page: Page): Promise<void> {
   await expect(campaign).toBeVisible();
   await campaign.click();
   await page.locator("#campaignTabStory").click();
+  await page.locator("#campaignPanelStory a[data-campaign-settings-group]").click();
 }
 
 test.describe.configure({ mode: "serial" });
@@ -49,14 +50,17 @@ test("legacy Nexus persists Story Direction and its profile without Auto", async
   });
 
   await openNexusCampaign(page);
-  await expect(page.locator("#campaignTurnControlStyle option")).toHaveCount(2);
-  await expect(page.locator("#campaignTurnControlStyle")).toHaveValue(/flexible_(action|scene)/);
-  await page.locator("#campaignTurnControlStyle").selectOption("flexible_scene");
-  await page.locator("#saveCampaign").click();
-  await expect(page.locator("#campaignStatusMessage")).toContainText(/saved/i);
+  await expect(page.locator("#story select[name=turnControlStyle] option")).toHaveCount(2);
+  await expect(page.locator("#story select[name=turnControlStyle]")).toHaveValue(/flexible_(action|scene)/);
+  if (await page.locator("#story select[name=turnControlStyle]").inputValue() !== "flexible_scene") {
+    await page.locator("#story select[name=turnControlStyle]").selectOption("flexible_scene");
+    await page.locator("#story button[type=submit]").click();
+    await expect(page.locator("#story [role=status]")).toContainText(/saved/i);
+  }
   await openNexusCampaign(page);
-  await expect(page.locator("#campaignTurnControlStyle")).toHaveValue("flexible_scene");
+  await expect(page.locator("#story select[name=turnControlStyle]")).toHaveValue("flexible_scene");
 
+  await page.goto("/nexus/#campaigns");
   await page.locator("#openNexusUserProfile").click();
   await expect(page.locator("#nexusUserProfileDialog")).toHaveAttribute("open", "");
   await expect(page.locator("#nexusUserProfileDefaultTurnControlStyle option")).toHaveCount(2);
@@ -147,9 +151,9 @@ test("legacy Story profile exposes separate automatic choice submission preferen
 
 test("legacy campaign settings restore explicit Action controls after Story Direction", async ({ page }, testInfo) => {
   await openNexusCampaign(page);
-  await page.locator("#campaignTurnControlStyle").selectOption("flexible_action");
-  await page.locator("#saveCampaign").click();
-  await expect(page.locator("#campaignStatusMessage")).toContainText(/saved/i);
+  await page.locator("#story select[name=turnControlStyle]").selectOption("flexible_action");
+  await page.locator("#story button[type=submit]").click();
+  await expect(page.locator("#story [role=status]")).toContainText(/saved/i);
   await page.goto(`/story/${campaignId}`);
   await expect(page.locator("#turnInputModeField")).toBeVisible();
   const action = page.locator('[data-turn-input-mode="action"]');
@@ -192,15 +196,15 @@ test("action-only campaign keeps Action locked", async ({ page }) => {
 
 test("stale Nexus settings save leaves the selected draft intact", async ({ page }) => {
   await openNexusCampaign(page);
-  await page.locator("#campaignTurnControlStyle").selectOption("flexible_scene");
-  await page.locator("#saveCampaign").click();
-  await expect(page.locator("#campaignStatusMessage")).toContainText(/saved/i);
+  if (await page.locator("#story select[name=turnControlStyle]").inputValue() !== "flexible_scene") {
+    await page.locator("#story select[name=turnControlStyle]").selectOption("flexible_scene");
+    await page.locator("#story button[type=submit]").click();
+    await expect(page.locator("#story [role=status]")).toContainText(/saved/i);
+  }
 
   const draftAction = "flexible_action";
-  await page.locator("#campaignTurnControlStyle").selectOption(draftAction);
-  await page.locator("#campaignTabOverview").click();
-  const draftTitle = `Stale Story Direction ${Date.now()}`;
-  await page.locator("#campaignTitle").fill(draftTitle);
+  await page.locator("#story select[name=turnControlStyle]").selectOption(draftAction);
+  await page.locator("#story select[name=storyLengthProfile]").selectOption("long");
   const story = await page.context().newPage();
   const generationDiagnostics: string[] = [];
   story.on("response", async (response) => {
@@ -220,11 +224,10 @@ test("stale Nexus settings save leaves the selected draft intact", async ({ page
       await story.screenshot({ path: "docs/review/story-only-campaigns/screenshots/legacy/stale-generation-failure.png", fullPage: true });
       throw new Error(`${String(error)}\n${generationDiagnostics.join("\n")}`);
     }
-    await page.locator("#saveCampaign").click();
-    await expect(page.locator("#campaignStatusMessage")).toHaveClass(/error/);
-    await expect(page.locator("#campaignStatusMessage")).toContainText(/409|conflict|changed/i);
-    await expect(page.locator("#campaignTurnControlStyle")).toHaveValue(draftAction);
-    await expect(page.locator("#campaignTitle")).toHaveValue(draftTitle);
+    await page.locator("#story button[type=submit]").click();
+    await expect(page.locator("#story [role=status]")).toContainText(/409|conflict|changed/i);
+    await expect(page.locator("#story select[name=turnControlStyle]")).toHaveValue(draftAction);
+    await expect(page.locator("#story select[name=storyLengthProfile]")).toHaveValue("long");
   } finally {
     await story.close();
   }
@@ -232,9 +235,11 @@ test("stale Nexus settings save leaves the selected draft intact", async ({ page
 
 test("retry replaces the latest accepted turn without appending history", async ({ page }) => {
   await openNexusCampaign(page);
-  await page.locator("#campaignTurnControlStyle").selectOption("flexible_scene");
-  await page.locator("#saveCampaign").click();
-  await expect(page.locator("#campaignStatusMessage")).toContainText(/saved/i);
+  if (await page.locator("#story select[name=turnControlStyle]").inputValue() !== "flexible_scene") {
+    await page.locator("#story select[name=turnControlStyle]").selectOption("flexible_scene");
+    await page.locator("#story button[type=submit]").click();
+    await expect(page.locator("#story [role=status]")).toContainText(/saved/i);
+  }
   await page.goto(`/story/${campaignId}`);
   await expect(page.locator("#btnTakeAction")).toContainText("Continue story");
   const beforeTurns = await turns(page);

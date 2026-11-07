@@ -1,0 +1,8 @@
+/** Ordered migrations expected when upgrading an existing installation across the Settings release. */
+export const settingsReleaseMigrations = [
+  "0121_instance_settings",
+  "0122_instance_settings_changed_keys",
+  "0123_archive_policy_snapshots",
+  "0124_admission_policy_history",
+  "0125_http_admission_leases"
+] as const;

@@ -402,6 +402,32 @@ integration("provider route configuration redaction", () => {
     }
   });
 
+  it.each(["image", "embedding"] as const)("rejects a delayed key-only %s rotation after its endpoint and key change", async role => {
+    const initial = await app.inject({method:"POST",url:"/api/v1/providers",payload:{
+      ...baseProviderInput, name: `Concurrent ${role} ${crypto.randomUUID()}`, providerRole:role,
+      baseUrl:"https://initial-fixture.invalid/v1",apiKey:"initial-fixture-key"
+    }});
+    expect(initial.statusCode).toBe(201);
+    const id = initial.json().id;
+    const path = `/api/v1/providers/${id}`;
+    const graph = createApiProviderApplicationComposition(pool,{credentialSecret:routeConfig.credentialEncryptionKey,transport});
+    const owner = (await pool.query("SELECT owner_user_id FROM provider_profiles WHERE id=$1",[id])).rows[0].owner_user_id;
+    const moveBeforeCommit: typeof graph.transaction = async work => {
+      const moved = await app.inject({method:"PATCH",url:path,payload:{baseUrl:"https://moved-fixture.invalid/v1",apiKey:"moved-fixture-key"}});
+      expect(moved.statusCode).toBe(200);
+      return graph.transaction(work);
+    };
+    const racedProviders = createProviderApplicationAdapter({...graph,transaction:moveBeforeCommit} as never);
+    const racedApp = await buildServer(serverOptions({config:routeConfig,pool,providers:racedProviders}));
+    try {
+      const rotation = await racedApp.inject({method:"PATCH",url:path,payload:{apiKey:"old-destination-fixture-key"}});
+      expect(rotation.statusCode).toBe(409);
+      const current = await graph.runtime.presetSaveAuthoritySnapshot(owner,id,false);
+      expect(current?.candidate.baseUrl).toBe("https://moved-fixture.invalid/v1");
+      expect(current?.readSavedCredential() === "moved-fixture-key").toBe(true);
+    } finally { await racedApp.close(); }
+  });
+
   it("does not decrypt a stale saved key after authority switches to a concrete model", async () => {
     const name = `${baseProviderInput.name} STALE-SWITCHAWAY ${crypto.randomUUID()}`;
     const originalFetch = transport.fetch;
@@ -437,7 +463,11 @@ integration("provider route configuration redaction", () => {
         throw new Error("concrete authority selection must not validate a preset");
       };
       try {
-        const saved = await racedApp.inject({ method: "PATCH", url: `/api/v1/providers/${id}`, payload: { baseUrl: "https://after-switch.test/api/v1" } });
+        const changedEndpoint = {baseUrl: "https://after-switch.test/api/v1"};
+        const rejected = await racedApp.inject({method: "PATCH", url: `/api/v1/providers/${id}`, payload: changedEndpoint});
+        expect(rejected.statusCode).toBe(400);
+        const saved = await racedApp.inject({method: "PATCH", url: `/api/v1/providers/${id}`, payload: {...changedEndpoint, apiKey: "fresh-fixture-key"}});
+
         expect(saved.statusCode).toBe(200);
         expect(saved.json()).toMatchObject({ baseUrl: "https://after-switch.test/api/v1", textSelection: { kind: "model", modelId: "concrete-model" } });
         expect(remoteAttempts).toBe(0);

@@ -91,7 +91,7 @@ test("every_open_dialog_has_accessible_name", async ({ page }) => {
     ["#btnOpenEditCharacterProfile", "editCharacterProfileDialog", "Edit Character Profile"],
     ["#btnReaderHistory", "turnHistoryDialog", "Turn History & State"],
     ["#btnOpenActivityLog", "activityLogDialog", "Activity Log"],
-    ["#btnOpenUserProfile", "userProfileDialog", "User Profile & Settings"]
+    ["#btnOpenUserProfile", "userProfileDialog", "User Profile"]
   ] as const;
   const missingOpenNames: string[] = [];
   for (const [trigger, dialogId, accessibleName] of openedDialogs) {

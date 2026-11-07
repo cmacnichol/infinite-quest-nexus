@@ -77,6 +77,18 @@ function listModels(composition: ReturnType<typeof createApiProviderApplicationC
 }
 
 describe("provider application composition capability cache transactions", () => {
+  it.each([
+    { discovery: false, autoMatch: false }, { discovery: false, autoMatch: true },
+    { discovery: true, autoMatch: false }, { discovery: true, autoMatch: true }
+  ])("keeps discovery admission and optional lexical matching distinct: $discovery/$autoMatch", ({ discovery, autoMatch }) => {
+    const { pool } = controlledPool();
+    for (const create of [createApiProviderApplicationComposition, createWorkerProviderApplicationComposition]) {
+      const graph = create(pool as never, { credentialSecret: "test-secret", transport: { fetch: vi.fn(), validateSdkEndpoint: vi.fn(), close: vi.fn() }, castDiscoveryEnabled: discovery, castAutoMatchEnabled: autoMatch });
+      expect(graph.generation.castLexicalMentionsEnabled).toBe(discovery && autoMatch);
+      expect(typeof graph.generation.prepareCastDiscoveryExecution).toBe(discovery ? "function" : "undefined");
+      expect(pool.query).not.toHaveBeenCalled();
+    }
+  });
   it.each([true, false])("uses current cast context setting %s in prompt previews despite older jobs", async (castContextEnabled) => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
@@ -136,6 +148,19 @@ describe("provider application composition capability cache transactions", () =>
       await execution.execute({ systemPrompt: "Tell a story.", input: "Continue." });
       expect(fetch).toHaveBeenCalledTimes(1); expect(live.size).toBe(0);
       expect(query.mock.calls.some(([sql]) => sql.startsWith("INSERT INTO text_provider_capacity_leases"))).toBe(true);
+    }
+  });
+  it("does not apply shared text admission when discovery is disabled", async () => {
+    for (const create of [createApiProviderApplicationComposition, createWorkerProviderApplicationComposition]) {
+      const query = vi.fn(async (sql: string) => ({ rows: sql.includes("FROM provider_profiles") ? [profile("story-model")] : [], rowCount: 1 }));
+      const pool = { query, connect: vi.fn(async () => ({ query, release: vi.fn() })) };
+      const fetch = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: "A traveller arrives." }, finish_reason: "stop" }] }), { headers: { "content-type": "application/json" } }));
+      const graph = create(pool as never, { credentialSecret: "test-secret", castDiscoveryEnabled: false, textProviderConcurrency: 1,
+        transport: { fetch, validateSdkEndpoint: vi.fn(), close: vi.fn() } });
+      const execution = await graph.generation.execution.text({ ownerUserId }, providerProfileId, "text");
+      await execution.execute({ systemPrompt: "Tell a story.", input: "Continue." });
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(query.mock.calls.some(([sql]) => sql.includes("text_provider_capacity_leases"))).toBe(false);
     }
   });
   it("shares one default-off prepared executor across every API and worker text consumer graph", () => {

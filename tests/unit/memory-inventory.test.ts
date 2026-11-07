@@ -26,7 +26,7 @@ const rollbackSql = `UPDATE campaign_memory_configs
 
 async function chronicleDocumentation() {
   return Object.fromEntries(await Promise.all(Object.entries(chronicleDocumentationUrls).map(async ([name, url]) => (
-    [name, await readFile(fileURLToPath(url), "utf8")]
+    [name, (await readFile(fileURLToPath(url), "utf8")).replaceAll("\r\n", "\n")]
   )))) as Record<keyof typeof chronicleDocumentationUrls, string>;
 }
 

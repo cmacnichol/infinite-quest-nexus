@@ -1,3 +1,4 @@
+import { archivePolicySnapshotSchema, historicalArchivePolicy, requireCompatibleArchivePreview, stricterArchiveLimits, type ArchivePolicySnapshot, type ArchiveSafetyLimits } from "../../../packages/contracts/src/archive-policy.js";
 import { validateCampaignArchiveCast } from "../../../packages/contracts/src/archives.js";
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
@@ -403,11 +404,12 @@ class ZipCentralDirectoryInspector {
 async function* boundedArchiveSource(
   source: AsyncIterable<Uint8Array>,
   inspector: ZipCentralDirectoryInspector,
+  maximumBytes = MAX_INPUT_BYTES,
 ): AsyncGenerator<Uint8Array> {
   let total = 0;
   for await (const chunk of source) {
     total += chunk.byteLength;
-    if (total > MAX_INPUT_BYTES) throw new Error("archive_size_limit_exceeded");
+    if (total > maximumBytes) throw new Error("archive_size_limit_exceeded");
     inspector.push(chunk);
     yield chunk;
   }
@@ -582,11 +584,15 @@ async function verifyCurrentAsset(
 async function campaignZip(
   source: AsyncIterable<Uint8Array>,
   includeAssetBytes: boolean,
+  limits: ArchiveSafetyLimits = historicalArchivePolicy("campaign").limits,
 ): Promise<DecodedCampaignZip> {
   const inspector = new ZipCentralDirectoryInspector();
-  const archiveSource = Readable.from(boundedArchiveSource(source, inspector));
+  const archiveSource = Readable.from(boundedArchiveSource(source, inspector, Math.min(MAX_INPUT_BYTES, limits.maxCompressedBytes)));
   const sourceSettled = finished(archiveSource).then(() => undefined, () => undefined);
   const parser = archiveSource.pipe(unzipper.Parse({ forceStream: true }));
+  // pipe does not forward source errors: propagate early admission failures so
+  // the parser cannot wait forever for a first ZIP header that will never arrive.
+  archiveSource.once("error", (error) => parser.destroy(error));
   const parserSettled = finished(parser).then(() => undefined, () => undefined);
   let entryCount = 0;
   let expandedBytes = 0;
@@ -600,7 +606,7 @@ async function campaignZip(
     for await (const rawEntry of parser) {
       const entry = rawEntry as StreamingZipEntry;
       entryCount += 1;
-      if (entryCount > MAX_ARCHIVE_ENTRIES) throw new Error("archive_entry_limit_exceeded");
+      if (entryCount > Math.min(MAX_ARCHIVE_ENTRIES, limits.maxEntries)) throw new Error("archive_entry_limit_exceeded");
       entryPaths.push(entry.path);
       if (new TextEncoder().encode(entry.path).byteLength > MAX_ZIP_ENTRY_NAME_BYTES) {
         throw new Error("archive_format_invalid");
@@ -610,6 +616,8 @@ async function campaignZip(
       const mode = (external >>> 16) & 0xffff;
       if ((mode & 0o170000) === 0o120000) throw new Error("archive_link_denied");
       const declared = entry.vars?.uncompressedSize;
+      const compressed = entry.vars?.compressedSize;
+      if (declared && compressed !== undefined && declared > Math.max(1, compressed) * limits.maxExpansionRatio) throw new Error("archive_size_limit_exceeded");
       if (declared !== undefined && (!Number.isSafeInteger(declared) || declared < 0)) {
         throw new Error("archive_format_invalid");
       }
@@ -622,12 +630,13 @@ async function campaignZip(
         .includes(entry.path);
       const assetMatch = /^assets\/([0-9a-f-]{36})\.(png|jpe?g|webp|gif)$/iu.exec(entry.path);
       const currentAssetMatch = /^assets\/sha256\/[0-9a-f]{2}\/[0-9a-f]{64}\.(png|jpe?g|webp|gif)$/u.exec(entry.path);
-      const maximum = isManifestJson || isPayloadJson ? MAX_JSON_BYTES
-        : assetMatch || currentAssetMatch ? MAX_ASSET_BYTES : 1024 * 1024;
+      const maximum = isManifestJson ? Math.min(MAX_JSON_BYTES, limits.maxManifestBytes, limits.maxJsonEntryBytes)
+        : isPayloadJson ? Math.min(MAX_JSON_BYTES, limits.maxJsonEntryBytes)
+          : assetMatch || currentAssetMatch ? Math.min(MAX_ASSET_BYTES, limits.maxOriginalImageBytes) : 1024 * 1024;
       if (declared !== undefined && declared > maximum) throw new Error("archive_size_limit_exceeded");
       const bytes = await readZipEntry(entry, maximum);
       expandedBytes += bytes.byteLength;
-      if (expandedBytes > MAX_INPUT_BYTES) throw new Error("archive_size_limit_exceeded");
+      if (expandedBytes > Math.min(MAX_INPUT_BYTES, limits.maxUncompressedBytes)) throw new Error("archive_size_limit_exceeded");
       if (files.has(entry.path)) throw new Error("archive_format_invalid");
       files.set(entry.path, bytes);
       if (entry.path === "campaign.json" || entry.path === "infinite-quest-campaign.json") {
@@ -1189,11 +1198,12 @@ function portableAggregatePixels(records: readonly ArchiveAssetRecord[]): number
 export function createPortableFamilyPreviewAdapter(
   provider: PortableProviderWorldConversionPort,
   targets: PortableTargetWorldReaderPort,
+  limits: ArchiveSafetyLimits = historicalArchivePolicy("campaign").limits,
 ): PrivatePortableFamilyPreviewPort {
   const adapter: PrivatePortableFamilyPreviewPort = {
     async extractCampaignZipAssets(source, expectedAuthority) {
       if (expectedAuthority.kind !== "campaign_zip") throw new Error("portable_import_authority_mismatch");
-      const decoded = await campaignZip(source, true);
+      const decoded = await campaignZip(source, true, limits);
       const expected = expectedAuthority.normalizedPayload.assetRecords;
       const records = decoded.assets.flatMap((asset) => asset.records);
       const manifestAuthority = (assetManifest: PortableJsonValue) => canonicalPortableImportAuthority({
@@ -1259,7 +1269,7 @@ export function createPortableFamilyPreviewAdapter(
       return decoded;
     },
     async previewCampaignZip(source, command) {
-      const decoded = await campaignZip(source, false);
+      const decoded = await campaignZip(source, false, limits);
       const assetRecords = decoded.assets.flatMap((asset) => asset.records);
       if (decoded.archiveFormat === "manifest_v1") {
         const campaign = decoded.campaign!;
@@ -1624,6 +1634,7 @@ export type PortableImportExportCompositionOptions = Readonly<{
   leaseOwner: string;
   leaseSeconds?: number;
   previewTtlSeconds?: number;
+  policy?: ArchivePolicySnapshot;
   exportTtlSeconds?: number;
   streamDeadlineSeconds?: number;
 }>;
@@ -2021,15 +2032,17 @@ export async function createPortableImportExportComposition(
   future(streamDeadlineSeconds);
   const assets = await createPrivatePortableNormalizedAssetPublicationComposition(options.pool, options.roots);
   const storage = assets.portableStorage;
+  const policy = options.policy ?? { ...historicalArchivePolicy("campaign"), settingsRevision: "environment", previewTtlSeconds, artifactTtlSeconds: exportTtlSeconds };
   const authority = createPostgresPortableImportAuthorityRepository(
     options.pool,
     storage.repository,
     assets.coordinator,
+    policy,
   );
-  const families = createPortableFamilyPreviewAdapter(options.provider, options.targets);
+  const families = createPortableFamilyPreviewAdapter(options.provider, options.targets, policy.limits);
   const mutations = createPostgresPortableFamilyMutationRepository(options.worlds);
   const inputLimits = () => bindPrivateBoundedStreamLimits({
-    maximumBytes: MAX_INPUT_BYTES,
+    maximumBytes: Math.min(MAX_INPUT_BYTES, policy.limits.maxCompressedBytes),
     deadlineAt: future(streamDeadlineSeconds)
   });
   const owner = (ownerUserId: string): ImportOwnerScope => Object.freeze({ ownerUserId });
@@ -2099,6 +2112,13 @@ export async function createPortableImportExportComposition(
     command: PortableImportCommitCommand,
     artifacts: import("../../../packages/application/src/imports/private-portable-composition.js").PrivatePortableImportArtifacts = {},
   ) => {
+    const { rows: [transfer] } = await options.pool.query<{ policy_snapshot: unknown }>(
+      "SELECT policy_snapshot FROM portable_import_operations WHERE owner_user_id=$1 AND preview_token_hash=$2 AND status IN ('previewed','consuming')",
+      [command.ownerUserId, sha256(command.previewHandle.token)],
+    );
+    const storedPolicy = transfer?.policy_snapshot ? archivePolicySnapshotSchema.parse(transfer.policy_snapshot) : historicalArchivePolicy("campaign");
+    if (transfer) requireCompatibleArchivePreview(storedPolicy, policy);
+    const commitFamilies = createPortableFamilyPreviewAdapter(options.provider, options.targets, stricterArchiveLimits(storedPolicy, policy));
     const suppliedLegacyStoryCompanions = artifacts.legacyStoryCompanions ?? [];
     if (command.kind !== "legacy_story" && suppliedLegacyStoryCompanions.length > 0) {
       throw new Error("portable_import_artifacts_invalid");
@@ -2154,7 +2174,7 @@ export async function createPortableImportExportComposition(
         });
         try {
           assetArtifacts = command.kind === "campaign_zip"
-            ? await families.extractCampaignZipAssets(session.chunks, previewAuthority.authority)
+            ? await commitFamilies.extractCampaignZipAssets(session.chunks, previewAuthority.authority)
             : await families.extractLegacyStoryAssets(
               session.chunks,
               previewAuthority.authority,
@@ -2428,6 +2448,7 @@ export async function createPortableImportExportComposition(
     }
     const issued = await storage.adapter.publishPortableExport({
       exportScope: artifact.exportScope,
+      policy,
       operationScopeId: randomUUID(),
       leaseOwner: options.leaseOwner,
       expiresAt: future(exportTtlSeconds),
@@ -2444,7 +2465,7 @@ export async function createPortableImportExportComposition(
 
   const composition: PortableImportExportComposition = {
     async stageInput(input) {
-      const staged = await storage.adapter.stagePortableInput(input);
+      const staged = await storage.adapter.stagePortableInput(options.previewTtlSeconds === undefined ? input : { ...input, expiresAt: future(previewTtlSeconds) });
       return Object.freeze({ stagedInput: staged.stagedInput });
     },
     previewCampaignZip: (command) => preview(command, families.previewCampaignZip.bind(families)),

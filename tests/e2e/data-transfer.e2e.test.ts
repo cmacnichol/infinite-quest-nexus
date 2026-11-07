@@ -385,6 +385,47 @@ const surfaces = [
 ] as const;
 
 for (const surface of surfaces) {
+  for (const resume of [false, true]) {
+    test(`${surface.name} negotiates upload ceiling and resumes tighter chunks: ${resume}`, async ({ page }, testInfo) => {
+      await installDataTransferApi(page);
+      const cap = 1024 * 1024, size = cap * 2.5;
+      let received = 0, next = 0, creates = 0, interrupted = false, restarted = false;
+      const sent: Array<{ bytes: number; index: number }> = [];
+      const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+      const view = () => ({ id: UPLOAD_ID, status: received === size ? "completed" : "uploading", byteLength: size, receivedBytes: received, chunkBytes: resume && !restarted ? cap * 1.5 : cap, nextChunkIndex: next, expiresAt: preview.expiresAt });
+      await page.route("**/api/v1/system-imports/uploads**", async route => {
+        const request = route.request(), path = new URL(request.url()).pathname;
+        if (path.endsWith("/uploads") && request.method() === "POST") { creates++; return json(route, view(), 201); }
+        if (path.endsWith(`/uploads/${UPLOAD_ID}`)) return json(route, view());
+        if (path.endsWith("/complete")) return json(route, view());
+        const match = /chunks\/(\d+)$/u.exec(path);
+        if (!match) throw new Error("unexpected_upload_route");
+        if (resume && !interrupted && received > 0) { interrupted = true; return route.abort("internetdisconnected"); }
+        const bytes = request.postDataBuffer()!.byteLength;
+        expect(bytes).toBeLessThanOrEqual(view().chunkBytes); expect(Number(match[1])).toBe(next);
+        sent.push({ bytes, index: next }); received += bytes; next++;
+        return json(route, view());
+      });
+      await page.goto(surface.url);
+      await expect(page.getByRole("heading", { name: "Data Transfer", exact: true, level: 1 })).toBeVisible();
+      const file = { name: "bounded-system.zip", mimeType: "application/zip", buffer: Buffer.alloc(size) };
+      await page.locator(surface.file).setInputFiles(file);
+      if (resume) {
+        await expect.poll(() => interrupted).toBe(true);
+        await expect(page.locator(surface.error)).toBeVisible();
+        restarted = true; await page.reload();
+        await expect(page.locator(surface.file)).toBeEnabled();
+        await page.locator(surface.file).setInputFiles(file);
+      }
+      await expect(page.locator(surface.preview)).toBeVisible();
+      expect(creates).toBe(1); expect(received).toBe(size);
+      expect(sent.map(chunk => chunk.bytes)).toEqual(resume ? [cap*1.5, cap] : [cap, cap, cap/2]);
+      expect(sent.map(chunk => chunk.index)).toEqual(resume ? [0,1] : [0,1,2]);
+      expect(errors).toEqual([]); await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+      await page.screenshot({ path: testInfo.outputPath("negotiated-upload.png"), fullPage: true });
+    });
+  }
+
   test(`${surface.name} renders the mocked Task 6 preview and report evidence without client ZIP inspection`, async ({ page }, testInfo) => {
     await installDataTransferApi(page);
     await page.goto(surface.url);

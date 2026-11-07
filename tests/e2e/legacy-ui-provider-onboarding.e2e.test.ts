@@ -219,8 +219,8 @@ async function selectDiscoveredModel(page: Page, expectedName: RegExp) {
 }
 
 async function openNewProvider(page: Page) {
-  await page.goto(`${origin}/nexus/index.html#providers`);
-  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  if (!page.url().includes("/app/settings?section=providers")) await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page.locator("#newProviderButton")).toBeVisible();
   await page.getByRole("button", { name: "New provider profile" }).click();
   await expect(page.locator("#providerDialog")).toBeVisible();
 }
@@ -288,7 +288,7 @@ test("role readiness uses explicit inventory checks and preserves independent pr
   const api = await installProviderApi(page, { providers: [providerFixture({ responseFormatCapability: verifiedCapability })], failFirstInventory: true });
   await page.clock.install({ time: new Date(now) });
   await page.goto(`${origin}/nexus/index.html#providers`);
-  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#newProviderButton")).toBeVisible();
   const text = page.locator('[data-provider-readiness="text"]');
   const image = page.locator('[data-provider-readiness="image"]');
   await expect(text).toHaveAttribute("data-readiness-state", "unavailable");
@@ -312,7 +312,7 @@ test("role readiness uses explicit inventory checks and preserves independent pr
 test("opening and saving a provider profile never probes story generation", async ({ page }) => {
   const api = await installProviderApi(page);
   await page.goto(`${origin}/nexus/index.html#providers`);
-  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#newProviderButton")).toBeVisible();
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   await expect(page.locator("#providerDialog")).toBeVisible();
   expect(api.getInventoryCalls()).toBe(0);
@@ -344,7 +344,7 @@ test("text profile setup succeeds while illustration provider is absent", async 
 test("Model-mode Advanced structured settings are visible by keyboard and round-trip", async ({ page }) => {
   const api = await installProviderApi(page, { providers: [providerFixture({ configuration: { textResponseFormatPolicy: "legacy" } })] });
   await page.goto(`${origin}/nexus/index.html#providers`);
-  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#newProviderButton")).toBeVisible();
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/T23-provider-basic.png", fullPage: true });
   const advanced = page.locator("#providerAdvancedSettings");
@@ -366,9 +366,9 @@ test("Model-mode Advanced structured settings are visible by keyboard and round-
   await expect.poll(() => api.writes.length).toBe(1);
   expect(requiredItem(api.writes, 0).method).toBe("PATCH");
   expect(requiredItem(api.writes, 0).body).toMatchObject({
-    contextWindowTokens: "57344",
-    maxOutputTokens: "6144",
-    temperature: "0.55",
+    contextWindowTokens: 57344,
+    maxOutputTokens: 6144,
+    temperature: 0.55,
     configuration: {
       textResponseFormatPolicy: "auto",
       textExecutionOverrides: { parameters: { temperature: 0.27 } }
@@ -387,7 +387,7 @@ test("Model-mode Advanced structured settings are visible by keyboard and round-
 test("a successful inventory listing without the selected model remains not ready", async ({ page }) => {
   const api = await installProviderApi(page, { inventoryModelIds: ["vendor/other-model"] });
   await page.goto(`${origin}/nexus/index.html#providers`);
-  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#newProviderButton")).toBeVisible();
   const text = page.locator('[data-provider-readiness="text"]');
   await expect(text).toHaveAttribute("data-readiness-state", "unavailable");
   await text.getByRole("button", { name: "Check model inventory" }).click();
@@ -404,7 +404,7 @@ test("stale inventory results cannot lock or overwrite readiness after the profi
   const imageOther = providerFixture({ id: "33333333-3333-4333-8333-333333333333", name: "Synthetic other image", providerRole: "image", baseUrl: "https://image-other.example.test/v1", defaultModel: "vendor/image-other", isDefault: false, responseFormatCapability: undefined });
   const api = await installProviderApi(page, { providers: [textProfile, imageDefault, imageOther], failFirstListAfterWrite: true, holdFirstModelListResponse: true });
   await page.goto(`${origin}/nexus/index.html#providers`);
-  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#newProviderButton")).toBeVisible();
   const text = page.locator('[data-provider-readiness="text"]');
   const inventoryCheck = text.locator("[data-readiness-check]");
   await expect(inventoryCheck).toHaveCount(1);
@@ -461,7 +461,7 @@ test("stale inventory results cannot lock or overwrite readiness after the profi
 test("unknown structured-output capability remains not ready", async ({ page }) => {
   const api = await installProviderApi(page, { providers: [providerFixture({ responseFormatCapability: undefined })] });
   await page.goto(`${origin}/nexus/index.html#providers`);
-  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#newProviderButton")).toBeVisible();
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   const capability = page.locator("#providerResponseFormatCapability");
   await expect(capability).toContainText("unknown");
@@ -476,7 +476,7 @@ test("expired schema capability stays not ready for a healthy text provider", as
   expect(provider.healthStatus).toBe("healthy");
   const api = await installProviderApi(page, { providers: [provider] });
   await page.goto(`${origin}/nexus/index.html#providers`);
-  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#newProviderButton")).toBeVisible();
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   const capability = page.locator("#providerResponseFormatCapability");
   await expect(capability).not.toContainText("verified");
@@ -494,7 +494,7 @@ test("preset Advanced override edits are saved and Inherit clears the saved over
   });
   const api = await installProviderApi(page, { providers: [text] });
   await page.goto(`${origin}/nexus/index.html#providers`);
-  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#newProviderButton")).toBeVisible();
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   const advanced = page.locator("#providerAdvancedSettings");
   await advanced.locator("summary").click();
@@ -505,12 +505,14 @@ test("preset Advanced override edits are saved and Inherit clears the saved over
   await expect(temperature).toBeVisible();
   await expect(temperature).toHaveValue("0.31");
   await temperature.fill("0.47");
+  const parameters = {TopP:"0.71", TopK:"8", FrequencyPenalty:"0.22", PresencePenalty:"0.33", RepetitionPenalty:"1.15", MinP:"0.1", TopA:"0.2", Seed:"28", MaxTokens:"1850", MaxCompletionTokens:"900", ContextTokens:"25000"};
+  for (const [field, value] of Object.entries(parameters)) await page.locator("#providerOverride" + field).fill(value);
   await page.locator("#saveProvider").click();
   await expect.poll(() => api.writes.length).toBe(1);
   expect(requiredItem(api.writes, 0).method).toBe("PATCH");
   expect(requiredItem(api.writes, 0).body.configuration).toMatchObject({
     textResponseFormatPolicy: "auto",
-    textExecutionOverrides: { parameters: { temperature: 0.47, max_tokens: 1800 }, conservativeContextWindowTokens: 24000 }
+    textExecutionOverrides: { parameters: { temperature: 0.47, top_p:0.71, top_k:8, frequency_penalty:0.22, presence_penalty:0.33, repetition_penalty:1.15, min_p:0.1, top_a:0.2, seed:28, max_tokens:1850, max_completion_tokens:900 }, conservativeContextWindowTokens: 25000 }
   });
 
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
@@ -539,7 +541,7 @@ test("provider tuning stays advanced and round-trips text and Sogni profile valu
   const sogni = providerFixture({ id: imageProfileId, name: "Sogni image profile", providerType: "sogni_sdk", providerRole: "image", baseUrl: "https://image.example.test/v1", defaultModel: "synthetic/image-model", isDefault: false, configuration: { defaultWidth: 1536, defaultHeight: 1024, defaultAspectRatio: "3:2", defaultImageCount: 2, defaultOutputFormat: "webp", defaultQuality: "high", generationTimeoutMs: 240000, network: "relaxed", tokenType: "spark", contentFilter: "enabled", defaultSizePreset: "landscape", defaultSteps: 32, defaultGuidance: 6.5, defaultSeed: 12345, defaultSampler: "dpmpp_2m", defaultScheduler: "karras", defaultPreviewCount: 3 } });
   const api = await installProviderApi(page, { providers: [text, sogni] });
   await page.goto(`${origin}/nexus/index.html#providers`);
-  await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
+  await expect(page.locator("#newProviderButton")).toBeVisible();
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   const advanced = page.locator("#providerAdvancedSettings");
   await expect(page.locator("#providerName")).toBeVisible();
@@ -560,9 +562,9 @@ test("provider tuning stays advanced and round-trips text and Sogni profile valu
   await page.locator("#saveProvider").click();
   await expect.poll(() => api.writes.length).toBe(1);
   expect(requiredItem(api.writes, 0).body).toMatchObject({
-    contextWindowTokens: "49152",
-    maxOutputTokens: "3072",
-    temperature: "0.45",
+    contextWindowTokens: 49152,
+    maxOutputTokens: 3072,
+    temperature: 0.45,
     textSelection: { kind: "openrouter_preset", slug: "nexus-story" },
     configuration: {
       textResponseFormatPolicy: "auto",
@@ -617,14 +619,54 @@ test("a committed profile remains saved when refreshing the provider list fails"
   await page.locator("#saveProvider").click();
   await expect.poll(() => api.writes.length).toBe(1);
   await expect(page.locator("#providerStatus")).toContainText("Committed before list failure was saved.");
-  await expect(page.locator("#providerStatus")).toContainText(/provider list could not be refreshed/i);
+  await expect(page.locator("#providerListStatus")).toContainText(/provider list could not be refreshed/i);
   await expect(page.locator("#providerStatus")).not.toContainText(/could not be saved/i);
   const committedMessage = await page.locator("#providerStatus").innerText();
   expect(committedMessage.match(/Committed before list failure was saved\./g)).toHaveLength(1);
-  expect(committedMessage.match(/The provider list could not be refreshed\./g)).toHaveLength(1);
+  expect((await page.locator("#providerListStatus").innerText()).match(/The provider list could not be refreshed\./g)).toHaveLength(1);
   expect(api.writes).toHaveLength(1);
   expect(requiredItem(api.writes, 0).body.apiKey).toBe("synthetic-committed-secret");
   await page.getByRole("button", { name: "Retry provider profiles" }).click();
   await expect(page.locator("#providerProfileList")).toContainText("Committed before list failure");
   expect(api.writes).toHaveLength(1);
+});
+
+test("moving a saved credentialed profile requires a fresh key for that endpoint", async ({page}) => {
+  const api = await installProviderApi(page, {providers:[providerFixture({hasApiKey:true})]});
+  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.locator("#providerProfileList").getByRole("button",{name:"Edit"}).click();
+  await page.locator("#providerBaseUrl").fill("https://moved.example.test/v1");
+  await page.locator("#providerApiKey").fill("   ");
+  await page.locator("#saveProvider").click();
+  await expect(page.locator("#providerEditorStatus")).toContainText("Enter a new API key");
+  expect(api.writes).toHaveLength(0);
+  await page.locator("#providerApiKey").fill("replacement-fixture-credential");
+  await page.locator("#saveProvider").click();
+  await expect.poll(() => api.writes.length).toBe(1);
+  expect(requiredItem(api.writes,0).body).toMatchObject({baseUrl:"https://moved.example.test/v1",apiKey:"replacement-fixture-credential"});
+});
+
+test("rotating a key preserves the selected model, configured limits and overrides while invalidating evidence", async ({page}) => {
+  const configuration = {textResponseFormatPolicy:"auto" as const, textExecutionOverrides:{
+    parameters:{temperature:0.34,top_p:0.73},conservativeContextWindowTokens:49000
+  }};
+  const profile = providerFixture({contextWindowTokens:49152,maxOutputTokens:6144,temperature:0.55,configuration});
+  const api = await installProviderApi(page,{providers:[profile]});
+  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.locator("#providerProfileList").getByRole("button",{name:"Edit"}).click();
+  await page.locator("#providerDefaultModel").click();
+  await page.getByRole("button",{name:/Synthetic inventory model/}).click();
+  await expect(page.locator("#providerContextTokens")).toHaveValue("65536");
+  await page.locator("#providerApiKey").fill("rotated-fixture-key");
+  await expect(page.locator("#providerDefaultModel")).toHaveValue(profile.defaultModel);
+  await page.locator("#providerAdvancedSettings > summary").click();
+  await expect(page.locator("#providerContextTokens")).toHaveValue("49152");
+  await expect(page.locator("#providerContextTokens")).not.toHaveAttribute("readonly","");
+  await expect(page.locator("#providerResponseFormatCapability")).toContainText(/unknown/i);
+  await page.locator("#saveProvider").click();
+  await expect.poll(()=>api.writes.length).toBe(1);
+  expect(requiredItem(api.writes,0).body).toMatchObject({
+    baseUrl:profile.baseUrl,apiKey:"rotated-fixture-key",defaultModel:profile.defaultModel,contextWindowTokens:49152,
+    maxOutputTokens:6144,temperature:0.55,configuration
+  });
 });

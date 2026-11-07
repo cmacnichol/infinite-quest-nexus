@@ -27,6 +27,8 @@ describe("System Archive ambiguous persistence reconciliation", () => {
       status: "expired" as const,
       byte_length: 4,
       received_bytes: 2,
+      next_chunk_index: 1,
+      policy_snapshot: null,
       content_hash: "a".repeat(64),
       staged_input_id: null,
       expires_at: new Date("2026-08-25T12:00:00.000Z"),

@@ -46,7 +46,7 @@ type ApiRuntimeProviderAdapter = Readonly<{
   ): Promise<ProviderModelInventory>;
   discoverCandidatePresetsWithCredential(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number }>, credential: string | null): Promise<ProviderPresetInventory>;
   resolveCandidatePresetWithCredential(candidate: ProviderCandidate, slug: string, credential: string | null, signal?: AbortSignal): Promise<ProviderPresetDetail>;
-  presetSaveAuthoritySnapshot(ownerUserId: string, providerProfileId: string, lock: boolean): Promise<Readonly<{ candidate: ProviderCandidate; readSavedCredential(): string | null; revision: string }> | null>;
+  presetSaveAuthoritySnapshot(ownerUserId: string, providerProfileId: string, lock: boolean): Promise<Readonly<{ candidate: ProviderCandidate; hasCredential: boolean; readSavedCredential(): string | null; revision: string }> | null>;
 }>;
 
 type ProviderApiComposition = Readonly<{
@@ -192,22 +192,23 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     async update(ownerUserId: string, providerProfileId: string, input: ProviderProfileUpdate) {
       assertProviderConfiguration(input.configuration);
       const textSelection = input.textSelection;
-      const current = (await composition.application.listProfiles({ ownerUserId })).find((profile) => profile.id === providerProfileId);
-      if (!current) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
-      const canChangeTextSelection = current.providerRole === "text" || current.providerRole === "intent";
-      const requiresPresetAuthority = canChangeTextSelection &&
-        (input.textSelection !== undefined || input.defaultModel !== undefined || input.baseUrl !== undefined || input.apiKey !== undefined);
-      const authority = requiresPresetAuthority
+      const requiresAuthority = input.apiKey !== undefined || input.baseUrl !== undefined ||
+        input.textSelection !== undefined || input.defaultModel !== undefined;
+      const authority = requiresAuthority
         ? await composition.runtime.presetSaveAuthoritySnapshot(ownerUserId, providerProfileId, false)
         : null;
-      if (requiresPresetAuthority && !authority) stalePresetSave();
-      const profileForSelection = authority?.candidate ?? current;
-      const nextSelection = updatedSelection(profileForSelection, input);
-      const selectionChanged = nextSelection && profileForSelection.textSelection
-        ? selectionCompatibilityId(nextSelection) !== selectionCompatibilityId(profileForSelection.textSelection)
+      const current = requiresAuthority ? authority?.candidate :
+        (await composition.application.listProfiles({ownerUserId})).find(profile => profile.id === providerProfileId);
+      if (!current) throw Object.assign(new Error("Provider profile not found."), {statusCode: 404});
+      if (authority?.hasCredential && input.baseUrl !== undefined && input.baseUrl !== authority.candidate.baseUrl && !input.apiKey?.trim()) {
+        throw Object.assign(new Error("A new API key is required when changing the endpoint of a credentialed provider."), {statusCode: 400});
+      }
+      const nextSelection = updatedSelection(current, input);
+      const selectionChanged = nextSelection && current.textSelection
+        ? selectionCompatibilityId(nextSelection) !== selectionCompatibilityId(current.textSelection)
         : false;
       const needsPresetValidation = nextSelection?.kind === "openrouter_preset" &&
-        (selectionChanged || input.baseUrl !== undefined && input.baseUrl !== profileForSelection.baseUrl || input.apiKey !== undefined);
+        (selectionChanged || input.baseUrl !== undefined && input.baseUrl !== current.baseUrl || input.apiKey !== undefined);
       if (needsPresetValidation) {
         if (!authority) stalePresetSave();
         const candidate = candidateForPresetSave(ownerUserId, authority.candidate, nextSelection, input);
