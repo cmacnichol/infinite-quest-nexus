@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createSettingsUseCases, validateSettingsSnapshot, type SettingsRepositoryPort, type SettingsState } from "../../packages/application/src/settings/index.js";
-import { INSTANCE_SETTING_FIELDS } from "../../packages/domain/src/instance-settings.js";
+import { INSTANCE_SETTING_FIELDS, resolveInstanceSettings } from "../../packages/domain/src/instance-settings.js";
 import type { DeploymentSettingsPolicy } from "../../packages/contracts/src/instance-settings.js";
 import { settingsFixture } from "../fixtures/instance-settings.js";
 function policyFixture(): DeploymentSettingsPolicy {
@@ -21,9 +21,25 @@ function fixture() {
     propose: async (input) => { writes.push(input); return { ...state, requested: input.snapshot }; },
     activate: async () => state
   };
-  return { actor, state, writes, repository, useCases: createSettingsUseCases(repository, policyFixture()) };
+  return { actor, state, writes, repository, useCases: createSettingsUseCases(repository, policyFixture(), resolveInstanceSettings) };
 }
 describe("settings application boundary", () => {
+  it("requires an explicit policy resolver instead of silently selecting one", () => {
+    const { repository } = fixture();
+    expect(() => Reflect.apply(createSettingsUseCases, undefined, [repository, policyFixture()])).toThrow("settings_policy_resolver_required");
+  });
+  it("honors the injected resolver and passes each role without replica metadata", async () => {
+    const { repository, actor } = fixture();
+    const policy = policyFixture();
+    policy.expectedRoles.push({ role: "api", replicas: 2, databaseMaxConnections: 12 });
+    const capacities: unknown[] = [];
+    const useCases = createSettingsUseCases(repository, policy, (snapshot, effectivePolicy, capacity) => {
+      capacities.push(capacity);
+      return capacity.role === "api" ? { ok: false } : resolveInstanceSettings(snapshot, effectivePolicy, capacity);
+    });
+    await expect(useCases.propose({ expectedRequestedRevision: "1", changes: { logLevel: "debug" }, reason: "operator" }, actor)).rejects.toThrow("settings_policy_rejected");
+    expect(capacities).toEqual([{ role: "worker", databaseMaxConnections: 8 }, { role: "api", databaseMaxConnections: 12 }]);
+  });
   it("rejects secret-shaped and invalid values before persistence", () => {
     expect(() => validateSettingsSnapshot({ ...settingsFixture(), token: "secret" })).toThrow();
     expect(() => validateSettingsSnapshot({ ...settingsFixture(), workerPollIntervalMs: "500" })).toThrow();

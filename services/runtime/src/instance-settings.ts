@@ -38,7 +38,7 @@ export function resolveRuntimeSettingsState(state:SettingsState, bootstrap:Runti
   if(state.installationId!==policy.installationId || state.policyDigest!==settingsDigest(policy)) throw new Error('settings_policy_mismatch');
   if(!state.active || !state.activeRevision) throw new Error('settings_active_missing');
   if(!policy.expectedRoles.some(r=>r.role===bootstrap.role && r.databaseMaxConnections===bootstrap.databaseMaxConnections)) throw new Error('settings_role_mismatch');
-  validateSettingsPolicy(state.active,policy);
+  validateSettingsPolicy(state.active,policy,resolveInstanceSettings);
   const gates={...policy.featureGates};
   for(const key of Object.keys(settingsFeatureGatesSchema.shape) as (keyof typeof gates)[]) gates[key] = gates[key] && bootstrap[key]===true;
   const resolved=resolveInstanceSettings(state.active,{...policy,featureGates:gates},{role:bootstrap.role,databaseMaxConnections:bootstrap.databaseMaxConnections});

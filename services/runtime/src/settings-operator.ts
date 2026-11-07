@@ -1,3 +1,4 @@
+import { resolveInstanceSettings } from "../../../packages/domain/src/instance-settings.js";
 import { z } from "zod";
 import { instanceSettingsSchema, runtimeRoleCapacitySchema, type DeploymentSettingsPolicy, type InstanceSettings } from "../../../packages/contracts/src/instance-settings.js";
 import { validateSettingsPolicy, type SettingsActor, type SettingsRepositoryPort } from "../../../packages/application/src/settings/index.js";
@@ -16,7 +17,7 @@ export function reconcileSettingsSeeds(input:unknown,policy:DeploymentSettingsPo
   for(const seed of seeds) if(seed.digest!==settingsDigest(seed.snapshot) || settingsDigest(seed.snapshot)!==settingsDigest(snapshot)) throw new Error('settings_seed_inconsistent');
   for(const intended of policy.expectedRoles) if(seeds.filter(seed=>seed.role.role===intended.role && seed.role.databaseMaxConnections===intended.databaseMaxConnections).length!==intended.replicas) throw new Error('settings_seed_roles_missing');
   if(seeds.length!==policy.expectedRoles.reduce((n,r)=>n+r.replicas,0)) throw new Error('settings_seed_roles_unexpected');
-  validateSettingsPolicy(snapshot,policy);
+  validateSettingsPolicy(snapshot,policy,resolveInstanceSettings);
   return snapshot;
 }
 export type SettingsOperatorPorts={
@@ -52,11 +53,11 @@ export async function runInstanceSettingsCommand(args:readonly string[],ports:Se
       await ports.repository.activate({expectedActiveRevision:active==='null'?null:active,expectedRequestedRevision:required('--expected-requested'),policyDigest,maintenanceReference:required('--maintenance'),actor:ports.actor});
     } else if(command==='propose'||command==='propose-rollback') {
       const snapshot=command==='propose'?instanceSettingsSchema.parse(await ports.readJson(required('--input'))):await ports.readRevision(required('--revision'));
-      validateSettingsPolicy(snapshot,ports.policy);
+      validateSettingsPolicy(snapshot,ports.policy,resolveInstanceSettings);
       await ports.repository.propose({expectedRequestedRevision:required('--expected-requested'),snapshot,policyDigest,actor:ports.actor,reason:'operator_policy_review',kind:command==='propose-rollback'?'rollback':'proposal'});
     } else {
       if(!state.requested)throw new Error('settings_uninitialized');
-      validateSettingsPolicy(state.requested,ports.policy);
+      validateSettingsPolicy(state.requested,ports.policy,resolveInstanceSettings);
       if(state.policyDigest!==policyDigest) throw new Error('settings_policy_revalidation_required');
     }
     ports.output({status:'ok',command});return 0;

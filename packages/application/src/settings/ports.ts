@@ -1,4 +1,11 @@
+import type { DeploymentSettingsPolicy, InstanceSettings, RuntimeRoleCapacity } from "@infinite-quest/contracts";
 import type { ActivationRequest, SettingsProposal, SettingsSeed, SettingsState } from "./types.js";
+/** Runtime adapters supply the shared domain resolver; application owns no policy rules. */
+export type SettingsPolicyResolverPort = (
+  snapshot: InstanceSettings,
+  policy: DeploymentSettingsPolicy,
+  capacity: RuntimeRoleCapacity
+) => { ok: true } | { ok: false };
 export interface SettingsRepositoryPort {
   read(): Promise<SettingsState>;
   seed(input: SettingsSeed): Promise<SettingsState>;

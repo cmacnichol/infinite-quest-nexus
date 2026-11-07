@@ -33,7 +33,7 @@ export function createInstanceSettingsHttpComposition(pool: DatabasePool, bootst
       if(state.installationId!==mounted.installationId || state.policyDigest!==settingsDigest(mounted))throw new SettingsHttpError(503,"settings_policy_mismatch");
       if(state.requestedRevision!==patch.expectedRequestedRevision)throw new SettingsConflictError(state.requestedRevision);
       for(const key of Object.keys(settingsFeatureGatesSchema.shape) as SettingsFeatureKey[])if(patch.changes[key]===true && !effectivePolicy.featureGates[key])throw new SettingsHttpError(422,"settings_deployment_disabled");
-      try {return await view(await createSettingsUseCases(repository,effectivePolicy).propose(patch,actor));}
+      try {return await view(await createSettingsUseCases(repository,effectivePolicy,resolveInstanceSettings).propose(patch,actor));}
       catch(error){if(error instanceof SettingsConflictError)throw error;if(error instanceof Error && error.message==="settings_policy_rejected")throw new SettingsHttpError(422,"settings_policy_rejected");throw error;}
     },
     history:async(cursor:string|undefined,limit:number)=>{
