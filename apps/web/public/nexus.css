@@ -530,6 +530,11 @@ button.dashboard-card { width: 100%; padding: 0; cursor: pointer; font: inherit;
 .character-generator-fields label, .character-core-fields label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 700; }
 .character-generator .field-note { display: block; margin: 8px 0 0; }
 .character-core-fields { display: grid; gap: 12px; }
+.character-source-section { margin-top: 16px; padding-top: 8px; border-top: 1px solid var(--line); }
+.character-source-section h3 { margin: 8px 0 12px; font-size: 1rem; }
+.character-source-section > label:not(.hidden) { display: grid; gap: 7px; color: var(--muted); }
+.character-source-section > label.hidden { display: none; }
+.character-source-section > button { margin-top: 12px; }
 .character-playable-context { margin: 0; }
 .character-advanced-disclosure { margin: 2px 0; }
 .character-advanced-disclosure > fieldset, .character-advanced-disclosure > label { margin-top: 12px; }
