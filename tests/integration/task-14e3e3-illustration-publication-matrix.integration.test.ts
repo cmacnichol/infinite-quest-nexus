@@ -798,8 +798,10 @@ integration("Task 14e3e3 illustration publication matrix", () => {
        END;
        $gate$`,
     );
+    // PostgreSQL runs same-event triggers alphabetically. Pause before the
+    // production guard locks the request, so both recoveries reach this update.
     await pool.query(
-      `CREATE TRIGGER task_14e3e3_mapping_promote_gate_trigger
+      `CREATE TRIGGER a_task_14e3e3_mapping_promote_gate_trigger
        BEFORE UPDATE ON image_job_asset_publications
        FOR EACH ROW WHEN (NEW.publication_state='published')
        EXECUTE FUNCTION task_14e3e3_mapping_promote_gate()`,
@@ -847,7 +849,7 @@ integration("Task 14e3e3 illustration publication matrix", () => {
       if (blockerOpen) await blocker.query("ROLLBACK");
       blocker.release();
       await pool.query(
-        "DROP TRIGGER IF EXISTS task_14e3e3_mapping_promote_gate_trigger ON image_job_asset_publications",
+        "DROP TRIGGER IF EXISTS a_task_14e3e3_mapping_promote_gate_trigger ON image_job_asset_publications",
       );
       await pool.query("DROP FUNCTION IF EXISTS task_14e3e3_mapping_promote_gate()");
     }
