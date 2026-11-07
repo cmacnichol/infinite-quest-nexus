@@ -31,7 +31,70 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
   const document = root.ownerDocument; const window = document.defaultView!;
   const content = root.querySelector<HTMLElement>(".settings-content")!;
   const nav = root.querySelector<HTMLElement>(".settings-nav")!;
-  const session = createSettingsSession(options.api ?? createInstanceSettingsApi());
+  const settingsApi = options.api ?? createInstanceSettingsApi();
+  const session = createSettingsSession(settingsApi);
+  const restartKey = "nexus-settings-restart";
+  let restartOperation: { operationId: string; revision: string } | null = null;
+  let restartMessage = "";
+  let restartBusy = false;
+  let restartTimer: number | undefined;
+  try {
+    const stored = JSON.parse(window.sessionStorage.getItem(restartKey) ?? "null");
+    if (stored && typeof stored.operationId === "string" && typeof stored.revision === "string") restartOperation = stored;
+  } catch { /* Storage may be unavailable. */ }
+  function clearRestart(message: string) {
+    restartMessage = message; restartOperation = null; restartBusy = false;
+    try { window.sessionStorage.removeItem(restartKey); } catch { /* unavailable */ }
+    if (!disposed && !pendingTextEdit) render();
+  }
+  async function pollRestart(submit = false) {
+    const intent = restartOperation;
+    if (!intent || !settingsApi.restartStatus || !settingsApi.restart || disposed) return;
+    try {
+      const result = submit ? await settingsApi.restart(intent.revision, intent.operationId) : await settingsApi.restartStatus(intent.operationId);
+      if (disposed || restartOperation !== intent) return;
+      if (result.revision !== intent.revision || (!submit && result.operationId !== intent.operationId)) {
+        clearRestart("Restart operation mismatch. Reload settings to investigate."); return;
+      }
+      if (submit && result.operationId !== intent.operationId) {
+        intent.operationId = result.operationId;
+        try { window.sessionStorage.setItem(restartKey, JSON.stringify(intent)); } catch { /* unavailable */ }
+      }
+      if (result.status === "ready") {
+        const view = await settingsApi.get();
+        const ready = await window.fetch("/health/ready", { cache: "no-store" });
+        if (disposed || restartOperation !== intent) return;
+        if (ready.ok) {
+          clearRestart(view.activeRevision === result.revision
+            ? `Saved revision ${result.revision} is active and ready.`
+            : `Restart completed for revision ${result.revision}. The active revision has since changed.`);
+          await session.load(); return;
+        }
+      }
+      if (result.status === "failed") { clearRestart(`Restart failed${result.error ? `: ${result.error}` : "."}`); return; }
+      restartMessage = result.status === "draining" ? "Waiting for active work to finish…" : "Restarting and waiting for the selected revision to become ready…";
+    } catch (error) {
+      if (disposed || restartOperation !== intent) return;
+      const status = (error as { status?: number }).status;
+      if (!submit && status === 404) { void pollRestart(true); return; }
+      if (status !== undefined && status >= 400 && status < 500) {
+        clearRestart("Restart request was rejected. Reload settings to investigate."); return;
+      }
+      restartMessage = "Waiting for the application to reconnect…";
+    }
+    if (!disposed && restartOperation === intent) {
+      if (!pendingTextEdit) render();
+      restartTimer = window.setTimeout(() => void pollRestart(), 2000);
+    }
+  }
+  async function startRestart(revision: string) {
+    const state = session.state;
+    if (!settingsApi.restart || !settingsApi.restartStatus || restartBusy || state.busy || state.conflict || pendingTextEdit || !state.view || !state.draft || state.view.requestedRevision !== revision || state.view.activationStatus !== "restart_required" || state.view.fields.some(({ key }) => settingsValue(state.draft!, key) !== settingsValue(state.view!.requested ?? state.view!.active, key))) return;
+    restartBusy = true; restartMessage = "Starting restart…";
+    restartOperation = { operationId: window.crypto.randomUUID(), revision };
+    try { window.sessionStorage.setItem(restartKey, JSON.stringify(restartOperation)); } catch { /* unavailable */ }
+    render(); void pollRestart(true);
+  }
   let ownerEditor: { dispose(): void } | null = null;
   let editing = false;
   let pendingTextEdit = false;
@@ -90,8 +153,9 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
     }
     const state = session.state;
     content.append(node(document, "p", "Scope: installation · shared across this deployment · restart required", "settings-scope"));
-    content.append(node(document, "p", state.localSingleUser ? "Save stages a requested revision. Activate it with the guarded settings command, then restart the application." : "Save stages a requested revision. Only an operator's coordinated restart can activate it. Story and campaign records are unchanged.", "settings-help"));
+    content.append(node(document, "p", state.localSingleUser ? "Save stages a requested revision. Apply saved settings to restart the local application." : "Save stages a requested revision. Only an operator's coordinated restart can activate it. Story and campaign records are unchanged.", "settings-help"));
     if (state.message) { const message = node(document, "p", state.message, "settings-status"); message.setAttribute("role", state.conflict ? "alert" : "status"); content.append(message); }
+    if (restartMessage && (!state.view || !state.unlocked)) { const status = node(document, "p", restartMessage, "settings-status"); status.setAttribute("role", "status"); content.append(status); }
     if (!state.unlocked) {
       clearDraftDetails();
       if (state.busy) content.append(node(document, "p", "Checking installation access…"));
@@ -108,6 +172,13 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
     if (!state.localSingleUser) content.append(button("Lock installation settings", () => { void session.logout(); }));
     if (!state.view || !state.draft) { content.append(node(document, "p", state.busy ? "Loading installation settings…" : "Installation values are unavailable.")); return; }
     const { view, draft } = state;
+    if (state.localSingleUser && settingsApi.restart) {
+      if (restartMessage) { const status = node(document, "p", restartMessage, "settings-status"); status.setAttribute("role", "status"); content.append(status); }
+      const unsaved = pendingTextEdit || view.fields.some(({ key }) => settingsValue(draft, key) !== settingsValue(view.requested ?? view.active, key));
+      const apply = button("Apply saved settings and restart", () => void startRestart(view.requestedRevision!), restartBusy || state.busy || state.conflict || !!restartOperation || unsaved || view.requestedRevision === null || view.activationStatus !== "restart_required");
+      apply.dataset.settingsRestart = ""; content.append(apply);
+      if (unsaved) content.append(node(document, "p", "Save or discard all drafts before restarting.", "settings-help"));
+    }
     const revisions = node(document, "dl", undefined, "settings-revisions");
     for (const [label, value] of [["Active revision", view.activeRevision ?? "Environment configuration"], ["Saved revision", view.requestedRevision ?? "Not initialized"]]) { revisions.append(node(document, "dt", label), node(document, "dd", value)); }
     content.append(revisions);
@@ -119,7 +190,7 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
     function saveDisabled() {
       const current = session.state;
       const draft = current.draft;
-      return current.busy || current.conflict || view.requestedRevision === null || validation.length > 0 ||
+      return current.busy || restartBusy || current.conflict || view.requestedRevision === null || validation.length > 0 ||
         !draft || !fields.some(field => settingsValue(draft, field.key) !== settingsValue(view.requested ?? view.active, field.key));
     }
     if (validation.length) { const summary = node(document, "div", undefined, "settings-validation"); summary.setAttribute("role", "alert"); summary.tabIndex = -1; summary.append(node(document, "h3", "Check these values")); const list = node(document, "ul"); for (const error of validation) list.append(node(document, "li", error)); summary.append(list); content.append(summary); }
@@ -129,12 +200,12 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
       const unit = displayUnit(field); const value = settingsValue(draft, field.key); let input: HTMLInputElement | HTMLSelectElement;
       if (field.kind === "enum") { input = node(document, "select"); for (const level of ["fatal", "error", "warn", "info", "debug", "trace", "silent"]) input.append(new Option(level, level)); input.value = String(value); }
       else { input = node(document, "input"); if (field.kind === "boolean") { input.type = "checkbox"; input.checked = value === true; } else { input.type = "text"; input.inputMode = "decimal"; input.value = readableValue(field, value).split(" ")[0]!; } }
-      input.id = id; input.dataset.focus = id; input.disabled = state.busy || view.requestedRevision === null || field.lockReason === "deployment_disabled";
+      input.id = id; input.dataset.focus = id; input.disabled = state.busy || restartBusy || view.requestedRevision === null || field.lockReason === "deployment_disabled";
       const help = node(document, "p", undefined, "settings-help"); help.id = `${id}-help`; input.setAttribute("aria-describedby", help.id);
       help.textContent = field.lockReason === "deployment_disabled" ? "Blocked by deployment policy. Settings cannot enable this capability." : field.lockReason === "dependency_disabled" ? "Currently blocked by a disabled dependency. A saved preference will not bypass that dependency." : field.kind === "integer" && field.permittedRange ? `Permitted: ${readableRangeValue(field, field.permittedRange.min)} – ${readableRangeValue(field, field.permittedRange.max)}.` : "Applies after an operator activates the saved revision and restarts the deployment.";
       if (field.kind === "integer") {
         const displayedValue = input.value;
-        input.addEventListener("input", () => { pendingTextEdit = input.value !== displayedValue; });
+        input.addEventListener("input", () => { pendingTextEdit = input.value !== displayedValue; const apply = content.querySelector<HTMLButtonElement>("[data-settings-restart]"); if (apply && pendingTextEdit) apply.disabled = true; });
       }
       input.addEventListener("change", () => {
         pendingTextEdit = false;
@@ -146,6 +217,8 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
           editing = true;
           try { session.edit(field.key, next); } finally { editing = false; }
           content.querySelectorAll(".settings-validation, .settings-review, .settings-status").forEach(element => element.remove());
+          const applyButton = content.querySelector<HTMLButtonElement>("[data-settings-restart]");
+          if (applyButton && session.state.draft) applyButton.disabled = restartBusy || session.state.busy || session.state.conflict || !!restartOperation || view.requestedRevision === null || view.activationStatus !== "restart_required" || view.fields.some(({ key }) => settingsValue(session.state.draft!, key) !== settingsValue(view.requested ?? view.active, key));
           const saveButton = content.querySelector<HTMLButtonElement>("[data-settings-save]");
           if (saveButton && session.state.draft) {
             saveButton.textContent = "Save section";
@@ -193,8 +266,8 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
       }
     });
     footer.append(saveButton);
-    footer.append(button(state.conflict ? "Discard all drafts and reload" : "Discard section draft", () => { validation = []; review = false; resetPreview = false; session.discard(fields.map(field => field.key)); if (state.conflict) void session.load(); }, state.busy));
-    footer.append(button("Preview safe defaults", () => { resetPreview = !resetPreview; review = false; render(); }, state.busy || !view.resetDefaults));
+    footer.append(button(state.conflict ? "Discard all drafts and reload" : "Discard section draft", () => { validation = []; review = false; resetPreview = false; session.discard(fields.map(field => field.key)); if (state.conflict) void session.load(); }, state.busy || restartBusy));
+    footer.append(button("Preview safe defaults", () => { resetPreview = !resetPreview; review = false; render(); }, state.busy || restartBusy || !view.resetDefaults));
     if (!view.resetDefaults) footer.append(node(document, "p", "Safe defaults are unavailable under the current deployment policy. No reset will be staged.", "settings-help"));
     content.append(footer);
     if (resetPreview && view.resetDefaults) {
@@ -208,11 +281,12 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
     }
     if (focus) content.querySelector<HTMLElement>(`[data-focus="${focus}"]`)?.focus();
   }
-  const unsubscribe = session.subscribe(() => { if (!editing) render(); });
+  const unsubscribe = session.subscribe(() => { if (!editing && !pendingTextEdit) render(); });
   const installation = !["providers", "prompts", "campaign"].includes(route.section);
   if (installation) {
     window.addEventListener("beforeunload", guardInstallationDraft);
     void session.load();
+    if (restartOperation) { restartBusy = true; void pollRestart(); }
   }
   if (route.section === "campaign") void ownerApi.campaigns.list(controller.signal).then(value => { if (!disposed) { campaigns = value.campaigns; render(); } }).catch(() => { if (!disposed) { campaignFailed = true; render(); } });
   if (route.section === "diagnostics") void ownerApi.meta.get(controller.signal).then(value => { if (!disposed) { meta = value; render(); } }).catch(() => undefined);
@@ -227,6 +301,7 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
     ownerEditor = null;
     controller.abort();
     window.clearInterval(expiryTimer);
+    window.clearTimeout(restartTimer);
     window.removeEventListener("beforeunload", guardInstallationDraft);
     window.removeEventListener("app-identity-changed", onIdentityChange);
     unsubscribe();

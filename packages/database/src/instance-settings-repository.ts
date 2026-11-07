@@ -83,23 +83,32 @@ export function createInstanceSettingsRepository(pool: DatabasePool, options: { 
     },
     async activate(input) {
       if (!options.activationGuard) throw new Error("settings_activation_guard_required");
-      settingsRevisionSchema.parse(input.expectedRequestedRevision);
-      if (input.expectedActiveRevision !== null) settingsRevisionSchema.parse(input.expectedActiveRevision);
-      digest.parse(input.policyDigest); z.string().trim().min(1).max(200).parse(input.maintenanceReference);
-      return withTransaction(pool, async (client) => {
-        await lockSettingsState(client); await checkActor(client, input.actor);
-        const state = await readSettingsState(client);
-        if (state.activeRevision !== input.expectedActiveRevision || state.requestedRevision !== input.expectedRequestedRevision) throw new SettingsConflictError(state.requestedRevision);
-        if ((input.expectedEpoch !== undefined || (state.mode === "environment" && state.activationEpoch !== "0")) &&
-            input.expectedEpoch !== state.activationEpoch) throw new Error("settings_activation_epoch_mismatch");
-        if (state.policyDigest !== input.policyDigest) throw new Error("settings_policy_mismatch");
-        const live = await client.query("SELECT process_id FROM instance_settings_runtime_reports WHERE heartbeat_at > clock_timestamp()-interval '30 seconds' LIMIT 1");
-        if (live.rowCount) throw new Error("settings_runtime_not_drained");
-        await options.activationGuard!(client, state, input);
-        await client.query("UPDATE instance_settings_state SET active_revision=requested_revision,mode='database',activation_epoch=activation_epoch+1,updated_at=clock_timestamp()");
-        await event(client, "activation", input.expectedRequestedRevision, input.actor, "maintenance_activation", input.maintenanceReference);
-        return readSettingsState(client);
-      });
+          return withTransaction(pool, client => activateSettingsInTransaction(client, input, options.activationGuard!));
     }
   };
+}
+
+/** Activate using an existing transaction, including the caller's session locks. */
+export async function activateSettingsInTransaction(
+  client: DatabaseClient,
+  input: import("../../application/src/settings/types.js").ActivationRequest,
+  guard: SettingsActivationGuard
+): Promise<SettingsState> {
+  settingsRevisionSchema.parse(input.expectedRequestedRevision);
+  if (input.expectedActiveRevision !== null) settingsRevisionSchema.parse(input.expectedActiveRevision);
+  digest.parse(input.policyDigest);
+  z.string().trim().min(1).max(200).parse(input.maintenanceReference);
+
+  await lockSettingsState(client); await checkActor(client, input.actor);
+  const state = await readSettingsState(client);
+  if (state.activeRevision !== input.expectedActiveRevision || state.requestedRevision !== input.expectedRequestedRevision) throw new SettingsConflictError(state.requestedRevision);
+  if ((input.expectedEpoch !== undefined || (state.mode === "environment" && state.activationEpoch !== "0")) &&
+      input.expectedEpoch !== state.activationEpoch) throw new Error("settings_activation_epoch_mismatch");
+  if (state.policyDigest !== input.policyDigest) throw new Error("settings_policy_mismatch");
+  const live = await client.query("SELECT process_id FROM instance_settings_runtime_reports WHERE heartbeat_at > clock_timestamp()-interval '30 seconds' LIMIT 1");
+  if (live.rowCount) throw new Error("settings_runtime_not_drained");
+  await guard(client, state, input);
+  await client.query("UPDATE instance_settings_state SET active_revision=requested_revision,mode='database',activation_epoch=activation_epoch+1,updated_at=clock_timestamp()");
+  await event(client, "activation", input.expectedRequestedRevision, input.actor, "maintenance_activation", input.maintenanceReference);
+  return readSettingsState(client);
 }

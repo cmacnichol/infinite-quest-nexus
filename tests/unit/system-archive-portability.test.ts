@@ -38,6 +38,7 @@ describe("System Archive portability registry", () => {
       instance_settings_revisions: "deployment_configuration",
       instance_settings_events: "operational",
       instance_settings_runtime_reports: "operational",
+      local_settings_restart_operations: "operational",
       settings_operator_sessions: "security_authority",
       settings_unlock_attempts: "security_authority",
       activity_event_outbox: "operational",

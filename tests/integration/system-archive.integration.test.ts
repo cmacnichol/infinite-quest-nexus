@@ -602,9 +602,12 @@ integration("deterministic owner-wide System Archive export", () => {
     await pool.query("INSERT INTO settings_unlock_attempts VALUES('archive-settings-attempt-marker',now(),1)");
     await pool.query(`INSERT INTO instance_settings_runtime_reports(process_id,role,build_version,protocol_version,policy_digest,activation_epoch,effective_configuration_digest,readiness_state)
       VALUES(gen_random_uuid(),'all','archive-settings-process-marker',1,$1,0,$1,'ready')`, [policyDigest]);
+    const restartId = randomUUID();
+    await pool.query(`INSERT INTO local_settings_restart_operations(id,revision,expected_active_revision,expected_epoch,status)
+      VALUES($1,1,NULL,0,'failed')`, [restartId]);
     const exported = await exportArchive();
     const { serialized } = await archiveText(exported.bytes);
-    for (const marker of [installationId, policyDigest, tokenDigest, actor.cliReference, "archive-settings-attempt-marker", "archive-settings-process-marker", "workerGenerationConcurrency"]) {
+    for (const marker of [installationId, policyDigest, tokenDigest, restartId, actor.cliReference, "archive-settings-attempt-marker", "archive-settings-process-marker", "workerGenerationConcurrency"]) {
       expect(serialized).not.toContain(marker);
     }
     // Simulate destination-local policy diverging from the source snapshot.
@@ -4840,7 +4843,7 @@ integration("deterministic owner-wide System Archive export", () => {
       await resetSystemImportDestination();
 
       const settingsTables = ["instance_settings_state", "instance_settings_revisions", "instance_settings_events",
-        "instance_settings_runtime_reports", "settings_operator_sessions", "settings_unlock_attempts"] as const;
+        "instance_settings_runtime_reports", "local_settings_restart_operations", "settings_operator_sessions", "settings_unlock_attempts"] as const;
       const readInstallation = () => Promise.all(settingsTables.map(async table =>
         (await pool.query("SELECT to_jsonb(t) AS row FROM " + table + " t ORDER BY to_jsonb(t)::text")).rows));
       const destinationSettings = await readInstallation();

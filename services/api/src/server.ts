@@ -1,3 +1,4 @@
+import { installLocalHttpDrain } from "./local-http-drain.js";
 import { installRequestAdmission, type RequestAdmissionPort } from "./request-admission.js";
 import { registerInstanceSettingsRoutes } from "./instance-settings-routes.js";
 import { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest } from "../../runtime/src/instance-settings.js";
@@ -183,6 +184,7 @@ import {
 export type BuildServerOptions = {
   requestAdmission?: RequestAdmissionPort;
   settingsBootstrap?: RuntimeConfig;
+  localSettingsRestart?: import("./instance-settings-routes.js").LocalSettingsRestartPort;
   settingsLocalPolicy?: import("../../../packages/contracts/src/instance-settings.js").DeploymentSettingsPolicy;
   settingsReadiness?: () => Promise<boolean>;
   config: RuntimeConfig;
@@ -690,7 +692,7 @@ async function generationLifecycleLogContext(
 export async function buildServer({
   requestAdmission,
   settingsBootstrap,
-  settingsLocalPolicy,
+  settingsLocalPolicy, localSettingsRestart,
   settingsReadiness,
   config,
   pool,
@@ -737,7 +739,10 @@ export async function buildServer({
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
-  registerInstanceSettingsRoutes(app, { ...createInstanceSettingsHttpComposition(pool, settingsBootstrap ?? config, config, { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest, localPolicy: settingsLocalPolicy }), resolveActor: async () => initialOwnerId(pool), accessMode: config.instanceSettingsAccessMode });
+  if (config.instanceSettingsAccessMode === "local-single-user" && localSettingsRestart) {
+    app.decorate("waitForLocalHttpDrain", installLocalHttpDrain(app, localSettingsRestart.isDraining));
+  }
+  registerInstanceSettingsRoutes(app, { ...createInstanceSettingsHttpComposition(pool, settingsBootstrap ?? config, config, { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest, localPolicy: settingsLocalPolicy }), resolveActor: async () => initialOwnerId(pool), accessMode: config.instanceSettingsAccessMode, localSettingsRestart });
   const memoryAdapter = createMemoryApplicationAdapter(pool, memory, createCastContextPreview(pool, config));
   const turnCorrections = createTurnCorrectionApplication({
     corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation,
@@ -1754,7 +1759,7 @@ export async function buildServer({
       let lastSentJson = "";
       const hints = subscription[Symbol.asyncIterator]();
       let pendingHint = hints.next();
-      while (!isClosed) {
+      while (!isClosed && !localSettingsRestart?.isDraining()) {
         const currentJson = JSON.stringify(job);
         if (currentJson !== lastSentJson) {
           lastSentJson = currentJson;
@@ -1774,7 +1779,7 @@ export async function buildServer({
             }
             pendingHint = hints.next();
           }
-          if (isClosed) break;
+          if (isClosed || localSettingsRestart?.isDraining()) break;
           job = generationStreamSnapshot(await generationAdapter.getGenerationJob(ownerScope, jobId));
           if (job.campaignId !== firstJob.campaignId) {
             throw new Error("Generation job left its authorized stream scope.");

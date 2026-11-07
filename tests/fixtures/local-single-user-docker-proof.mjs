@@ -23,7 +23,7 @@ const proofImage = process.env.SETTINGS_PROOF_IMAGE ?? `infinitequest-nexus:sett
 const local = `iq-settings-local-${suffix}`;
 const protectedProject = `iq-settings-protected-${suffix}`;
 const key = `disposable-proof-${randomUUID()}-key`;
-const baseEnv = { ...process.env, POSTGRES_PASSWORD: "disposable-proof-password", SETTINGS_PROOF_DIR: dir.replaceAll("\\", "/"), SETTINGS_PROOF_IMAGE: proofImage };
+const baseEnv = { ...process.env, POSTGRES_PASSWORD: "disposable-proof-password", SETTINGS_PROOF_DIR: dir.replaceAll("\\", "/"), SETTINGS_PROOF_IMAGE: proofImage, PROVIDER_NETWORK_ALLOWLIST: "proof-provider" };
 const cli = "/app/dist/services/runtime/src/settings-operator-cli.js";
 const localFiles = ["-f", "compose.yaml", "-f", "compose.local-single-user.yaml", "-f", "tests/fixtures/local-single-user-proof.override.yaml"];
 const protectedFiles = ["-f", "compose.yaml", "-f", "tests/fixtures/protected-settings-proof.override.yaml"];
@@ -58,22 +58,16 @@ try {
   if (!skipBuild) compose(localFiles, localEnv, "build", "infinitequest-app");
   compose(localFiles, localEnv, "up", "-d");
   await ready(localPort);
-  await browserProof({ SETTINGS_PROOF_BASE: `http://127.0.0.1:${localPort}`, SETTINGS_PROOF_MODE: "local" });
-  const readLocal = async () => {
-    const response = await fetch(`http://127.0.0.1:${localPort}/api/v1/settings/instance`);
-    assert.equal(response.status, 200);
-    return response.json();
-  };
-  const staged = await readLocal();
-  compose(localFiles, localEnv, "restart", "infinitequest-app");
-  await ready(localPort);
-  const restarted = await readLocal();
-  assert.equal(restarted.requestedRevision, staged.requestedRevision);
-  assert.deepEqual(restarted.requested, staged.requested);
-  assert.equal(restarted.activeRevision, staged.activeRevision);
-  assert.deepEqual(restarted.active, staged.active);
-  process.stdout.write(`${JSON.stringify({ mode: "local-restart", activeRevision: restarted.activeRevision, requestedRevision: restarted.requestedRevision })}\n`);
-
+  await writeFile(join(dir, "provider.mjs"), `import http from "node:http";
+let held, cancelled = false;
+http.createServer((req, res) => {
+  if (req.url === "/status") { res.end(JSON.stringify({ held: !!held, cancelled })); return; }
+  if (req.url === "/release") { if (held) { held.writeHead(200, {"content-type":"application/json"}); held.end(JSON.stringify({data:[{id:"proof-model",object:"model"}]})); held = null; } res.end("ok"); return; }
+  if (req.url === "/v1/models") { held = res; req.on("aborted", () => { cancelled = true; }); res.on("close", () => { if (!res.writableFinished) cancelled = true; }); return; }
+  res.writeHead(404).end();
+}).listen(9090, "0.0.0.0");`);
+  run("docker", ["run", "-d", "--name", `${local}-provider`, "--network", `${local}-local-backend`, "--network-alias", "proof-provider", "--mount", `type=bind,src=${dir.replaceAll("\\", "/")},dst=/proof,readonly`, "--entrypoint", "node", proofImage, "/proof/provider.mjs"]);
+  await browserProof({ SETTINGS_PROOF_PROJECT: local, SETTINGS_PROOF_BASE: `http://127.0.0.1:${localPort}`, SETTINGS_PROOF_MODE: "local" });
   await writeFile(join(dir, "key"), key);
   const seed = JSON.parse(compose(protectedFiles, protectedEnv, "run", "--rm", "--no-deps", "--entrypoint", "sh", "infinitequest-app", "-c", `node /app/scripts/ensure-local-credential-encryption-key.mjs && exec node ${cli} export-seed`));
   await writeFile(join(dir, "seeds.json"), JSON.stringify([seed]));
@@ -96,6 +90,8 @@ try {
   await browserProof({ SETTINGS_PROOF_BASE: `https://127.0.0.1:${tlsPort}`, SETTINGS_PROOF_DIRECT_HTTP: `http://127.0.0.1:${protectedPort}`, SETTINGS_PROOF_MODE: "protected", SETTINGS_PROOF_KEY: key });
 } finally {
   if (proxy) await new Promise(done => proxy.close(done));
+  try { run("docker", ["exec", `${local}-provider`, "node", "-e", "fetch('http://127.0.0.1:9090/release').then(r=>r.text()).then(console.log)"]); } catch { /* provider may not have started */ }
+  try { run("docker", ["rm", "-f", `${local}-provider`]); } catch { /* provider may not have started */ }
   for (const [files, environment] of [[localFiles, env(local, localPort)], [protectedFiles, env(protectedProject, protectedPort)]]) {
     try { compose(files, environment, "down", "--volumes", "--remove-orphans"); } catch (error) { process.stderr.write(`Cleanup failed: ${error.message}\n`); }
   }

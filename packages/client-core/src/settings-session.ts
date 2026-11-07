@@ -1,6 +1,8 @@
 import type { InstanceSettings, InstanceSettingsPatch, InstanceSettingsView, SettingsFieldKey } from "@infinite-quest/contracts";
 export type OperatorStatus = { managementEnabled: boolean; unlocked: false } | { managementEnabled: true; unlocked: true; csrfToken: string; expiresAt: string } | { managementEnabled: true; unlocked: true; accessMode: "local-single-user" };
 export interface InstanceSettingsApi {
+  restart?(revision: string, operationId: string): Promise<import("@infinite-quest/contracts").LocalSettingsRestartOperation>;
+  restartStatus?(operationId: string): Promise<import("@infinite-quest/contracts").LocalSettingsRestartOperation>;
   status(): Promise<OperatorStatus>;
   unlock(managementKey: string): Promise<{ csrfToken: string; expiresAt: string }>;
   logout(csrfToken: string): Promise<void>;

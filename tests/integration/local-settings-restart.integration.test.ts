@@ -1,0 +1,47 @@
+import { beforeAll, afterAll, describe, it, expect } from "vitest";
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { createInstanceSettingsRepository } from "../../packages/database/src/instance-settings-repository.js";
+import { createSettingsActivationGuard } from "../../services/runtime/src/settings-activation.js";
+import { createLocalSettingsRestartStore } from "../../services/runtime/src/local-settings-restart-store.js";
+import { settingsDigest } from "../../services/runtime/src/instance-settings.js";
+import { runtimePolicy } from "../helpers/instance-settings-runtime.js";
+import { settingsFixture } from "../fixtures/instance-settings.js";
+
+describe("local settings restart durability", () => {
+  let pool: DatabasePool;
+  beforeAll(async () => { pool = createDatabasePool(process.env.TEST_DATABASE_URL!); await migrateDatabase(pool, resolve("database/migrations")); });
+  afterAll(async () => { await pool?.end(); });
+  it("deduplicates, rejects stale epochs and leases, and recovers only audited activation", async () => {
+    const policy = runtimePolicy();
+    const digest = settingsDigest(policy);
+    const actor = { userId: await initialOwnerId(pool), cliReference: "restart-test" };
+    const repo = createInstanceSettingsRepository(pool, { activationGuard: createSettingsActivationGuard(policy) });
+    const snapshot = settingsFixture();
+    await repo.seed({ installationId: policy.installationId, snapshot, policyDigest: digest, seedDigest: settingsDigest(snapshot), actor });
+    const store = createLocalSettingsRestartStore(pool);
+    const firstId = randomUUID();
+    const first = await store.start("1", firstId);
+    expect((await store.start("1", firstId)).operation.operationId).toBe(first.operation.operationId);
+    await expect(store.start("2", firstId)).rejects.toThrow("settings_restart_id_conflict");
+    await expect(store.start("1", randomUUID())).rejects.toThrow("settings_restart_id_conflict");
+    expect(first.expectedActiveRevision).toBeNull();
+    expect(first.expectedEpoch).toBe("0");
+    expect(await store.recoverInterrupted()).toBeUndefined();
+    expect((await store.status(first.operation.operationId)).status).toBe("failed");
+    const secondId = randomUUID();
+    const second = await store.start("1", secondId);
+    const request = { expectedActiveRevision: second.expectedActiveRevision, expectedRequestedRevision: "1", expectedEpoch: second.expectedEpoch, policyDigest: digest, maintenanceReference: `local-restart/${second.operation.operationId}`, actor };
+    await expect(repo.activate({ ...request, expectedEpoch: "99" })).rejects.toThrow("settings_activation_epoch_mismatch");
+    await pool.query("INSERT INTO api_admission_leases(owner_user_id,operation,request_id,expires_at,request_running) VALUES($1,'provider','restart-test',clock_timestamp()-interval '1 hour',true)", [actor.userId]);
+    await expect(repo.activate(request)).rejects.toThrow("settings_active_leases");
+    await pool.query("DELETE FROM api_admission_leases WHERE request_id='restart-test'");
+    await store.setStatus(second.operation.operationId, "restarting");
+    await repo.activate(request);
+    expect(await store.recoverInterrupted()).toBe(second.operation.operationId);
+    await store.setStatus(second.operation.operationId, "ready");
+    expect((await store.start("1", secondId)).operation.operationId).toBe(second.operation.operationId);
+  });
+});

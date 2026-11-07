@@ -29,6 +29,7 @@ import {
 import { createActivityComposition } from "../../runtime/src/activity-composition.js";
 
 export type WorkerDependencies = Readonly<{
+  cancellationSignal?: AbortSignal;
   generation: GenerationWorkerApplication;
   illustration: IllustrationWorkerApplication;
   generationIllustration?: IllustrationApplication;
@@ -217,7 +218,7 @@ export async function runWorker(
   pool: DatabasePool,
   config: RuntimeConfig,
   signal: AbortSignal,
-  { generation, illustration, generationIllustration, memory, authoring, castDiscovery, optionalLanes: injectedOptionalLanes }: WorkerDependencies
+  { generation, illustration, generationIllustration, memory, authoring, castDiscovery, cancellationSignal, optionalLanes: injectedOptionalLanes }: WorkerDependencies
 ): Promise<void> {
   const workerId = `${hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
   logger.info({ event: "worker_started", workerId });
@@ -263,7 +264,7 @@ export async function runWorker(
     illustrationPublication!,
     systemArchive,
     authoring,
-    signal,
+    cancellationSignal ?? signal,
   );
   const { authoring: configuredAuthoring, castDiscovery: configuredCastDiscovery, ...baseLanes } = configuredOptionalLanes;
   const castRun = configuredCastDiscovery ?? (castDiscovery ? () => castDiscovery.runNext(workerId) : undefined);

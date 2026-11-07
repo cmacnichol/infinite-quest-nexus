@@ -12,7 +12,9 @@ For a fresh or previously unseeded installation, first startup migrates the data
 
 The generated local policy retains the initial feature gates and request-rate tuple. It permits a slower queue polling interval and a reduction in generation concurrency. Most numeric bounds are pinned to their seed values. For example, changing Log level in Diagnostics stages a new revision immediately. A restart alone preserves that pending revision.
 
-To apply a staged change, follow the drain checks in [Stage, activate and observe](#stage-activate-and-observe). For the combined local service, these PowerShell commands show the one-shot invocation. Substitute the revisions and epoch reported by `status`, and your maintenance reference:
+In the local installation Settings editor, select **Apply saved settings and restart** beside the revision numbers. The app stops accepting new work, lets admitted work finish, and runs the activation checks against the selected revision. Docker restarts the combined service when the process exits. The browser reconnects and checks readiness and the active revision. If the revision changes or the activation guard reports a blocker, check the reported status before retrying. This procedure relies on the local Compose restart policy.
+
+To activate from the command line, follow the drain checks in [Stage, activate and observe](#stage-activate-and-observe). For the combined local service, these PowerShell commands show the one-shot invocation. Substitute the revisions and epoch reported by `status`, and your maintenance reference:
 
 ```powershell
 $stack = @('-f', 'compose.yaml', '-f', 'compose.local-single-user.yaml')

@@ -101,3 +101,7 @@ export const instanceSettingsHistorySchema = z.object({
     changedKeys:z.array(settingsFieldDescriptorSchema.shape.key).max(40),createdAt:z.iso.datetime()}).strict()).max(100),
   nextCursor:settingsRevisionSchema.nullable()
 }).strict();
+
+export const localSettingsRestartRequestSchema = z.object({ expectedRequestedRevision: settingsRevisionSchema, operationId: z.string().uuid() }).strict();
+export const localSettingsRestartOperationSchema = z.object({ operationId: z.string().uuid(), revision: settingsRevisionSchema, status: z.enum(["draining", "restarting", "failed", "ready"]), error: z.string().max(1000).optional() }).strict();
+export type LocalSettingsRestartOperation = z.infer<typeof localSettingsRestartOperationSchema>;

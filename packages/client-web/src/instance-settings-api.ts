@@ -1,4 +1,4 @@
-import { instanceSettingsViewSchema, instanceSettingsPatchSchema, settingsOperatorStatusSchema, settingsOperatorSessionResponseSchema, settingsOperatorSessionRequestSchema } from "@infinite-quest/contracts";
+import { instanceSettingsViewSchema, instanceSettingsPatchSchema, settingsOperatorStatusSchema, settingsOperatorSessionResponseSchema, settingsOperatorSessionRequestSchema, localSettingsRestartRequestSchema, localSettingsRestartOperationSchema } from "@infinite-quest/contracts";
 import type { InstanceSettingsApi } from "@infinite-quest/client-core";
 export class SettingsApiError extends Error {
   constructor(readonly status: number, readonly code: string) { super(code); }
@@ -8,7 +8,7 @@ export function createInstanceSettingsApi(fetcher: typeof fetch = fetch): Instan
   async function request(path: string, method = "GET", body?: unknown, csrf?: string): Promise<unknown> {
     const response = await fetcher(`/api/v1/settings/${path}`, {
       method, credentials: "same-origin", cache: "no-store",
-      headers: { ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(csrf ? { "X-Settings-CSRF": csrf } : {}), ...(method === "PATCH" && !csrf ? { "X-Settings-Local": "1" } : {}) },
+      headers: { ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(csrf ? { "X-Settings-CSRF": csrf } : {}), ...(["PATCH", "POST"].includes(method) && !csrf ? { "X-Settings-Local": "1" } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {})
     });
     if (!response.ok) {
@@ -18,6 +18,8 @@ export function createInstanceSettingsApi(fetcher: typeof fetch = fetch): Instan
     return response.status === 204 ? null : response.json();
   }
   return {
+    restart: async (revision, operationId) => localSettingsRestartOperationSchema.parse(await request("instance/restart", "POST", localSettingsRestartRequestSchema.parse({ expectedRequestedRevision: revision, operationId }))),
+    restartStatus: async operationId => localSettingsRestartOperationSchema.parse(await request(`instance/restart/${encodeURIComponent(operationId)}`)),
     status: async () => settingsOperatorStatusSchema.parse(await request("operator-session")),
     unlock: async (managementKey) => settingsOperatorSessionResponseSchema.parse(await request("operator-session", "POST", settingsOperatorSessionRequestSchema.parse({ managementKey }))),
     logout: async (csrf) => { await request("operator-session", "DELETE", undefined, csrf); },
