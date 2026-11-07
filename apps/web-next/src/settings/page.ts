@@ -90,11 +90,12 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
     }
     const state = session.state;
     content.append(node(document, "p", "Scope: installation · shared across this deployment · restart required", "settings-scope"));
-    content.append(node(document, "p", "Save stages a requested revision. Only an operator's coordinated restart can activate it. Story and campaign records are unchanged.", "settings-help"));
+    content.append(node(document, "p", state.localSingleUser ? "Save stages a requested revision. Activate it with the guarded settings command, then restart the application." : "Save stages a requested revision. Only an operator's coordinated restart can activate it. Story and campaign records are unchanged.", "settings-help"));
     if (state.message) { const message = node(document, "p", state.message, "settings-status"); message.setAttribute("role", state.conflict ? "alert" : "status"); content.append(message); }
     if (!state.unlocked) {
       clearDraftDetails();
       if (state.busy) content.append(node(document, "p", "Checking installation access…"));
+      else if (state.localSingleUser) content.append(node(document, "p", "Local installation access is unavailable. Reload Settings to retry."));
       else if (!state.managementEnabled) content.append(node(document, "p", "Installation management is locked. It requires HTTPS and deployment-provisioned operator access. Your personal and campaign settings remain available."));
       else {
         const form = node(document, "form"); const label = node(document, "label", "Operator management key", "settings-key-label"); const input = node(document, "input"); input.type = "password"; input.autocomplete = "off"; input.required = true; input.maxLength = 4096; input.dataset.focus = "unlock-key";
@@ -104,7 +105,7 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
       }
       return;
     }
-    content.append(button("Lock installation settings", () => { void session.logout(); }));
+    if (!state.localSingleUser) content.append(button("Lock installation settings", () => { void session.logout(); }));
     if (!state.view || !state.draft) { content.append(node(document, "p", state.busy ? "Loading installation settings…" : "Installation values are unavailable.")); return; }
     const { view, draft } = state;
     const revisions = node(document, "dl", undefined, "settings-revisions");

@@ -8,7 +8,7 @@ export function createInstanceSettingsApi(fetcher: typeof fetch = fetch): Instan
   async function request(path: string, method = "GET", body?: unknown, csrf?: string): Promise<unknown> {
     const response = await fetcher(`/api/v1/settings/${path}`, {
       method, credentials: "same-origin", cache: "no-store",
-      headers: { ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(csrf ? { "X-Settings-CSRF": csrf } : {}) },
+      headers: { ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(csrf ? { "X-Settings-CSRF": csrf } : {}), ...(method === "PATCH" && !csrf ? { "X-Settings-Local": "1" } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {})
     });
     if (!response.ok) {

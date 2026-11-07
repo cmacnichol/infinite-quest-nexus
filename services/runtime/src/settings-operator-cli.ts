@@ -6,6 +6,7 @@ import { recoverRequestAdmission } from "./admission-recovery.js";
 import { loadDeploymentSettingsPolicy, settingsDigest, loadActiveRuntimeSettings, readSettingsRuntimeReports, settingsReportsCompatible } from "./instance-settings.js";
 import { createSettingsActivationGuard } from "./settings-activation.js";
 import { createSeedPolicy, exportSettingsSeed, runInstanceSettingsCommand, runAdmissionRecoveryCommand } from "./settings-operator.js";
+import { loadLocalSingleUserPolicy } from "./local-single-user-settings.js";
 import { exportRollback, verifyRollback, transitionToEnvironment } from "./settings-rollback.js";
 
 const readJson = async (path: string): Promise<unknown> => JSON.parse(await readFile(path, "utf8"));
@@ -42,7 +43,14 @@ async function main(args: string[]) {
     if (command === "recover-admission") {
       return await runAdmissionRecoveryCommand(args, { output, readJson, recoverAdmission: input => recoverRequestAdmission(pool, input) });
     }
-    const policy = loadDeploymentSettingsPolicy(config.instanceSettingsPolicyFile ?? "");
+    const policy = config.instanceSettingsAccessMode === "local-single-user"
+      ? await loadLocalSingleUserPolicy(pool, config)
+      : loadDeploymentSettingsPolicy(config.instanceSettingsPolicyFile ?? "");
+    if (command === "export-policy") {
+      operands();
+      output(policy);
+      return 0;
+    }
     if (policy.systemArchiveAllowLimitIncrease && config.systemArchiveAllowLimitIncrease !== true) throw new Error("settings_deployment_divergence");
     if (command === "export-rollback") {
       operands();

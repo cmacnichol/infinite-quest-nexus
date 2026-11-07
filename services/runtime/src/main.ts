@@ -30,6 +30,7 @@ import { createProviderApplicationAdapter } from "../../api/src/provider-applica
 import { loadSchemaVerificationFile } from "./provider-schema-verification.js";
 
 import { loadActiveRuntimeSettings, loadDeploymentSettingsPolicy, registerSettingsRuntime } from "./instance-settings.js";
+import { initializeLocalSingleUserSettings } from "./local-single-user-settings.js";
 const config = loadRuntimeConfig();
 const schemaVerification = loadSchemaVerificationFile(process.env.TEXT_SCHEMA_VERIFICATION_FILE?.trim() || undefined);
 const abortController = new AbortController();
@@ -53,7 +54,9 @@ await runRuntimeLifecycle(config, abortController, {
   createGenerationEvents: createRuntimeGenerationEventSource,
   dispatchRole: (roleConfig, pool, signal, providerTransport, generationEvents) => dispatchRuntimeRole(roleConfig, pool, signal, {
     resolveSettings: async (pool, bootstrap, signal) => {
-      const policy = bootstrap.instanceSettingsPolicyFile ? loadDeploymentSettingsPolicy(bootstrap.instanceSettingsPolicyFile) : undefined;
+      const policy = bootstrap.instanceSettingsAccessMode === "local-single-user"
+        ? await initializeLocalSingleUserSettings(pool, bootstrap)
+        : bootstrap.instanceSettingsPolicyFile ? loadDeploymentSettingsPolicy(bootstrap.instanceSettingsPolicyFile) : undefined;
       const resolved = await loadActiveRuntimeSettings(pool, bootstrap, policy);
       adoptRuntimeLoggerSettings(resolved.config);
       logger.info({
@@ -69,7 +72,7 @@ await runRuntimeLifecycle(config, abortController, {
       const registration = await registerSettingsRuntime(pool, resolved, signal, () => abortController.abort(), policy);
       try { await registration.waitUntilCompatible(); }
       catch (error) { await registration.dispose(); throw error; }
-      return { config: resolved.config, bootstrap, ...registration };
+      return { config: resolved.config, bootstrap, localPolicy: bootstrap.instanceSettingsAccessMode === "local-single-user" ? policy : undefined, ...registration };
     },
     migrateDatabase,
     waitForDatabaseMigrations,

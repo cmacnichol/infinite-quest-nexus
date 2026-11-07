@@ -1,0 +1,16 @@
+# Used only by the disposable settings browser proof.
+services:
+  infinitequest-app:
+    image: ${SETTINGS_PROOF_IMAGE:?Set a unique proof image tag}
+    environment:
+      INSTANCE_SETTINGS_POLICY_FILE: /proof/policy.json
+      SETTINGS_MANAGEMENT_ENABLED: "true"
+      SETTINGS_MANAGEMENT_KEY_FILE: /proof/key
+      TRUST_PROXY_HOPS: "1"
+    ports: !override
+      - "127.0.0.1:${APP_PORT}:8080"
+    volumes:
+      - ${SETTINGS_PROOF_DIR}:/proof:ro
+networks:
+  infinitequest-backend:
+    name: "${COMPOSE_PROJECT_NAME}-protected-backend"

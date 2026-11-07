@@ -1,0 +1,25 @@
+import { afterAll, beforeAll, expect, it } from "vitest";
+import { resolve } from "node:path";
+import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { createInstanceSettingsRepository } from "../../packages/database/src/instance-settings-repository.js";
+import { initializeLocalSingleUserSettings, loadLocalSingleUserPolicy } from "../../services/runtime/src/local-single-user-settings.js";
+import { settingsDigest } from "../../services/runtime/src/instance-settings.js";
+import { bootstrap } from "../helpers/instance-settings-runtime.js";
+let pool: DatabasePool;
+beforeAll(async () => { pool = createDatabasePool(process.env.TEST_DATABASE_URL!); await migrateDatabase(pool, resolve("database/migrations")); }, 60000);
+afterAll(async () => { await pool?.end(); });
+it("initializes once and preserves a pending revision and stable policy on restart", async () => {
+  const config = { ...bootstrap(), role: "all" as const, instanceSettingsAccessMode: "local-single-user" as const };
+  const [policy] = await Promise.all([initializeLocalSingleUserSettings(pool, config), initializeLocalSingleUserSettings(pool, config)]);
+  const repo = createInstanceSettingsRepository(pool);
+  const first = await repo.read();
+  expect(first).toMatchObject({ mode: "database", activeRevision: "1", requestedRevision: "1", activationEpoch: "1" });
+  const actor = { userId: await initialOwnerId(pool), localSingleUser: true as const };
+  await repo.propose({ expectedRequestedRevision: "1", snapshot: { ...first.requested!, logLevel: "debug" }, policyDigest: settingsDigest(policy), actor, reason: "test" });
+  expect(await initializeLocalSingleUserSettings(pool, config)).toEqual(policy);
+  expect(await loadLocalSingleUserPolicy(pool, config)).toEqual(policy);
+  expect(await repo.read()).toMatchObject({ activeRevision: "1", requestedRevision: "2", activationEpoch: "1", requested: { logLevel: "debug" } });
+  const events = await pool.query("SELECT local_single_user,cli_reference FROM instance_settings_events ORDER BY id");
+  expect(events.rows.every(row => row.local_single_user && row.cli_reference === null)).toBe(true);
+});

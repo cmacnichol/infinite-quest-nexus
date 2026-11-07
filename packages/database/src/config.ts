@@ -33,6 +33,7 @@ export type RuntimeConfig = {
   /** Active installation revision; internal transfer provenance, never portable. */
   instanceSettingsRevision?: string;
   logLevel?: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
+  instanceSettingsAccessMode?: "protected" | "local-single-user";
   settingsManagementEnabled?: boolean;
   settingsManagementKeyFile?: string | undefined;
   instanceSettingsPolicyFile?: string | undefined;
@@ -219,6 +220,10 @@ export function loadRuntimeConfig(): RuntimeConfig {
   if (!(["all", "api", "worker", "migrate"] as const).includes(roleValue as RuntimeConfig["role"])) {
     throw new Error(`Unsupported APP_ROLE '${roleValue}'. Expected all, api, worker, or migrate.`);
   }
+  const accessMode = process.env.INSTANCE_SETTINGS_ACCESS_MODE?.trim() || "protected";
+  if (accessMode !== "protected" && accessMode !== "local-single-user") throw new Error("INSTANCE_SETTINGS_ACCESS_MODE must be protected or local-single-user.");
+  if (accessMode === "local-single-user" && roleValue !== "all") throw new Error("local-single-user requires APP_ROLE=all.");
+  if (accessMode === "local-single-user" && requiredIntegerSetting("TRUST_PROXY_HOPS", 0, 0, 16) !== 0) throw new Error("local-single-user requires TRUST_PROXY_HOPS=0.");
   const databaseUrl = secretSetting("DATABASE_URL");
   if (!databaseUrl) throw new Error("DATABASE_URL is required.");
   const workerGenerationConcurrency = workerGenerationConcurrencySetting();
@@ -245,6 +250,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
 
   return {
     logLevel: (process.env.LOG_LEVEL || "info") as NonNullable<RuntimeConfig["logLevel"]>,
+    instanceSettingsAccessMode: accessMode,
     settingsManagementEnabled: process.env.SETTINGS_MANAGEMENT_ENABLED === "true",
     settingsManagementKeyFile: process.env.SETTINGS_MANAGEMENT_KEY_FILE?.trim() || undefined,
     instanceSettingsPolicyFile: process.env.INSTANCE_SETTINGS_POLICY_FILE?.trim() || undefined,

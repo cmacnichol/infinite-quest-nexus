@@ -44,6 +44,15 @@ export function createSeedPolicy(input: unknown, installationId: string): Deploy
   return policy;
 }
 
+/** A fixed policy derived from the original seed, never the current requested revision. */
+export function createLocalSingleUserPolicy(snapshot: InstanceSettings, installationId: string, databaseMaxConnections: number): DeploymentSettingsPolicy {
+  const seed = { version: 1 as const, role: { role: "all" as const, databaseMaxConnections }, snapshot, digest: settingsDigest(snapshot) };
+  const policy = createSeedPolicy([seed], installationId);
+  policy.numericBounds.workerPollIntervalMs = { min: snapshot.workerPollIntervalMs, max: 60000 };
+  policy.numericBounds.workerGenerationConcurrency = { min: 1, max: snapshot.workerGenerationConcurrency };
+  return policy;
+}
+
 export function exportCompatibilityEnvironment(snapshot: InstanceSettings): Record<string, string> {
   const checked = instanceSettingsSchema.parse(snapshot);
   return Object.fromEntries(INSTANCE_SETTING_FIELDS.map(field => [field.environmentName, String(valueAt(checked, field.key))]));

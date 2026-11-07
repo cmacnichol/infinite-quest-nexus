@@ -9,6 +9,7 @@ import type {
   WorldCampaignApplication
   , AuthoringWorkerApplication, AuthoringApplication
 } from "../../../packages/application/src/index.js";
+import type { DeploymentSettingsPolicy } from "../../../packages/contracts/src/instance-settings.js";
 import type { DatabasePool, RuntimeConfig } from "../../../packages/database/src/index.js";
 import type { BuildServerOptions } from "../../api/src/server.js";
 import type { ProviderApiTransportAdapter } from "../../api/src/provider-application-adapter.js";
@@ -48,7 +49,7 @@ export type RuntimeRoleDependencies = Readonly<{
     transport: ProviderTransport,
     config: RuntimeConfig
   ): WorkerProviderApplicationComposition;
-  resolveSettings?(pool: DatabasePool, config: RuntimeConfig, signal: AbortSignal): Promise<{config:RuntimeConfig;bootstrap?:RuntimeConfig;dispose():Promise<void>;markReady?():Promise<void>;isReady?():Promise<boolean>}>;
+  resolveSettings?(pool: DatabasePool, config: RuntimeConfig, signal: AbortSignal): Promise<{config:RuntimeConfig;bootstrap?:RuntimeConfig;localPolicy?:DeploymentSettingsPolicy | undefined;dispose():Promise<void>;markReady?():Promise<void>;isReady?():Promise<boolean>}>;
   createProviderApiAdapter(composition: ApiProviderApplicationComposition): ProviderApiTransportAdapter;
   createApiGeneration(
     pool: DatabasePool,
@@ -191,6 +192,7 @@ async function dispatchResolvedRuntimeRole(
     const providers = dependencies.createProviderApiAdapter(providerGraph);
     const server = await dependencies.buildServer({
       ...(settings?.bootstrap ? { settingsBootstrap: settings.bootstrap } : {}),
+      ...(settings?.localPolicy ? { settingsLocalPolicy: settings.localPolicy } : {}),
       ...(settings?.isReady ? { settingsReadiness: settings.isReady } : {}),
       config, pool, generation, illustration, memory, providers, generationEvents, worldCampaign, authoring,
       infiniteWorldsProviders: providerGraph.infiniteWorlds,
@@ -256,6 +258,7 @@ async function dispatchResolvedRuntimeRole(
   );
   const server = await dependencies.buildServer({
     ...(settings?.bootstrap ? { settingsBootstrap: settings.bootstrap } : {}),
+      ...(settings?.localPolicy ? { settingsLocalPolicy: settings.localPolicy } : {}),
     ...(settings?.isReady ? { settingsReadiness: settings.isReady } : {}),
     config, pool, generation: apiGeneration, illustration, memory, providers, generationEvents, worldCampaign, authoring: apiAuthoring,
     infiniteWorldsProviders: apiProviderGraph.infiniteWorlds,

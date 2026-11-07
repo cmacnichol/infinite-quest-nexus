@@ -183,6 +183,7 @@ import {
 export type BuildServerOptions = {
   requestAdmission?: RequestAdmissionPort;
   settingsBootstrap?: RuntimeConfig;
+  settingsLocalPolicy?: import("../../../packages/contracts/src/instance-settings.js").DeploymentSettingsPolicy;
   settingsReadiness?: () => Promise<boolean>;
   config: RuntimeConfig;
   pool: DatabasePool;
@@ -689,6 +690,7 @@ async function generationLifecycleLogContext(
 export async function buildServer({
   requestAdmission,
   settingsBootstrap,
+  settingsLocalPolicy,
   settingsReadiness,
   config,
   pool,
@@ -735,7 +737,7 @@ export async function buildServer({
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
-  registerInstanceSettingsRoutes(app, { ...createInstanceSettingsHttpComposition(pool, settingsBootstrap ?? config, config, { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest }), resolveActor: async () => initialOwnerId(pool) });
+  registerInstanceSettingsRoutes(app, { ...createInstanceSettingsHttpComposition(pool, settingsBootstrap ?? config, config, { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest, localPolicy: settingsLocalPolicy }), resolveActor: async () => initialOwnerId(pool), accessMode: config.instanceSettingsAccessMode });
   const memoryAdapter = createMemoryApplicationAdapter(pool, memory, createCastContextPreview(pool, config));
   const turnCorrections = createTurnCorrectionApplication({
     corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation,

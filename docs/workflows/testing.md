@@ -318,3 +318,14 @@ The [activity history runbook](../runbooks/activity-history.md) documents additi
 On Windows, the disposable [Story-only runtime CLI](../../scripts/story-only-ui-runtime.ts) connects its temporary Docker network to an existing PostgreSQL container. Set `STORY_ONLY_RUNTIME_POSTGRES_CONTAINER` to the coordinator-owned container name matching the private database configuration before invoking the CLI directly. An unset value retains `infinitequest-story-only-test`; an empty or unsafe name fails before database allocation, file cleanup, or Docker commands. The same resolved name is used for network connection, the runtime database hostname, and disconnection on both successful close and startup failure. Only the fixture's generated database is dropped.
 
 This option does not change [the signal runner](../../scripts/story-only-runtime-signal-runner.ts), which retains its dedicated-container proxy contract. Use the direct CLI for a separately owned Windows test container. Keep database URLs and credentials in ignored local configuration and out of logs, screenshots, and committed evidence.
+
+## Local and proxied installation Settings
+
+From the repository root, run the disposable Docker browser test with Docker Compose, Playwright Chromium, and OpenSSL installed:
+
+```powershell
+$env:SETTINGS_PROOF_SCREENSHOTS = Join-Path $env:TEMP 'iq-settings-screenshots'
+node tests/fixtures/local-single-user-docker-proof.mjs
+```
+
+Set `OPENSSL` to the executable path if it is outside PATH. The test builds the application, starts isolated PostgreSQL volumes, checks an HTTP local-owner Save and restart, then submits an operator key through an HTTPS reverse proxy with an HTTP backend. It verifies the saved revisions and rejected cross-origin writes and removes its disposable deployments. [Local HTTP screenshot](../review/assets/local-single-user/local-settings-saved.png) · [Proxied HTTPS screenshot](../review/assets/local-single-user/protected-settings-saved.png)
