@@ -2409,7 +2409,8 @@ describe("Nexus management UI contracts", () => {
     const baseTemplate = { key: "story_system", title: "Story writer", category: "Story Engine", description: "", variables: [], maxLength: 10000, campaignOverrideAllowed: true,
       effectiveSource: "application", effectiveContent: "Saved instructions", compatibility: { acknowledged: true, requiredShapeVersion: "v2", requiredShapePreview: "{}" } };
     const harness = (template: typeof baseTemplate) => managementFunctions<{ renderPromptLibrary: (load?: boolean) => void }>(
-      ["renderPromptLibrary"], {
+      ["renderPromptLibrary", "syncMutationControls"], {
+        mutationPending: false,
         document, elements, promptLibrary: { templates: [template] }, promptLibraryCategory: "All", selectedPromptTemplateKey: template.key,
         promptLibrarySelectedTemplate: () => template, syncPromptLibraryCampaigns: () => {}, promptLibraryCampaignId: () => "",
         promptLibraryEditorContext: "", promptLibraryEditorBaseline: "", renderPromptLibraryDirtyState: () => {}, promptLibraryPreviewVisible: false,
@@ -2430,7 +2431,8 @@ describe("Nexus management UI contracts", () => {
     const template = { key: "story_system", title: "Story writer", category: "Story Engine", description: "", variables: [], maxLength: 10000, campaignOverrideAllowed: true,
       effectiveSource: "application", effectiveContent: "Saved instructions", compatibility: { acknowledged: true, requiredShapeVersion: "v2", requiredShapePreview: "{}" } };
     const functions = managementFunctions<{ renderPromptLibrary: (load?: boolean) => void }>(
-      ["renderPromptLibrary"], {
+      ["renderPromptLibrary", "syncMutationControls"], {
+        mutationPending: false,
         document, elements, promptLibrary: { templates: [template] }, promptLibraryCategory: "All", selectedPromptTemplateKey: template.key,
         promptLibrarySelectedTemplate: () => template, syncPromptLibraryCampaigns: () => {}, promptLibraryCampaignId: () => "",
         promptLibraryEditorContext: "", promptLibraryEditorBaseline: "", renderPromptLibraryDirtyState: () => {}, promptLibraryPreviewVisible: false,
