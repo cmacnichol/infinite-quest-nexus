@@ -69,6 +69,37 @@ for (const width of [1280, 390]) test(`legacy previews and controls an explicit 
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
 });
 
+for (const surface of ["legacy", "next"]) test(`history scan updates progress and automatic jobs without refresh on ${surface}`, async ({ page }) => {
+  await fixture(page);
+  const scan = { id: candidateId, fromTurn: 1, throughTurn: 1, completeTurns: 0, failedTurns: 0, pendingReviewCount: 0, status: "running" };
+  const jobs = { queued: 8, runningTurn: 9 as number | null, retryWait: 1, failed: 2, complete: 4 };
+  await page.route("**/cast/discovery", route => route.fulfill({ json: {
+    enabled: true, activeTurnNumber: 16, coverageStartTurn: 1, trackedThroughTurn: 0, state: "catching_up",
+    unresolvedCount: 0, firstGap: null, automaticJobs: jobs
+  } }));
+  await page.route("**/cast/scans**", route => route.fulfill({ json: route.request().url().endsWith("/scans")
+    ? { scan, capabilities: { castBackfill: true } } : scan }));
+  if (surface === "legacy") await open(page);
+  else {
+    await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`);
+    await page.locator("[data-campaign-tools] summary").click();
+    await page.locator("[data-tool-action='open-characters']").click();
+  }
+  const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace");
+  await dialog.getByRole("button", { name: "Scan earlier story", exact: true }).click();
+  await expect(dialog).toContainText("processing turn 9");
+  await expect(dialog).toContainText("8 queued · 1 waiting to retry · 2 failed · 4 complete");
+  await expect(dialog).toContainText("Scan running");
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/live-scan-${surface}.png` });
+  jobs.runningTurn = null;
+  jobs.complete++;
+  scan.status = "complete";
+  scan.completeTurns = 1;
+  await expect(dialog).toContainText("1 of 1 turns complete");
+  await expect(dialog).toContainText("no turn running");
+  await expect(dialog).toContainText("5 complete");
+});
+
 test("legacy retains a failed scan retry key and keeps cancellation available after capability loss", async ({ page }) => {
   const fixtureApi = await fixture(page);
   let enabled = true;

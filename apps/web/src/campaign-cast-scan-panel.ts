@@ -1,4 +1,4 @@
-import type { CampaignCastApi } from "@infinite-quest/client-web";
+import { watchCastScan, type CampaignCastApi } from "@infinite-quest/client-web";
 import type { CastBoundary, CastDiscoveryStatus, CastBackfillRequest, CastBackfillRetry } from "@infinite-quest/contracts";
 
 export function castScanRecovery(discovery: CastDiscoveryStatus | null, boundary: number) {
@@ -24,7 +24,7 @@ export function castScanRecovery(discovery: CastDiscoveryStatus | null, boundary
 export function renderLegacyCastScan(container: HTMLElement, options: {
   api: CampaignCastApi["scans"]; campaignId: string; authority: { revision: number; boundary: CastBoundary };
   data: Awaited<ReturnType<CampaignCastApi["scans"]["latest"]>>; discovery: CastDiscoveryStatus | null;
-  current(): boolean; generationActive(): boolean; refresh(scanId?: string): Promise<void>;
+  readDiscovery(): Promise<CastDiscoveryStatus>; current(): boolean; generationActive(): boolean; refresh(scanId?: string): Promise<void>;
 }) {
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => {
     const value = document.createElement(tag); value.textContent = text; return value;
@@ -55,6 +55,17 @@ export function renderLegacyCastScan(container: HTMLElement, options: {
   }
   const scan = options.data.scan, enabled = options.data.capabilities.castBackfill;
   root.append(node("p", "Discover supporting characters from accepted story turns. Your character edits are preserved. Cancellation keeps characters already discovered."));
+  const automatic = node("p");
+  automatic.setAttribute("aria-live", "polite");
+  function showAutomatic(tracking: CastDiscoveryStatus | null) {
+    const jobs = tracking?.automaticJobs;
+    const text = jobs
+      ? `Automatic character tracking: ${jobs.runningTurn === null ? "no turn running" : `processing turn ${jobs.runningTurn}`}. ${jobs.queued} queued · ${jobs.retryWait} waiting to retry · ${jobs.failed} failed · ${jobs.complete} complete.`
+      : "Automatic character tracking status unavailable.";
+    if (automatic.textContent !== text) automatic.textContent = text;
+  }
+  showAutomatic(options.discovery);
+  root.append(automatic);
   const recovery = castScanRecovery(options.discovery, options.authority.boundary.turnNumber);
   if (options.discovery) {
     const { coverageStartTurn, trackedThroughTurn, firstGap } = options.discovery;
@@ -126,5 +137,16 @@ export function renderLegacyCastScan(container: HTMLElement, options: {
   }
   if (options.generationActive()) root.append(node("p", "Finish or resolve the current generation before starting or retrying a scan."));
   root.append(feedback);
+  const connection = node("p");
+  connection.setAttribute("role", "status");
+  root.append(connection);
+  watchCastScan({
+    scan, current: () => root.isConnected && options.current(), suspended: () => busy || document.hidden,
+    readDiscovery: options.readDiscovery, readScan: id => options.api.get(options.campaignId, id),
+    showAutomatic, showConnection: unavailable => {
+      connection.textContent = unavailable ? "Live progress is temporarily unavailable. Retrying…" : "";
+    },
+    refresh: options.refresh
+  });
   container.append(root, button("Refresh scan", () => { if (!busy) void options.refresh(); }));
 }

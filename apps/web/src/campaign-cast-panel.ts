@@ -97,7 +97,7 @@ export function createLegacyCastPanel(options: {
       if (!current(token)) return;
       scanData = data; list = roster; discovery = tracking;
       shell("Scan earlier story"); dialog.append(button("Back to characters", () => { void loadRoster(); }));
-      renderLegacyCastScan(dialog, { api: options.api.scans, campaignId: campaign, authority: roster, data, discovery: tracking,
+      renderLegacyCastScan(dialog, { api: options.api.scans, readDiscovery: () => options.api.discoveryStatus(campaign), campaignId: campaign, authority: roster, data, discovery: tracking,
         current: () => current(token), generationActive: options.generationActive, refresh: (id = scanId) => loadScan(id) });
     } catch (error) {
       if (!current(token)) return;

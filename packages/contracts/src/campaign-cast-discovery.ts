@@ -21,6 +21,10 @@ export const castDiscoveryStatusSchema = z.object({
   enabled: z.boolean(), activeTurnNumber: z.number().int().nonnegative(),
   coverageStartTurn: z.number().int().positive().nullable(), trackedThroughTurn: z.number().int().nonnegative().nullable(),
   state: z.enum(["disabled", "not_enrolled", "catching_up", "failed", "complete"]),
+  automaticJobs: z.object({
+    queued: z.number().int().nonnegative(), runningTurn: z.number().int().positive().nullable(),
+    retryWait: z.number().int().nonnegative(), failed: z.number().int().nonnegative(), complete: z.number().int().nonnegative()
+  }).strict().optional(),
   unresolvedCount: z.number().int().nonnegative(),
   firstGap: z.object({ turnNumber: z.number().int().positive(), jobId: z.uuid().nullable(),
     status: z.enum(["missing", "queued", "running", "retry_wait", "failed", "cancelled"]),

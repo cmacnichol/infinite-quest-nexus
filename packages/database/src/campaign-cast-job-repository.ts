@@ -210,28 +210,48 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
       const worker = z.string().trim().min(1).max(200).parse(workerId);
       return withTransaction(pool, async (client) => {
         // Lock campaign before job, matching accepted-turn and manual editing order.
-        const candidate = (await client.query(`SELECT c.id FROM campaigns c WHERE EXISTS (
-          SELECT 1 FROM campaign_cast_discovery_jobs j WHERE j.campaign_id=c.id
-          AND (j.scan_id IS NULL OR ($1::boolean AND EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=j.scan_id AND s.status IN ('queued','running'))))
-          AND ((j.status IN ('queued','retry_wait') AND j.available_at<=clock_timestamp()) OR (j.status='running' AND j.lease_expires_at<=clock_timestamp()))
-          AND NOT EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs earlier WHERE earlier.campaign_id=j.campaign_id
-            AND earlier.status NOT IN ('complete','cancelled')
-            AND (earlier.scan_id IS NULL OR ($1::boolean AND EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=earlier.scan_id AND s.status IN ('queued','running'))))
-            AND (CASE WHEN earlier.scan_id IS NULL THEN 0 ELSE 1 END,earlier.turn_number,earlier.created_at,earlier.id)
-              < (CASE WHEN j.scan_id IS NULL THEN 0 ELSE 1 END,j.turn_number,j.created_at,j.id))
-          AND NOT EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs live WHERE live.campaign_id=j.campaign_id AND live.status='running' AND live.lease_expires_at>clock_timestamp())
-        ) ORDER BY CASE WHEN EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs f WHERE f.campaign_id=c.id
-          AND f.scan_id IS NULL AND f.status NOT IN ('complete','cancelled')) THEN 0 ELSE 1 END,c.id
-        FOR UPDATE OF c SKIP LOCKED LIMIT 1`, [scansEnabled()])).rows[0];
+        // A scan can reuse an automatic job without taking ownership of its retry
+        // budget or cancelling it when the user cancels the scan.
+        const candidate = (await client.query(`SELECT c.id, pick.job_id FROM campaigns c
+          LEFT JOIN LATERAL (
+            SELECT s.id, head.source FROM campaign_cast_scans s
+            LEFT JOIN LATERAL (SELECT p.source FROM campaign_cast_scan_sources p
+              WHERE p.scan_id=s.id AND p.status<>'complete' ORDER BY p.turn_number LIMIT 1) head ON true
+            WHERE $1::boolean AND s.campaign_id=c.id AND s.owner_user_id=c.owner_user_id
+              AND s.status IN ('queued','running')
+          ) scan ON true
+          CROSS JOIN LATERAL (
+            SELECT j.id AS job_id, requested.priority FROM campaign_cast_discovery_jobs j
+            CROSS JOIN LATERAL (SELECT COALESCE(scan.id=j.scan_id OR (
+              j.scan_id IS NULL AND scan.source->>'turnId'=j.turn_id::text
+              AND (scan.source->>'timelineRevision')::int=j.timeline_revision
+              AND (scan.source->>'narrationRevision')::int=j.narration_revision
+              AND scan.source->>'sourceHash'=j.source_hash AND j.protocol=$2), false) AS priority) requested
+            WHERE j.campaign_id=c.id AND j.owner_user_id=c.owner_user_id
+              AND ((j.status IN ('queued','retry_wait') AND j.available_at<=clock_timestamp())
+                OR (j.status='running' AND j.lease_expires_at<=clock_timestamp()))
+              AND (requested.priority OR (j.scan_id IS NULL AND NOT EXISTS (
+                SELECT 1 FROM campaign_cast_discovery_jobs earlier WHERE earlier.campaign_id=c.id
+                  AND earlier.scan_id IS NULL AND earlier.status NOT IN ('complete','cancelled')
+                  AND (earlier.turn_number,earlier.created_at,earlier.id)<(j.turn_number,j.created_at,j.id))))
+            ORDER BY requested.priority DESC,j.turn_number,j.created_at,j.id LIMIT 1
+          ) pick
+          WHERE NOT EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs live WHERE live.campaign_id=c.id
+            AND live.status='running' AND live.lease_expires_at>clock_timestamp())
+          ORDER BY pick.priority DESC,c.id FOR UPDATE OF c SKIP LOCKED LIMIT 1`, [scansEnabled(), CAST_DISCOVERY_PROTOCOL])).rows[0];
         if (!candidate || !enabled()) return null;
-        // Expired scan leases must release the running slot before forward work wins priority.
-        await client.query(`UPDATE campaign_cast_discovery_jobs j SET status='queued',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL
-          WHERE campaign_id=$1 AND status='running' AND lease_expires_at<=clock_timestamp()
-            AND scan_id IS NOT NULL`, [candidate.id]);
-        const job = (await client.query(`SELECT * FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 AND status NOT IN ('complete','cancelled')
-          AND (scan_id IS NULL OR ($2::boolean AND EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=scan_id AND s.status IN ('queued','running'))))
-          ORDER BY CASE WHEN scan_id IS NULL THEN 0 ELSE 1 END,turn_number,created_at,id FOR UPDATE LIMIT 1`, [candidate.id, scansEnabled()])).rows[0];
-        if (!job || job.status === "failed") return null;
+        // Recheck eligibility under the campaign lock: another worker may have
+        // finished the selected job just before we obtained the lock.
+        const job = (await client.query(`SELECT * FROM campaign_cast_discovery_jobs j WHERE campaign_id=$1 AND id=$2
+          AND ((status IN ('queued','retry_wait') AND available_at<=clock_timestamp())
+            OR (status='running' AND lease_expires_at<=clock_timestamp()))
+          AND (scan_id IS NULL OR EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=j.scan_id AND s.status IN ('queued','running')))
+          AND NOT EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs live WHERE live.campaign_id=$1 AND live.status='running'
+            AND live.lease_expires_at>clock_timestamp()) FOR UPDATE`, [candidate.id, candidate.job_id])).rows[0];
+        if (!job) return null;
+        // Release the unique running slot if an expired lease belonged to another job.
+        await client.query(`UPDATE campaign_cast_discovery_jobs SET status='queued',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL
+          WHERE campaign_id=$1 AND id<>$2 AND status='running' AND lease_expires_at<=clock_timestamp()`, [candidate.id, job.id]);
         if (job.attempt >= 2 && job.checkpoint === null) {
           await client.query("UPDATE campaign_cast_discovery_jobs SET status='failed',diagnostic_code='provider_failed',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [job.id]);
           return null;

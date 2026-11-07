@@ -280,17 +280,17 @@ describe("accepted-history scan preview", () => {
     expect(await scans.get(f.scope, scan.id)).toMatchObject({ status: "cancelled", completeTurns: 0 });
     expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [f.scope.campaignId])).rows[0].n).toBe(0);
   });
-  it("prioritizes forward work, skips paused scan jobs and fences cancelled publication", async () => {
+  it("allows forward work while the scan is paused, skips paused scan jobs and fences cancelled publication", async () => {
     const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
     const scan = await scans.start(f.scope, f.request, f.execution);
     await scans.scheduleNext();
     await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[2]!, execution: f.execution, enabled: true }));
     const jobs = createCastDiscoveryJobRepository(pool, () => true, () => true);
+    await scans.control(f.scope, scan.id, "pause");
     const forward = (await jobs.claim("forward-priority"))!;
     expect(forward.source.turnNumber).toBe(3);
     await jobs.checkpoint(forward, { version: 1, characters: [] });
     await jobs.publish(forward);
-    await scans.control(f.scope, scan.id, "pause");
     expect(await jobs.claim("paused-scan")).toBeNull();
     await scans.control(f.scope, scan.id, "resume");
     const historical = (await jobs.claim("resumed-scan"))!;
@@ -344,7 +344,7 @@ describe("accepted-history scan preview", () => {
       .toEqual({ status: "failed", attempt: 1, diagnostic_code: "provider_failed" });
     expect(await jobs.claim("no-further-paid-call")).toBeNull();
   });
-  it("releases an expired active scan lease when newer forward work wins priority", async () => {
+  it("recovers the expired scan lease ahead of newer automatic work", async () => {
     const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
     await scans.start(f.scope, f.request, f.execution);
     await scans.scheduleNext();
@@ -353,14 +353,11 @@ describe("accepted-history scan preview", () => {
     await jobs.checkpoint(historical, { version: 1, characters: [] });
     await pool.query("UPDATE campaign_cast_discovery_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [historical.id]);
     await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[2]!, execution: f.execution, enabled: true }));
-    const forward = (await jobs.claim("new-forward"))!;
-    expect(forward.source.turnNumber).toBe(3);
-    expect(await jobs.publish(historical)).toBe("lost_lease");
-    await jobs.checkpoint(forward, { version: 1, characters: [] });
-    await jobs.publish(forward);
     const resumed = (await jobs.claim("resume-history"))!;
     expect(resumed).toMatchObject({ id: historical.id, attempt: historical.attempt, output: { version: 1, characters: [] } });
+    expect(await jobs.publish(historical)).toBe("lost_lease");
     expect(await jobs.publish(resumed)).toBe("complete");
+    expect((await jobs.claim("new-forward"))?.source.turnNumber).toBe(3);
   });
   it.each([false, true])("cancels scans at the lifecycle boundary without converting scan jobs to forward work (scheduled=%s)", async scheduled => {
     const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
@@ -382,13 +379,37 @@ describe("accepted-history scan preview", () => {
     await jobs.publish(claim);
     expect(await scans.control(f.scope, scan.id, "cancel")).toMatchObject({ status: "cancelled", completeTurns: 1 });
   });
-  it("prioritizes forward discovery across campaigns as well as within one campaign", async () => {
+  it.each([false, true])("completes a scan behind a failed and a queued automatic turn (overlap=%s)", async overlap => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    const jobs = createCastDiscoveryJobRepository(pool, () => true, () => true);
+    for (const index of overlap ? [0, 1, 2] : [0, 1]) {
+      await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, {
+        scope: f.scope, turnId: f.turnIds[index]!, execution: f.execution, enabled: true
+      }));
+    }
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET status='failed',diagnostic_code='provider_timeout' WHERE turn_id=$1", [f.turnIds[0]]);
+    // The requested range touches the existing tracking range.
+    await pool.query("UPDATE campaign_cast_state SET coverage_start_turn=3 WHERE campaign_id=$1", [f.scope.campaignId]);
+    const scan = await scans.start(f.scope, { ...f.request, fromTurn: 3 }, f.execution);
+    await scans.scheduleNext();
+    const claim = (await jobs.claim("scan-with-backlog"))!;
+    expect(claim?.source.turnNumber).toBe(3);
+    const cast = createPostgresCampaignCastRepository(pool, { editingEnabled: true, discoveryEnabled: true });
+    expect((await cast.discoveryStatus!(f.scope)).automaticJobs).toEqual({
+      queued: 1, failed: 1, retryWait: 0, complete: 0, runningTurn: overlap ? 3 : null
+    });
+    await jobs.checkpoint(claim, { version: 1, characters: [] });
+    expect(await jobs.publish(claim)).toBe("complete");
+    await scans.scheduleNext();
+    expect(await scans.get(f.scope, scan.id)).toMatchObject({ status: "complete", completeTurns: 1 });
+  });
+  it("prioritizes requested scan work across campaigns", async () => {
     const fixtures = [await fixture(), await fixture()].sort((a, b) => a.scope.campaignId.localeCompare(b.scope.campaignId));
     const older = fixtures[0]!, newer = fixtures[1]!, scans = createCastBackfillRepository(pool, () => true);
     await scans.start(older.scope, older.request, older.execution);
     await scans.scheduleNext();
     await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope: newer.scope, turnId: newer.turnIds[0]!, execution: newer.execution, enabled: true }));
-    expect((await createCastDiscoveryJobRepository(pool, () => true, () => true).claim("global-priority"))?.scope).toEqual(newer.scope);
+    expect((await createCastDiscoveryJobRepository(pool, () => true, () => true).claim("global-priority"))?.scope).toEqual(older.scope);
   });
   it("disables scan claims and publication while preserving checkpoints and forward discovery", async () => {
     const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);

@@ -138,3 +138,4 @@ export * from "./display-preferences.js";
 export * from "./edit-dialog-dismissal.js";
 
 export { writeCampaignSettings } from "./campaign-settings-writes.js";
+export { watchCastScan } from "./watch-cast-scan.js";

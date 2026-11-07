@@ -6,7 +6,7 @@ import type { DatabasePool, DatabaseClient } from "./pool.js";
 /** One statement observes enrollment, current narration, and progress at one database snapshot. */
 export async function readCastDiscoveryStatus(pool: DatabasePool | DatabaseClient, rawScope: CastScope, enabled: boolean): Promise<CastDiscoveryStatus> {
   const scope = castScopeSchema.parse(rawScope);
-  const row = (await pool.query(`SELECT c.active_turn_number,s.coverage_start_turn,gap.turn_number,gap.job_id,gap.status,gap.diagnostic_code,
+  const row = (await pool.query(`SELECT c.active_turn_number,s.coverage_start_turn,gap.turn_number,gap.job_id,gap.status,gap.diagnostic_code, automatic.*,
       (SELECT count(*)::integer FROM campaign_cast_discovery_candidates p
         JOIN campaign_cast_discovery_jobs j ON j.id=p.job_id AND j.campaign_id=p.campaign_id AND j.owner_user_id=p.owner_user_id
         JOIN effective_turn_narrations n ON n.turn_id=j.turn_id AND n.campaign_id=j.campaign_id AND n.owner_user_id=j.owner_user_id
@@ -14,6 +14,15 @@ export async function readCastDiscoveryStatus(pool: DatabasePool | DatabaseClien
           AND j.timeline_revision=s.timeline_revision AND j.turn_number<=c.active_turn_number
           AND j.narration_revision=n.correction_revision AND j.source_hash=encode(digest(n.effective_narration,'sha256'),'hex')) AS unresolved_count
     FROM campaigns c LEFT JOIN campaign_cast_state s ON s.campaign_id=c.id AND s.owner_user_id=c.owner_user_id
+    CROSS JOIN LATERAL (
+      SELECT count(*) FILTER (WHERE j.status='queued')::int AS queued,
+        max(j.turn_number) FILTER (WHERE j.status='running' AND j.lease_expires_at>statement_timestamp()) AS running_turn,
+        count(*) FILTER (WHERE j.status='running' AND j.lease_expires_at<=statement_timestamp())::int AS expired,
+        count(*) FILTER (WHERE j.status='retry_wait')::int AS retry_wait,
+        count(*) FILTER (WHERE j.status='failed')::int AS failed, count(*) FILTER (WHERE j.status='complete')::int AS complete
+      FROM campaign_cast_discovery_jobs j WHERE j.campaign_id=c.id AND j.owner_user_id=c.owner_user_id AND j.scan_id IS NULL
+        AND j.timeline_revision=s.timeline_revision AND j.turn_number<=c.active_turn_number
+    ) automatic
     LEFT JOIN LATERAL (
       SELECT t.turn_number,j.id AS job_id,COALESCE(j.status,'missing') AS status,j.diagnostic_code
       FROM generate_series(COALESCE(s.coverage_start_turn,c.active_turn_number+1),c.active_turn_number) t(turn_number)
@@ -29,6 +38,7 @@ export async function readCastDiscoveryStatus(pool: DatabasePool | DatabaseClien
     coverageStartTurn: row.coverage_start_turn,
     trackedThroughTurn: enrolled ? (row.turn_number === null ? row.active_turn_number : row.turn_number - 1) : null,
     state: !enabled ? "disabled" : !enrolled ? "not_enrolled" : row.status === "failed" ? "failed" : row.turn_number === null ? "complete" : "catching_up",
+    automaticJobs: { queued: row.queued + row.expired, runningTurn: row.running_turn, retryWait: row.retry_wait, failed: row.failed, complete: row.complete },
     unresolvedCount: row.unresolved_count,
     firstGap: row.turn_number === null ? null : { turnNumber: row.turn_number, jobId: row.job_id, status: row.status, diagnosticCode: row.diagnostic_code }
   });
