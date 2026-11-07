@@ -18,7 +18,7 @@ export function createSettingsActivationGuard(policy:DeploymentSettingsPolicy):S
     // only from PostgreSQL's catalog and are quoted, never from operator input.
     const leases=await client.query<{table_name:string;column_name:string}>(`SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND (column_name='lease_expires_at' OR (table_name IN ('text_provider_capacity_leases','api_admission_leases') AND column_name='expires_at')) ORDER BY table_name`);
     const quote=(name:string)=>'"'+name.replaceAll('"','""')+'"';
-    const tables=[...new Set([...leases.rows.map(r=>r.table_name),'prepared_text_physical_attempts','instance_settings_runtime_reports'])].sort();
+    const tables=[...new Set([...leases.rows.map(r=>r.table_name),'prepared_text_physical_attempts','instance_settings_runtime_reports','cancelled_dispatch_recoveries','generation_jobs','campaign_cast_discovery_jobs'])].sort();
     // Block claims/invocations/report insertion across the final guard and activation commit.
     await client.query('LOCK TABLE '+tables.map(quote).join(',')+' IN SHARE MODE');
     for(const row of leases.rows) {
@@ -26,7 +26,13 @@ export function createSettingsActivationGuard(policy:DeploymentSettingsPolicy):S
       const active=await client.query('SELECT 1 FROM '+quote(row.table_name)+' WHERE '+predicate+' LIMIT 1');
       if(active.rowCount) throw new Error('settings_active_leases');
     }
-    const attempts=await client.query("SELECT 1 FROM prepared_text_physical_attempts WHERE status IN ('reserved','dispatched') LIMIT 1");
+    await client.query("SET LOCAL TIME ZONE 'UTC'");
+    const attempts=await client.query(`SELECT 1 FROM prepared_text_physical_attempts a
+      WHERE a.status IN ('reserved','dispatched') AND NOT EXISTS (
+        SELECT 1 FROM cancelled_dispatch_recoveries r JOIN cancelled_dispatch_evidence e
+          USING (attempt_id,owner_user_id,parent_job_id,logical_kind,attempt_sha256)
+        WHERE r.attempt_id=a.id
+      ) LIMIT 1`);
     if(attempts.rowCount) throw new Error('settings_active_invocations');
     const reports=await client.query("SELECT 1 FROM instance_settings_runtime_reports WHERE heartbeat_at>clock_timestamp()-interval '30 seconds' LIMIT 1");
     if(reports.rowCount) throw new Error('settings_runtime_not_drained');

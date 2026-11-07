@@ -6,5 +6,6 @@ export const settingsReleaseMigrations = [
   "0124_admission_policy_history",
   "0125_http_admission_leases",
   "0126_local_settings_actor",
-  "0127_local_settings_restart"
+  "0127_local_settings_restart",
+  "0128_cancelled_dispatch_recoveries"
 ] as const;
