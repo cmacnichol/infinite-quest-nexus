@@ -98,6 +98,16 @@ describe("request lease lifecycle",()=>{
 
 import { runtimeArchivePolicy } from "../../services/runtime/src/archive-policy.js";
 describe("archive request intersections",()=>{
+  it("supports campaign-only configurations while requiring complete System Archive settings", () => {
+    const config = bootstrap();
+    delete config.systemArchiveUploadTtlSeconds;
+    delete config.systemArchiveChunkBytes;
+    expect(runtimeArchivePolicy(config, "campaign")).toMatchObject({ uploadTtlSeconds: 86_400, chunkBytes: 16_777_216 });
+    expect(() => runtimeArchivePolicy(config, "system")).toThrow();
+    config.systemArchiveUploadTtlSeconds = 3600;
+    config.systemArchiveChunkBytes = 2_097_152;
+    expect(runtimeArchivePolicy(config, "campaign")).toMatchObject({ uploadTtlSeconds: 3600, chunkBytes: 2_097_152 });
+  });
   it("intersects campaign compressed/json/image limits with import and asset ceilings",()=>{
     const config=bootstrap();
     config.security.apiImportBodyLimitBytes=1048576;
