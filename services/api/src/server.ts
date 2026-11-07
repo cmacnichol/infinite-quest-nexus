@@ -25,7 +25,7 @@ import type {
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
 import { clearStoryMemoryEnrollment, readStoryMemorySettings, saveStoryMemoryEnrollment, saveStoryMemorySettings } from "../../../packages/database/src/story-memory-policy-repository.js";
 import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
-import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema } from "../../../packages/contracts/src/imports.js";
+import { LEGACY_STORY_IMPORT_PATH, LEGACY_STORY_PREVIEW_PATH, infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, castContextPreviewRequestSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
 import {
   campaignBranchSchema,
@@ -1204,7 +1204,7 @@ export async function buildServer({
     providers.delete(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId))
   ));
 
-  app.post("/api/v1/imports/legacy-story/preview", { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => {
+  app.post(LEGACY_STORY_PREVIEW_PATH, { bodyLimit: config.security.apiImportBodyLimitBytes }, async (request) => {
     const preview = await previewPortableLegacyStory({
       portable: apiPortable.portable,
       pool,

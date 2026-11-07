@@ -1,4 +1,4 @@
-import type { DisplayPreferencesStore } from "./display-preferences.js";
+import type { DisplayPreferencesStore } from "@infinite-quest/client-web";
 
 interface DeviceThemePort {
   set(theme: "light" | "dark"): unknown;

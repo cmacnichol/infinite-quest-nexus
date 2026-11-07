@@ -1,6 +1,6 @@
 import { browserDeviceStorage } from "@infinite-quest/client-web";
 import { loadUserProfile } from "./user-profile-menu";
-import { mountSettingsPage, parseSettingsRoute } from "./settings/page";
+import { parseSettingsRoute } from "./settings/sections";
 import "./styles.css";
 import { generateWorldPreview } from "./world-creation-api";
 import { createAuthoringJobsApi } from "./authoring-jobs-api";
@@ -57,7 +57,10 @@ async function start(): Promise<MountedPage | null> {
     if (pageDisposed) return null;
   }
   const settingsRoute = parseSettingsRoute(new URL(window.location.href));
-  if (settingsRoute) return mountSettingsPage(appRoot, settingsRoute);
+  if (settingsRoute) {
+    const { mountSettingsPage } = await import("./settings/page");
+    return pageDisposed ? null : mountSettingsPage(appRoot, settingsRoute);
+  }
   const characterSessionKey = characterSessionKeyFromPath(window.location.pathname);
   const storyRoute = storyRouteFromLocation(window.location.pathname, window.location.search);
   const campaignRoute = campaignRouteFromPath(window.location.pathname);

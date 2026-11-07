@@ -1,3 +1,4 @@
+import { LEGACY_STORY_IMPORT_PATH, LEGACY_STORY_PREVIEW_PATH } from "../../../packages/contracts/src/imports.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -14,7 +15,7 @@ const PROVIDER_GET = new Set([
   "/api/v1/providers/:providerId/presets/:slug"
 ]);
 const IMPORT_POST = new Set([
-  "/api/v1/imports/legacy-story/preview", "/api/v1/imports/legacy-story",
+  LEGACY_STORY_PREVIEW_PATH, LEGACY_STORY_IMPORT_PATH,
   "/api/v1/imports/world/preview", "/api/v1/imports/world",
   "/api/v1/imports/infinite-worlds/preview", "/api/v1/imports/infinite-worlds",
   "/api/v1/imports/campaign-archive/preview", "/api/v1/imports/campaign-archive"

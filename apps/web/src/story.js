@@ -1,7 +1,8 @@
 /* ═══════════════════════════════════════════════════════════════
    Infinite Quest — Story Player
    ═══════════════════════════════════════════════════════════════ */
-import { browserDeviceStorage, mountLegacyDeviceProfile } from "@infinite-quest/client-web";
+import { browserDeviceStorage } from "@infinite-quest/client-web";
+import { mountLegacyDeviceProfile } from "../../shared-ui/profile/legacy-device-profile.js";
 import { createStoryActivityView, safeActivityDiagnostic } from "./story-activity.js";
 import { branchCampaignFromTurn } from "./story-routing.js";
 import {

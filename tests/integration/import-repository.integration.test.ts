@@ -723,7 +723,7 @@ integration("PostgreSQL portable import repository", () => {
           WHERE operation.preview_token_hash=$1`,
         [hash(preview.previewHandle.token)]
       );
-      expect(expired.rows[0]).toEqual({ preview_status: "previewed", staged_status: "expired" });
+      expect(expired.rows[0]).toEqual({ preview_status: "expired", staged_status: "expired" });
     } finally {
       await client.query("ROLLBACK").catch(() => undefined);
       client.release();

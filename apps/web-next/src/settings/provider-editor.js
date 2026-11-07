@@ -145,17 +145,26 @@ export function mountProviderEditor(root, ports) {
   }
   function reportProviderListReadFailure(message) {
     if (signal.aborted) return;
-    providerMessage(message, "error");
+    const status = elements.providerListStatus;
+    status.hidden = false;
+    status.textContent = message + " ";
     const retry = document.createElement("button");
     retry.type = "button";
+    retry.id = "workflowRetryProviders";
     retry.textContent = "Retry provider profiles";
-    retry.onclick = () => loadProviders().then(() => providerMessage("Provider profiles refreshed.", "success")).catch(() => reportProviderListReadFailure(message));
-    elements.providerStatus.append(retry);
+    retry.onclick = async () => {
+      retry.disabled = true;
+      try { await loadProviders(); }
+      catch { if (!signal.aborted) retry.disabled = false; }
+    };
+    status.append(retry);
   }
   async function loadProviders() {
     const response = await ports.list(signal);
     if (signal.aborted) return;
     providers = response.providers;
+    elements.providerListStatus.replaceChildren();
+    elements.providerListStatus.hidden = true;
     renderProviderProfiles();
   }
   function number(value) {
@@ -952,7 +961,8 @@ export function mountProviderEditor(root, ports) {
     try {
       await loadProviders();
     } catch (error) {
-      reportProviderListReadFailure(`${provider.name} was ${wasEditing ? "updated" : "saved"}. The provider list could not be refreshed. Retry provider profiles to confirm the saved profile.`);
+      providerMessage(`${provider.name} was ${wasEditing ? "updated" : "saved"}.`, "success");
+      reportProviderListReadFailure("The provider list could not be refreshed. Retry provider profiles to confirm the saved profile.");
       if (elements.providerDialog) elements.providerDialog.close();
       providerControls.forEach((control, index) => { control.disabled = disabledBeforeSave[index] ?? false; });
       providerSaveBusy = false;

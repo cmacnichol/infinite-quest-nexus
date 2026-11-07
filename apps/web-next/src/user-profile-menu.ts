@@ -1,5 +1,5 @@
 import type { ProfilePort } from "./preferences/profile-editor";
-import { mountReaderPreferenceFields } from "@infinite-quest/client-web";
+import { mountReaderPreferenceFields } from "../../shared-ui/profile/profile-controls.js";
 import {
   userProfileSchema,
   userProfileUpdateSchema,

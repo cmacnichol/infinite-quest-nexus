@@ -1,5 +1,7 @@
 import { settingsBookmarkDestination } from "./settings-bookmark.js";
-import { createStoryMemoryApi, writeCampaignSettings, browserDeviceStorage, mountLegacyDeviceProfile, mountReaderPreferenceFields } from "@infinite-quest/client-web";
+import { createStoryMemoryApi, writeCampaignSettings, browserDeviceStorage } from "@infinite-quest/client-web";
+import { mountLegacyDeviceProfile } from "../../shared-ui/profile/legacy-device-profile.js";
+import { mountReaderPreferenceFields } from "../../shared-ui/profile/profile-controls.js";
 import {
   buildCampaignCreateRequest,
   createCampaignCreationDraft,
@@ -1031,7 +1033,7 @@ function applyManagementView(hash, { focus = false } = {}) {
   const dashboardView = route.view === "dashboard";
   if (route.view === "providers" || route.view === "prompt-library") {
     location.assign(settingsBookmarkDestination(hash));
-    return;
+    return route;
   }
   const dataTransferView = route.view === "data-transfer";
   const campaignView = route.view === "campaigns";

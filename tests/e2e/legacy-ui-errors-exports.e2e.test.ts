@@ -68,11 +68,14 @@ test("campaign_and_provider_startup_errors_have_independent_dashboard_retries", 
   await expect(page.locator("#dashboardCampaigns [data-campaign-id]")).toHaveCount(1);
   await page.locator("#workflowDashboardRetryProviders").click();
   await expect(page.locator("#dashboardWorkflowStatus")).toBeHidden();
-  await page.goto(`${origin}/nexus/index.html#providers`);
-  await expect(page.locator("#providerStatus")).not.toContainText("Provider profiles could not be loaded");
-  await expect(page.locator("#workflowRetryProviders")).toHaveCount(0);
   expect(campaignAttempts).toBe(2);
   expect(providerAttempts).toBe(2);
+  await page.goto(`${origin}/nexus/index.html#providers`);
+  await expect(page).toHaveURL(/\/app\/settings\?section=providers$/u);
+  await expect(page.getByRole("button", { name: "New provider profile" })).toBeVisible();
+  await expect(page.locator("#workflowRetryProviders")).toHaveCount(0);
+  // The canonical owner editor reads its own authoritative list when mounted.
+  await expect.poll(() => providerAttempts).toBe(3);
 });
 
 test("worlds_startup_failure_reaches_workspace_before_dashboard_retry", async ({ page }) => {
@@ -145,7 +148,7 @@ test("provider_startup_failure_reaches_workspace_before_dashboard_retry", async 
   await installLegacyUiFixture(page, fixture);
   await page.route("**/api/v1/providers", async route => {
     providerAttempts += 1;
-    if (providerAttempts === 1) {
+    if (providerAttempts <= 2) {
       await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private provider read diagnostics" }) });
       return;
     }
@@ -157,17 +160,17 @@ test("provider_startup_failure_reaches_workspace_before_dashboard_retry", async 
 
   await page.locator("#navSetup").click();
   await page.locator("#navProviders").click();
-  await expect(page).toHaveURL(/#providers$/u);
-  await expect(page.locator("#providerStatus")).toContainText("Provider profiles could not be loaded");
-  await expect(page.locator("#providerStatus")).not.toContainText("Private provider read diagnostics");
+  await expect(page).toHaveURL(/\/app\/settings\?section=providers$/u);
+  await expect(page.locator("#providerListStatus")).toContainText("Provider profiles could not be loaded");
+  await expect(page.locator("#providerListStatus")).not.toContainText("Private provider read diagnostics");
   await expect(page.locator("#workflowRetryProviders")).toBeVisible();
   await page.screenshot({ path: `${evidenceDir}/fix2-providers-read-error-desktop.png`, fullPage: false });
   await page.locator("#workflowRetryProviders").click();
-  await expect(page.locator("#providerStatus")).not.toContainText("Provider profiles could not be loaded");
+  await expect(page.locator("#providerListStatus")).not.toContainText("Provider profiles could not be loaded");
   await expect(page.locator("#workflowRetryProviders")).toHaveCount(0);
-  await expect(page.locator("#dashboardWorkflowStatus")).toBeHidden();
+  await expect(page.locator("#providerListStatus")).toBeHidden();
   await page.screenshot({ path: `${evidenceDir}/fix2-providers-read-recovered-desktop.png`, fullPage: false });
-  expect(providerAttempts).toBe(2);
+  expect(providerAttempts).toBe(3);
 });
 
 test("workspace_read_retry_coexists_with_newer_world_action_error", async ({ page }) => {
@@ -475,7 +478,7 @@ test("provider_list_retry_keeps_current_save_error_after_profile_selection_refre
 
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto(`${origin}/nexus/index.html#providers`);
-  await expect(page.locator("#providerStatus")).toContainText("Provider profiles could not be loaded");
+  await expect(page.locator("#providerListStatus")).toContainText("Provider profiles could not be loaded");
   await page.locator("#newProviderButton").click();
   await page.locator("#providerForm button[type=submit]").click();
   await expect(page.locator("#providerStatus")).toContainText("Provider profile could not be saved.");
@@ -764,6 +767,10 @@ test("missing_campaign_not_empty_adventure keeps the Story recovery view authori
   await page.route(`**/story/${missingCampaignId}`, route => route.fulfill({ contentType: "text/html", body: storyHtml }));
   await page.route("**/api/v1/**", async route => {
     const path = new URL(route.request().url()).pathname;
+    if (path === "/api/v1/session") {
+      await route.fulfill({ json: legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 }).session });
+      return;
+    }
     if (path.endsWith("/sync-status")) {
       await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ code: "campaign_not_found", message: "Campaign not found" }) });
       return;

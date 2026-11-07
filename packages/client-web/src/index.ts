@@ -132,11 +132,8 @@ export { canonicalActivityApiBase, createActivityVisibilitySource, createActivit
 export * from "./characters-workspace-session.js";
 export * from "./instance-settings-api.js";
 
-export { mountReaderPreferenceFields } from "./profile-controls.js";
 export * from "./device-storage.js";
 export * from "./display-preferences.js";
-export { mountDevicePreferenceFields } from "./device-profile-controls.js";
-export { mountLegacyDeviceProfile } from "./legacy-device-profile.js";
 export * from "./edit-dialog-dismissal.js";
 
 export { writeCampaignSettings } from "./campaign-settings-writes.js";

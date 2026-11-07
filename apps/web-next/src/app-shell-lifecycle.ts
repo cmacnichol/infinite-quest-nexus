@@ -1,6 +1,6 @@
 import type { UserProfile } from "@infinite-quest/contracts";
 import type { ProfilePort } from "./preferences/profile-editor";
-import { mountDevicePreferenceFields } from "@infinite-quest/client-web";
+import { mountDevicePreferenceFields } from "../../shared-ui/profile/device-profile-controls.js";
 import { initializeAppTheme, renderAppShell, type AppNavigation, type AppShellOptions } from "./app-shell";
 import { createDisplayPreferences, DISPLAY_PREFERENCES_STORAGE_KEY, type DisplayPreferencesStore } from "./preferences/display-preferences";
 import { createDeviceStorage } from "./preferences/device-storage";

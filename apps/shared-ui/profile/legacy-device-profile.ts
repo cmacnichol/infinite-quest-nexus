@@ -1,5 +1,5 @@
-import { browserDeviceStorage } from "./device-storage.js";
-import { createDisplayPreferences, DISPLAY_PREFERENCES_STORAGE_KEY } from "./display-preferences.js";
+import { browserDeviceStorage } from "@infinite-quest/client-web";
+import { createDisplayPreferences, DISPLAY_PREFERENCES_STORAGE_KEY } from "@infinite-quest/client-web";
 import { mountDevicePreferenceFields } from "./device-profile-controls.js";
 import type { UserProfile } from "@infinite-quest/contracts";
 

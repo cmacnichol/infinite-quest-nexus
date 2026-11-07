@@ -1,4 +1,4 @@
-import { archivePolicySnapshotSchema, type ArchivePolicySnapshot } from "../../../contracts/src/archive-policy.js";
+import { archivePolicySnapshotSchema, type ArchivePolicySnapshot } from "@infinite-quest/contracts";
 import type { ImportOwnerScope, PortableArchiveExportRetrieval, PortableStagedInput } from "./types.js";
 import type {
   AttachedFilesystemOperation,

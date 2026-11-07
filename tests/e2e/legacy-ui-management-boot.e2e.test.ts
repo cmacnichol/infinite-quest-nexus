@@ -16,7 +16,7 @@ test("management controls wait for the canonical controller before accepting nat
     await route.continue();
   });
   try {
-    await page.goto(`${origin}/nexus/index.html#providers`);
+    await page.goto(`${origin}/nexus/index.html#world-library`);
     await expect.poll(() => controllerHeld).toBe(true);
     await expect(page.locator("#managementBootStatus")).toContainText("Loading management controls");
     await expect(page.getByRole("button", { name: "Reload page", exact: true })).toBeHidden();
@@ -32,7 +32,7 @@ test("management controls wait for the canonical controller before accepting nat
     expect(linkRectangle).not.toBeNull();
     if (!linkRectangle) throw new Error("The native Dashboard link must have a rectangle.");
     await page.mouse.click(linkRectangle.x + linkRectangle.width / 2, linkRectangle.y + linkRectangle.height / 2);
-    await expect(page).toHaveURL(`${origin}/nexus/index.html#providers`);
+    await expect(page).toHaveURL(`${origin}/nexus/index.html#world-library`);
     await page.keyboard.press("Tab");
     expect(await page.locator("#managementInteractiveRoot").evaluate((root) => root.contains(document.activeElement))).toBe(false);
     await page.screenshot({ path: testInfo.outputPath("management-controller-loading.png"), fullPage: false });
@@ -66,7 +66,7 @@ test("failed controller import leaves a safe reachable reload action", async ({ 
     else await route.continue();
   });
   try {
-    await page.goto(`${origin}/nexus/index.html#providers`);
+    await page.goto(`${origin}/nexus/index.html#world-library`);
     await expect(page.locator("#managementBootStatus")).toContainText("Management controls could not load");
     await expect(page.locator("#managementInteractiveRoot")).toHaveAttribute("inert", "");
     await expect(page.locator("#managementInteractiveRoot")).toHaveAttribute("aria-busy", "false");
@@ -85,6 +85,8 @@ test("failed controller import leaves a safe reachable reload action", async ({ 
     await expect.poll(() => controllerRequests).toBe(2);
     await expect(page.locator("#managementInteractiveRoot")).not.toHaveAttribute("inert", "");
     await expect(page.locator("#managementBootStatus")).toBeHidden();
+    await page.locator("#navSetup").click();
+    await page.locator("#navProviders").click();
     await page.getByRole("button", { name: "New provider profile" }).click();
     await expect(page.locator("#providerDialog")).toBeVisible();
     expect(pageErrors).toEqual([]);

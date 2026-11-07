@@ -71,7 +71,7 @@ test("direct_hash_selects_correct_workspace", async ({ page }) => {
   await expect(page.locator("#prompt-library")).toBeHidden();
   await expect(page.locator("#data-transfer")).toBeVisible();
   await page.goto(`${origin}/nexus/index.html#prompt-library`);
-  await expect(page.locator("body")).toHaveAttribute("data-management-view", "prompt-library");
+  await expect(page).toHaveURL(/\/app\/settings\?section=prompts$/u);
   await expect(page.locator("#prompt-library")).toBeVisible();
   await expect(page.locator("#campaigns")).toBeHidden();
 });
@@ -380,7 +380,7 @@ test("unindexed_back_stay_returns_one_step_without_growing_history", async ({ pa
   const api = await installLegacyUiFixture(page, fixture);
   const campaign = fixture.campaigns[0];
   if (!campaign) throw new Error("The one-campaign fixture was not created.");
-  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.goto(`${origin}/nexus/index.html#world-library`);
   await page.evaluate((campaignId) => {
     window.history.replaceState({ unrelated: "preserved predecessor" }, "", window.location.href);
     window.history.pushState({ unrelatedEntry: "also preserved" }, "", `#campaigns?campaignId=${campaignId}`);

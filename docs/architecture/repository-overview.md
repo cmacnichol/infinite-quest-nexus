@@ -61,6 +61,7 @@ Infinite Quest Nexus is a server-backed application packaged for both local Dock
 
 The repository contains the legacy self-contained client for reference only:
 
+- `apps/shared-ui/profile/`: user-profile controls rendered by both active web clients. Owner-scoped storage and transport remain in `packages/client-web/`.
 - `index.html`: legacy self-contained Infinite Quest application, kept for reference only and no longer kept in parity with the new application (`apps/web`).
 
 As the service is scaffolded, prefer this organization:

@@ -619,11 +619,11 @@ test("a committed profile remains saved when refreshing the provider list fails"
   await page.locator("#saveProvider").click();
   await expect.poll(() => api.writes.length).toBe(1);
   await expect(page.locator("#providerStatus")).toContainText("Committed before list failure was saved.");
-  await expect(page.locator("#providerStatus")).toContainText(/provider list could not be refreshed/i);
+  await expect(page.locator("#providerListStatus")).toContainText(/provider list could not be refreshed/i);
   await expect(page.locator("#providerStatus")).not.toContainText(/could not be saved/i);
   const committedMessage = await page.locator("#providerStatus").innerText();
   expect(committedMessage.match(/Committed before list failure was saved\./g)).toHaveLength(1);
-  expect(committedMessage.match(/The provider list could not be refreshed\./g)).toHaveLength(1);
+  expect((await page.locator("#providerListStatus").innerText()).match(/The provider list could not be refreshed\./g)).toHaveLength(1);
   expect(api.writes).toHaveLength(1);
   expect(requiredItem(api.writes, 0).body.apiKey).toBe("synthetic-committed-secret");
   await page.getByRole("button", { name: "Retry provider profiles" }).click();

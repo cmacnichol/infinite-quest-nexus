@@ -1,4 +1,4 @@
-import { mountReaderPreferenceFields } from "@infinite-quest/client-web";
+import { mountReaderPreferenceFields } from "../../../shared-ui/profile/profile-controls.js";
 import {
   userProfileUpdateSchema,
   type UserProfile,
