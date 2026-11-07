@@ -28,9 +28,9 @@ export const LOGGER_REDACT_PATHS = [
   "*.password"
 ] as const;
 
-export function createLoggerOptions(): LoggerOptions {
+export function createLoggerOptions(level = process.env.LOG_LEVEL || "info"): LoggerOptions {
   return {
-    level: process.env.LOG_LEVEL || "info",
+    level,
     redact: {
       paths: [...LOGGER_REDACT_PATHS],
       censor: "[Redacted]"
@@ -52,3 +52,8 @@ export function createLoggerOptions(): LoggerOptions {
 }
 
 export const logger = pino(createLoggerOptions());
+
+// Change the existing shared logger before constructing clients or accepting work.
+export function adoptRuntimeLoggerSettings(config: Readonly<{ logLevel?: string }>): void {
+  logger.level = config.logLevel ?? process.env.LOG_LEVEL ?? "info";
+}

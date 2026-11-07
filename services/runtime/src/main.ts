@@ -3,7 +3,7 @@ import { migrateDatabase, waitForDatabaseMigrations } from "../../../packages/da
 import { buildServer } from "../../api/src/server.js";
 import { createApiCampaignCastApplication, createWorkerCampaignCastApplication } from "./campaign-cast-composition.js";
 import { runWorker } from "../../worker/src/worker.js";
-import { logger } from "../../../packages/logger/src/index.js";
+import { adoptRuntimeLoggerSettings, logger } from "../../../packages/logger/src/index.js";
 import { createProviderNetworkPolicy } from "../../../packages/security/src/provider-network-policy.js";
 import {
   configureDefaultProviderTransport,
@@ -55,6 +55,17 @@ await runRuntimeLifecycle(config, abortController, {
     resolveSettings: async (pool, bootstrap, signal) => {
       const policy = bootstrap.instanceSettingsPolicyFile ? loadDeploymentSettingsPolicy(bootstrap.instanceSettingsPolicyFile) : undefined;
       const resolved = await loadActiveRuntimeSettings(pool, bootstrap, policy);
+      adoptRuntimeLoggerSettings(resolved.config);
+      logger.info({
+        event: "runtime_settings_active",
+        role: resolved.config.role,
+        activeRevision: resolved.activeRevision,
+        effectiveConfigurationDigest: resolved.effectiveDigest,
+        generationJobsPerWorker: resolved.config.workerGenerationConcurrency,
+        sharedTextRequestCapacity: resolved.config.castDiscoveryEnabled === true ? resolved.config.textProviderConcurrency : null,
+        sharedTextRequestCapacityScope: "cast_discovery_dependent_text_routes",
+        workerPollIntervalMs: resolved.config.workerPollIntervalMs
+      });
       const registration = await registerSettingsRuntime(pool, resolved, signal, () => abortController.abort(), policy);
       try { await registration.waitUntilCompatible(); }
       catch (error) { await registration.dispose(); throw error; }

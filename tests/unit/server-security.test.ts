@@ -135,6 +135,19 @@ describe("API server security and CORS headers", () => {
     }),
   } as unknown as DatabasePool;
 
+  it("uses the active log level for the API logger while retaining environment bootstrap fallback", async () => {
+    const previous = process.env.LOG_LEVEL;
+    process.env.LOG_LEVEL = "error";
+    try {
+      const active = await buildServer(serverOptions({ config: makeConfig({ logLevel: "trace" }), pool: mockPool }));
+      try { expect(active.log.level).toBe("trace"); } finally { await active.close(); }
+      const bootstrap = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
+      try { expect(bootstrap.log.level).toBe("error"); } finally { await bootstrap.close(); }
+    } finally {
+      if (previous === undefined) delete process.env.LOG_LEVEL;
+      else process.env.LOG_LEVEL = previous;
+    }
+  });
   it("fails readiness while the settings runtime is incompatible", async () => {
     const mockPool = { query: async () => ({ rows: [{ database_version: "18", vector_version: "0.8.6" }] }) } as unknown as DatabasePool;
     const app = await buildServer({ ...serverOptions({ config: makeConfig(), pool: mockPool }), settingsReadiness: async () => false });

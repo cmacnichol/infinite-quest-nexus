@@ -723,7 +723,7 @@ export async function buildServer({
     return { ownerUserId, campaignId: segment.campaign_id, turnId: segment.turn_id, segmentId };
   };
   const app = Fastify({
-    logger: createLoggerOptions(),
+    logger: createLoggerOptions(config.logLevel),
     bodyLimit: config.security.apiDefaultBodyLimitBytes,
     trustProxy: config.security.trustProxyHops > 0
       ? (_address, hop) => hop < config.security.trustProxyHops
