@@ -645,3 +645,28 @@ test("moving a saved credentialed profile requires a fresh key for that endpoint
   await expect.poll(() => api.writes.length).toBe(1);
   expect(requiredItem(api.writes,0).body).toMatchObject({baseUrl:"https://moved.example.test/v1",apiKey:"replacement-fixture-credential"});
 });
+
+test("rotating a key preserves the selected model, configured limits and overrides while invalidating evidence", async ({page}) => {
+  const configuration = {textResponseFormatPolicy:"auto" as const, textExecutionOverrides:{
+    parameters:{temperature:0.34,top_p:0.73},conservativeContextWindowTokens:49000
+  }};
+  const profile = providerFixture({contextWindowTokens:49152,maxOutputTokens:6144,temperature:0.55,configuration});
+  const api = await installProviderApi(page,{providers:[profile]});
+  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.locator("#providerProfileList").getByRole("button",{name:"Edit"}).click();
+  await page.locator("#providerDefaultModel").click();
+  await page.getByRole("button",{name:/Synthetic inventory model/}).click();
+  await expect(page.locator("#providerContextTokens")).toHaveValue("65536");
+  await page.locator("#providerApiKey").fill("rotated-fixture-key");
+  await expect(page.locator("#providerDefaultModel")).toHaveValue(profile.defaultModel);
+  await page.locator("#providerAdvancedSettings > summary").click();
+  await expect(page.locator("#providerContextTokens")).toHaveValue("49152");
+  await expect(page.locator("#providerContextTokens")).not.toHaveAttribute("readonly","");
+  await expect(page.locator("#providerResponseFormatCapability")).toContainText(/unknown/i);
+  await page.locator("#saveProvider").click();
+  await expect.poll(()=>api.writes.length).toBe(1);
+  expect(requiredItem(api.writes,0).body).toMatchObject({
+    baseUrl:profile.baseUrl,apiKey:"rotated-fixture-key",defaultModel:profile.defaultModel,contextWindowTokens:49152,
+    maxOutputTokens:6144,temperature:0.55,configuration
+  });
+});

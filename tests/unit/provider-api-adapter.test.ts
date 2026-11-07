@@ -158,7 +158,7 @@ describe("provider API configuration boundary", () => {
     expect(result.configuration).toEqual({ textResponseFormatPolicy: "legacy" });
   });
 
-  it("validates a preset PATCH from one authority snapshot when the profile changes after the initial list read", async () => {
+  it("validates a preset PATCH from one authority snapshot without an earlier profile list lookup", async () => {
     const value = adapter();
     const staleProfile = { ...input, id, baseUrl: "https://endpoint-a.example/v1", textSelection: { kind: "model" as const, modelId: "model" } };
     const authorityProfile = {
@@ -186,6 +186,7 @@ describe("provider API configuration boundary", () => {
     } as never);
 
     expect(result).toMatchObject({ baseUrl: authorityProfile.baseUrl, textSelection: { kind: "openrouter_preset", slug: "night-shift" } });
+    expect(value.application.listProfiles).not.toHaveBeenCalled();
     expect(readSavedCredential).toHaveBeenCalledOnce();
   });
 

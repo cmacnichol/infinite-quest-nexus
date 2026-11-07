@@ -56,6 +56,8 @@ export function mountProviderEditor(root, ports) {
   let providerSaveBusy = false;
   let formDestination = "";
   let inventoryRequest = null;
+  let editableContext = null;
+  let clampedOutput = null;
   const rangeDefaults = [elements.providerSogniSteps, elements.providerSogniGuidance, elements.providerSogniPreviewCount]
     .map(input => ({input, min: input.min, max: input.max, step: input.step}));
   const destination = () => JSON.stringify([elements.providerType.value, elements.providerRole.value, elements.providerBaseUrl.value.trim()]);
@@ -64,14 +66,14 @@ export function mountProviderEditor(root, ports) {
     return profile && profile.providerType === elements.providerType.value && profile.providerRole === elements.providerRole.value
       && profile.baseUrl === elements.providerBaseUrl.value.trim();
   }
-  function invalidateInventory() {
+  function invalidateInventory(destinationChanged) {
     inventoryRequest?.abort();
     inventoryRequest = null;
     clearResponseFormatCapability();
     providerSelectionCredentialRevision++;
     const hadInventory = discoveredProfileModels.length > 0;
     const previousModel = elements.providerDefaultModel.value;
-    if (discoveredProfileModels.some(model => profileModelValue(model) === previousModel)) {
+    if (destinationChanged && discoveredProfileModels.some(model => profileModelValue(model) === previousModel)) {
       elements.providerDefaultModel.value = "";
       if (providerSelectionEditor?.mode === "model") setProviderSelectionState({type:"modelDraftChanged", modelId:"", responseFormatPolicy: elements.providerResponseFormatPolicy.value});
     }
@@ -82,12 +84,22 @@ export function mountProviderEditor(root, ports) {
     elements.providerCustomModel.value = "";
     elements.refreshProviderModels.disabled = false;
     elements.refreshProviderModelDialog.disabled = false;
-    if (elements.providerContextTokens.readOnly) elements.providerContextTokens.value = "32768";
+    if (elements.providerContextTokens.readOnly) {
+      elements.providerContextTokens.value = destinationChanged ? "32768" : editableContext ?? elements.providerContextTokens.value;
+    }
+    if (clampedOutput && elements.providerOutputTokens.value === clampedOutput.effective) {
+      elements.providerOutputTokens.value = clampedOutput.configured;
+    }
+    editableContext = null;
+    clampedOutput = null;
     applyProfileModelContext();
     if (hadInventory) {
       for (const {input, min, max, step} of rangeDefaults) { input.min = min; input.max = max; input.step = step; }
-      for (const select of [elements.providerSogniSampler, elements.providerSogniScheduler]) select.replaceChildren(new Option("Model default", ""));
-      elements.providerSogniSizePreset.replaceChildren(new Option("Custom dimensions", "custom"));
+      for (const [select, fallback] of [[elements.providerSogniSampler, ""], [elements.providerSogniScheduler, ""], [elements.providerSogniSizePreset, "custom"]]) {
+        const selected = select.value;
+        select.replaceChildren(new Option(fallback ? "Custom dimensions" : "Model default", fallback));
+        if (!destinationChanged && selected && selected !== fallback) select.add(new Option(selected, selected, true, true));
+      }
       applySogniWorkerTypeOptions(null);
     }
     if (providerSelectionEditor) setProviderSelectionState({type:"authorityChanged", ...providerSelectionAuthority(providers.find(p => p.id === editingProviderId))});
@@ -97,7 +109,7 @@ export function mountProviderEditor(root, ports) {
     if (next === formDestination) return;
     formDestination = next;
     elements.providerApiKey.value = "";
-    invalidateInventory();
+    invalidateInventory(true);
   }
   const DEFAULT_LM_STUDIO_BASE_URL = "http://10.11.41.224:1234";
   const providerPresetsApi = ports.presets;
@@ -617,7 +629,7 @@ export function mountProviderEditor(root, ports) {
   }
 
   function resetProviderForm() {
-    invalidateInventory();
+    invalidateInventory(true);
     clearResponseFormatCapability();
     editingProviderId = "";
     elements.providerForm.reset();
@@ -851,7 +863,7 @@ export function mountProviderEditor(root, ports) {
   }
 
   function beginProviderEdit(provider) {
-    invalidateInventory();
+    invalidateInventory(true);
     const returnFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
     clearResponseFormatCapability();
     editingProviderId = provider.id;
@@ -1195,6 +1207,7 @@ export function mountProviderEditor(root, ports) {
     const model = discoveredProfileModels.find((item) => profileModelValue(item) === selectedValue || item.id === selectedValue);
     const contextLength = Number(model?.contextLength || 0);
     if (contextLength > 0) {
+      if (editableContext === null) editableContext = elements.providerContextTokens.value;
       elements.providerContextTokens.value = String(contextLength);
       elements.providerContextTokens.readOnly = true;
       elements.providerContextSource.textContent = `Locked to ${number(contextLength)} tokens advertised by ${model.displayName}.`;
@@ -1218,7 +1231,9 @@ export function mountProviderEditor(root, ports) {
     elements.providerOutputTokens.setCustomValidity("");
     const requestedOutputTokens = Number(elements.providerOutputTokens.value);
     if (!Number.isFinite(requestedOutputTokens) || requestedOutputTokens > maximumOutputTokens) {
-      elements.providerOutputTokens.value = String(maximumOutputTokens);
+      const configured = clampedOutput?.configured ?? elements.providerOutputTokens.value;
+      clampedOutput = {configured, effective: String(maximumOutputTokens)};
+      elements.providerOutputTokens.value = clampedOutput.effective;
     }
   }
   elements.providerType.addEventListener("change", () => {
@@ -1251,13 +1266,15 @@ export function mountProviderEditor(root, ports) {
 
   elements.providerSogniNetwork.addEventListener("change", applySogniWorkerAvailability);
 
+  elements.providerOutputTokens.addEventListener("input", () => { clampedOutput = null; });
+  elements.providerContextTokens.addEventListener("input", () => { editableContext = null; });
   elements.providerRole.addEventListener("change", () => {
     syncProviderRoleSettings({ applySuggestedDefaults: !editingProviderId });
     syncDestination();
   });
   for (const event of ["input", "change"]) {
     elements.providerBaseUrl.addEventListener(event, syncDestination);
-    elements.providerApiKey.addEventListener(event, invalidateInventory);
+    elements.providerApiKey.addEventListener(event, () => invalidateInventory(false));
     elements.providerStreaming.addEventListener(event, clearResponseFormatCapability);
     elements.providerResponseFormatPolicy.addEventListener(event, clearResponseFormatCapability);
   }

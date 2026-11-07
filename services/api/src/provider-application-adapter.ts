@@ -192,25 +192,23 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     async update(ownerUserId: string, providerProfileId: string, input: ProviderProfileUpdate) {
       assertProviderConfiguration(input.configuration);
       const textSelection = input.textSelection;
-      const current = (await composition.application.listProfiles({ ownerUserId })).find((profile) => profile.id === providerProfileId);
-      if (!current) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
-      const canChangeTextSelection = current.providerRole === "text" || current.providerRole === "intent";
-      const requiresAuthority = input.baseUrl !== undefined || canChangeTextSelection &&
-        (input.textSelection !== undefined || input.defaultModel !== undefined || input.apiKey !== undefined);
+      const requiresAuthority = input.apiKey !== undefined || input.baseUrl !== undefined ||
+        input.textSelection !== undefined || input.defaultModel !== undefined;
       const authority = requiresAuthority
         ? await composition.runtime.presetSaveAuthoritySnapshot(ownerUserId, providerProfileId, false)
         : null;
-      if (requiresAuthority && !authority) stalePresetSave();
+      const current = requiresAuthority ? authority?.candidate :
+        (await composition.application.listProfiles({ownerUserId})).find(profile => profile.id === providerProfileId);
+      if (!current) throw Object.assign(new Error("Provider profile not found."), {statusCode: 404});
       if (authority?.hasCredential && input.baseUrl !== undefined && input.baseUrl !== authority.candidate.baseUrl && !input.apiKey?.trim()) {
         throw Object.assign(new Error("A new API key is required when changing the endpoint of a credentialed provider."), {statusCode: 400});
       }
-      const profileForSelection = authority?.candidate ?? current;
-      const nextSelection = updatedSelection(profileForSelection, input);
-      const selectionChanged = nextSelection && profileForSelection.textSelection
-        ? selectionCompatibilityId(nextSelection) !== selectionCompatibilityId(profileForSelection.textSelection)
+      const nextSelection = updatedSelection(current, input);
+      const selectionChanged = nextSelection && current.textSelection
+        ? selectionCompatibilityId(nextSelection) !== selectionCompatibilityId(current.textSelection)
         : false;
       const needsPresetValidation = nextSelection?.kind === "openrouter_preset" &&
-        (selectionChanged || input.baseUrl !== undefined && input.baseUrl !== profileForSelection.baseUrl || input.apiKey !== undefined);
+        (selectionChanged || input.baseUrl !== undefined && input.baseUrl !== current.baseUrl || input.apiKey !== undefined);
       if (needsPresetValidation) {
         if (!authority) stalePresetSave();
         const candidate = candidateForPresetSave(ownerUserId, authority.candidate, nextSelection, input);
