@@ -44,3 +44,12 @@ describe('runtime installation settings',()=>{
     expect(resolveRuntimeSettingsState(state,bootstrap(),policy).activeRevision).toBe('1');
   });
 });
+
+it.each(["castEditingEnabled", "castDiscoveryEnabled"] as const)("narrows dependent character capabilities when active %s is off", key => {
+  const policy = runtimePolicy();
+  const active = { ...settingsFixture(), castEditingEnabled: true, castDiscoveryEnabled: true, castAutoMatchEnabled: true, castContextEnabled: true, castBackfillEnabled: true, [key]: false };
+  const state = { ...environment, installationId: policy.installationId, mode: "database" as const, activeRevision: "1", active, policyDigest: settingsDigest(policy) };
+  const config = resolveRuntimeSettingsState(state, { ...bootstrap(), castEditingEnabled: true, castDiscoveryEnabled: true, castAutoMatchEnabled: true, castContextEnabled: true, castBackfillEnabled: true }, policy).config;
+  expect(config).toMatchObject({ castDiscoveryEnabled: false, castAutoMatchEnabled: false, castContextEnabled: false, castBackfillEnabled: false });
+  expect(active.castAutoMatchEnabled).toBe(true);
+});

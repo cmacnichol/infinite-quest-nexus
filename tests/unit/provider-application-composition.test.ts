@@ -77,6 +77,18 @@ function listModels(composition: ReturnType<typeof createApiProviderApplicationC
 }
 
 describe("provider application composition capability cache transactions", () => {
+  it.each([
+    { discovery: false, autoMatch: false }, { discovery: false, autoMatch: true },
+    { discovery: true, autoMatch: false }, { discovery: true, autoMatch: true }
+  ])("keeps discovery admission and optional lexical matching distinct: $discovery/$autoMatch", ({ discovery, autoMatch }) => {
+    const { pool } = controlledPool();
+    for (const create of [createApiProviderApplicationComposition, createWorkerProviderApplicationComposition]) {
+      const graph = create(pool as never, { credentialSecret: "test-secret", transport: { fetch: vi.fn(), validateSdkEndpoint: vi.fn(), close: vi.fn() }, castDiscoveryEnabled: discovery, castAutoMatchEnabled: autoMatch });
+      expect(graph.generation.castLexicalMentionsEnabled).toBe(discovery && autoMatch);
+      expect(typeof graph.generation.prepareCastDiscoveryExecution).toBe(discovery ? "function" : "undefined");
+      expect(pool.query).not.toHaveBeenCalled();
+    }
+  });
   it.each([true, false])("uses current cast context setting %s in prompt previews despite older jobs", async (castContextEnabled) => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };

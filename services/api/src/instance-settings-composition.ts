@@ -6,10 +6,9 @@ import { createInstanceSettingsRepository } from "../../../packages/database/src
 import { createSettingsUseCases, SettingsConflictError, type SettingsState } from "../../../packages/application/src/settings/index.js";
 import {
   instanceSettingsHistorySchema, instanceSettingsPatchSchema, instanceSettingsViewSchema, instanceSettingsSchema,
-  settingsFeatureGatesSchema, type InstanceSettings, type SettingsFieldKey, type SettingsFeatureKey
+  settingsFeatureGatesSchema, type DeploymentSettingsPolicy, type InstanceSettings, type SettingsFieldKey, type SettingsFeatureKey
 } from "../../../packages/contracts/src/instance-settings.js";
 import { resolveInstanceSettings, INSTANCE_SETTING_FIELDS } from "../../../packages/domain/src/instance-settings.js";
-import { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest } from "../../runtime/src/instance-settings.js";
 import { createSettingsOperatorSessions, SettingsHttpError } from "./settings-operator-session.js";
 
 function effectiveValue(snapshot: InstanceSettings, key: SettingsFieldKey) {
@@ -20,7 +19,16 @@ function effectiveValue(snapshot: InstanceSettings, key: SettingsFieldKey) {
   return snapshot[key as Exclude<SettingsFieldKey, `${string}.${string}`>];
 }
 
-export function createInstanceSettingsHttpComposition(pool: DatabasePool, bootstrap: RuntimeConfig, running: RuntimeConfig) {
+export type SettingsRuntimePorts = Readonly<{
+  loadDeploymentSettingsPolicy(path: string): DeploymentSettingsPolicy;
+  projectRuntimeSettings(config: RuntimeConfig): InstanceSettings;
+  settingsDigest(value: unknown): string;
+}>;
+
+export function createInstanceSettingsHttpComposition(
+  pool: DatabasePool, bootstrap: RuntimeConfig, running: RuntimeConfig,
+  { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest }: SettingsRuntimePorts
+) {
   const repository = createInstanceSettingsRepository(pool);
   // Capture the configuration this process actually serves, before any mounted policy changes.
   const runningConfig = structuredClone(running);

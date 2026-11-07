@@ -1,5 +1,6 @@
 import { installRequestAdmission, type RequestAdmissionPort } from "./request-admission.js";
 import { registerInstanceSettingsRoutes } from "./instance-settings-routes.js";
+import { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest } from "../../runtime/src/instance-settings.js";
 import { createInstanceSettingsHttpComposition } from "./instance-settings-composition.js";
 import { createCastContextPreview } from "../../runtime/src/campaign-cast-context-preview.js";
 import { createHash } from "node:crypto";
@@ -734,7 +735,7 @@ export async function buildServer({
     requestIdHeader: "x-correlation-id",
     genReqId: () => crypto.randomUUID()
   });
-  registerInstanceSettingsRoutes(app, { ...createInstanceSettingsHttpComposition(pool, settingsBootstrap ?? config, config), resolveActor: async () => initialOwnerId(pool) });
+  registerInstanceSettingsRoutes(app, { ...createInstanceSettingsHttpComposition(pool, settingsBootstrap ?? config, config, { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest }), resolveActor: async () => initialOwnerId(pool) });
   const memoryAdapter = createMemoryApplicationAdapter(pool, memory, createCastContextPreview(pool, config));
   const turnCorrections = createTurnCorrectionApplication({
     corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation,
@@ -1398,9 +1399,9 @@ export async function buildServer({
       }));
   });
 
+  // Owners retain access to manage and revoke existing links while sharing is disabled.
   const worldShares = createWorldShareLinkService(pool);
   app.get<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/share-links", async (request, reply) => {
-    if (config.worldSharingEnabled !== true) return reply.code(404).send({ error: "World sharing is disabled." });
     return { shares: await worldShares.list(await initialOwnerId(pool), uuidSchema.parse(request.params.worldId)) };
   });
   app.post<{ Params: { worldId: string } }>("/api/v1/worlds/:worldId/share-links", async (request, reply) => {
@@ -1417,7 +1418,6 @@ export async function buildServer({
       : reply.code(404).send({ error: "The selected published world version was not found." });
   });
   app.delete<{ Params: { worldId: string; shareId: string } }>("/api/v1/worlds/:worldId/share-links/:shareId", async (request, reply) => {
-    if (config.worldSharingEnabled !== true) return reply.code(404).send({ error: "World sharing is disabled." });
     const revoked = await worldShares.revoke(
       await initialOwnerId(pool),
       uuidSchema.parse(request.params.worldId),

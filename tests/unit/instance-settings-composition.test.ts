@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootstrap, runtimePolicy } from "../helpers/instance-settings-runtime.js";
 import { settingsFixture } from "../fixtures/instance-settings.js";
-import { settingsDigest, mergeRuntimeSettings } from "../../services/runtime/src/instance-settings.js";
+import { settingsDigest, mergeRuntimeSettings, loadDeploymentSettingsPolicy, projectRuntimeSettings } from "../../services/runtime/src/instance-settings.js";
 import { createInstanceSettingsHttpComposition } from "../../services/api/src/instance-settings-composition.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 const { read } = vi.hoisted(() => ({ read: vi.fn() }));
@@ -21,7 +21,7 @@ function fixture(mode: "environment" | "database", allowed = true, pollMaximum =
   const query = vi.fn(async () => ({ rows: [{ policy_digest: settingsDigest(policy) }] }));
   const pool = { query } as unknown as DatabasePool;
   const running = mergeRuntimeSettings(config, active);
-  const composition = createInstanceSettingsHttpComposition(pool, config, running);
+  const composition = createInstanceSettingsHttpComposition(pool, config, running, { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest });
   return { composition, policy, path, query };
 }
 describe("running installation projection", () => {
