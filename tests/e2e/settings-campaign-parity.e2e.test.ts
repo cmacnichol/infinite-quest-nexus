@@ -292,3 +292,44 @@ test("initial missing segment configuration uses the owner's image count while a
   await page.getByRole("combobox",{name:"Campaign",exact:true}).selectOption(b);
   await expect(page.getByLabel("Images per segment")).toHaveValue("1");
 });
+
+for (const source of ["segment", "campaign"] as const) {
+  test(`unavailable explicit ${source} image profile cannot use another profile's inventory or initial count`, async ({page}) => {
+    await setup(page);
+    const unavailableId = "44444444-4444-4444-8444-444444444440";
+    const defaultId = "44444444-4444-4444-8444-444444444441";
+    await page.route("**/api/v1/providers", route => route.fulfill({json:{providers:[
+      {...profileRow, id:unavailableId, name:"Retired image profile", providerRole:"image", enabled:false, isDefault:false},
+      {...profileRow, id:defaultId, name:"Owner default", providerRole:"image", configuration:{defaultImageCount:2}}
+    ]}}));
+    await page.route("**/api/v1/campaigns", route => route.fulfill({json:{campaigns:[
+      {...rows[0],imageProviderProfileId:source === "campaign" ? unavailableId : defaultId}
+    ]}}));
+    await page.route("**/campaigns/"+a+"/illustration-config", route => route.fulfill({json:{
+      ...fixture.illustrationConfig, providerProfileId:source === "segment" ? unavailableId : null,
+      updatedAt:source === "segment" ? fixture.illustrationConfig.updatedAt : null, imagesPerSegment:1
+    }}));
+    const requested: string[] = [];
+    await page.route("**/api/v1/providers/*/models*", route => {
+      requested.push(new URL(route.request().url()).pathname);
+      return route.fulfill({json:{models:[{id:"owner-model",displayName:"Owner model"}]}});
+    });
+    await page.goto(url(a));
+    const selected = page.getByLabel(source === "segment" ? "Segment image provider" : "Image provider assignment");
+    await expect(selected.locator("option:checked")).toContainText("unavailable");
+    const inventory = page.getByRole("button",{name:"Load image models"});
+    await expect(inventory).toBeVisible();
+    if (await inventory.isEnabled()) await inventory.click();
+    await expect(inventory).toBeDisabled();
+    expect(requested).toEqual([]);
+    await expect(page.getByLabel("Images per segment")).toHaveValue("1");
+
+    await selected.selectOption("");
+    if (source === "campaign") await page.getByRole("button",{name:"Save provider assignments"}).click();
+    await expect(inventory).toBeEnabled();
+    await expect(page.getByLabel("Images per segment")).toHaveValue(source === "segment" ? "1" : "2");
+    await inventory.click();
+    await expect(page.locator("#campaign-image-models option")).toHaveCount(1);
+    expect(requested).toEqual(["/api/v1/providers/"+defaultId+"/models"]);
+  });
+}

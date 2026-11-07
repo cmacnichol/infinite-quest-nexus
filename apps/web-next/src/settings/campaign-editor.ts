@@ -281,8 +281,11 @@ export function mountCampaignSettings(host: HTMLElement, campaigns: CampaignSumm
       const imageProviders = list.filter(provider => provider.enabled && provider.providerRole === "image");
       const provider = container.querySelector<HTMLSelectElement>("[name=providerProfileId]")!;
       const count = container.querySelector<HTMLInputElement>("[name=imagesPerSegment]")!;
-      const imageProvider = () => imageProviders.find(item => item.id === (provider.value || campaign.imageProviderProfileId))
-        ?? imageProviders.find(item => item.isDefault) ?? (imageProviders.length === 1 ? imageProviders[0] : undefined);
+      const imageProvider = () => {
+        const selectedId = provider.value || campaign.imageProviderProfileId;
+        if (selectedId) return imageProviders.find(item => item.id === selectedId);
+        return imageProviders.find(item => item.isDefault) ?? (imageProviders.length === 1 ? imageProviders[0] : undefined);
+      };
       const refreshInventory = modelInventory(container,"image",() => imageProvider()?.id ?? null);
       let savedConfig = config.updatedAt !== null;
       let effectiveProviderId = imageProvider()?.id;
