@@ -19,7 +19,27 @@ export function mountPromptEditor(root, ports, campaignId, promptKey, requireCam
   let promptLibraryPreviewSequence = 0;
   let campaigns = [];
   let scopeEpoch = 0;
-  let saving = false;
+  let mutationPending = false;
+  function syncMutationControls() {
+    const template = promptLibrarySelectedTemplate();
+    const scope = elements.promptLibraryScope.value;
+    elements.promptLibraryEditor.querySelector('[type="submit"]').disabled = mutationPending;
+    elements.promptLibraryReset.disabled = mutationPending || template?.effectiveSource !== scope;
+    elements.promptLibraryResetCampaigns.disabled = mutationPending;
+  }
+  function setMutationPending(pending) {
+    mutationPending = pending;
+    syncMutationControls();
+  }
+  function applyMutationResult(library, key, submittedContent) {
+    promptLibrary = library;
+    if (key === selectedPromptTemplateKey) {
+      const editedDuringRequest = elements.promptLibraryContent.value !== submittedContent;
+      promptLibraryEditorBaseline = promptLibrarySelectedTemplate()?.effectiveContent ?? submittedContent;
+      if (!editedDuringRequest) elements.promptLibraryContent.value = promptLibraryEditorBaseline;
+    }
+    renderPromptLibrary();
+  }
   function promptLibraryCampaignId() {
     return elements.promptLibraryScope?.value === "campaign" ? elements.promptLibraryCampaign?.value || "" : "";
   }
@@ -131,9 +151,8 @@ export function mountPromptEditor(root, ports, campaignId, promptKey, requireCam
       elements.promptLibraryCompatibilityCopy.textContent = `Required output shape version ${compatibility.requiredShapeVersion}. Saving records this prompt against the current shape; the application adds the required output rules automatically.${compatibility.acknowledged ? "" : " Saved for an earlier output shape or outside the Prompt Library. Save it again before generation can use it."}`;
       elements.promptLibraryRequiredShape.textContent = compatibility.requiredShapePreview;
     }
-    const resetAvailable = campaignScope ? template.effectiveSource === "campaign" : template.effectiveSource === "application";
     elements.promptLibraryReset.textContent = campaignScope ? "Use inherited application prompt" : "Restore shipped default";
-    elements.promptLibraryReset.disabled = !resetAvailable;
+    syncMutationControls();
     elements.promptLibraryResetCampaigns.classList.toggle("hidden", campaignScope || !template.campaignOverrideAllowed);
     renderPromptLibraryDirtyState();
     if (promptLibraryPreviewVisible) schedulePromptLibraryPreview();
@@ -172,50 +191,49 @@ export function mountPromptEditor(root, ports, campaignId, promptKey, requireCam
   }
   async function savePromptLibraryTemplate(event) {
     event.preventDefault();
-    if (saving) return;
+    if (mutationPending) return;
     const template = promptLibrarySelectedTemplate(); if (!template) return;
     const scope = elements.promptLibraryScope.value;
     const epoch = scopeEpoch;
-    saving = true;
-    const submit = elements.promptLibraryEditor.querySelector('[type="submit"]');
-    submit.disabled = true;
+    setMutationPending(true);
     try {
       const content = elements.promptLibraryContent.value;
       const response = await ports.save({ key: template.key, scope, ...(scope === "campaign" ? { campaignId: promptLibraryCampaignId() } : {}), content }, signal);
       if (signal.aborted || epoch !== scopeEpoch) return;
-      promptLibrary = response.library;
-      if (template.key === selectedPromptTemplateKey) {
-        const editedDuringSave = elements.promptLibraryContent.value !== content;
-        promptLibraryEditorBaseline = promptLibrarySelectedTemplate()?.effectiveContent ?? content;
-        if (!editedDuringSave) elements.promptLibraryContent.value = promptLibraryEditorBaseline;
-      }
+      applyMutationResult(response.library, template.key, content);
       elements.promptLibraryStatus.textContent = promptLibraryIsDirty() ? "Prompt saved. You have further unsaved edits." : "Prompt saved. New jobs will use this version.";
       elements.promptLibraryStatus.className = "status success";
-      renderPromptLibrary();
     } catch (error) {
       if (signal.aborted || epoch !== scopeEpoch) return;
       elements.promptLibraryStatus.textContent = error.message || String(error);
       elements.promptLibraryStatus.className = "status error";
     } finally {
-      saving = false;
-      submit.disabled = false;
+      setMutationPending(false);
     }
   }
   async function resetPromptLibraryTemplate() {
+    if (mutationPending) return;
     const template = promptLibrarySelectedTemplate(); if (!template) return;
     const scope = elements.promptLibraryScope.value;
     const epoch = scopeEpoch;
+    const content = elements.promptLibraryContent.value;
+    setMutationPending(true);
     try {
       const response = await ports.reset({ key: template.key, scope, ...(scope === "campaign" ? { campaignId: promptLibraryCampaignId() } : {}) }, signal);
       if (signal.aborted || epoch !== scopeEpoch) return;
-      promptLibrary = response.library; elements.promptLibraryStatus.textContent = scope === "campaign" ? "Campaign override removed; the inherited application prompt is active." : "Application override removed; the shipped default is active."; elements.promptLibraryStatus.className = "status success"; renderPromptLibrary(true);
+      applyMutationResult(response.library, template.key, content);
+      elements.promptLibraryStatus.textContent = scope === "campaign" ? "Campaign override removed; the inherited application prompt is active." : "Application override removed; the shipped default is active.";
+      elements.promptLibraryStatus.className = "status success";
     } catch (error) {
       if (signal.aborted || epoch !== scopeEpoch) return;
       elements.promptLibraryStatus.textContent = error.message || String(error);
       elements.promptLibraryStatus.className = "status error";
+    } finally {
+      setMutationPending(false);
     }
   }
   async function resetAllCampaignPromptOverrides() {
+    if (mutationPending) return;
     const template = promptLibrarySelectedTemplate();
     if (!template || !template.campaignOverrideAllowed || elements.promptLibraryScope.value !== "application") return;
     if (promptLibraryIsDirty()) {
@@ -225,7 +243,7 @@ export function mountPromptEditor(root, ports, campaignId, promptKey, requireCam
     }
     if (!window.confirm(`Reset “${template.title}” for all your campaigns to the saved application default? This will overwrite all campaign overrides for this prompt by removing them. This cannot be undone. Other prompts and already queued jobs will not change.`)) return;
     const epoch = scopeEpoch;
-    elements.promptLibraryResetCampaigns.disabled = true;
+    setMutationPending(true);
     try {
       await ports.reset({ key: template.key, scope: "application", allCampaigns: true }, signal);
       if (signal.aborted || epoch !== scopeEpoch) return;
@@ -236,7 +254,7 @@ export function mountPromptEditor(root, ports, campaignId, promptKey, requireCam
       elements.promptLibraryStatus.textContent = error.message || String(error);
       elements.promptLibraryStatus.className = "status error";
     } finally {
-      elements.promptLibraryResetCampaigns.disabled = false;
+      setMutationPending(false);
     }
   }
   function scrollPromptLibrary(direction) {

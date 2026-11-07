@@ -287,3 +287,38 @@ test(`${mode} stalled optional identity at the app entry still opens World Libra
   } finally { release(); }
   await expect(page).toHaveURL(/\/app\/?$/);
 });
+for (const switchPrompt of [false, true]) {
+  test(`${mode} delayed reset retains edits to ${switchPrompt ? "another" : "the same"} prompt`, async ({page}) => {
+    await api(page);
+    const override = {...template, effectiveSource: "application", effectiveContent: "Saved override."};
+    const other = {...PROMPT_TEMPLATE_CATALOG.story_recovery_schema, effectiveSource: "shipped", effectiveContent: "Other prompt."};
+    await page.route("**/api/v1/prompt-library", route => route.fulfill({json:{templates:[override, other]}}));
+    let release!: () => void;
+    const held = new Promise<void>(resolve => {release = resolve;});
+    let started = false;
+    await page.route("**/api/v1/prompt-library/overrides", async route => {
+      started = true;
+      await held;
+      await route.fulfill({json:{library:{templates:[template, other]}}});
+    });
+    await page.goto(base + "/app/settings?section=prompts");
+    const content = page.locator("#promptLibraryContent");
+    await expect(content).toHaveValue(override.effectiveContent);
+    await page.locator("#promptLibraryReset").click();
+    try {
+      await expect.poll(() => started).toBe(true);
+      if (switchPrompt) await page.locator(`[data-prompt-key="${other.key}"]`).click();
+      await content.fill("Keep this newer draft.");
+      await expect(page.getByRole("button", {name:"Save prompt"})).toBeDisabled();
+      await expect(page.locator("#promptLibraryResetCampaigns")).toBeDisabled();
+    } finally { release(); }
+    await expect(page.getByRole("button", {name:"Save prompt"})).toBeEnabled();
+    await expect(content).toHaveValue("Keep this newer draft.");
+    if (switchPrompt) await page.screenshot({path:`${folder}/${mode}-retained-prompt-draft.png`});
+    await page.locator("#promptLibraryDiscard").click();
+    await expect(content).toHaveValue(switchPrompt ? other.effectiveContent : template.effectiveContent);
+    if (switchPrompt) await page.locator(`[data-prompt-key="${template.key}"]`).click();
+    await expect(content).toHaveValue(template.effectiveContent);
+    await expect(page.locator("#promptLibraryReset")).toBeDisabled();
+  });
+}
