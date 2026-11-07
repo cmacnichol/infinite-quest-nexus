@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { DatabasePool, RuntimeConfig } from "../../../packages/database/src/index.js";
@@ -18,6 +19,7 @@ const IMPORT_POST = new Set([
   "/api/v1/imports/infinite-worlds/preview", "/api/v1/imports/infinite-worlds",
   "/api/v1/imports/campaign-archive/preview", "/api/v1/imports/campaign-archive"
 ]);
+const generationRouteIds = z.object({ worldId: z.uuid().optional(), campaignId: z.uuid().optional(), jobId: z.uuid().optional() });
 const GENERATION_POST = new Set([
   "/api/v1/worlds/generate-preview", "/api/v1/worlds/playable-characters/generate-preview",
   "/api/v1/worlds/:worldId/draft/playable-characters/generate",
@@ -96,6 +98,8 @@ export function installRequestAdmission(app:FastifyInstance,pool:DatabasePool,co
       request.raw.on("newListener",observing);
       reply.raw.once("close",()=>{request.raw.off("data",count);request.raw.off("newListener",observing);});
     }
+    // Invalid path IDs must not resolve an owner or consume a request from their budget.
+    if (key === "generation") generationRouteIds.parse(request.params);
     const limits=config.security;
     const owner=await initialOwnerId(pool),requestId=randomUUID();
     const decision=await port.acquire(pool,owner,requestId,{

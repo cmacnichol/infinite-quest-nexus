@@ -18,6 +18,7 @@ import {
 import * as storyModule from "../../apps/web/src/story.js";
 import { DEDICATED_CHUNKED_AUDIT, TEXT_FALLBACK_LEGACY_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
+const profileOwnerId = "7f9fa38e-d5e6-45fb-a991-bd188cc3aa51";
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/src/story.js", "utf8");
 const storyCss = readFileSync("apps/web/public/story.css", "utf8");
@@ -30,6 +31,7 @@ async function bootLegacyStory({
   nextCursor = null,
   continuousReading = false,
   readerPreferences,
+  profileOwner,
   defaultTurnControlStyle = "flexible_action",
   fetchTurns = vi.fn(),
   syncStatus,
@@ -59,6 +61,7 @@ async function bootLegacyStory({
   nextCursor?: string | null;
   continuousReading?: boolean;
   readerPreferences?: Record<string, unknown>;
+  profileOwner?: string;
   defaultTurnControlStyle?: string;
   fetchTurns?: ReturnType<typeof vi.fn>;
   syncStatus?: ReturnType<typeof vi.fn>;
@@ -120,13 +123,14 @@ async function bootLegacyStory({
     turns: { campaignId: "campaign-1", turns, nextCursor }
   });
   const saveProfile = updateProfile || vi.fn(async (profile) => ({
-    user: { displayName: profile.displayName, settings: profile.settings }
+    user: { id: profileOwnerId, displayName: profile.displayName, settings: profile.settings }
   }));
 
   const initialized = (storyModule.startStoryPlayer as (composition: unknown) => Promise<void>)({
     api: {
       session: {
         get: async () => ({ user: {
+          ...(profileOwner ? { id: profileOwner, displayName: "Initial Owner" } : {}),
           settings: { continuousReading, readerPreferences, autoSubmitTurnChoices: false, defaultTurnControlStyle }
         } }),
         updateProfile: saveProfile
@@ -149,6 +153,8 @@ async function bootLegacyStory({
       segments: loadIllustrationSegments ?? (async () => ({ segments: illustrationSegments })),
       imageJobs: loadImageJobs ?? (async () => ({ jobs: [] }))
     },
+    actionDrafts: { read: async () => null, readExpiryNotice: async () => false },
+    readerPositions: { read: async () => null, write: async () => "saved" },
     readerHistory: { getTurn: getReaderHistoryTurn, searchHistory: searchReaderHistory, getSceneWindow },
     workflow,
     ...(failedTurnPrompts ? { failedTurnPrompts } : {}),
@@ -3299,6 +3305,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     const fetchTurns = vi.fn();
     try {
       const { document, window } = await bootLegacyStory({
+        profileOwner: profileOwnerId,
         turns: makeAcceptedTurns(51, 100),
         nextCursor: "before-51",
         fetchTurns
@@ -3323,6 +3330,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     const fetchTurns = vi.fn().mockRejectedValue(new Error("profile history failed"));
     try {
       const { document, window } = await bootLegacyStory({
+        profileOwner: profileOwnerId,
         turns: makeAcceptedTurns(51, 100),
         nextCursor: "before-51",
         fetchTurns
@@ -3619,10 +3627,11 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     const held = deferred<unknown>();
     const getSceneWindow = vi.fn(() => held.promise);
     const updateProfile = vi.fn(async (profile: Record<string, unknown>) => ({
-      user: { displayName: profile.displayName, settings: profile.settings }
+      user: { id: profileOwnerId, displayName: profile.displayName, settings: profile.settings }
     }));
     try {
       const { document, window } = await bootLegacyStory({
+        profileOwner: profileOwnerId,
         turns: makeAcceptedTurns(51, 100),
         pathname: `/story/${T16_CAMPAIGN_ID}`,
         continuousReading: true,
@@ -4251,9 +4260,9 @@ it("updates the accepted reader count before required sync reconciliation settle
 
 describe("profile reading appearance", () => {
   it("previews and saves area width separately from prose while preserving play settings", async () => {
-    const updateProfile = vi.fn(async (profile) => ({ user: { settings: profile.settings } }));
+    const updateProfile = vi.fn(async (profile) => ({ user: { id: profileOwnerId, settings: profile.settings } }));
     try {
-      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 2), updateProfile, continuousReading: true, defaultTurnControlStyle: "action_only" });
+      const { document, window } = await bootLegacyStory({ profileOwner: profileOwnerId, turns: makeTurns(1, 2), updateProfile, continuousReading: true, defaultTurnControlStyle: "action_only" });
       document.getElementById("btnOpenUserProfile")!.dispatchEvent(new window.Event("click"));
       const dialog = document.getElementById("userProfileDialog")!;
       const change = (selector: string, value: string) => {
@@ -4281,7 +4290,7 @@ describe("profile reading appearance", () => {
       change("[data-reader-width]", "full");
       document.getElementById("btnSaveUserProfile")!.dispatchEvent(new window.Event("click"));
       await vi.waitFor(() => expect(dialog.hasAttribute("open")).toBe(false));
-      expect(updateProfile).toHaveBeenCalledWith({ displayName: "Initial Owner", settings: { autoSubmitTurnChoices: false, continuousReading: true, defaultTurnControlStyle: "action_only", readerPreferences: expect.objectContaining({ areaWidth: "wide", widthCh: "full" }) } });
+      expect(updateProfile).toHaveBeenCalledWith({ displayName: "Initial Owner", settings: { autoSubmitTurnChoices: false, continuousReading: true, defaultTurnControlStyle: "action_only", readerPreferences: expect.objectContaining({ areaWidth: "wide", widthCh: "full" }) } }, expect.any(AbortSignal));
       expect(app.getAttribute("data-reader-area-width")).toBe("wide");
       expect(reader.style.getPropertyValue("--reader-prose-width")).toBe("100%");
     } finally { vi.unstubAllGlobals(); }
@@ -4290,7 +4299,7 @@ describe("profile reading appearance", () => {
   it("retains a failed profile preview for retry and restores the saved area when cancelled", async () => {
     const updateProfile = vi.fn().mockRejectedValue(new Error("offline"));
     try {
-      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 2), updateProfile });
+      const { document, window } = await bootLegacyStory({ profileOwner: profileOwnerId, turns: makeTurns(1, 2), updateProfile });
       document.getElementById("btnOpenUserProfile")!.dispatchEvent(new window.Event("click"));
       const dialog = document.getElementById("userProfileDialog")!;
       const width = dialog.querySelector("[data-reader-area-width]") as HTMLSelectElement;
