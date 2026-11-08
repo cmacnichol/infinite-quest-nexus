@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { describe, expect, it } from "vitest";
-import { characterProfileSchema, playableCharacterSchema, worldContentSchema } from "../../packages/contracts/src/world-library.js";
+import { characterProfileSchema, playableCharacterSchema, worldContentSchema, validateWorldCharacterLinks } from "../../packages/contracts/src/world-library.js";
 import {
   projectAuthoringIssues,
   validateGeneratedCharacter
@@ -205,5 +205,16 @@ describe("generated authoring output", () => {
       code: "custom",
       message: "Generated character contains prohibited provider metadata."
     });
+  });
+});
+
+
+describe("world entity character links", () => {
+  it("accepts same-world links and rejects stale or malformed targets", () => {
+    const world = worldContentSchema.parse({ world: { title: "World" }, playableCharacters: [{ id: "hero", name: "Hero" }],
+      entities: [{ id: "entity", linkedCharacterId: "hero" }] });
+    expect(validateWorldCharacterLinks(world)).toBe(world);
+    expect(() => validateWorldCharacterLinks({ ...world, entities: [{ linkedCharacterId: "missing" }] })).toThrow(/linkedCharacterId/);
+    expect(() => validateWorldCharacterLinks({ ...world, entities: [{ linkedCharacterId: 1 }] })).toThrow(/linkedCharacterId/);
   });
 });

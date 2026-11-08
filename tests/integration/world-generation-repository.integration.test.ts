@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, expectTypeOf, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   type DashboardRepositoryPort,
   type SessionProfileRepositoryPort,
@@ -23,6 +23,10 @@ import {
 } from "../../packages/database/src/pool.js";
 import * as repositoryModule from "../../packages/database/src/world-generation-repository.js";
 import { createPostgresWorldCampaignTransactionPort } from "../../packages/database/src/world-campaign-transaction.js";
+import type { ProviderRequest } from "../../packages/story-engine/src/providers.js";
+import { worldContentSchema } from "../../packages/contracts/src/world-library.js";
+import { createProviderWorldGenerationCollaborator } from "../../services/runtime/src/world-campaign-composition.js";
+import type { WorldGenerationProviderCollaborators } from "../../services/runtime/src/provider-application-composition.js";
 import { getDashboardStats } from "../helpers/memory-aware-services.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -434,4 +438,32 @@ integration("world generation supporting PostgreSQL adapters", () => {
       PlayableCharacterGenerationRequest
     ]>();
   });
+  it("runs bounded cast suggestions and supporting expansion through the owner-scoped PostgreSQL collaborator", async () => {
+    const profile = { identity: { aliases: [], pronouns: "" }, story: { role: "Guide", background: "A harbor childhood", personality: "", motivations: "", goals: "Find a route", fearsAndConflicts: "", keyRelationships: "", narrativeHooks: "", voiceAndMannerisms: "", otherGuidance: "" }, appearance: { ancestryOrSpecies: "", apparentAge: "", genderPresentation: "", build: "", skinOrComplexion: "", face: "", eyes: "", hair: "", distinguishingFeatures: [], clothing: "", equipmentAndAccessories: "", otherVisualDetails: "" }, unclassifiedNotes: "" };
+    const payloads: unknown[] = [
+      { seeds: [{ name: "Hidden", role: "guide", concept: "A guide" }, { name: "Person", role: "guide", concept: "A guide" }, { name: "Iris", role: "scout", concept: "A scout" }, { name: "iris", role: "scout", concept: "Duplicate" }] },
+      { name: "Wrong", profile }, { name: "Iris", profile, rpgStats: [{ name: "discard" }] }
+    ];
+    const execute = vi.fn(async (_request: ProviderRequest) => ({ content: JSON.stringify(payloads.shift()), responseId: "r", finishReason: "stop", outputLimited: false, modelInstanceId: "test", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }));
+    const providers = { resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) }, execution: { text: async () => ({ execute }) }, prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: {} }) }, promptTools: { content: () => "Create a character." } } as unknown as WorldGenerationProviderCollaborators;
+    const collaborator = createProviderWorldGenerationCollaborator(pool, providers, createPostgresWorldCampaignTransactionPort(pool), repositoryModule.createPostgresWorldGenerationProgressRepository());
+    const content = worldContentSchema.parse({ world: { title: "Atlas" }, entities: [...Array.from({ length: 19_998 }, (_, n) => ({ type: "npc", name: `N${n}` })), { kind: "character", title: "Hidden" }, { category: "person", label: "Person" }] });
+    const result = await collaborator.suggestCastPreview({ ownerUserId }, { content, count: 3 });
+    expect(result.seeds.map((seed) => seed.name)).toEqual(["Iris"]);
+    const progressKey = `cast-preview-${crypto.randomUUID()}`; progressKeys.push(progressKey);
+    const expanded = await collaborator.generatePlayableCharacterPreview({ ownerUserId }, { content, prompt: "Expand", seed: { name: "Iris", role: "scout", concept: "A scout" }, campaignUse: "supporting", progressKey });
+    expect(expanded.character).toMatchObject({ name: "Iris", campaignUse: "supporting", rpgStats: [], defaultTriggers: [] });
+    expect(execute).toHaveBeenCalledTimes(3);
+    const progress = await pool.query<{ status: string }>("SELECT status FROM world_generation_progress WHERE owner_user_id = $1 AND progress_key = $2", [ownerUserId, progressKey]);
+    expect(progress.rows[0]?.status).toBe("completed");
+    payloads.push({ name: "Legacy", profile, rpgStats: [], defaultTriggers: [] });
+    const legacy = await collaborator.generatePlayableCharacterPreview({ ownerUserId }, { content, prompt: "Create legacy playable" });
+    expect(legacy.character.campaignUse).toBe("playable");
+    expect(execute.mock.calls[3]![0].systemPrompt).toContain("character-authoring-v3-validated-profile");
+    const unavailable = { ...providers, resolution: { resolveDirect: async () => ({ status: "unavailable" }) } } as unknown as WorldGenerationProviderCollaborators;
+    const offline = createProviderWorldGenerationCollaborator(pool, unavailable, createPostgresWorldCampaignTransactionPort(pool), repositoryModule.createPostgresWorldGenerationProgressRepository());
+    await expect(offline.suggestCastPreview({ ownerUserId }, { content, count: 3 })).rejects.toMatchObject({ statusCode: 409 });
+    expect(content.entities).toHaveLength(20_000);
+  });
+
 });

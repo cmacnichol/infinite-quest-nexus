@@ -1,4 +1,5 @@
 import { castWorldChoicesSchema } from "@infinite-quest/contracts";
+import { castDraftPreviewRequestSchema, castDraftPreviewResponseSchema, type CastDraftPreviewRequest } from "@infinite-quest/contracts";
 import { castFromWorldPreviewQuerySchema, castFromWorldPreviewSchema, castFromWorldSchema, editAuthoredCastProfileSchema,
   type CastFromWorld, type CastFromWorldPreviewQuery, type EditAuthoredCastProfile } from "@infinite-quest/contracts";
 import { castContextPreviewRequestSchema, castContextExplanationSchema, type CastContextPreviewRequest } from "@infinite-quest/contracts";
@@ -27,6 +28,10 @@ export function createCampaignCastApi(options: NexusHttpClientOptions = {
   const http = createNexusHttpClient(options);
   const pathFor = (campaignId: string) => `/campaigns/${encodeURIComponent(campaignId)}/cast`;
   return {
+    draftPreview(campaignId: string, id: string, input: CastDraftPreviewRequest, signal?: AbortSignal) {
+      const path = `${pathFor(campaignId)}/${encodeURIComponent(id)}/draft-preview`, value = validatedRequest(castDraftPreviewRequestSchema, input, "POST", path);
+      return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: castDraftPreviewResponseSchema, ...(signal ? { signal } : {}) });
+    },
     sourceTurn: (campaignId: string, turnNumber: number) => http.request({ method: "GET",
       path: `/campaigns/${encodeURIComponent(campaignId)}/reader/turns/${readerTurnNumberSchema.parse(turnNumber)}?sourceHash=1`,
       responseSchema: readerTurnResponseSchema.extend({ sourceHash: z.string().regex(/^[a-f0-9]{64}$/u).optional() }) }),

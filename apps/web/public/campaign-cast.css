@@ -55,3 +55,11 @@
 
 .cast-dialog .cast-world-pin { display: flex; align-items: center; gap: .5rem; }
 .cast-dialog .cast-world-pin input[type="checkbox"] { width: auto; flex: none; margin: 0; }
+
+.cast-dialog .cast-choice { display: flex; align-items: center; gap: .55rem; min-height: 44px; }
+.cast-dialog .cast-choice input[type="checkbox"] { width: auto; margin: 0; flex: none; order: -1; }
+.story-draft-review fieldset, .cast-suggestions fieldset {
+  min-width: 0; margin-block: .85rem; padding: .8rem 1rem;
+  border: 1px solid var(--border, #536075); border-radius: .75rem;
+}
+.story-draft-review blockquote { margin: .65rem 0; padding-inline-start: .85rem; border-inline-start: 2px solid var(--accent, #d8b4fe); }

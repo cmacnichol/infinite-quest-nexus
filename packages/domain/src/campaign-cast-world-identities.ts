@@ -40,17 +40,20 @@ export function castDiscoveryWorldIdentities(content: unknown): CastDiscoveryWor
   const entities = Array.isArray(world.entities) ? world.entities
     : Object.entries(record(world.entities)).map(([key, value]) => ({ key, ...record(value) }));
   const result: CastDiscoveryWorldIdentity[] = [];
+  const catalog = buildScopedEntityCatalog({ worldContent: content });
   for (const value of entities) {
     const row = record(value);
-    const ref = buildScopedEntityCatalog({ worldContent: { entities: [row] } })[0];
+    const id = typeof row.id === "string" ? row.id : row.key;
+    const ref = catalog.find((entry) => entry.id === `world:${id}`);
     if (!ref || !/^(?:character|person|npc)$/iu.test(ref.kind) || !fiction(ref.displayName)) continue;
-    result.push({ entityId: ref.id.slice("world:".length), name: ref.displayName,
+    result.push({ entityId: ref.id.slice("world:".length), ...(ref.equivalentIds?.length ? { equivalentEntityIds: ref.equivalentIds.map((id) => id.slice("world:".length)) } : {}), name: ref.displayName,
       aliases: ref.aliases.filter((alias) => alias !== ref.displayName && fiction(alias)).slice(0, 20),
       identityHints: hints([row.description, row.summary, row.background, row.lore, row.details, row.role]) });
   }
   for (const value of Array.isArray(world.playableCharacters) ? world.playableCharacters : []) {
     const row = record(value);
     if (typeof row.id !== "string" || !row.id.trim() || !fiction(row.name)) continue;
+    if (catalog.some((entry) => entry.equivalentIds?.includes(`world:${row.id}`))) continue;
     const authority = characterFictionAuthority(null, row);
     const parsedProfile = characterProfileSchema.safeParse(row.profile);
     const rawProfile = parsedProfile.success ? parsedProfile.data : null;

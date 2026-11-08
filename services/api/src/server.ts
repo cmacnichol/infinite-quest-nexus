@@ -62,6 +62,8 @@ import {
   campaignWorldMigrationSchema,
   playableCharacterGenerationRequestSchema,
   characterProfileOrganizationRequestSchema,
+  castSuggestionPreviewRequestSchema,
+  castSuggestionPreviewResponseSchema,
   playableCharacterGenerationPreviewRequestSchema,
   playableCharacterGenerationPreviewResponseSchema,
   resourceDeleteSchema,
@@ -794,6 +796,7 @@ export async function buildServer({
         .header("Content-Type", "application/json; charset=utf-8");
       appendVaryHeader(reply, "Accept-Encoding");
     }
+    const privateAuthoringRoute = request.routeOptions.url === "/api/v1/worlds/playable-characters/suggest-cast-preview" || request.routeOptions.url === "/api/v1/worlds/playable-characters/generate-preview";
     const exposed = exposeError(error, code);
     const transport = providerTransportErrorDetails(error);
     const authoringFailure = typeof error === "object" && error !== null && "authoringFailure" in error
@@ -828,6 +831,8 @@ export async function buildServer({
         providerCategory: transport.causeCategory,
         durationMs: transport.durationMs
       }, "request_failed");
+    } else if (privateAuthoringRoute) {
+      request.log.error({ correlationId: request.id, code }, "request_failed");
     } else {
       request.log.error({ err: error, code }, "request_failed");
     }
@@ -844,7 +849,7 @@ export async function buildServer({
         ? { code: providerErrorCode, category: transport.causeCategory, retryable: true }
         : safeAuthoringFailure ? { ...safeAuthoringFailure, correlationId: request.id }
         : exposed && (code < 500 || safeFiveXX) ? safeErrorDetails(details.details) : {},
-      ...(!safeAuthoringFailure && code < 500 && details.issues !== undefined ? { issues: details.issues } : {})
+      ...(!privateAuthoringRoute && !safeAuthoringFailure && code < 500 && details.issues !== undefined ? { issues: details.issues } : {})
     });
     void reply.code(code).send(guardedStaticRangeError && request.method === "HEAD" ? "" : payload);
   });
@@ -1314,6 +1319,11 @@ export async function buildServer({
       progressKey: key
     }));
     return progress || { status: "unknown", phase: "unknown", progressPercent: 0, message: "" };
+  });
+
+  app.post("/api/v1/worlds/playable-characters/suggest-cast-preview", async (request) => {
+    const ownerScope = await resolveWorldCampaignOwnerScope();
+    return parseResponseProjection(castSuggestionPreviewResponseSchema, await worldCampaignAdapter.run(() => worldCampaignAdapter.application.suggestCastPreview(ownerScope, castSuggestionPreviewRequestSchema.parse(request.body))));
   });
 
   app.post("/api/v1/worlds/playable-characters/generate-preview", async (request) => {

@@ -229,6 +229,7 @@ export function applyGeneratedCharacter(
   const candidate = stripProhibitedRootKeys({
     ...(next.candidate as Record<string, unknown>),
     ...safeGenerated,
+    ...(next.candidate.campaignUse === "supporting" ? { rpgStats: next.candidate.rpgStats, defaultTriggers: next.candidate.defaultTriggers } : {}),
     id: next.candidate.id,
     source: next.candidate.source,
     campaignUse: next.candidate.campaignUse,

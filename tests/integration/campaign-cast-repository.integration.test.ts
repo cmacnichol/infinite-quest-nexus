@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPostgresCampaignCastRepository, captureCastGenerationSnapshotWithClient } from "../../packages/database/src/campaign-cast-repository.js";
+import { createPostgresCampaignCastRepository, captureCastGenerationSnapshotWithClient, applyCastBatchWithClient } from "../../packages/database/src/campaign-cast-repository.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { exportCampaignCast, importCampaignCast } from "../../packages/database/src/campaign-cast-portability.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -425,5 +425,73 @@ integration("campaign cast PostgreSQL foundation", () => {
     await repo.applyBatch(scope, { boundary, idempotencyKey: "refresh", commands: [{ kind: "observe", characterId: observedId, field: "state.location", value: "harbor", mode: "fact", speakerCharacterId: null, evidence: later, supersedesObservationId: null }] });
     expect((await repo.rebuild(scope)).characters.find((c) => c.id === observedId)?.profile).toEqual({ "state.location": "harbor" });
     expect((await repo.loadSnapshot(scope, { turnNumber: 1, timelineRevision: 0 })).characters.map((c) => c.id)).not.toContain(editedId);
+  });
+  it("locates attributed facts through a scoped mention while rejecting mention-only and corrected text", async () => {
+    for (const narration of ["Mara waits.", "Mara has blue eyes."]) {
+      const f = await fixture();
+      await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.evidence.turnId, narration]);
+      const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+      const id = (await repo.create(f.scope, { expectedCastRevision: 0, expectedBoundary: f.boundary, idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: {} })).character.id;
+      const source = { ...f.evidence, quote: "Mara", sourceHash: sha256(narration) };
+      await repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: randomUUID(), commands: [{ kind: "mention", characterId: id, kindOfMention: "lexical", evidence: source, sourceRange: { turnId: source.turnId, narrationRevision: 0, sourceHash: source.sourceHash, paragraphId: "p1", start: 0, end: 4 } }] });
+      const detail = await repo.detail(f.scope, id), request = { expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: detail.boundary };
+      const context = await repo.draftPreviewContext!(f.scope, id, request);
+      expect(context.evidence).toHaveLength(narration.includes("blue") ? 1 : 0);
+      if (context.evidence.length) {
+        expect(context.evidence[0]?.quote).toBe(narration);
+        await pool.query(`INSERT INTO turn_narration_corrections(owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,source,created_by_user_id) VALUES($1,$2,$3,1,'Mara leaves.',$4,'user_edit',$1)`, [ownerUserId, f.scope.campaignId, source.turnId, source.sourceHash]);
+        await expect(repo.edit(f.scope, id, { ...request, idempotencyKey: randomUUID(), setOverrides: { "appearance.description": "blue eyes" }, draftEvidenceFences: [{ path: "appearance.description", value: "blue eyes", evidence: context.evidence }] })).rejects.toMatchObject({ code: "cast_draft_evidence_changed" });
+      }
+    }
+  });
+  it("removes detached mention evidence from previews and invalidates an existing fence", async () => {
+    const f = await fixture(), narration = "Mara has blue eyes.";
+    await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.evidence.turnId, narration]);
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const id = (await repo.create(f.scope, { expectedCastRevision: 0, expectedBoundary: f.boundary, idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: {} })).character.id;
+    const source = { ...f.evidence, quote: "Mara", sourceHash: sha256(narration) };
+    const range = { turnId: source.turnId, narrationRevision: 0, sourceHash: source.sourceHash, paragraphId: "p1", start: 0, end: 4 };
+    const attachment = await withTransaction(pool, client => applyCastBatchWithClient(client, f.scope, { boundary: f.boundary, idempotencyKey: randomUUID(), commands: [{ kind: "mention", characterId: id, evidence: source }] }, { attachment: { characterId: id, basis: "unique_name", sourceRanges: [range] } }));
+    const detail = await repo.detail(f.scope, id), request = { expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: detail.boundary };
+    const preview = await repo.draftPreviewContext!(f.scope, id, request);
+    expect(preview.evidence).toHaveLength(1);
+    await repo.detachAttachment(f.scope, id, attachment.eventId, { ...request, idempotencyKey: randomUUID() });
+    await expect(repo.edit(f.scope, id, { ...request, idempotencyKey: randomUUID(), setOverrides: { "appearance.description": "blue eyes" }, draftEvidenceFences: [{ path: "appearance.description", value: "blue eyes", evidence: preview.evidence }] })).rejects.toMatchObject({ code: "cast_draft_evidence_changed" });
+    const current = await repo.detail(f.scope, id);
+    const after = await repo.draftPreviewContext!(f.scope, id, { expectedCastRevision: current.revision, expectedCharacterRevision: current.character.revision, expectedBoundary: current.boundary });
+    expect(after.evidence).toEqual([]);
+  });
+  it("rejects stale draft evidence atomically on both save paths", async () => {
+    for (const [seeded, stale] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+      const f = await fixture(), narration = seeded ? "Mara has blue eyes." : "Mara is kind.";
+      await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.evidence.turnId, narration]);
+      const evidence = { ...f.evidence, sourceHash: sha256(narration), quote: narration };
+      const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+      let id: string;
+      if (seeded) {
+        await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [f.worldVersionId, JSON.stringify({ world: { title: "Fixture" }, playableCharacters: [{ id: "mara", name: "Mara", campaignUse: "supporting", characterText: "", profile: {} }] })]);
+        const preview = await repo.fromWorldPreview!(f.scope, { characterId: "mara" });
+        const result = await repo.fromWorld!(f.scope, { characterId: "mara", expectedWorldVersionId: f.worldVersionId, previewFingerprint: preview.previewFingerprint, expectedCastRevision: preview.castRevision, expectedBoundary: preview.boundary, idempotencyKey: randomUUID() });
+        id = result.character.id;
+      } else {
+        id = (await repo.create(f.scope, { expectedCastRevision: 0, expectedBoundary: f.boundary, idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: {} })).character.id;
+      }
+      await repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: randomUUID(), commands: [{ kind: "observe", characterId: id, field: seeded ? "appearance.description" : "story.role", value: seeded ? "blue eyes" : "kind", mode: "fact", speakerCharacterId: null, evidence, supersedesObservationId: null }] });
+      const detail = await repo.detail(f.scope, id);
+      const request = { expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: detail.boundary };
+      const context = await repo.draftPreviewContext!(f.scope, id, request);
+      expect(context.evidence).toHaveLength(1);
+      const path = seeded ? "appearance.eyes" : "story.personality", value = seeded ? "blue eyes" : "kind";
+      if (stale) await pool.query(`INSERT INTO turn_narration_corrections(owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,source,created_by_user_id) VALUES($1,$2,$3,1,'Mara leaves.',$4,'user_edit',$1)`, [ownerUserId, f.scope.campaignId, evidence.turnId, evidence.sourceHash]);
+      const before = await pool.query("SELECT count(*)::int AS count FROM campaign_cast_events WHERE campaign_id=$1", [f.scope.campaignId]);
+      const write = { ...request, idempotencyKey: randomUUID(), draftEvidenceFences: [{ path, value, evidence: context.evidence }] };
+      const save = seeded ? repo.editAuthoredProfile!(f.scope, id, { ...write, set: { "appearance.eyes": value } }) : repo.edit(f.scope, id, { ...write, setOverrides: { "story.personality": value } });
+      if (stale) {
+        await expect(save).rejects.toMatchObject({ code: "cast_draft_evidence_changed" });
+        expect((await pool.query("SELECT count(*)::int AS count FROM campaign_cast_events WHERE campaign_id=$1", [f.scope.campaignId])).rows).toEqual(before.rows);
+      } else {
+        await expect(save).resolves.toMatchObject({ character: { id } });
+      }
+    }
   });
 });

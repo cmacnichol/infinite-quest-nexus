@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import Fastify from "fastify";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
@@ -10,6 +10,8 @@ import { registerCampaignCastRoutes } from "../../services/api/src/campaign-cast
 import { buildServer } from "../../services/api/src/server.js";
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
 import { inertStorageServerOptions } from "../helpers/build-server-options.js";
+import { sha256 } from "../../packages/domain/src/text.js";
+import { createApiCampaignCastApplication } from "../../services/runtime/src/campaign-cast-composition.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 integration("campaign cast editing API", () => {
@@ -32,6 +34,49 @@ integration("campaign cast editing API", () => {
     const write = { expectedCastRevision: 0, expectedBoundary: { turnNumber: 0, timelineRevision: 0 }, idempotencyKey: randomUUID() };
     return { app, base, campaignId, version, write };
   }
+  it("maps corrected draft evidence to 409 without applying edits", async () => {
+    const { app, base, campaignId, write } = await fixture();
+    try {
+      const created = (await app.inject({ method: "POST", url: base, payload: { ...write, name: "Mara", aliases: [], profile: {} } })).json();
+      const turnId = randomUUID(), narration = "Mara is kind.", sourceHash = sha256(narration);
+      await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [campaignId]);
+      await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,1,$4)", [turnId, ownerUserId, campaignId, narration]);
+      const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+      await repo.applyBatch({ ownerUserId, campaignId }, { boundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: randomUUID(), commands: [{ kind: "observe", characterId: created.character.id, field: "story.role", value: "kind", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId, turnNumber: 1, narrationRevision: 0, sourceHash, paragraphId: "p1", quote: narration } }] });
+      const detail = (await app.inject({ method: "GET", url: `${base}/${created.character.id}` })).json();
+      const request = { expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: detail.boundary };
+      const context = await repo.draftPreviewContext!({ ownerUserId, campaignId }, created.character.id, request);
+      await pool.query(`INSERT INTO turn_narration_corrections(owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,source,created_by_user_id) VALUES($1,$2,$3,1,'Mara leaves.',$4,'user_edit',$1)`, [ownerUserId, campaignId, turnId, sourceHash]);
+      const response = await app.inject({ method: "PATCH", url: `${base}/${created.character.id}`, payload: { ...request, idempotencyKey: randomUUID(), setOverrides: { "story.personality": "kind" }, draftEvidenceFences: [{ path: "story.personality", value: "kind", evidence: context.evidence }] } });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().code).toBe("cast_draft_evidence_changed");
+      expect((await repo.detail({ ownerUserId, campaignId }, created.character.id)).character.profile["story.personality"]).toBeUndefined();
+    } finally { await app.close(); }
+  });
+  it("composes the draft route with the selected campaign provider without writing observations", async () => {
+    const { app: original, base, campaignId, write } = await fixture();
+    const created = (await original.inject({ method: "POST", url: base, payload: { ...write, name: "Mara", aliases: [], profile: {} } })).json();
+    await original.close();
+    const narration = "Mara is kind.", turnId = randomUUID(), sourceHash = sha256(narration), scope = { ownerUserId, campaignId };
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [campaignId]);
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,1,$4)", [turnId, ownerUserId, campaignId, narration]);
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const receipt = await repo.applyBatch(scope, { boundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: randomUUID(), commands: [{ kind: "observe", characterId: created.character.id, field: "story.role", value: "kind", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId, turnNumber: 1, narrationRevision: 0, sourceHash, paragraphId: "p1", quote: narration } }] });
+    const execute = vi.fn().mockResolvedValue({ content: JSON.stringify({ proposals: [{ path: "story.personality", value: "kind", evidenceIds: receipt.observationIds }] }), responseId: "r", finishReason: "stop", outputLimited: false, modelInstanceId: "m", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCost: null, rawMetadata: {} });
+    const providers = { resolution: { resolveDirect: vi.fn().mockResolvedValue({ status: "resolved", providerProfileId: randomUUID(), model: "m" }) }, execution: { text: vi.fn().mockResolvedValue({ execute, model: "m" }) } };
+    const app = Fastify();
+    await app.register(registerCampaignCastRoutes, { application: createApiCampaignCastApplication(pool, { castEditingEnabled: true }, providers as never), enabled: true, resolveOwner: async () => ({ ownerUserId }) });
+    try {
+      const detail = (await app.inject({ method: "GET", url: `${base}/${created.character.id}` })).json();
+      expect(detail.draftFromStoryEligible).toBe(true);
+      const before = await pool.query("SELECT count(*)::int AS count FROM campaign_cast_events WHERE campaign_id=$1", [campaignId]);
+      const response = await app.inject({ method: "POST", url: `${base}/${created.character.id}/draft-preview`, payload: { expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: detail.boundary } });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().proposals).toMatchObject([{ path: "story.personality", value: "kind", draftEvidenceFence: { path: "story.personality", value: "kind" } }]);
+      expect(execute).toHaveBeenCalledOnce();
+      expect((await pool.query("SELECT count(*)::int AS count FROM campaign_cast_events WHERE campaign_id=$1", [campaignId])).rows).toEqual(before.rows);
+    } finally { await app.close(); }
+  });
   it("chooses one narrator state from installation capability, enrollment and discovery", async () => {
     const { app, campaignId } = await fixture();
     try {

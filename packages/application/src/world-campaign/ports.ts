@@ -36,6 +36,8 @@ import type {
   CharacterProfileView,
   DashboardSource,
   DashboardView,
+  CastSuggestionPreviewRequest,
+  CastSuggestionPreviewResponse,
   GeneratedPlayableCharacterView,
   GeneratedWorldPreviewView,
   PlayableCharacterSummaryItemView,
@@ -160,6 +162,7 @@ export interface SessionProfileRepositoryPort {
 /** Temporary 14c -> 14d text-generation collaborator; transport and model selection stay outside application. */
 export interface WorldGenerationCollaboratorPort {
   generateWorldPreview(scope: OwnerScope, request: WorldGenerationPreviewRequest): Promise<GeneratedWorldPreviewView>;
+  suggestCastPreview(scope: OwnerScope, request: CastSuggestionPreviewRequest): Promise<Readonly<{ seeds: ReadonlyArray<Readonly<CastSuggestionPreviewResponse["seeds"][number]>> }>>;
   generatePlayableCharacterPreview(scope: OwnerScope, request: PlayableCharacterGenerationPreviewRequest): Promise<GeneratedPlayableCharacterView>;
   generatePlayableCharacter(scope: WorldScope, request: PlayableCharacterGenerationRequest): Promise<GeneratedPlayableCharacterView>;
 }
@@ -257,6 +260,7 @@ export interface WorldCampaignApplication {
   getSessionProfile(scope: OwnerScope): Promise<SessionProfileView>;
   updateSessionProfile(scope: OwnerScope, request: UserProfileUpdate): Promise<SessionProfileView>;
   generateWorldPreview(scope: OwnerScope, request: WorldGenerationPreviewRequest): Promise<GeneratedWorldPreviewView>;
+  suggestCastPreview(scope: OwnerScope, request: CastSuggestionPreviewRequest): Promise<Readonly<{ seeds: ReadonlyArray<Readonly<CastSuggestionPreviewResponse["seeds"][number]>> }>>;
   generatePlayableCharacterPreview(scope: OwnerScope, request: PlayableCharacterGenerationPreviewRequest): Promise<GeneratedPlayableCharacterView>;
   generatePlayableCharacter(scope: WorldScope, request: PlayableCharacterGenerationRequest): Promise<GeneratedPlayableCharacterView>;
   createWorldGenerationProgress(scope: WorldGenerationProgressScope): Promise<void>;

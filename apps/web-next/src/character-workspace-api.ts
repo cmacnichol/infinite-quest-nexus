@@ -40,6 +40,7 @@ export class CharacterWorkspaceApiError extends Error {
 }
 
 export interface CharacterGenerationPreviewRequest {
+  campaignUse?: "playable" | "supporting" | "both";
   content: EditableWorldDraft;
   prompt: string;
   characterId?: string;
@@ -86,6 +87,7 @@ export async function generateCharacterPreview(request: CharacterGenerationPrevi
   try {
     const result = await client().worlds.generateCharacterPreview({
       content, prompt: request.prompt,
+      ...(request.campaignUse === "supporting" ? { campaignUse: request.campaignUse } : {}),
       ...(request.characterId === undefined ? {} : { characterId: request.characterId }),
       ...(request.progressKey === undefined ? {} : { progressKey: request.progressKey })
     }, signal);

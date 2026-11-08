@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { castDiscoveryCharacterHints, castDiscoveryWorldIdentities } from "../../packages/domain/src/campaign-cast-world-identities.js";
 
 describe("pinned world discovery identities", () => {
+  it("folds linked entities into the roster identity and retires unretained entity names", () => {
+    const result = castDiscoveryWorldIdentities({ entities: [{ id: "npc", kind: "npc", name: "Old", linkedCharacterId: "roster" }],
+      playableCharacters: [{ id: "roster", name: "New", profile: { identity: { aliases: ["Kept"] } } }] });
+    expect(result).toEqual([{ entityId: "npc", equivalentEntityIds: ["roster"], name: "New", aliases: ["Kept"], identityHints: [] }]);
+  });
+
   it("excludes unsafe names and aliases instead of restoring raw rejected identity text", () => {
     const result = castDiscoveryWorldIdentities({ entities: [{ id: "mara", kind: "npc", name: "Mara", aliases: ["Watcher", "DC 20"] },
       { id: "mechanics", kind: "npc", name: "DC 20" }], playableCharacters: [{ id: "bad", name: "DC 20", characterText: "hello" }] });

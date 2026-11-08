@@ -1,6 +1,8 @@
 import { createActivityApi, type ActivityApi } from "./activity-api.js";
 import { ApiContractError } from "@infinite-quest/client-core";
 import {
+  castSuggestionPreviewRequestSchema,
+  castSuggestionPreviewResponseSchema,
   worldGenerationProgressResponseSchema,
   playableCharacterGenerationPreviewRequestSchema,
   playableCharacterGenerationPreviewResponseSchema,
@@ -45,6 +47,8 @@ import {
   acceptedTurnCorrectionViewSchema
 } from "@infinite-quest/contracts";
 import type {
+  CastSuggestionPreviewRequest,
+  CastSuggestionPreviewResponse,
   WorldGenerationProgressResponse,
   PlayableCharacterGenerationPreviewRequest,
   PlayableCharacterGenerationPreviewResponse,
@@ -92,6 +96,7 @@ import { createIllustrationApi } from "./illustration-api.js";
 import type { IllustrationApi } from "./illustration-api.js";
 
 export interface WorldApi {
+  suggestCastPreview(request: CastSuggestionPreviewRequest, signal?: AbortSignal): Promise<CastSuggestionPreviewResponse>;
   generateCharacterPreview(request: PlayableCharacterGenerationPreviewRequest, signal?: AbortSignal): Promise<PlayableCharacterGenerationPreviewResponse>;
   loadCharacterGenerationProgress(progressKey: string, signal?: AbortSignal): Promise<WorldGenerationProgressResponse>;
   organizeCharacter(worldId: string, request: CharacterProfileOrganizationRequest, signal?: AbortSignal): Promise<CharacterProfileOrganizationResult>;
@@ -193,6 +198,11 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
   const illustrations = createIllustrationApi(http);
 
   const worlds: WorldApi = {
+    async suggestCastPreview(request, signal) {
+      const path = "/worlds/playable-characters/suggest-cast-preview";
+      const body = validatedRequest(castSuggestionPreviewRequestSchema, request, "POST", path);
+      return http.request(withSignal({ method: "POST", path, body: { kind: "json", value: body }, responseSchema: castSuggestionPreviewResponseSchema }, signal));
+    },
     async generateCharacterPreview(request, signal) {
       const path = "/worlds/playable-characters/generate-preview";
       const body = validatedRequest(playableCharacterGenerationPreviewRequestSchema, request, "POST", path);

@@ -6244,6 +6244,10 @@ async function init() {
     await reconcileCampaignStartup(campaignId);
     const character = new URLSearchParams(window.location.search).get("character");
     if (character && state.campaignId === campaignId) await castPanel?.open(character, $("btnOpenCast"));
+    const turn = Number(new URLSearchParams(window.location.search).get("turn"));
+    if (!character && Number.isSafeInteger(turn) && turn > 0 && state.campaignId === campaignId) {
+      await ensureCompleteTurnHistory(); navigateToTurn(turn);
+    }
   } else {
     await checkOnboarding();
     updateStatusBar();

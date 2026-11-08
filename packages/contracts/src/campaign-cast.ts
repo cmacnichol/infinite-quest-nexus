@@ -139,12 +139,30 @@ export const castWriteBase = {
   expectedCastRevision: ordinal, expectedBoundary: castBoundarySchema,
   idempotencyKey: z.string().min(1).max(200)
 };
+export const castDraftEvidenceSchema = z.object({ evidenceId: z.uuid(), characterId: z.uuid(), turnId: z.uuid(), turnNumber: ordinal,
+  narrationRevision: ordinal, sourceHash: z.string().regex(/^[a-f0-9]{64}$/u), paragraphId: name,
+  start: ordinal, end: ordinal, quote: z.string().min(1).max(1000) }).strict().refine(item => item.end > item.start);
+export const castDraftEvidenceFenceSchema = z.object({ path: z.string().min(1).max(200), value: z.string().min(1).max(20_000),
+  evidence: z.array(castDraftEvidenceSchema).min(1).max(40) }).strict();
+export const castDraftEvidenceFencesSchema = z.array(castDraftEvidenceFenceSchema).max(30).refine(fences =>
+  fences.reduce((sum, fence) => sum + fence.evidence.length, 0) <= 40
+  && fences.reduce((sum, fence) => sum + fence.evidence.reduce((total, item) => total + item.quote.length, 0), 0) <= 24_000,
+  "Draft evidence exceeds the citation limit.");
+export const castDraftPreviewRequestSchema = z.object({ expectedCastRevision: ordinal, expectedBoundary: castBoundarySchema,
+  expectedCharacterRevision: ordinal, direction: z.string().max(2000).optional() }).strict();
+export const castDraftPreviewResponseSchema = z.object({ boundary: castBoundarySchema, characterRevision: ordinal,
+  proposals: z.array(z.object({ path: z.string().min(1).max(200), value: z.string().min(1).max(20_000), evidenceIds: z.array(z.uuid()).max(40),
+    draftEvidenceFence: castDraftEvidenceFenceSchema.optional() }).strict()).max(30), evidence: z.array(castDraftEvidenceSchema).max(40),
+  omitted: z.array(z.object({ path: z.string().max(200), reason: z.string().max(100) }).strict()).max(30) }).strict();
+export type CastDraftEvidenceFence = z.infer<typeof castDraftEvidenceFenceSchema>;
+export type CastDraftPreviewRequest = z.infer<typeof castDraftPreviewRequestSchema>;
+export type CastDraftPreviewResponse = z.infer<typeof castDraftPreviewResponseSchema>;
 export const createCastCharacterSchema = z.object({ ...castWriteBase, name,
   aliases: z.array(name).max(20), profile: castOverrideProfileSchema }).strict();
 export const editCastCharacterSchema = z.object({ ...castWriteBase,
   expectedCharacterRevision: ordinal, name: name.optional(), aliases: z.array(name).max(20).optional(),
   setOverrides: castOverrideProfileSchema.optional(), clearOverrides: z.array(castFieldSchema).max(11).optional(),
-  pinned: z.boolean().optional(), ignored: z.boolean().optional()
+  pinned: z.boolean().optional(), ignored: z.boolean().optional(), draftEvidenceFences: castDraftEvidenceFencesSchema.optional()
 }).strict().refine((value) => !value.clearOverrides?.some((field) => Object.hasOwn(value.setOverrides ?? {}, field)),
   "Cannot set and clear the same override.").refine((value) => value.name !== undefined || value.aliases !== undefined
     || Object.keys(value.setOverrides ?? {}).length > 0 || (value.clearOverrides?.length ?? 0) > 0
@@ -160,7 +178,7 @@ export const castListQuerySchema = z.object({ limit: z.coerce.number().int().min
   expectedRevision: z.coerce.number().int().nonnegative().optional(),
   expectedTurnNumber: z.coerce.number().int().nonnegative().optional(),
   expectedTimelineRevision: z.coerce.number().int().nonnegative().optional() }).strict();
-export const castDetailSchema = castWriteResultSchema.extend({ observations: z.array(castObservationSchema),
+export const castDetailSchema = castWriteResultSchema.extend({ draftFromStoryEligible: z.boolean().optional(), observations: z.array(castObservationSchema),
   overrides: z.array(castOverrideSchema), autoMatches: z.array(castAttachmentSchema.extend({ turnNumber: ordinal, quote: z.string() })).default([]), identityEvents: z.array(z.object({
     eventId: z.uuid(), effectiveTurnNumber: ordinal, name, aliases: z.array(name).max(20), evidence: castEvidenceSchema
   }).strict()), authoredHistory: z.array(z.object({ eventId: z.uuid(), seedEventId: z.uuid(), effectiveTurnNumber: ordinal,

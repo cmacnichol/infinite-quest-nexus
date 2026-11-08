@@ -49,3 +49,9 @@ Goals, location, condition and current clothing update with the story. **Use dis
 When presets are enabled, **Add from world** shows eligible characters in the campaign’s pinned world version. Review the proposed changes before adding a new character or applying a profile to an existing one. A detached match can receive a fresh copy on the same cast record. The Sources and edit history section keeps earlier edits.
 
 Save and reset actions are available again after pending or recoverable generation is resolved. Keep the editor open to retain your draft.
+
+## Draft a character from story evidence
+
+Open a companion or supporting character and choose **Edit character**. When the character has an eligible citation and generation is idle, **Draft from story** can suggest details for blank fields. You can give the campaign text model a direction. Review each suggestion alongside its current value, quoted passage and turn link. **Creative guidance** identifies optional writing guidance without a factual citation.
+
+**Apply selected suggestions** fills the local draft. **Save character** records your selections as hand edits. If the cited narration changes before saving, the editor keeps your draft and asks you to review fresh evidence. You can also enter your own details directly.

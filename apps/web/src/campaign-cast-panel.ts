@@ -1,3 +1,4 @@
+import { createStoryDraftReview } from "./character-editor/story-draft.js";
 import { renderPresetFields } from "./character-editor/preset-fields.js";
 import { renderWorldCastPicker } from "./character-editor/world-cast-picker.js";
 import { castNarratorNotice, buildPresetRequest, changePresetField, createPresetDraft, presetField, presetFields, SUPPORTING_FIELDS, type PresetDraft } from "@infinite-quest/client-core";
@@ -17,7 +18,7 @@ export function mainProfileSourceLabel(profile: { inheritedFromSnapshot?: boolea
 }
 type List = Awaited<ReturnType<CampaignCastApi["list"]>>;
 export function createLegacyCastPanel(options: {
-  api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile"> & Partial<Pick<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile">>; campaignId(): string | null; generationActive(): boolean;
+  api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview"> & Partial<Pick<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview">>; campaignId(): string | null; generationActive(): boolean;
   campaignPage?: boolean;
   checkLock?(campaign: string): Promise<boolean>;
   getProfile?(campaign: string): Promise<CampaignCharacterProfile & { revision: number; inheritedFromSnapshot?: boolean; storedProfile?: unknown }>;
@@ -28,6 +29,7 @@ export function createLegacyCastPanel(options: {
   dialog.setAttribute("aria-labelledby", "cast-title"); document.body.append(dialog);
   let campaign = "", epoch = 0, editor: CastEditorState | null = null, list: List | null = null;
   let enabled = false, query = "", filter: CharacterFilter = "all", latest: CastDetail | null = null, returnFocus: HTMLElement | null = null;
+  const storyReview = createStoryDraftReview();
   let preset: PresetDraft | null = null;
   let lockedByServer = false, editingForm = false, saving = false;
   let lockCheck = 0;
@@ -72,7 +74,7 @@ export function createLegacyCastPanel(options: {
     result.addEventListener("click", action); return result;
   }
   function closePanel() {
-    epoch++; clearInterval(lockPoll); preset = null; editor = null; workspace.close(); operationKeys.clear(); dialog.close(); returnFocus?.focus();
+    storyReview.reset(); epoch++; clearInterval(lockPoll); preset = null; editor = null; workspace.close(); operationKeys.clear(); dialog.close(); returnFocus?.focus();
   }
   function requestNavigation(action: () => void) {
     if (saving || editor?.saving || dialog.querySelector("[data-cast-confirm]")) return;
@@ -108,6 +110,7 @@ export function createLegacyCastPanel(options: {
   }
   const current = (token: number) => token === epoch && campaign === options.campaignId();
   async function loadRoster(cursor?: string, notice?: string) {
+    storyReview.reset();
     const token = ++epoch; preset = null; editor = null; latest = null; latestRoster = null; rosterVisible = true;
     shell("Characters"); status("Loading characters…");
     try {
@@ -339,7 +342,7 @@ export function createLegacyCastPanel(options: {
   }
   async function openDetail(id: string) {
     if (dirty() || editor?.saving || saving) { requestNavigation(() => { void openDetail(id); }); return; }
-    rosterVisible = false; workspace.select(id);
+    storyReview.reset(); rosterVisible = false; workspace.select(id);
     const token = ++epoch; shell("Character"); status("Loading character…");
     try {
       const [detail] = await Promise.all([options.api.detail(campaign, id), syncLock()]);
@@ -435,6 +438,50 @@ export function createLegacyCastPanel(options: {
     }
     renderEvidence();
   }
+  function renderStoryDraft(form: HTMLElement, readonly: boolean) {
+    const detail = editor?.loaded, api = options.api.draftPreview;
+    if (!detail || detail.character.origin.kind === "protagonist") return;
+    const state = preset;
+    const availableFields = state ? presetFields : SUPPORTING_FIELDS;
+    const value = (path: string) => {
+      if (!availableFields.some(field => field.path === path)) return undefined;
+      const current = state ? state.draft.values[path] : editor?.draft.profile[path as CastField];
+      return Array.isArray(current) ? current.join("\n") : current ?? "";
+    };
+    storyReview.render(form, {
+      eligible: Boolean(api && detail.draftFromStoryEligible), locked: readonly || Boolean(editor?.conflict),
+      value, label: path => availableFields.find(field => field.path === path)?.label ?? path,
+      fetch: async direction => {
+        const token = epoch, activeCampaign = campaign;
+        if (!await syncLock() || !current(token)) throw new Error("Character editing is unavailable");
+        if (editor?.error === staleEvidenceMessage) {
+          const fresh = await options.api.detail(activeCampaign, detail.character.id);
+          if (!current(token) || !editor) throw new Error("Character selection changed");
+          if (fresh.revision !== detail.revision || fresh.character.revision !== detail.character.revision ||
+            fresh.boundary.turnNumber !== detail.boundary.turnNumber || fresh.boundary.timelineRevision !== detail.boundary.timelineRevision) {
+            latest = fresh;
+            editor = failCastSubmission(editor, "The campaign changed. Compare the latest values below, reapply your edits, then run Draft from story again.", true);
+            throw new Error("Review the latest character before retrying");
+          }
+        }
+        return api!(campaign, detail.character.id, { expectedCastRevision: detail.revision, expectedBoundary: detail.boundary,
+          expectedCharacterRevision: detail.character.revision, ...(direction ? { direction } : {}) });
+      },
+      apply: (path, text) => {
+        if (state) changePresetField(state, path, text);
+        else editor = setCastEditorField(editor!, path as CastField, text);
+      },
+      turn: turn => requestNavigation(() => { closePanel(); void options.navigateToTurn(turn); }), refresh: renderEditor
+    });
+  }
+  function collectedFences() {
+    return storyReview.fences().filter(fence => preset ? preset.changes.has(fence.path) && preset.draft.values[fence.path] === fence.value && !preset.actions.has(fence.path)
+      : editor?.setOverrides[fence.path as CastField] === fence.value);
+  }
+  function staleEvidence(error: unknown) {
+    return (error as { domainCode?: string })?.domainCode === "cast_draft_evidence_changed";
+  }
+  const staleEvidenceMessage = "The cited story evidence changed. Your draft is kept. Run Draft from story again to review fresh evidence.";
   function renderPresetEditor(state: PresetDraft) {
     const expanded = new Map([...dialog.querySelectorAll<HTMLDetailsElement>("[data-cast-group]")].map(group => [group.dataset.castGroup!, group.open]));
     const focusId = (document.activeElement as HTMLElement | null)?.id;
@@ -466,6 +513,7 @@ export function createLegacyCastPanel(options: {
         }, !sameSeed || readonly), button("Discard draft and load latest", () => { preset = null; editor = null; void openDetail(state.detail.character.id); }));
       }
     }
+    renderStoryDraft(form, readonly);
     changed(); form.append(save, button("Cancel", () => requestNavigation(() => void loadRoster()), saving));
     form.onsubmit = event => { event.preventDefault(); void saveDraft(); }; dialog.append(form);
     if (!options.campaignPage) renderEvidence();
@@ -555,13 +603,14 @@ export function createLegacyCastPanel(options: {
         for (const [field, label] of fields) comparison.append(node("p", `${label}: ${latest.character.profile[field] ?? "Unknown"}`));
         comparison.className = "cast-comparison"; form.append(node("h3", "Latest saved character"), comparison);
         form.append(button("Reapply my changes", () => { editor = reapplyCastDraft(editor!, latest!); latest = null; renderEditor(); }, !enabled));
-        form.append(button("Discard draft and load latest", () => { editor = createCastEditor(latest!, latest!); latest = null; renderEditor(); }));
+        form.append(button("Discard draft and load latest", () => { storyReview.reset(); editor = createCastEditor(latest!, latest!); latest = null; renderEditor(); }));
       }
       if (latestRoster && !editor.characterId) {
         form.append(node("p", `Latest cast: ${latestRoster.characters.map((person) => person.name).join(", ") || "empty"}. Your new character has not been saved.`));
         form.append(button("Reapply my changes", () => { editor = reapplyNewCastDraft(editor!, latestRoster!); latestRoster = null; renderEditor(); }, !enabled));
       }
     }
+    renderStoryDraft(form, Boolean(locked));
     syncSave(); if (!protagonist && enabled) form.append(save);
     form.append(button("Cancel", () => requestNavigation(() => { void loadRoster(); }), editor.saving));
     form.addEventListener("submit", (event) => { event.preventDefault(); void saveDraft(); }); dialog.append(form);
@@ -618,6 +667,8 @@ export function createLegacyCastPanel(options: {
         if (!options.api.editAuthoredProfile) throw new Error("Character editing is unavailable.");
         if (dialog.querySelector("form")?.reportValidity() === false) { saving = false; return; }
         const payload = buildPresetRequest(state, crypto.randomUUID());
+        const fences = collectedFences();
+        if (fences.length) payload.draftEvidenceFences = fences;
         payload.idempotencyKey = operationKey("authored", { ...payload, idempotencyKey: null, characterId: state.detail.character.id });
         renderEditor();
         const result = await options.api.editAuthoredProfile(campaign, state.detail.character.id, payload);
@@ -627,6 +678,7 @@ export function createLegacyCastPanel(options: {
         if (afterSave) afterSave(); else await openDetail(result.character.id);
       } catch (error) {
         saving = false; if (!current(authority) || !editor) return;
+        if (staleEvidence(error)) { editor = failCastSubmission(editor, staleEvidenceMessage, false); renderEditor(); return; }
         const issue = error as { statusCode?: number; details?: { fields?: { path: string }[] } };
         editor = failCastSubmission(editor, issue.statusCode === 409 ? "The campaign or character changed. Compare the latest version to reapply your draft." : message(error), issue.statusCode === 409); renderEditor();
         const rawPath = issue.details?.fields?.[0]?.path;
@@ -643,7 +695,8 @@ export function createLegacyCastPanel(options: {
     const token = epoch;
     try {
       editor = prepareCastSubmission(editor, crypto.randomUUID()); renderEditor();
-      const result = editor.characterId ? await options.api.edit(campaign, editor.characterId, editor.submission as EditCastCharacter)
+      const fences = collectedFences();
+      const result = editor.characterId ? await options.api.edit(campaign, editor.characterId, { ...editor.submission as EditCastCharacter, ...(fences.length ? { draftEvidenceFences: fences } : {}) })
         : await options.api.create(campaign, editor.submission as CreateCastCharacter);
       if (!current(token)) return;
       editor = null; if (afterSave) { afterSave(); return; }
@@ -651,6 +704,7 @@ export function createLegacyCastPanel(options: {
       const heading = dialog.querySelector<HTMLElement>("#cast-title"); if (heading) { heading.tabIndex = -1; heading.focus(); }
     } catch (error) {
       if (!current(token) || !editor) return;
+      if (staleEvidence(error)) { editor = failCastSubmission(editor, staleEvidenceMessage, false); renderEditor(); return; }
       const code = (error as { statusCode?: number }).statusCode;
       editor = failCastSubmission(editor, code === 409 ? "The character or campaign changed, or generation is active. Your draft is kept. Compare the latest version before reapplying." : message(error), code === 409);
       if (code === 503) enabled = false;

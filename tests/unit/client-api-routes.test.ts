@@ -1639,6 +1639,21 @@ describe("client API route contracts without PostgreSQL", () => {
     }
   });
 
+  it("validates cast suggestion requests and binds them to the server owner", async () => {
+    const calls: unknown[] = [];
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), worldCampaign: testWorldCampaignApplication({
+      suggestCastPreview: async (scope, request) => { calls.push({ scope, request }); return { seeds: [{ seedId: "11111111-1111-4111-8111-111111111111", name: "Iris", role: "Guide", concept: "A scout" }] }; }
+    }) }));
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/v1/worlds/playable-characters/suggest-cast-preview", payload: { content: WORLD_CONTENT, count: 3 } });
+      expect(response.statusCode).toBe(200);
+      expect(calls).toEqual([expect.objectContaining({ scope: { ownerUserId: OWNER_ID }, request: expect.objectContaining({ count: 3 }) })]);
+      const invalid = await app.inject({ method: "POST", url: "/api/v1/worlds/playable-characters/suggest-cast-preview", payload: { content: WORLD_CONTENT, count: 9 } });
+      expect(invalid.statusCode).toBe(400);
+      expect(calls).toHaveLength(1);
+    } finally { await app.close(); }
+  });
+
   it("binds character preview generation to the server owner and forwards only the parsed progress key", async () => {
     const calls: Array<{ scope: Record<string, string>; request: Record<string, unknown> }> = [];
     const app = await buildServer(serverOptions({

@@ -34,8 +34,8 @@ export type CanonicalProviderRequest = Readonly<
 
 /** Review, story, and repair share the configured output allowance.
  * The effective limit is serialized into the hash-bound request, including preset routes. */
-export function effectiveRequestOutputTokens(configured: number, _request: Pick<ProviderRequest, "budgetOutput">): number {
-  return configured;
+export function effectiveRequestOutputTokens(configured: number, request: Pick<ProviderRequest, "budgetOutput" | "maxOutputTokens">): number {
+  return request.maxOutputTokens === undefined ? configured : Math.min(configured, Math.max(1, Math.floor(request.maxOutputTokens)));
 }
 
 /** Task 5 supplies this text-free audit after measuring the serialized request. */
@@ -506,6 +506,7 @@ export function serializeLegacyProviderRequest(
   request: ProviderRequest,
   options: ProviderRequestSerializationOptions = {}
 ): PreparedProviderRequest {
+  profile = { ...profile, maxOutputTokens: effectiveRequestOutputTokens(profile.maxOutputTokens, request) };
   const rejectedResponse = String(request.rejectedResponse || "").trim()
     .slice(0, Math.max(4_000, Math.min(80_000, profile.maxOutputTokens * 4)));
   if (profile.providerType === "lmstudio") {

@@ -271,7 +271,7 @@ test("replacement cast recovers a new character draft after a revision conflict"
   expect(api.characters.filter(person => person.name === "New guide")).toHaveLength(1);
 });
 
-async function fixture(page: Page, deferredDetails = false, conflictFixture = false, presetFixture = false, applyFixture = false, seededFixture = false, deepLink = false) {
+async function fixture(page: Page, deferredDetails = false, conflictFixture = false, presetFixture = false, applyFixture = false, seededFixture = false, deepLink = false, eligible = false) {
   let stalePreset = presetFixture;
   let liveLock = false;
   let revision = 0, enabled = true, conflict = false, trackingComplete = false, trackingUnavailable = false, pendingMatch = true;
@@ -358,7 +358,7 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
       }
       if (id) {
         const person = characters.find((c) => c.id === id);
-        if (conflictFixture && id === candidateId) return send(route, { character: person, revision, boundary, capabilities: { castEditing: enabled }, observations: ["guide", "guard"].map((value, index) => ({ id: index ? "77777777-7777-4777-8777-777777777778" : "77777777-7777-4777-8777-777777777777", characterId: id, field: "story.role", value, mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: turn.id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: turn.narration } })), overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null });
+        if (conflictFixture && id === candidateId) return send(route, { character: person, draftFromStoryEligible: eligible, revision, boundary, capabilities: { castEditing: enabled }, observations: ["guide", "guard"].map((value, index) => ({ id: index ? "77777777-7777-4777-8777-777777777778" : "77777777-7777-4777-8777-777777777777", characterId: id, field: "story.role", value, mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: turn.id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: turn.narration } })), overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null });
         return send(route, { character: person, revision, boundary, capabilities: { castEditing: enabled }, observations: id === protagonistId ? [] : [{
           id: "77777777-7777-4777-8777-777777777777", characterId: id, field: "story.role", value: "gatekeeper", mode: "claim",
           speakerCharacterId: protagonistId, supersedesObservationId: null,
@@ -397,7 +397,7 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
   await page.route(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/story/${campaignId}*`, (route) => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/story/${campaignId}${deepLink ? `?character=${candidateId}` : ""}`);
   await expect(page.locator("#storyTitle")).toHaveText("Cast fixture");
-  return { characters, writes, profileWrites, setLock: (value: boolean) => { liveLock = value; }, conflict: () => { conflict = true; }, disable: () => { enabled = false; },
+  return { characters, writes, profileWrites, advanceRevision: () => { revision++; }, setLock: (value: boolean) => { liveLock = value; }, conflict: () => { conflict = true; }, disable: () => { enabled = false; },
     publishDiscovery: () => {
       revision++; trackingComplete = true; pendingMatch = false;
       let person = characters.find((character) => character.origin.kind === "discovered");
@@ -1064,4 +1064,77 @@ test("world profile conflict preserves and reapplies the draft", async ({ page }
   await expect(dialog.locator("#cast-story-role")).toHaveValue("Navigator");
   await dialog.locator("#cast-save").click();
   expect(api.writes.at(-1).set["story.role"]).toBe("Navigator");
+});
+
+for (const seeded of [false, true]) test(`Story reviews fenced facts in the ${seeded ? "preset" : "supporting"} editor`, async ({ page }) => {
+  if (!seeded) await page.setViewportSize({ width: 390, height: 844 });
+  const api = await fixture(page, false, true, false, false, seeded, true, true);
+  const quote = "Mara was raised at the lighthouse.", path = "story.background", value = "raised at the lighthouse";
+  const span = { evidenceId: worldId, characterId: candidateId, turnId: versionId, turnNumber: 1, narrationRevision: 0,
+    sourceHash: "a".repeat(64), paragraphId: "p1", start: 0, end: quote.length, quote };
+  const fence = { path, value, evidence: [span] };
+  let previews = 0, rejected = false;
+  await page.route("**/draft-preview", async route => {
+    previews++;
+    expect(route.request().postDataJSON()).toMatchObject({ expectedCastRevision: !seeded && rejected ? 1 : 0, expectedCharacterRevision: 0, direction: "Early years" });
+    await route.fulfill({ json: { boundary: { turnNumber: 1, timelineRevision: 0 }, characterRevision: 0,
+      proposals: [{ path, value, evidenceIds: [span.evidenceId], draftEvidenceFence: fence },
+        ...(seeded ? [{ path: "story.otherGuidance", value: "Let the tide set the mood.", evidenceIds: [] }] : [])],
+      evidence: [span], omitted: [{ path: "story.role", reason: "already_observed" }] } });
+  });
+  await page.route(seeded ? "**/authored-profile" : `**/cast/${candidateId}`, async route => {
+    if (route.request().method() === "GET" || rejected) return route.fallback();
+    expect(route.request().postDataJSON().draftEvidenceFences).toEqual([fence]); rejected = true;
+    if (!seeded) api.advanceRevision();
+    return route.fulfill({ status: 409, json: { code: "cast_draft_evidence_changed", message: "Evidence changed" } });
+  });
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
+  const direction = dialog.getByLabel("Direction (optional)"); await direction.fill("Early years");
+  const draft = dialog.getByRole("button", { name: "Draft from story", exact: true });
+  api.setLock(true); await expect(draft).toBeDisabled({ timeout: 8000 });
+  api.setLock(false); await expect(draft).toBeEnabled({ timeout: 8000 }); await draft.click();
+  await expect(dialog.getByText(quote, { exact: true })).toBeVisible(); await expect(dialog.getByRole("button", { name: "Turn 1", exact: true }).first()).toBeVisible();
+  await expect(dialog.getByText("Current: Blank", { exact: true }).first()).toBeVisible();
+  if (seeded) await expect(dialog.getByText("Creative guidance: Let the tide set the mood.")).toBeVisible();
+  await dialog.getByRole("button", { name: "Apply selected suggestions" }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `docs/review/assets/unified-character-editor-phase-5/story-draft-${seeded ? "preset" : "supporting"}.png` });
+  await dialog.getByRole("button", { name: "Apply selected suggestions" }).click(); expect(api.writes).toEqual([]);
+  await expect(dialog.locator("#cast-story-background")).toHaveValue(value);
+  await dialog.locator("#cast-save").click(); await expect(dialog).toContainText("Run Draft from story again");
+  await expect(dialog.locator("#cast-story-background")).toHaveValue(value); await draft.click();
+  if (!seeded) {
+    await expect(dialog).toContainText("Compare the latest values below");
+    await dialog.getByRole("button", { name: "Reapply my changes" }).click();
+    await draft.click();
+  }
+  await dialog.getByRole("button", { name: "Apply selected suggestions" }).click();
+  await dialog.locator("#cast-save").click();
+  await expect.poll(() => api.writes.length).toBe(1);
+  expect(api.writes[0].draftEvidenceFences).toEqual([fence]); expect(previews).toBe(2);
+  if (seeded) expect(api.writes[0].set["story.otherGuidance"]).toBe("Let the tide set the mood.");
+});
+
+for (const eligible of [false, true]) test(`Story keeps manual editing available with ${eligible ? "an offline provider" : "no eligible evidence"}`, async ({ page }) => {
+  const api = await fixture(page, false, true, false, false, false, true, eligible);
+  let previews = 0;
+  await page.route("**/draft-preview", route => {
+    previews++; return route.fulfill({ status: 503, json: { code: "cast_discovery_unavailable" } });
+  });
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
+  const field = dialog.locator("#cast-story-background");
+  const disclosure = field.locator("xpath=ancestor::details[1]");
+  if (!await field.isVisible()) await disclosure.locator("summary").click();
+  await field.fill("Written by hand");
+  const draft = dialog.getByRole("button", { name: "Draft from story", exact: true });
+  if (eligible) {
+    await draft.click(); await expect(dialog).toContainText("Check the campaign text provider");
+  } else {
+    await expect(draft).toBeDisabled(); await expect(dialog).toContainText("An eligible story citation is required");
+  }
+  await expect(field).toHaveValue("Written by hand"); expect(api.writes).toEqual([]);
+  await dialog.locator("#cast-save").click();
+  await expect.poll(() => api.writes.length).toBe(1); expect(api.writes[0].draftEvidenceFences).toBeUndefined();
+  expect(previews).toBe(Number(eligible));
 });

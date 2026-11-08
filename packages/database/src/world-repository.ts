@@ -32,6 +32,7 @@ import {
   WORLD_CONTENT_SCHEMA_VERSION,
   worldImportRequestSchema,
   worldContentSchema,
+  validateWorldCharacterLinks,
   type WorldContent
 } from "../../contracts/src/world-library.js";
 import { normalizeCampaignTrackers } from "../../domain/src/campaign-trackers.js";
@@ -117,7 +118,7 @@ function contentWithTitle(content: WorldContent, title: string): WorldContent {
 
 /** Public writes must reject stale or tampered source support before persistence. */
 function validatedWorldContentWithTitle(content: WorldContent, title: string): WorldContent {
-  return validateWorldSourceMaterialForContent(contentWithTitle(content, title));
+  return validateWorldCharacterLinks(validateWorldSourceMaterialForContent(contentWithTitle(content, title)));
 }
 
 const SENSITIVE_WORLD_KEYS = new Set([

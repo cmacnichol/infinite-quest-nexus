@@ -1,7 +1,7 @@
 import { createReviewSource } from "./character-review-source.js";
 import type { CastCharacter, CastCandidateList } from "@infinite-quest/contracts";
 import { buildReviewQueue, type ReviewItem, type CampaignCastApi } from "@infinite-quest/client-web";
-export function renderCastReview(options: { document: Document; container: HTMLElement; api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile"> & Partial<Pick<CampaignCastApi, "sourceTurn">>; campaign: string; current(): boolean; editing(): boolean; navigate(turn: number): void; back(): void; key(operation: string, value: unknown): string; clearKeys(): void; autoMatch?: boolean | null; initialItem?: string }) {
+export function renderCastReview(options: { document: Document; container: HTMLElement; api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview"> & Partial<Pick<CampaignCastApi, "sourceTurn">>; campaign: string; current(): boolean; editing(): boolean; navigate(turn: number): void; back(): void; key(operation: string, value: unknown): string; clearKeys(): void; autoMatch?: boolean | null; initialItem?: string }) {
   const { document, container, api, campaign } = options;
   const drafts = new Map<string, string>();
   const skipped = new Set<string>(); let busy = false; let epoch = 0; let prioritizeCharacter: string | null = null; let initialItem = options.initialItem; let cached: { matches: CastCandidateList; details: CastCandidateList; targets: CastCharacter[] } | null = null;

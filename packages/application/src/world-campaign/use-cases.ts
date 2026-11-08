@@ -223,6 +223,7 @@ export function createWorldCampaignApplication(
     getSessionProfile: (scope) => read(scope, (database) => dependencies.sessionProfile.getSessionProfile(database, scope)),
     updateSessionProfile: (scope, request) => transition(scope, (database) => dependencies.sessionProfile.updateSessionProfile(database, scope, request)),
     generateWorldPreview: (scope, request) => collaborate(scope, () => dependencies.worldGeneration.generateWorldPreview(scope, request)),
+    suggestCastPreview: (scope, request) => collaborate(scope, () => dependencies.worldGeneration.suggestCastPreview(scope, request)),
     generatePlayableCharacterPreview: (scope, request) => collaborate(scope, () => dependencies.worldGeneration.generatePlayableCharacterPreview(scope, request)),
     generatePlayableCharacter: (scope, request) => collaborate(scope, () => dependencies.worldGeneration.generatePlayableCharacter(scope, request)),
     createWorldGenerationProgress: (scope) => transition(scope, (database) => dependencies.progress.createWorldGenerationProgress(database, scope)),

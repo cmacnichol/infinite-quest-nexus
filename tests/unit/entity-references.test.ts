@@ -11,9 +11,32 @@ import {
 } from "../../packages/domain/src/entity-references.js";
 
 describe("scoped entity references", () => {
+  it("uses the linked roster name and retained aliases while preserving the entity endpoint", () => {
+    const worldContent = { entities: [{ id: "npc-1", kind: "npc", name: "Old name", linkedCharacterId: "roster-1" }],
+      playableCharacters: [{ id: "roster-1", name: "New name", profile: { identity: { aliases: ["Kept name"] } } }] };
+    const catalog = buildScopedEntityCatalog({ worldContent });
+    expect(findEntityReferences("Old name", catalog)).toEqual([]);
+    expect(resolveEntityMetadata("Kept name", catalog).entityIds).toEqual(["world:npc-1", "world:roster-1"]);
+    expect(findEntityReferences("New name", catalog)).toHaveLength(1);
+  });
+
   const supporting = (id: string, name: string, aliases: string[] = []): CastCharacter => ({
     id, name, aliases, origin: { kind: "discovered" }, profile: {}, pinned: false, ignored: false,
     revision: 1, firstObservedTurn: 1, lastObservedTurn: 1
+  });
+  it("folds entity and roster origins into one pinned campaign occurrence and keeps aliases ambiguous across people", () => {
+    const version = "11111111-1111-4111-8111-111111111111";
+    const worldContent = { entities: [{ id: "entity", kind: "npc", name: "Old", linkedCharacterId: "roster" },
+      { id: "other", kind: "npc", name: "Other", alias: "Shared" }],
+      playableCharacters: [{ id: "roster", name: "New", profile: { identity: { aliases: ["Shared"] } } }] };
+    const first = { ...supporting("88888888-8888-4888-8888-888888888888", "Edited"), origin: { kind: "world" as const, worldVersionId: version, entityId: "entity" } };
+    const second = { ...supporting("99999999-9999-4999-8999-999999999999", "New"), origin: { kind: "world" as const, worldVersionId: version, entityId: "roster" } };
+    const catalog = buildScopedEntityCatalog({ worldContent, worldVersionId: version, campaignCharacters: [first, second] });
+    expect(findEntityReferences("Shared", catalog)).toEqual([]);
+    expect(resolveEntityMetadata("Edited", catalog).entityIds).toEqual([`campaign:${first.id}`, "world:entity", "world:roster", `campaign:${second.id}`]);
+    expect(findEntityReferences("Old", catalog)).toEqual([]);
+    const copied = buildScopedEntityCatalog({ worldContent, worldVersionId: version, campaignCharacters: [first, second] });
+    expect(resolveEntityMetadata("Edited", copied)).toEqual(resolveEntityMetadata("Edited", catalog));
   });
   it("promotes admitted characters from heuristic names to stable campaign IDs", () => {
     const person = supporting("88888888-8888-4888-8888-888888888888", "Mara", ["The Watcher"]);

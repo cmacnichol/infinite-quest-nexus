@@ -134,6 +134,8 @@ describe("cast discovery evidence boundary", () => {
     const wire = JSON.parse(buildCastDiscoveryInput({ source: source(), knownCharacters: [person], worldCharacters, identityHints, worldVersionId: version }));
     expect(wire.knownCharacters[0].identityHints).toEqual(["blue eyes"]);
     expect(wire.worldCharacters).toEqual([]);
+    const linkedWorld = [{ ...worldCharacters[0]!, entityId: "old-entity", equivalentEntityIds: ["mara"] }];
+    expect(JSON.parse(buildCastDiscoveryInput({ source: source(), knownCharacters: [person], worldCharacters: linkedWorld, worldVersionId: version })).worldCharacters).toEqual([]);
     expect(JSON.parse(buildCastDiscoveryInput({ source: source(), knownCharacters: [person], worldCharacters })).worldCharacters).toHaveLength(1);
     const manual = { ...person, origin: { kind: "manual" as const } };
     const seedActivations = [{ characterId: manual.id, seedEventId: "66666666-6666-4666-8666-666666666666", worldVersionId: version, entityId: "mara" }];
@@ -299,5 +301,28 @@ describe("cast discovery evidence boundary", () => {
     const invalid = candidate({ identityEvidence: [{ paragraphId: "missing", quote: "invented" }] });
     const result = validateCastDiscovery({ source: source(), output: { version: 1, characters: [invalid, { ...invalid, localKey: "duplicate" }] }, knownCharacters: [] });
     expect(result.unresolved).toEqual([]); expect(result.rejected.map((item) => item.code)).toEqual(["quote_not_in_source", "quote_not_in_source"]);
+  });
+});
+
+describe("draft story factual support", () => {
+  it("requires extractive attributed factual evidence and rejects unsafe contexts", async () => {
+    const { supportsCastDraftFact } = await import("../../packages/domain/src/campaign-cast-discovery.js");
+    const check = (paragraph: string, quote = paragraph, value = "blue eyes") => supportsCastDraftFact({ paragraph, quote, names: ["Mara"], field: "appearance.description", value });
+    expect(check("Mara has blue eyes.")).toBe(true);
+    expect(check("Tomas has blue eyes. Mara watches.")).toBe(false);
+    expect(check("Mara does not have blue eyes.")).toBe(false);
+    expect(check('"Mara has blue eyes," Tomas said.')).toBe(false);
+    expect(check("Mara watches.")).toBe(false);
+    expect(check("Mara has blue eyes.", "Mara has green eyes.")).toBe(false);
+    expect(check("Mara has blue eyes. <think>private reasoning</think>")).toBe(false);
+    expect(check("If Mara was a guide, she would know.", undefined, "guide")).toBe(false);
+    expect(supportsCastDraftFact({ paragraph: "Mara has blue eyes. Iven has long hair.", quote: "Mara has blue eyes. Iven has long hair.", names: ["Mara"], field: "appearance.hair", value: "blue" })).toBe(false);
+    expect(supportsCastDraftFact({ paragraph: "Mara has blue eyes and Iven has long hair.", quote: "Mara has blue eyes and Iven has long hair.", names: ["Mara"], field: "appearance.hair", value: "blue" })).toBe(false);
+  });
+  it("finds an attributed fact but not a bare mention or conditional", async () => {
+    const { extractCastDraftFactSpan } = await import("../../packages/domain/src/campaign-cast-discovery.js");
+    expect(extractCastDraftFactSpan("Mara has blue eyes.", ["Mara"])).toMatchObject({ quote: "Mara has blue eyes.", start: 0, end: 19 });
+    expect(extractCastDraftFactSpan("Mara waits.", ["Mara"])).toBeNull();
+    expect(extractCastDraftFactSpan("If Mara was a guide, she would know.", ["Mara"])).toBeNull();
   });
 });

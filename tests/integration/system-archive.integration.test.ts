@@ -605,7 +605,14 @@ integration("deterministic owner-wide System Archive export", () => {
     const restartId = randomUUID();
     await pool.query(`INSERT INTO local_settings_restart_operations(id,revision,expected_active_revision,expected_epoch,status)
       VALUES($1,1,NULL,0,'failed')`, [restartId]);
+    const originalConversionWorld = (await pool.query<{ content: Record<string, unknown> }>("SELECT content FROM world_versions WHERE id=$1", [worldVersionId])).rows[0]!.content;
+    const conversionWorld = structuredClone(originalConversionWorld);
+    conversionWorld.playableCharacters = [...(conversionWorld.playableCharacters as unknown[]), { id: "roundtrip-character", name: "New Name", characterText: "Guide", campaignUse: "supporting", startingCastDefault: false,
+      alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: { type: "world-entity", entityId: "roundtrip-entity" } }];
+    conversionWorld.entities = [{ id: "roundtrip-entity", name: "Old Name", kind: "npc", description: "Guide", tags: [], facts: [], linkedCharacterId: "roundtrip-character" }];
+    await pool.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1", [worldVersionId, JSON.stringify(conversionWorld)]);
     const exported = await exportArchive();
+    await pool.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1", [worldVersionId, JSON.stringify(originalConversionWorld)]);
     const { serialized } = await archiveText(exported.bytes);
     for (const marker of [installationId, policyDigest, tokenDigest, restartId, actor.cliReference, "archive-settings-attempt-marker", "archive-settings-process-marker", "workerGenerationConcurrency"]) {
       expect(serialized).not.toContain(marker);
@@ -1039,6 +1046,27 @@ integration("deterministic owner-wide System Archive export", () => {
       await expect(pool.query("SELECT input, reviewed_content, apply_receipt FROM authoring_jobs WHERE id=$1", [job.rows[0]!.id])).resolves.toEqual(source);
     } finally {
       await pool.query("DELETE FROM authoring_jobs WHERE id=$1", [job.rows[0]!.id]);
+    }
+  });
+
+  it("exports typed conversion links and provenance from stored world authority", async () => {
+    const original = await pool.query<{ content: Record<string, unknown> }>("SELECT content FROM world_versions WHERE id=$1", [worldVersionId]);
+    const content = structuredClone(original.rows[0]!.content);
+    const characters = [{ id: "converted-character", name: "New", characterText: "Lore", campaignUse: "supporting", startingCastDefault: false,
+      alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: { type: "world-entity", entityId: "converted-npc", private: "omit" } }];
+    content.playableCharacters = characters;
+    content.entities = [{ id: "converted-npc", name: "Old", kind: "npc", description: "Lore", tags: [], facts: [], linkedCharacterId: characters[0]!.id }];
+    await pool.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1", [worldVersionId, JSON.stringify(content)]);
+    try {
+      const exported = await exportArchive();
+      const { zip } = await archiveText(exported.bytes);
+      const records = (await Promise.all(Object.values(zip.files).filter((entry) => entry.name.startsWith("records/world-versions/") && !entry.dir)
+        .map((entry) => entry.async("string")))).flatMap((entry) => entry.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)));
+      const saved = records.find((entry) => entry.sourceId === worldVersionId).record.content;
+      expect(saved.playableCharacters[0].source).toEqual({ type: "world-entity", entityId: "converted-npc" });
+      expect(saved.entities[0].linkedCharacterId).toBe(characters[0]!.id);
+    } finally {
+      await pool.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1", [worldVersionId, JSON.stringify(original.rows[0]!.content)]);
     }
   });
 
@@ -2954,6 +2982,7 @@ integration("deterministic owner-wide System Archive export", () => {
       campaignUse: "both",
       startingCastDefault: false,
       alwaysInContext: true,
+      source: { type: "world-entity", entityId: "original-entity" },
       profile: restoredSnapshot.profile,
       rpgStats: restoredSnapshot.rpgStats,
       defaultTriggers: restoredSnapshot.defaultTriggers,
@@ -3037,7 +3066,7 @@ integration("deterministic owner-wide System Archive export", () => {
           content: {
             schemaVersion: 1,
             world: { title: "Restored World", genre: "Fantasy", tone: "Hopeful", premise: "Return.", backgroundStory: "", firstAction: "Begin.", rules: "" },
-            playableCharacters: [restoredWorldCharacter], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [],
+            playableCharacters: [restoredWorldCharacter], entities: [{ id: "original-entity", name: "Old name", kind: "npc", description: "Lore", tags: [], facts: [], linkedCharacterId: restoredSnapshot.id }], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [],
             defaults: { selectedCharacterId: restoredSnapshot.id, initialLocation: "" },
           },
           contentFingerprint: null, releaseNotes: "", createdFromRevision: null, publishedAt: "2026-08-25T12:00:00.000Z",
@@ -3388,7 +3417,9 @@ integration("deterministic owner-wide System Archive export", () => {
       legacy_settings: { turnControlStyle: "flexible_action" },
     }] });
     const restoredWorld = await pool.query<{ content: { playableCharacters: unknown[] } }>("SELECT content FROM world_versions WHERE id=$1", [versionId]);
-    expect(restoredWorld.rows[0]!.content.playableCharacters[0]).toMatchObject({ campaignUse: "both", startingCastDefault: false, alwaysInContext: true });
+    expect(restoredWorld.rows[0]!.content.playableCharacters[0]).toMatchObject({ campaignUse: "both", startingCastDefault: false, alwaysInContext: true,
+      source: { type: "world-entity", entityId: "original-entity" } });
+    expect(restoredWorld.rows[0]!.content).toMatchObject({ entities: [{ id: "original-entity", linkedCharacterId: restoredSnapshot.id }] });
     await expect(pool.query(
       `SELECT campaign.selected_character_id,campaign.character_snapshot,
               campaign.character_profile,campaign.character_profile_revision,
@@ -4917,6 +4948,9 @@ integration("deterministic owner-wide System Archive export", () => {
           "SELECT count(*)::text AS count FROM worlds WHERE owner_user_id=$1",
           [ownerUserId],
         )).resolves.toMatchObject({ rows: [{ count: "1" }] });
+        const converted = await pool.query<{ content: { playableCharacters: unknown[]; entities: unknown[] } }>("SELECT content FROM world_versions WHERE id=$1", [worldVersionId]);
+        expect(converted.rows[0]!.content.playableCharacters).toContainEqual(expect.objectContaining({ id: "roundtrip-character", source: { type: "world-entity", entityId: "roundtrip-entity" } }));
+        expect(converted.rows[0]!.content.entities[0]).toMatchObject({ id: "roundtrip-entity", linkedCharacterId: "roundtrip-character" });
         await expect(pool.query<{ enabled: boolean; health_status: string; encrypted_api_key: string | null }>(
           "SELECT enabled,health_status,encrypted_api_key FROM provider_profiles",
         )).resolves.toMatchObject({ rows: [{

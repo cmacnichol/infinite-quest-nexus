@@ -10,12 +10,14 @@ import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-p
 import { logger } from "../../../packages/logger/src/index.js";
 import { createCastBackfillRepository } from "../../../packages/database/src/campaign-cast-backfill-repository.js";
 import { createApiCastBackfillApplication } from "./campaign-cast-backfill-composition.js";
+import { createCastDraftPreview } from "./cast-draft-preview.js";
 
 export function createApiCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castPresetsEnabled" | "castEditingEnabled" | "castDiscoveryEnabled" | "castBackfillEnabled" | "castAutoMatchEnabled" | "castContextEnabled" | "storyMemoryCapability">,
-  providers?: Pick<ApiGenerationProviderCollaborators, "execution" | "resolution" | "prepareCastDiscoveryExecution">) {
+  providers?: Pick<ApiGenerationProviderCollaborators, "execution" | "resolution" | "prepareCastDiscoveryExecution" | "authoringTextPlans">) {
   const jobs = createCastDiscoveryJobRepository(pool, () => config.castEditingEnabled === true && config.castDiscoveryEnabled === true);
-  return createCampaignCastApplication(createPostgresCampaignCastRepository(pool, {
-    castPresetsEnabled: config.castPresetsEnabled === true, editingEnabled: config.castEditingEnabled === true, discoveryEnabled: config.castDiscoveryEnabled === true, backfillEnabled: config.castBackfillEnabled === true, castAutoMatchEnabled: config.castAutoMatchEnabled === true, castContextEnabled: config.castContextEnabled === true, storyMemoryCapability: config.storyMemoryCapability ?? null }), {
+  const repository = createPostgresCampaignCastRepository(pool, {
+    castPresetsEnabled: config.castPresetsEnabled === true, editingEnabled: config.castEditingEnabled === true, discoveryEnabled: config.castDiscoveryEnabled === true, backfillEnabled: config.castBackfillEnabled === true, castAutoMatchEnabled: config.castAutoMatchEnabled === true, castContextEnabled: config.castContextEnabled === true, storyMemoryCapability: config.storyMemoryCapability ?? null });
+  return createCampaignCastApplication(repository, {
     async retryFailed(scope, id, request) {
       try { return await jobs.retryFailed(scope, id, request); }
       catch (error) {
@@ -36,7 +38,7 @@ export function createApiCampaignCastApplication(pool: DatabasePool, config: Pic
       // Recheck all guards after metadata I/O, including races with corrections and other retries.
       return jobs.retryFailed(scope, id, request, execution);
     }
-  }, createApiCastBackfillApplication(pool, config, providers));
+  }, createApiCastBackfillApplication(pool, config, providers), createCastDraftPreview(pool, repository, providers));
 }
 
 export function createWorkerCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castPresetsEnabled" | "castDiscoveryEnabled" | "castBackfillEnabled" | "castAutoMatchEnabled" | "castContextEnabled" | "storyMemoryCapability">,

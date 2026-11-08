@@ -1,7 +1,7 @@
 import { editAuthoredCastProfileSchema, castFromWorldPreviewQuerySchema, castFromWorldSchema, type EditAuthoredCastProfile, type CastFromWorld, type CastFromWorldPreviewQuery, type CastFromWorldPreview } from "../../contracts/src/campaign-cast-authored.js";
 import { detachCastAttachmentSchema } from "../../contracts/src/campaign-cast.js";
 import { resolveCastContextGoal } from "../../domain/src/campaign-cast-context.js";
-import { buildCastDiscoverySource } from "../../domain/src/campaign-cast-discovery.js";
+import { buildCastDiscoverySource, supportsCastDraftFact, extractCastDraftFactSpan } from "../../domain/src/campaign-cast-discovery.js";
 import { castRangesOverlap, projectCastAttachments } from "../../domain/src/campaign-cast-attachments.js";
 import { randomUUID } from "node:crypto";
 import { refreshCastChronicleMetadata } from "./campaign-cast-chronicle-metadata.js";
@@ -12,9 +12,9 @@ import { createCastCandidateRepository } from "./campaign-cast-candidate-reposit
 import { z } from "zod";
 import {
   castBatchSchema, castBatchReceiptSchema, castBoundarySchema, castCharacterSchema,
-  castAuthoredPathSchema, castCommandSchema, castAttachmentSchema, castObservationSchema, castOriginSchema, castScopeSchema, castSnapshotSchema,
+  castAuthoredPathSchema, castFieldSchema, castCommandSchema, castAttachmentSchema, castObservationSchema, castOriginSchema, castScopeSchema, castSnapshotSchema,
   type CastBatch, type CastBatchReceipt, type CastBoundary, type CastCharacter, type CastCommand,
-  type CastDetail, type CastEvidence, type CastObservation, type CastOverride, type CastProfile, type CastScope, type CastSnapshot
+  type CastDetail, type CastEvidence, type CastObservation, type CastOverride, type CastProfile, type CastScope, type CastSnapshot, type CastDraftEvidenceFence
 } from "../../contracts/src/campaign-cast.js";
 import { createCastCharacterSchema, editCastCharacterSchema, type CreateCastCharacter, type EditCastCharacter, type CastWriteResult } from "../../contracts/src/campaign-cast.js";
 import { CampaignCastError, type CampaignCastRepositoryPort, type CampaignCastWritePort } from "../../application/src/campaign-cast/index.js";
@@ -264,6 +264,58 @@ async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Camp
   return (await snapshotProjection(client, scope, campaign, state, boundary)).snapshot;
 }
 
+async function collectDraftEvidence(client: DatabaseClient, scope: CastScope, boundary: CastBoundary, character: CastCharacter,
+  observations: CastObservation[]): Promise<import("../../contracts/src/campaign-cast.js").CastDraftPreviewResponse["evidence"]> {
+  const candidates = [...observations].reverse().filter(item => item.evidence.kind === "turn" && item.mode === "fact" && item.speakerCharacterId === null).slice(0, 40);
+  const events = (await client.query("SELECT id,effective_turn_number,payload,receipt,attachment FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND effective_turn_number <= $3 ORDER BY sequence DESC", [scope.campaignId, scope.ownerUserId, boundary.turnNumber])).rows.map(row => eventSchema.parse(row));
+  const attachments = projectCastAttachments([...events].reverse(), boundary.turnNumber);
+  const mentions: { eventId: string; evidence: Extract<CastEvidence, { kind: "turn" }>; range?: import("../../contracts/src/campaign-cast.js").CastSourceRange; allRanges?: import("../../contracts/src/campaign-cast.js").CastSourceRange[] }[] = [];
+  for (const event of events) {
+    if (attachments.detachedEventIds.has(event.id)) continue;
+    for (const { command } of event.payload) if (!event.attachment && command.kind === "mention" && command.characterId === character.id && command.evidence.kind === "turn" && !command.evidence.invalidated) {
+      if (command.sourceRange && attachments.detached.some(item => item.characterId === character.id && item.sourceRanges.some(range => castRangesOverlap(range, command.sourceRange!)))) continue;
+      mentions.push({ eventId: event.id, evidence: command.evidence, ...(command.sourceRange ? { range: command.sourceRange } : {}) });
+    }
+    const attachment = attachments.active.find(item => item.eventId === event.id && item.characterId === character.id);
+    if (attachment) for (const range of attachment.sourceRanges) mentions.push({ eventId: event.id, range, allRanges: attachment.sourceRanges,
+      evidence: { kind: "turn", turnId: range.turnId, turnNumber: event.effective_turn_number, narrationRevision: range.narrationRevision, sourceHash: range.sourceHash, paragraphId: range.paragraphId, quote: "" } });
+    if (mentions.length >= 40) break;
+  }
+  if (!candidates.length && !mentions.length) return [];
+  const ids = [...new Set([...candidates.flatMap(item => item.evidence.kind === "turn" ? [item.evidence.turnId] : []), ...mentions.flatMap(item => [item.evidence.turnId, ...(item.allRanges ?? []).map(range => range.turnId)])])];
+  const rows = (await client.query(`SELECT turn_id,turn_number,correction_revision,effective_narration FROM effective_turn_narrations
+    WHERE turn_id=ANY($1::uuid[]) AND campaign_id=$2 AND owner_user_id=$3`, [ids, scope.campaignId, scope.ownerUserId])).rows;
+  const byTurn = new Map(rows.map(row => [row.turn_id, row]));
+  const evidence: import("../../contracts/src/campaign-cast.js").CastDraftPreviewResponse["evidence"] = [];
+  let size = 0;
+  for (const observation of candidates) {
+    const e = observation.evidence;
+    if (e.kind !== "turn") continue;
+    const row = byTurn.get(e.turnId);
+    if (!row || row.turn_number !== e.turnNumber || row.correction_revision !== e.narrationRevision || sha256(row.effective_narration) !== e.sourceHash) continue;
+    const source = buildCastDiscoverySource({ scope, timelineRevision: boundary.timelineRevision, turnId: e.turnId, turnNumber: e.turnNumber, narrationRevision: e.narrationRevision, narration: row.effective_narration });
+    const paragraph = source.paragraphs.find(item => item.id === e.paragraphId)?.text;
+    if (!paragraph || !supportsCastDraftFact({ paragraph, quote: e.quote, names: [character.name, ...character.aliases], field: observation.field, value: observation.value })) continue;
+    const start = paragraph.indexOf(e.quote);
+    if (start < 0 || size + e.quote.length > 24000) continue;
+    evidence.push({ evidenceId: observation.id, characterId: character.id, turnId: e.turnId, turnNumber: e.turnNumber, narrationRevision: e.narrationRevision, sourceHash: e.sourceHash, paragraphId: e.paragraphId, start, end: start + e.quote.length, quote: e.quote });
+    size += e.quote.length;
+  }
+  for (const mention of mentions) {
+    const e = mention.evidence, row = byTurn.get(e.turnId);
+    if (mention.allRanges?.some(range => { const row = byTurn.get(range.turnId); return !row || row.turn_number > boundary.turnNumber || row.correction_revision !== range.narrationRevision || sha256(row.effective_narration) !== range.sourceHash; })) continue;
+    if (!row || row.turn_number > boundary.turnNumber || row.correction_revision !== e.narrationRevision || sha256(row.effective_narration) !== e.sourceHash) continue;
+    const source = buildCastDiscoverySource({ scope, timelineRevision: boundary.timelineRevision, turnId: e.turnId, turnNumber: row.turn_number, narrationRevision: e.narrationRevision, narration: row.effective_narration });
+    const paragraph = source.paragraphs.find(item => item.id === e.paragraphId)?.text;
+    if (!paragraph || (mention.range ? !paragraph.slice(mention.range.start, mention.range.end).trim() : !paragraph.includes(e.quote))) continue;
+    const span = extractCastDraftFactSpan(paragraph, [character.name, ...character.aliases]);
+    if (!span || span.quote.length > 1000 || size + span.quote.length > 24000 || evidence.some(item => item.evidenceId === mention.eventId)) continue;
+    evidence.push({ evidenceId: mention.eventId, characterId: character.id, turnId: e.turnId, turnNumber: row.turn_number, narrationRevision: e.narrationRevision, sourceHash: e.sourceHash, paragraphId: e.paragraphId, ...span });
+    size += span.quote.length;
+  }
+  return evidence.sort((a, b) => b.turnNumber - a.turnNumber).slice(0, 40);
+}
+
 /** Caller owns the transaction. Lock and read retained authority without initializing cast rows. */
 export async function captureCastGenerationSnapshotWithClient(client: DatabaseClient, rawScope: CastScope,
   options: { discoveryEnabled: boolean; boundary?: CastBoundary; turnNumber?: number; version?: "cast-context-v1" | "cast-context-v2" }): Promise<{ snapshot: CastGenerationSnapshot; fingerprint: string }> {
@@ -380,7 +432,7 @@ async function applyCommand(client: DatabaseClient, scope: CastScope, campaign: 
       if (command.origin.worldVersionId !== campaign.world_version_id) throw new Error("Invalid cast world origin.");
       const world = (await client.query("SELECT content FROM world_versions WHERE id=$1 AND owner_user_id=$2", [campaign.world_version_id, scope.ownerUserId])).rows[0]?.content;
       const entityId = command.origin.entityId;
-      if (!buildScopedEntityCatalog({ worldContent: world }).some((entity) => entity.id === `world:${entityId}`)
+      if (!buildScopedEntityCatalog({ worldContent: world }).some((entity) => entity.id === `world:${entityId}` || entity.equivalentIds?.includes(`world:${entityId}`))
         && !castDiscoveryWorldIdentities(world).some((person) => person.entityId === entityId)) throw new Error("World identity not found.");
     }
     const first = command.evidence?.kind === "turn" ? command.evidence.turnNumber : boundary.turnNumber;
@@ -539,6 +591,28 @@ export async function seedCampaignCastWithClient(client: DatabaseClient, rawScop
 }
 
 export function createPostgresCampaignCastRepository(pool: DatabasePool, options: { castPresetsEnabled?: boolean; editingEnabled?: boolean; discoveryEnabled?: boolean; backfillEnabled?: boolean; castAutoMatchEnabled?: boolean; castContextEnabled?: boolean; storyMemoryCapability?: "r1" | "r2" | "r3" | null } = {}): CampaignCastRepositoryPort & CampaignCastWritePort {
+  async function verifyDraftFences(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State, boundary: CastBoundary,
+    person: CastCharacter, fences: CastDraftEvidenceFence[] | undefined, edits: Record<string, unknown>): Promise<void> {
+    if (!fences?.length) return;
+    const fail = (): never => { throw new CampaignCastError("cast_draft_evidence_changed"); };
+    const projected = await snapshotProjection(client, scope, campaign, state, boundary);
+    const observations = projected.details.find(item => item.characterId === person.id)?.observations ?? [];
+    const eligible = await collectDraftEvidence(client, scope, boundary, person, observations);
+    if (new Set(fences.map(item => item.path)).size !== fences.length) fail();
+    for (const fence of fences) {
+      const allowed = person.campaignProfile ? castAuthoredPathSchema.safeParse(fence.path).success : castFieldSchema.safeParse(fence.path).success;
+      if (!allowed || edits[fence.path] !== fence.value || fence.path.startsWith("state.") || fence.path === "story.goals" || observations.some(item => item.field === fence.path)
+        || !person.campaignProfile && fence.value.length > 2000) fail();
+      try { validateCastFiction(fence.value); } catch { fail(); }
+      const [section, key] = fence.path.split(".");
+      const authored = key && person.campaignProfile ? (person.campaignProfile as any)[section!]?.[key] : undefined;
+      if ((person.profile as Record<string, string>)[fence.path]?.trim() || typeof authored === "string" && authored.trim()) fail();
+      for (const evidence of fence.evidence) {
+        const current = eligible.find(item => item.evidenceId === evidence.evidenceId);
+        if (!current || stableStringify(current) !== stableStringify(evidence) || !supportsCastDraftFact({ paragraph: current.quote, quote: current.quote, names: [person.name, ...person.aliases], field: fence.path, value: fence.value })) fail();
+      }
+    }
+  }
   async function write(rawScope: CastScope, characterId: string | null, raw: CreateCastCharacter | EditCastCharacter): Promise<CastWriteResult> {
     const scope = castScopeSchema.parse(rawScope);
     const request = characterId ? editCastCharacterSchema.parse(raw) : createCastCharacterSchema.parse(raw);
@@ -554,6 +628,12 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         if (!receipt.result) throw new CampaignCastError("cast_idempotency_conflict");
         return receipt.result;
       }
+      if (characterId && (request as EditCastCharacter).draftEvidenceFences?.length && (state.revision !== request.expectedCastRevision || state.timeline_revision !== request.expectedBoundary.timelineRevision || campaign.active_turn_number !== request.expectedBoundary.turnNumber)) {
+        const edit = request as EditCastCharacter, boundary = { turnNumber: campaign.active_turn_number, timelineRevision: state.timeline_revision };
+        const person = (await snapshot(client, scope, campaign, state, boundary)).characters.find(item => item.id === characterId);
+        if (!person) throw new CampaignCastError("cast_draft_evidence_changed");
+        await verifyDraftFences(client, scope, campaign, state, boundary, person, edit.draftEvidenceFences, edit.setOverrides ?? {});
+      }
       if (state.revision !== request.expectedCastRevision || state.timeline_revision !== request.expectedBoundary.timelineRevision
         || campaign.active_turn_number !== request.expectedBoundary.turnNumber) throw new CampaignCastError("cast_revision_conflict");
       const active = await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2
@@ -567,6 +647,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         const person = current.characters.find((person) => person.id === characterId);
         if (!person) throw new CampaignCastError("cast_not_found");
         if (person.origin.kind === "protagonist") throw new CampaignCastError("cast_protagonist_read_only");
+        await verifyDraftFences(client, scope, campaign, state, request.expectedBoundary, person, edit.draftEvidenceFences, edit.setOverrides ?? {});
         if (person.revision !== edit.expectedCharacterRevision) throw new CampaignCastError("cast_revision_conflict");
         if (person.originProfile) {
           const invalid = [...Object.keys(edit.setOverrides ?? {}), ...(edit.clearOverrides ?? [])].filter(field =>
@@ -607,6 +688,12 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         if (!receipt.result) throw new CampaignCastError("cast_idempotency_conflict");
         return receipt.result;
       }
+      if (request.draftEvidenceFences?.length && (state.revision !== request.expectedCastRevision || state.timeline_revision !== request.expectedBoundary.timelineRevision || campaign.active_turn_number !== request.expectedBoundary.turnNumber)) {
+        const boundary = { turnNumber: campaign.active_turn_number, timelineRevision: state.timeline_revision };
+        const person = (await snapshot(client, scope, campaign, state, boundary)).characters.find(item => item.id === id);
+        if (!person) throw new CampaignCastError("cast_draft_evidence_changed");
+        await verifyDraftFences(client, scope, campaign, state, boundary, person, request.draftEvidenceFences, { ...request.set, ...request.setOverrides });
+      }
       if (state.revision !== request.expectedCastRevision || state.timeline_revision !== request.expectedBoundary.timelineRevision
         || campaign.active_turn_number !== request.expectedBoundary.turnNumber) throw new CampaignCastError("cast_revision_conflict");
       if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2
@@ -614,6 +701,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
       const person = (await snapshot(client, scope, campaign, state, request.expectedBoundary)).characters.find((item) => item.id === id);
       if (!person) throw new CampaignCastError("cast_not_found");
       if (person.origin.kind === "protagonist") throw new CampaignCastError("cast_protagonist_read_only");
+      await verifyDraftFences(client, scope, campaign, state, request.expectedBoundary, person, request.draftEvidenceFences, { ...request.set, ...request.setOverrides });
       if (person.revision !== request.expectedCharacterRevision) throw new CampaignCastError("cast_revision_conflict");
       if (!person.originProfile || !person.campaignProfile) throw new CampaignCastError("cast_not_seeded");
       const allowed = ["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"];
@@ -738,6 +826,23 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
   }
   const statusCache = new Map<string, { fingerprint: string; value: Awaited<ReturnType<NonNullable<CampaignCastWritePort["workspaceRead"]>>> }>();
   return {
+    async draftPreviewContext(rawScope, rawId, request) {
+      const scope = castScopeSchema.parse(rawScope), id = z.uuid().parse(rawId);
+      return withTransaction(pool, async client => {
+        const campaign = await lockCampaign(client, scope), state = await readState(client, scope) ?? { revision: 0, timeline_revision: 0 };
+        if (!options.editingEnabled) throw new CampaignCastError("cast_editing_disabled");
+        if (state.revision !== request.expectedCastRevision || state.timeline_revision !== request.expectedBoundary.timelineRevision || campaign.active_turn_number !== request.expectedBoundary.turnNumber) throw new CampaignCastError("cast_revision_conflict");
+        if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`, [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
+        const projected = await snapshotProjection(client, scope, campaign, state, request.expectedBoundary);
+        const character = projected.snapshot.characters.find(item => item.id === id);
+        if (!character) throw new CampaignCastError("cast_not_found");
+        if (character.origin.kind === "protagonist") throw new CampaignCastError("cast_protagonist_read_only");
+        if (character.revision !== request.expectedCharacterRevision) throw new CampaignCastError("cast_revision_conflict");
+        const observations = projected.details.find(item => item.characterId === id)?.observations ?? [];
+        const evidence = await collectDraftEvidence(client, scope, request.expectedBoundary, character, observations);
+        return { character, boundary: request.expectedBoundary, evidence, observedPaths: [...new Set(observations.map(item => item.field))] };
+      });
+    },
     editAuthoredProfile, fromWorldPreview, fromWorld,
     async worldChoices(rawScope) {
       if (!options.castPresetsEnabled) throw new CampaignCastError("cast_presets_disabled");
@@ -942,6 +1047,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         if (!character) throw new CampaignCastError("cast_not_found");
         const projected = await snapshotProjection(client, scope, campaign, state, boundary);
         const observations = projected.details.find((item) => item.characterId === id)?.observations ?? [];
+        const draftFromStoryEligible = character.origin.kind !== "protagonist" && (await collectDraftEvidence(client, scope, boundary, character, observations)).length > 0;
         /* Retained events provide identity and attachment provenance. */
         const activeOverrides = projected.details.find(item => item.characterId === id)?.overrides ?? [];
         const identityEvents: CastDetail["identityEvents"] = [];
@@ -981,7 +1087,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
               set: command.set, reset: command.reset });
           }
         }
-        return { character, revision: value.revision, boundary, observations, overrides: activeOverrides, autoMatches, identityEvents, authoredHistory, unresolvedCandidateIds: [],
+        return { character, revision: value.revision, boundary, draftFromStoryEligible, observations, overrides: activeOverrides, autoMatches, identityEvents, authoredHistory, unresolvedCandidateIds: [],
           editorDestination: character.origin.kind === "protagonist" ? `/api/v1/campaigns/${scope.campaignId}/character-profile` : null };
       });
     },

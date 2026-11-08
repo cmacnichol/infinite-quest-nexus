@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { buildScopedEntityCatalog, findEntityReferences } from "../../packages/domain/src/entity-references.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -788,6 +789,53 @@ integration("World Library and campaign version integration", () => {
 
     await expect(deleteWorldVersion(pool, otherWorld.rows[0]!.id, otherVersion.rows[0]!.id, request))
       .rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("keeps linked identities and relationship endpoints in a campaign branch with cast context disabled", async () => {
+    const title = `Conversion branch ${crypto.randomUUID()}`;
+    const source = content(title, "One");
+    source.playableCharacters.push({ ...source.playableCharacters[0]!, id: "roster-npc", name: "New Name", campaignUse: "supporting", startingCastDefault: false,
+      profile: characterProfileSchema.parse({ identity: { aliases: ["Kept Alias"] } }), source: { type: "world-entity", entityId: "npc" } });
+    source.entities = [{ id: "npc", name: "Retired Name", kind: "npc", description: "A guide", linkedCharacterId: "roster-npc" },
+      { id: "place", name: "Harbor", kind: "location" }];
+    source.relationships = [{ id: "relation", fromEntityId: "npc", toEntityId: "place", kind: "guides", description: "Knows the harbor" }];
+    const created = await createWorld(pool, worldCreateSchema.parse({ title, content: source }));
+    const version = await publishWorld(pool, created.id, worldPublishSchema.parse({ expectedRevision: created.draftRevision, releaseNotes: "" }));
+    const ownerUserId = await initialOwnerId(pool);
+    const app = createApiWorldCampaignApplication(pool, { credentialSecret: "integration-test-credential-secret", castPresetsEnabled: true });
+    const campaign = await app.createCampaign({ ownerUserId }, campaignCreateSchema.parse({ title: "Conversion branch", worldVersionId: version.worldVersionId,
+      selectedCharacterId: source.playableCharacters[0]!.id, startingCast: [{ characterId: "roster-npc" }] }));
+    const branch = await branchCampaign(pool, campaign.id, { targetTurnNumber: 0, title: "Conversion branch copy" });
+    const cast = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+    const originalCast = await cast.current({ ownerUserId, campaignId: campaign.id });
+    const copiedCast = await cast.current({ ownerUserId, campaignId: branch.id });
+    expect(copiedCast.characters.map((person) => person.name)).toEqual(originalCast.characters.map((person) => person.name));
+    const copiedCatalog = buildScopedEntityCatalog({ worldContent: source, worldVersionId: version.worldVersionId, campaignCharacters: copiedCast.characters });
+    expect(findEntityReferences("Kept Alias", copiedCatalog)).toHaveLength(1);
+    expect(findEntityReferences("Retired Name", copiedCatalog)).toEqual([]);
+    const rows = await pool.query<{ content: typeof source }>(`SELECT wv.content FROM campaigns c JOIN world_versions wv ON wv.id=c.world_version_id WHERE c.id=ANY($1::uuid[]) ORDER BY c.id`, [[campaign.id, branch.id]]);
+    expect(rows.rows).toHaveLength(2);
+    for (const row of rows.rows) {
+      const catalog = buildScopedEntityCatalog({ worldContent: row.content });
+      expect(findEntityReferences("Kept Alias", catalog)).toMatchObject([{ id: "world:npc", equivalentIds: ["world:roster-npc"] }]);
+      expect(findEntityReferences("Retired Name", catalog)).toEqual([]);
+      expect(row.content.relationships).toMatchObject([{ fromEntityId: "npc", toEntityId: "place" }]);
+    }
+    const preview = await buildContextPreview(pool, branch.id, { budgetTokens: 8000, compression: "auto", recentTurns: 4, query: "Harbor" });
+    expect(JSON.stringify(preview.scopes.worldCanon)).toContain("Knows the harbor");
+  });
+
+  it("rejects dangling conversion links on save and publish", async () => {
+    const title = `Conversion ${crypto.randomUUID()}`;
+    const created = await createWorld(pool, worldCreateSchema.parse({ title }));
+    const invalid = content(title, "One");
+    invalid.entities = [{ id: "npc", kind: "npc", name: "Old", linkedCharacterId: "missing" }];
+    await expect(updateWorldDraft(pool, created.id, worldDraftUpdateSchema.parse({ expectedRevision: 1, content: invalid }))).rejects.toBeDefined();
+    expect((await getWorld(pool, created.id)).draftRevision).toBe(1);
+    await pool.query("UPDATE world_drafts SET content=$2::jsonb WHERE world_id=$1", [created.id, JSON.stringify(invalid)]);
+    await expect(publishWorld(pool, created.id, worldPublishSchema.parse({ expectedRevision: 1, releaseNotes: "" }))).rejects.toBeDefined();
+    const versions = await pool.query("SELECT id FROM world_versions WHERE world_id=$1", [created.id]);
+    expect(versions.rowCount).toBe(0);
   });
 
   it("rejects stale draft writes", async () => {

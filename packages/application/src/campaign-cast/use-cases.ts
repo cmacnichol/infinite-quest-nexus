@@ -13,8 +13,14 @@ import { castDiscoveryStatusSchema, castCandidateQuerySchema, castCandidateListS
 
 export function createCampaignCastApplication(repository: CampaignCastWritePort,
   discovery?: { retryFailed(scope: CastScope, id: string, request: RetryCastDiscovery): Promise<CastDiscoveryRetryResult> },
-  scans?: CastBackfillApplication) {
+  scans?: CastBackfillApplication,
+  draftPreview?: (scope: CastScope, id: string, request: import("@infinite-quest/contracts").CastDraftPreviewRequest) => Promise<import("@infinite-quest/contracts").CastDraftPreviewResponse>) {
   return {
+    async draftPreview(scope: CastScope, id: string, request: import("@infinite-quest/contracts").CastDraftPreviewRequest) {
+      const { castDraftPreviewRequestSchema, castDraftPreviewResponseSchema } = await import("@infinite-quest/contracts");
+      if (!draftPreview) throw new CampaignCastError("cast_discovery_unavailable");
+      return castDraftPreviewResponseSchema.parse(await draftPreview(castScopeSchema.parse(scope), id, castDraftPreviewRequestSchema.parse(request)));
+    },
     ...(scans ? { scans } : {}),
     async retryDiscovery(scope: CastScope, id: string, request: RetryCastDiscovery) {
       const parsedScope = castScopeSchema.parse(scope), parsedRequest = retryCastDiscoverySchema.parse(request);

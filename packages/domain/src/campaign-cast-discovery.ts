@@ -36,9 +36,10 @@ export function buildCastDiscoveryInput(input: {
     if (!fits()) knownCharacters.pop();
   }
   for (const person of (input.worldCharacters ?? []).filter(relevant).sort((a, b) => a.entityId.localeCompare(b.entityId))) {
-    if (input.worldVersionId && input.knownCharacters.some((known) => (known.origin.kind === "world" && known.origin.worldVersionId === input.worldVersionId && known.origin.entityId === person.entityId)
-      || (known.originProfile?.worldVersionId === input.worldVersionId && known.originProfile?.entityId === person.entityId)
-      || input.seedActivations?.some(seed => seed.characterId === known.id && seed.worldVersionId === input.worldVersionId && seed.entityId === person.entityId))) continue;
+    const occurrenceIds = [person.entityId, ...person.equivalentEntityIds ?? []];
+    if (input.worldVersionId && input.knownCharacters.some((known) => (known.origin.kind === "world" && known.origin.worldVersionId === input.worldVersionId && occurrenceIds.includes(known.origin.entityId))
+      || (known.originProfile && known.originProfile.worldVersionId === input.worldVersionId && occurrenceIds.includes(known.originProfile.entityId))
+      || input.seedActivations?.some(seed => seed.characterId === known.id && seed.worldVersionId === input.worldVersionId && occurrenceIds.includes(seed.entityId)))) continue;
     worldCharacters.push({ entityId: person.entityId, name: projectCastFictionText(person.name, 200) || "Unnamed character", aliases: person.aliases.map(alias => projectCastFictionText(alias, 200)).filter(Boolean).slice(0, 4),
       identityHints: (person.identityHints ?? []).map((hint) => safeHint(hint, 256)).filter(Boolean).slice(0, 4) });
     if (!fits()) worldCharacters.pop();
@@ -107,7 +108,7 @@ const fieldCues: Record<CastField, RegExp> = {
   "state.clothing": /\b(?:wears?|wore|wearing|clothes?|coat|cloak|shirt|dress|boots?|robe|armor|armour)\b/iu
 };
 const instructions = /\b(?:ignore (?:all |previous |prior )?instructions|system prompt|edit another campaign|override (?:the )?(?:system|developer))\b/iu;
-const prospective = /\b(?:hopes? to meet|plans? to meet|imagines?|imagined|hypothetical|if .{0,80}(?:arrives|exists))\b/iu;
+const prospective = /\b(?:hopes? to meet|plans? to meet|imagines?|imagined|hypothetical|if\b)\b/iu;
 const speech = /[“”"]|\b(?:says?|said|claims?|claimed|rumou?r|alleges?|believes?)\b/iu;
 /** Review can resolve attribution, but cannot turn unsafe or unsupported source into a fact. */
 export function canAcceptReviewedCastObservation(source: CastDiscoverySource, narration: string,
@@ -130,6 +131,42 @@ function directlyAttributes(text: string, names: string[], value: string) {
   // Paraphrases, pronoun resolution and more complex clauses stay reviewable.
   const predicates = "(?:has|had|is|was|wears|wore|wants|wanted|seeks|sought|speaks|spoke|looks|looked|works as|serves as|stands at|stood at|sits at|sat at|lives in|lived in|arrives at|arrived at)";
   return names.some((name) => new RegExp(`(?:^|[^\\p{L}\\p{N}])${escape(name)}\\s+${predicates}\\s+(?:(?:a|an|the)\\s+)?${escape(value)}(?:$|[^\\p{L}\\p{N}])`, "u").test(normalizeEntityTerm(text)));
+}
+
+/** Conservative extractive support for a draft; the enclosing paragraph supplies context. */
+export function supportsCastDraftFact(input: { paragraph: string; quote: string; names: string[]; field: string; value: string }): boolean {
+  const { paragraph, quote, names, field, value } = input;
+  const authoredCues: Record<string, RegExp> = {
+    "appearance.eyes": /\beyes?\b/iu, "appearance.hair": /\b(?:hair|braid|beard)\b/iu,
+    "appearance.face": /\b(?:face|scar)\b/iu, "appearance.skinOrComplexion": /\b(?:skin|complexion)\b/iu,
+    "appearance.build": /\b(?:build|tall|short|slender|stocky)\b/iu,
+    "appearance.clothing": /\b(?:wears?|wore|wearing|clothes?|coat|cloak|shirt|dress|boots?|robe|armor|armour)\b/iu
+  };
+  const cue = authoredCues[field] ?? fieldCues[field as CastField];
+  if (!value.trim() || !quote || !paragraph.includes(quote) || !contains(quote, value)
+    || projectCastFictionText(paragraph, paragraph.length + 1).replace(/\s+/gu, " ").trim() !== paragraph.replace(/\s+/gu, " ").trim()
+    || instructions.test(paragraph) || prospective.test(paragraph) || speech.test(paragraph)
+    || /\b(?:not|never|no longer|without|neither|isn't|wasn't|doesn't)\b/iu.test(paragraph)
+    || (field.startsWith("appearance.") && !cue?.test(value))
+    || !quote.split(/(?<=[.!?])\s+/u).some(sentence => !/(?:,|\b(?:and|but|while))\s+\p{Lu}[\p{L}\p{N}'’-]*\s+(?:has|had|is|was|wears|wore|wants|seeks)\b/u.test(sentence)
+      && cue?.test(sentence) && directlyAttributes(sentence, names, value))) return false;
+  try { validateCastFiction(value); return true; } catch { return false; }
+}
+
+/** Locate only a directly attributed extractive fact; a bare mention is not evidence. */
+export function extractCastDraftFactSpan(paragraph: string, names: string[]): { quote: string; start: number; end: number } | null {
+  const escaped = names.map(name => name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).filter(Boolean);
+  if (!escaped.length) return null;
+  const pattern = new RegExp(`(?:${escaped.join("|")})\\s+(?:has|had|is|was|wears|wore|wants|wanted|seeks|sought|speaks|spoke|looks|looked|works as|serves as|stands at|stood at|sits at|sat at|lives in|lived in|arrives at|arrived at)\\s+(?:(?:a|an|the)\\s+)?([^.!?\\n]+)`, "iu");
+  for (const match of paragraph.matchAll(/[^.!?\n]+[.!?]?/gu)) {
+    const quote = match[0].trim();
+    const found = pattern.exec(quote);
+    const value = found?.[1]?.trim();
+    if (!value || !Object.keys(fieldCues).some(field => supportsCastDraftFact({ paragraph, quote, names, field, value }))) continue;
+    const start = match.index! + match[0].indexOf(quote);
+    return { quote, start, end: start + quote.length };
+  }
+  return null;
 }
 
 function explicitlyLinksAlias(text: string, name: string, alias: string) {

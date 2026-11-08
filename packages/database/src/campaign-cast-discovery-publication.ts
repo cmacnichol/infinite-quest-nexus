@@ -42,8 +42,8 @@ export async function captureCastDiscoveryIdentities(client: DatabaseClient, sco
   const sameWorldVersions = new Set(scopedVersions.map(version => version.id));
   const represented = origins.filter(origin => sameWorldVersions.has(origin.worldVersionId));
   const allWorldCharacters = castDiscoveryWorldIdentities(world.content);
-  const worldCharacters = allWorldCharacters.filter(person => !represented.some(origin => origin.entityId === person.entityId));
-  const representedWorldCharacters = allWorldCharacters.flatMap(person => [...new Set(represented.filter(origin => origin.entityId === person.entityId).map(origin => origin.characterId))]
+  const worldCharacters = allWorldCharacters.filter(person => !represented.some(origin => [person.entityId, ...person.equivalentEntityIds ?? []].includes(origin.entityId)));
+  const representedWorldCharacters = allWorldCharacters.flatMap(person => [...new Set(represented.filter(origin => [person.entityId, ...person.equivalentEntityIds ?? []].includes(origin.entityId)).map(origin => origin.characterId))]
     .map(characterId => ({ ...person, characterId })));
   return castDiscoveryIdentitySnapshotSchema.parse({ revision: cast.revision, ...compactCastDiscoveryCharacters(cast.characters), worldVersionId: world.world_version_id, worldCharacters, representedWorldCharacters });
 }
@@ -73,9 +73,9 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
     paragraphId: sourceParagraphId(citation.paragraphId), quote: citation.quote });
   for (const candidate of first.accepted) {
     const { resolvedOrigin, identityBasis, ...proposal } = candidate;
-    const representedId = resolvedOrigin.kind === "world" ? captured.representedWorldCharacters?.find(person => person.entityId === resolvedOrigin.entityId)?.characterId : undefined;
+    const representedId = resolvedOrigin.kind === "world" ? captured.representedWorldCharacters?.find(person => [person.entityId, ...person.equivalentEntityIds ?? []].includes(resolvedOrigin.entityId))?.characterId : undefined;
     if (resolvedOrigin.kind === "world" && captured.worldVersionId !== pinned.world_version_id) {
-      const before = validationWorldCharacters.filter(person => person.entityId === resolvedOrigin.entityId).map(person => ({ entityId: person.entityId, name: person.name, aliases: person.aliases, ...(person.identityHints ? { identityHints: person.identityHints } : {}) }));
+      const before = validationWorldCharacters.filter(person => person.entityId === resolvedOrigin.entityId).map(person => ({ entityId: person.entityId, ...(person.equivalentEntityIds ? { equivalentEntityIds: person.equivalentEntityIds } : {}), name: person.name, aliases: person.aliases, ...(person.identityHints ? { identityHints: person.identityHints } : {}) }));
       const after = currentWorldIdentities.filter(person => person.entityId === resolvedOrigin.entityId);
       const terms = [candidate.name, ...candidate.aliases].map(normalizeEntityTerm);
       const collisions = currentWorldIdentities.filter(person => [person.name, ...person.aliases].some(name => terms.includes(normalizeEntityTerm(name))));

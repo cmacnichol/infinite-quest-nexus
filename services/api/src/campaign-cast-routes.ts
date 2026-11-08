@@ -9,10 +9,10 @@ export async function registerCampaignCastRoutes(app: FastifyInstance, options: 
   await registerCampaignCastScanRoutes(app, { ...(options.application.scans ? { application: options.application.scans } : {}), resolveOwner: options.resolveOwner });
   const base = "/api/v1/campaigns/:campaignId/cast";
   const params = z.object({ campaignId: z.uuid(), characterId: z.uuid().optional(), candidateId: z.uuid().optional(), jobId: z.uuid().optional(), eventId: z.uuid().optional() });
-  for (const [method, path] of [["GET", base], ["GET", `${base}/from-world`], ["GET", `${base}/from-world-preview`], ["POST", `${base}/from-world`], ["POST", `${base}/:characterId/authored-profile`], ["POST", base], ["GET", `${base}/workspace-status`], ["GET", `${base}/discovery`], ["GET", `${base}/candidates`],
+  for (const [method, path] of [["GET", base], ["GET", `${base}/from-world`], ["GET", `${base}/from-world-preview`], ["POST", `${base}/from-world`], ["POST", `${base}/:characterId/authored-profile`], ["POST", `${base}/:characterId/draft-preview`], ["POST", base], ["GET", `${base}/workspace-status`], ["GET", `${base}/discovery`], ["GET", `${base}/candidates`],
     ["POST", `${base}/:characterId/attachments/:eventId/detach`], ["POST", `${base}/discovery/:jobId/retry`], ["POST", `${base}/candidates/:candidateId/details/resolve`], ["POST", `${base}/candidates/:candidateId/resolve`], ["GET", `${base}/:characterId`], ["PATCH", `${base}/:characterId`]] as const) {
-    app.route({ method, url: path, bodyLimit: path.endsWith("/authored-profile") ? 8 * 1024 * 1024
-      : method === "PATCH" || method === "POST" && path === base ? 320 * 1024 : 64 * 1024, handler: async (request, reply) => {
+    app.route({ method, url: path, bodyLimit: path.endsWith("/authored-profile") ? 16 * 1024 * 1024
+      : method === "PATCH" ? 4 * 1024 * 1024 : method === "POST" && path === base ? 320 * 1024 : 64 * 1024, handler: async (request, reply) => {
       try {
         const ids = params.parse(request.params);
         const scope = { ...await options.resolveOwner(), campaignId: ids.campaignId };
@@ -31,6 +31,7 @@ export async function registerCampaignCastRoutes(app: FastifyInstance, options: 
           return reply.code((request.body as { targetCastCharacterId?: string }).targetCastCharacterId ? 200 : 201).send(result);
         }
         if (path.endsWith("/authored-profile")) return await options.application.editAuthoredProfile(scope, ids.characterId!, request.body as never);
+        if (path.endsWith("/draft-preview")) return await options.application.draftPreview(scope, ids.characterId!, request.body as never);
         if (ids.eventId) return await options.application.detachAttachment(scope, ids.characterId!, ids.eventId, request.body as never);
         if (ids.jobId) return await options.application.retryDiscovery(scope, ids.jobId, request.body as never);
         if (path === `${base}/candidates/:candidateId/details/resolve`) return await options.application.resolveDetail(scope, ids.candidateId!, request.body as never);

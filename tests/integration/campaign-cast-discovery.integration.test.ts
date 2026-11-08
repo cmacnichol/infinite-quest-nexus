@@ -74,13 +74,15 @@ describe("durable cast discovery", () => {
       { id: "hero", name: "Hero", characterText: "A guide", campaignUse: "both" }
     ] })]);
     await pool.query("UPDATE campaigns SET selected_character_id='hero',character_snapshot=$2 WHERE id=$1", [f.scope.campaignId, JSON.stringify({ id: "hero", name: "Hero", characterText: "A guide" })]);
+    await pool.query("UPDATE world_versions SET content=jsonb_set(content, '{entities}', $2::jsonb) WHERE id=$1", [f.versionId,
+      JSON.stringify([{ id: "hero-entity", kind: "npc", name: "Former", linkedCharacterId: "hero" }])]);
     const unknown = await withTransaction(pool, client => captureCastDiscoveryIdentities(client, f.scope));
     expect(unknown.worldCharacters.some(person => person.entityId === "hero")).toBe(false);
-    expect(unknown.representedWorldCharacters).toContainEqual(expect.objectContaining({ entityId: "hero", characterId: expect.any(String) }));
+    expect(unknown.representedWorldCharacters).toContainEqual(expect.objectContaining({ entityId: "hero-entity", equivalentEntityIds: ["hero"], characterId: expect.any(String) }));
     await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Other')", [foreignWorld, ownerUserId]);
     await pool.query("UPDATE campaigns SET selected_character_world_id=$2 WHERE id=$1", [f.scope.campaignId, foreignWorld]);
     const different = await withTransaction(pool, client => captureCastDiscoveryIdentities(client, f.scope));
-    expect(different.worldCharacters.some(person => person.entityId === "hero")).toBe(true);
+    expect(different.worldCharacters.some(person => person.entityId === "hero-entity")).toBe(true);
     expect(different.representedWorldCharacters?.some(person => person.entityId === "hero")).toBe(false);
   });
   it("reads the persisted first-appearance marker and current scoped roster under lock", async () => {

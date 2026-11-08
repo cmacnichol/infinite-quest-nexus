@@ -633,6 +633,7 @@ function minimalDependencies(
     },
     worldGeneration: {
       generateWorldPreview: unimplemented,
+      suggestCastPreview: async () => { throw new Error("unused"); },
       generatePlayableCharacterPreview: unimplemented,
       generatePlayableCharacter: unimplemented
     },

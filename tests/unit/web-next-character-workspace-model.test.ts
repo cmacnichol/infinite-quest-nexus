@@ -232,6 +232,16 @@ describe("character workspace model", () => {
     }
   });
 
+  it("preserves hidden supporting mechanics for new and existing drafts", () => {
+    const initial = createCharacterWorkspaceState({ roster: [], idFactory: () => "new-support" });
+    const newSupport = editCharacterCandidate(initial, ["campaignUse"], "supporting");
+    const generated = { ...completeCharacter(), rpgStats: [{ name: "Generated", value: 99 }], defaultTriggers: [{ name: "Generated tracker" }] };
+    expect(applyGeneratedCharacter(newSupport, generated).candidate).toMatchObject({ campaignUse: "supporting", rpgStats: [], defaultTriggers: [] });
+    const existing = { ...completeCharacter(), campaignUse: "supporting" as const, rpgStats: [{ name: "Retained", value: 7 }], defaultTriggers: [{ name: "Retained tracker" }] };
+    expect(applyGeneratedCharacter(createCharacterWorkspaceState({ roster: [], candidate: existing }), generated).candidate)
+      .toMatchObject({ campaignUse: "supporting", rpgStats: existing.rpgStats, defaultTriggers: existing.defaultTriggers });
+  });
+
   it("preserves roster authority when regenerating a Both character", () => {
     const original = { ...completeCharacter(), campaignUse: "both" as const, startingCastDefault: false, alwaysInContext: true, source: { type: "import" } };
     const initial = createCharacterWorkspaceState({ roster: [], candidate: original });

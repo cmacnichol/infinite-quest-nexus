@@ -388,6 +388,7 @@ const systemWorldContentSchema = z.object({
     campaignUse: z.enum(["playable", "supporting", "both"]).optional(),
     startingCastDefault: z.boolean().optional(),
     alwaysInContext: z.boolean().optional(),
+    source: z.object({ type: z.literal("world-entity"), entityId: identifierSchema }).strict().optional(),
     rpgStats: z.array(systemRpgStatSchema).max(10_000),
     defaultTriggers: z.array(systemDefaultTriggerSchema).max(10_000)
   }).strict()).max(1_000),
@@ -397,7 +398,8 @@ const systemWorldContentSchema = z.object({
     kind: identifierSchema,
     description: longTextSchema,
     tags: z.array(identifierSchema).max(1_000),
-    facts: z.array(z.object({ key: identifierSchema, value: longTextSchema }).strict()).max(10_000)
+    facts: z.array(z.object({ key: identifierSchema, value: longTextSchema }).strict()).max(10_000),
+    linkedCharacterId: identifierSchema.optional()
   }).strict()).max(20_000),
   relationships: z.array(z.object({
     id: identifierSchema,

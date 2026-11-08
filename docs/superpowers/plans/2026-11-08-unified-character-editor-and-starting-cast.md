@@ -433,9 +433,9 @@ Use phase 4’s local World draft and normal campaign saves. Suggest, conversion
 
 **Interface.** `POST /api/v1/worlds/playable-characters/suggest-cast-preview` accepts `{ content, direction?, count }`. Expansion uses generate-preview with `{ seed, campaignUse: "supporting" }`. Bound the reviewed seed list to the requested count.
 
-- [ ] **Regression cases.** Request 3–8 suggestions, including an all-duplicate response and a collision absent from a 100-name/4,000-character sample of a 20,000-entity world. Verify zero through requested count, no automatic refill, bounded repair on name mismatch, independent row retry/stop and close warning. Assert provider outage leaves manual entry and drafts intact. Capture serialized requests and logs with synthetic private and instruction-like input.
-- [ ] **Implementation.** Add the typed suggest-cast-preview method and bounded non-legacy prompt/operation/repair schemas. Expand selected seeds serially via generate-preview. Use a separate Supporting contract, retain reviewed name, ignore generated mechanics and preserve hidden mechanics on existing targets. Keep old snapshots and the shared durable character-authoring protocol valid. Only Add selected mutates the local draft and only Save world persists.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Request 3–8 suggestions, including an all-duplicate response and a collision absent from a 100-name/4,000-character sample of a 20,000-entity world. Verify zero through requested count, no automatic refill, bounded repair on name mismatch, independent row retry/stop and close warning. Assert provider outage leaves manual entry and drafts intact. Capture serialized requests and logs with synthetic private and instruction-like input.
+- [x] **Implementation.** Add the typed suggest-cast-preview method and bounded non-legacy prompt/operation/repair schemas. Expand selected seeds serially via generate-preview. Use a separate Supporting contract, retain reviewed name, ignore generated mechanics and preserve hidden mechanics on existing targets. Keep old snapshots and the shared durable character-authoring protocol valid. Only Add selected mutates the local draft and only Save world persists.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/direct-authoring-response-contract.test.ts tests/unit/authoring-prompts.test.ts
@@ -451,9 +451,9 @@ pnpm exec playwright test tests/e2e/character-authoring-simplification.e2e.test.
 
 **Interface.** A valid `linkedCharacterId` references an entry in the same World content. Both catalogs consume the same linked occurrence and explicit retained alias set. A new converted entry has `startingCastDefault: false`.
 
-- [ ] **Regression cases.** Convert one description-only and one name-colliding NPC locally without a provider. Keep or retire the former name explicitly. Check ambiguous and unique matches in discovery and Chronicle before/after campaign copy, relationship endpoints with context off, stale-link rejection on save/publish, and archive round-trip of typed conversion provenance.
-- [ ] **Implementation.** Implement the spec’s pure field mapping, preserve unconverted values in the preview and keep the entity ID as the relationship endpoint. Append Supporting with startingCastDefault false. Resolve linked aliases through one shared occurrence rule. Clear links on roster deletion and validate against the current draft at every write. Handle map-shaped legacy input only in the pure mapper. Verify one character has been added for each approved row, original relationships still resolve when cast context is disabled, and cancelling the local draft persists no conversion.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Convert one description-only and one name-colliding NPC locally without a provider. Keep or retire the former name explicitly. Check ambiguous and unique matches in discovery and Chronicle before/after campaign copy, relationship endpoints with context off, stale-link rejection on save/publish, and archive round-trip of typed conversion provenance.
+- [x] **Implementation.** Implement the spec’s pure field mapping, preserve unconverted values in the preview and keep the entity ID as the relationship endpoint. Append Supporting with startingCastDefault false. Resolve linked aliases through one shared occurrence rule. Clear links on roster deletion and validate against the current draft at every write. Handle map-shaped legacy input only in the pure mapper. Verify one character has been added for each approved row, original relationships still resolve when cast context is disabled, and cancelling the local draft persists no conversion.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/entity-references.test.ts tests/unit/campaign-cast-world-identities.test.ts
@@ -471,9 +471,9 @@ pnpm exec playwright test tests/e2e/legacy-ui-world-readiness.e2e.test.ts
 
 **Interface.** `POST cast/:id/draft-preview` returns proposals, evidence spans, omitted paths and server-verifiable fences. Both existing campaign PATCH and authored-profile POST accept `draftEvidenceFences` on reviewed factual edits.
 
-- [ ] **Regression cases.** Test a valid attributed quote, wrong subject, negation, dialogue claim, detached evidence and a mention-only passage. Assert zero provider calls with no eligible spans. Verify citation and value support, reject malformed whole output, and label the creative otherGuidance exception. Correct accepted narration after preview and attempt both save paths. Expect cast_draft_evidence_changed (409), preserved draft, no observation or partial edit.
-- [ ] **Implementation.** Add cast/:id/draft-preview and a versioned non-legacy campaign prompt without campaign override. Bound to 40 citations / 24,000 characters and assign exact server-scoped span IDs. Send only safe projected text using the selected campaign provider. Offer proposals only on blank eligible fields. Attach server-verifiable fences to selected factual draft edits, revalidate on PATCH and authored-profile save, and repeat 5A’s provider outage, privacy and logging checks for this endpoint. Raise the normal save-route body limits to include legitimate evidence fences and preserve generic error redaction.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Test a valid attributed quote, wrong subject, negation, dialogue claim, detached evidence and a mention-only passage. Assert zero provider calls with no eligible spans. Verify citation and value support, reject malformed whole output, and label the creative otherGuidance exception. Correct accepted narration after preview and attempt both save paths. Expect cast_draft_evidence_changed (409), preserved draft, no observation or partial edit.
+- [x] **Implementation.** Add cast/:id/draft-preview and a versioned non-legacy campaign prompt without campaign override. Bound to 40 citations / 24,000 characters and assign exact server-scoped span IDs. Send only safe projected text using the selected campaign provider. Offer proposals only on blank eligible fields. Attach server-verifiable fences to selected factual draft edits, revalidate on PATCH and authored-profile save, and repeat 5A’s provider outage, privacy and logging checks for this endpoint. Raise the normal save-route body limits to include legitimate evidence fences and preserve generic error redaction.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/campaign-cast-provider-contract.test.ts
@@ -482,6 +482,12 @@ pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts
 ```
 
 **Phase 5 exit.** Demonstrate each preview with deterministic provider fixtures, no-provider behavior and cancellation where applicable. Confirm zero automatic writes or observation creation. Record live provider quality separately if an operator validates it. Publish the guides for Suggest, Convert and Draft from story. The first delivery track can close here.
+
+**Phase 5 verification, 2026-11-08.** The 20 affected unit suites passed 394 tests, including the five files mapped above. All 78 tests in the three mapped integration suites passed against isolated Linux PostgreSQL (10 World generation, 54 System Archive, 14 cast API). The archive test exported and imported converted entity links and provenance. The final Linux cast discovery, repository and API run passed 110 tests, including the 14 cast API tests. The opt-in Chromium proof also edited an actual seeded cast from the Nexus campaign page using PostgreSQL.
+
+All 109 Chromium tests in the four mapped browser suites passed. The rendered checks cover no-provider manual entry, empty seeds, serial expansion, stop and retry, edits before adding, explicit world save, entity conversion and retained relationships. Story tests cover generation locks, per-field suggestions, cited turns, creative guidance, manual edits, stale citations, and comparing and reapplying across a changed campaign revision. Both clients exercise new and existing Supporting characters with hidden mechanics. Model responses in these checks use deterministic fixtures. Live-provider output quality is unassessed.
+
+[Screenshot evidence](../../review/assets/unified-character-editor-phase-5) includes Nexus cast suggestions and entity conversion at desktop and phone widths, both Story editors, and Web-Next Supporting generation.
 
 ## Phase 6 · Release reversible lifecycle operations
 

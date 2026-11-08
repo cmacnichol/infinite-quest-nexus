@@ -24,6 +24,8 @@ import type {
   PlayerEventTrigger,
   PlayerRpgStat,
   PlayableCharacter,
+  CastSuggestionPreviewRequest,
+  CastSuggestionPreviewResponse,
   PlayableCharacterGenerationPreviewRequest,
   PlayableCharacterGenerationRequest,
   PlayableCharacterListResponse,
@@ -562,3 +564,5 @@ export type {
   WorldStatusUpdateRequest,
   WorldVersionDeleteRequest
 };
+
+export type { CastSuggestionPreviewRequest, CastSuggestionPreviewResponse };

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { castAuthoredValuesSchema, castAuthoredPathSchema, castBoundarySchema, castFieldSchema, castOverrideProfileSchema, castOverrideSchema, castWriteBase } from "./campaign-cast.js";
+import { castAuthoredValuesSchema, castAuthoredPathSchema, castBoundarySchema, castFieldSchema, castOverrideProfileSchema, castOverrideSchema, castWriteBase, castDraftEvidenceFencesSchema } from "./campaign-cast.js";
 
 import { characterProfileSchema } from "./world-library.js";
 
@@ -7,7 +7,7 @@ export const editAuthoredCastProfileSchema = z.object({ ...castWriteBase, expect
   set: castAuthoredValuesSchema.optional(), reset: z.array(castAuthoredPathSchema).max(30).optional(), restoreAuthoredGoals: z.literal(true).optional(),
   setOverrides: castOverrideProfileSchema.optional(), clearOverrides: z.array(castFieldSchema).max(11).optional(),
   name: z.string().trim().min(1).max(200).optional(), aliases: z.array(z.string().trim().min(1).max(200)).max(20).optional(),
-  resetIdentity: z.literal(true).optional(), pinned: z.boolean().optional(), ignored: z.boolean().optional()
+  resetIdentity: z.literal(true).optional(), pinned: z.boolean().optional(), ignored: z.boolean().optional(), draftEvidenceFences: castDraftEvidenceFencesSchema.optional()
 }).strict().superRefine((value, context) => {
   const issue = (message: string) => context.addIssue({ code: "custom", message });
   if (value.resetIdentity && (value.name !== undefined || value.aliases !== undefined)) issue("Reset identity cannot be combined with identity edits.");

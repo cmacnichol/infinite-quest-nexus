@@ -259,6 +259,10 @@ export function mountCharacterWorkspacePage(
   }
   function beginDurable(job: AuthoringJobView): void {
     if (disposed || job.kind !== "character") return;
+    if (state.candidate.campaignUse === "supporting") {
+      durableStatus("Saved proposals remain available. Supporting generation uses a local preview.");
+      return;
+    }
     if (!characterJobMatchesSession(job, activeSession)) { durableStatus("This proposal belongs to a different parent draft. Open it from saved proposals to restore its parent."); return; }
     durableSession?.dispose();
     durableSession = createAuthoringJobSession({ job, loadAuthoringJob: authoringApi!.loadAuthoringJob, saveReview: authoringApi!.saveAuthoringReview, retryStage: authoringApi!.retryAuthoringStage, cancel: authoringApi!.cancelAuthoringJob, isHidden: () => document.hidden, onChange: renderDurable });
@@ -303,6 +307,8 @@ export function mountCharacterWorkspacePage(
     stageButtons.forEach((button, index) => {
       const stage = button.dataset.characterStage as CharacterStage;
       const current = stage === state.stage;
+      button.hidden = stage === "mechanics" && state.candidate.campaignUse === "supporting";
+      button.style.display = button.hidden ? "none" : "";
       if (current) button.setAttribute("aria-current", "step"); else button.removeAttribute("aria-current");
       const unavailable = index > state.furthestStageIndex;
       const stageState = current ? "current" : index < state.furthestStageIndex ? "completed" : unavailable ? "upcoming" : "revisitable";
@@ -345,7 +351,8 @@ export function mountCharacterWorkspacePage(
     const ledger = document.createElement("div");
     ledger.className = "character-progress-ledger";
     const progress = document.createElement("p");
-    progress.textContent = `${STAGES.indexOf(state.stage) + 1} of ${STAGES.length} · ${STAGE_LABELS[state.stage]}`;
+    const visibleStages = state.candidate.campaignUse === "supporting" ? STAGES.filter((stage) => stage !== "mechanics") : STAGES;
+    progress.textContent = `${visibleStages.indexOf(state.stage) + 1} of ${visibleStages.length} · ${STAGE_LABELS[state.stage]}`;
     const back = document.createElement("button");
     back.type = "button"; back.dataset.action = "back-character"; back.textContent = "Back";
     const next = document.createElement("button");
@@ -363,10 +370,30 @@ export function mountCharacterWorkspacePage(
 
   function renderMethod(): void {
     canvas.innerHTML = `<div class="character-stage character-method-stage"><header><h2>Start with a character idea</h2><p>Describe your character and generate an editable draft, or choose Manual to write it yourself.</p></header>
+      <label class="character-field"><span>Character use</span><select data-character-use><option value="playable">Playable</option><option value="supporting">Supporting</option><option value="both">Both</option></select></label>
       <fieldset class="character-method-controls"><legend>Character method</legend><label class="character-method-control"><input type="radio" name="characterMethod" value="manual"><span>Manual</span></label><label class="character-method-control"><input type="radio" name="characterMethod" value="ai"><span>AI-assisted</span></label></fieldset>
       <section class="character-prompt-authoring" data-character-ai-prompt hidden><div class="character-prompt-heading"><div><h3>Character concept</h3><p>Describe this character's role, personality, history, and visual identity.</p></div><div class="character-prompt-tools"><button type="button" data-action="copy-character-prompt" aria-label="Copy character concept">${copyIcon}</button><button type="button" data-action="paste-character-prompt" aria-label="Paste character concept">${pasteIcon}</button><button type="button" data-action="expand-character-prompt">${expandIcon}<span>Expand</span></button></div></div>
       <label class="character-field"><span>Concept prompt</span><textarea rows="7" data-character-prompt="compact"></textarea></label><p data-character-clipboard-status aria-live="polite"></p><div data-character-generation-status role="status" aria-live="polite"></div><div class="character-generation-actions"><button type="button" data-action="generate-character" disabled>Generate character</button><button type="button" data-action="cancel-character-generation" hidden>Cancel generation</button></div></section>
       <div data-character-manual hidden><p>Start with a name and one story detail. Appearance and mechanics are optional.</p></div></div>`;
+    const use = required<HTMLSelectElement>(canvas, "[data-character-use]");
+    use.querySelector(`option[value="${state.candidate.campaignUse}"]`)?.setAttribute("selected", "");
+    use.addEventListener("change", () => {
+      stopGeneration();
+      restoreGenerationActions();
+      if (use.value === "supporting" && durableSession) {
+        durableSession.dispose();
+        durableSession = null;
+        if (pageView.location?.href) {
+          const url = new URL(pageView.location.href);
+          url.searchParams.delete("authoringJob");
+          pageView.history.replaceState(null, "", `${url.pathname}${url.search}`);
+        }
+        durableStatus("Saved proposals remain available. Supporting generation uses a local preview.");
+      }
+      fieldChanged(["campaignUse"], use.value);
+      canvas.querySelector(".character-progress-ledger")?.replaceWith(actions());
+      updateStageIndex();
+    });
     const aiSection = required<HTMLElement>(canvas, "[data-character-ai-prompt]");
     const manual = required<HTMLElement>(canvas, "[data-character-manual]");
     const compact = required<HTMLTextAreaElement>(canvas, '[data-character-prompt="compact"]');
@@ -579,7 +606,7 @@ export function mountCharacterWorkspacePage(
     reviewSection("Identity", "identity", [["Name", state.candidate.name], ["Pronouns", state.candidate.profile?.identity.pronouns], ["Aliases", state.candidate.profile?.identity.aliases]]);
     reviewSection("Story", "story", [...STORY_FIELDS.map(([name, label]) => [label, state.candidate.profile?.story[name]] as const), ["Additional notes", state.candidate.profile?.unclassifiedNotes]]);
     reviewSection("Appearance", "appearance", [...APPEARANCE_FIELDS.map(([name, label]) => [label, state.candidate.profile?.appearance[name]] as const), ["Distinguishing features", state.candidate.profile?.appearance.distinguishingFeatures]]);
-    reviewSection("Mechanics", "mechanics", [
+    if (state.candidate.campaignUse !== "supporting") reviewSection("Mechanics", "mechanics", [
       ...state.candidate.rpgStats.map(item => { const fields = structuredFieldsFor("stat", item); return [`Statistic: ${fields.name || "Unnamed"}`, [fields.value, fields.note].filter(value => value !== undefined && value !== "").join(" · ") || "No value or note added."] as const; }),
       ...state.candidate.defaultTriggers.map(item => { const fields = structuredFieldsFor("trigger", item); return [`Tracker: ${fields.name || "Unnamed"}`, [fields.condition, fields.effect].filter(Boolean).join(" → ") || "No condition or effect added."] as const; })
     ]);
@@ -783,7 +810,7 @@ export function mountCharacterWorkspacePage(
     generate.disabled = true; cancel.hidden = false;
     const submittedPrompt = prompt;
     void (async () => {
-      if (authoringApi && await durableCapability()) {
+      if (state.candidate.campaignUse !== "supporting" && authoringApi && await durableCapability()) {
         if (disposed || controller.signal.aborted) return null;
         const target = activeSession.origin === "world-creation" ? { kind: "new_world" as const } : { kind: "world_draft" as const, worldId: decodeURIComponent(new URL(activeSession.parentRoute, "https://local.invalid").pathname.split("/").at(-1)!), expectedRevision: activeSession.expectedWorldRevision!, ...(activeSession.mode === "edit" ? { characterId: activeSession.candidate!.id } : {}) };
         if (!pendingSubmission || pendingSubmission.prompt !== submittedPrompt) pendingSubmission = { kind: "character", idempotencyKey: crypto.randomUUID(), target, prompt: submittedPrompt, content: worldContentSchema.parse(activeSession.worldContext), ...(activeSession.mode === "edit" ? { characterId: activeSession.candidate!.id } : {}) };
@@ -793,7 +820,7 @@ export function mountCharacterWorkspacePage(
       }
       if (disposed || controller.signal.aborted) return null;
       poll(progressKey, sequence, controller.signal);
-      return generatePreview({ content: activeSession.worldContext, prompt: submittedPrompt, ...(activeSession.mode === "edit" ? { characterId: state.candidate.id } : {}), progressKey }, controller.signal);
+      return generatePreview({ content: activeSession.worldContext, prompt: submittedPrompt, campaignUse: state.candidate.campaignUse, ...(activeSession.mode === "edit" ? { characterId: state.candidate.id } : {}), progressKey }, controller.signal);
     })()
       .then((preview) => {
         if (!preview) return;
@@ -899,8 +926,8 @@ export function mountCharacterWorkspacePage(
       render();
       return;
     }
-    if (action === "continue-character") { if (!showValidation()) return; const index = STAGES.indexOf(state.stage); if (index < STAGES.length - 1) { if (state.stage === "method") stopGeneration(); state = setCharacterStage(state, STAGES[index + 1]!); render(); } }
-    if (action === "back-character") { const index = STAGES.indexOf(state.stage); if (index > 0) { state = setCharacterStage(state, STAGES[index - 1]!); render(); } }
+    if (action === "continue-character") { if (!showValidation()) return; const index = STAGES.indexOf(state.stage); if (index < STAGES.length - 1) { if (state.stage === "method") stopGeneration(); state = setCharacterStage(state, state.candidate.campaignUse === "supporting" && state.stage === "appearance" ? "review" : STAGES[index + 1]!); render(); } }
+    if (action === "back-character") { const index = STAGES.indexOf(state.stage); if (index > 0) { state = setCharacterStage(state, state.candidate.campaignUse === "supporting" && state.stage === "review" ? "appearance" : STAGES[index - 1]!); render(); } }
     if (action === "generate-character") startGeneration();
     if (action === "cancel-character-generation") { stopGeneration(); render(); }
     if (action === "expand-character-prompt") openDialog();

@@ -275,7 +275,7 @@ describe("executeAuthoringStage", () => {
     const prepared = await prepareDirectAuthoringTextExecution({
       ownerUserId: "owner-1",
       execution,
-      operationPrompts: { worldOutline: "Create.", organizer: "Organize." },
+      operationPrompts: { worldOutline: "Create.", organizer: "Organize.", castSuggestion: "Suggest." },
       options: {
         nativePresetPlansEnabled: true,
         preparedExecutor: { execute },
@@ -303,6 +303,9 @@ describe("executeAuthoringStage", () => {
       expect(JSON.parse(request.body)).toMatchObject({ temperature: 0.19, max_tokens: 1_024 });
       expect(request.budgetAudit).toMatchObject({ inputLimit: 4_976, outputReserveTokens: 1_024 });
     }
+    await prepared!.execute({ operation: "castSuggestion", request: { systemPrompt: "ignored", input: "small world", maxOutputTokens: 256 } });
+    const boundedRequest = (execute.mock.calls[2]![0] as { preparedRequest: { body: string } }).preparedRequest;
+    expect(JSON.parse(boundedRequest.body).max_tokens).toBe(256);
   });
 
   it("rejects v2 preparation without current authority evidence", async () => {

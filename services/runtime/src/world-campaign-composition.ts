@@ -30,6 +30,7 @@ import {
 import {
   generatePlayableCharacterForOwner,
   generatePlayableCharacterPreviewForOwner,
+  suggestCastPreviewForOwner,
   generateWorldPreviewForOwner
 } from "./provider-world-generation-adapter.js";
 import { createChroniclePlatformBindings } from "./chronicle-platform-bindings.js";
@@ -110,6 +111,7 @@ export function createProviderWorldGenerationCollaborator(
       providers,
       providerDependencies
     ),
+    suggestCastPreview: (scope, request) => suggestCastPreviewForOwner(scope.ownerUserId, request, providers),
     generatePlayableCharacterPreview: (scope, request) => generatePlayableCharacterPreviewForOwner(
       pool,
       scope.ownerUserId,

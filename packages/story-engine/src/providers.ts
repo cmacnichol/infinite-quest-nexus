@@ -69,6 +69,8 @@ export type ProviderRequest = {
   /** Snapshotted job/provider ceiling; canonical generation must not exceed it. */
   effectiveContextWindowTokens?: number;
   budgetOutput?: ProviderOutputBudget;
+  /** Optional narrower ceiling for a bounded authoring response. */
+  maxOutputTokens?: number;
   /** Authoring calls account for every generation request themselves. */
   responseFormatFallback?: "allow" | "forbid";
   responseContract?: PreparedResponseContract | PreparedResponseContractV2;
