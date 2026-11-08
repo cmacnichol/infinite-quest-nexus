@@ -104,6 +104,17 @@ export function resolveSeededCastProfile(input: ProjectCastProfileInput & {
 }
 
 /** Authority class for the shared editor and server write guards. */
+/** Paths that update from the story, which Draft from story must never propose. */
+export function isCastUpdatingPath(path: string): boolean {
+  return path.startsWith("state.") || path === "story.goals";
+}
+
+/** The per-path character limit for an authored campaign value. */
+export function castAuthoredFieldLimit(path: string): number {
+  if (path === "unclassifiedNotes") return 200_000;
+  return path === "identity.pronouns" || ["appearance.ancestryOrSpecies", "appearance.apparentAge", "appearance.genderPresentation", "appearance.build", "appearance.skinOrComplexion", "appearance.eyes"].includes(path) ? 2_000 : 20_000;
+}
+
 export function seededCastFieldPolicy(path: string): "identity" | "fixed" | "updating" | "observed" | "unknown" {
   if (path === "name" || path === "identity.aliases") return "identity";
   if (path === "appearance.description") return "observed";

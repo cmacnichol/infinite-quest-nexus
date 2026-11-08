@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { castGenerationSnapshotSchema, castGenerationSnapshotFingerprint } from "../../packages/contracts/src/campaign-cast-context.js";
-import { resolveCastContextGoal, selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
+import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
 import { estimateTokens } from "../../packages/domain/src/text.js";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -164,6 +164,20 @@ it("prioritizes recent activity above thirty pins and explains field budget omis
   expect(select(modern, 0, "Wait").omittedCharacterIds).toHaveLength(30);
 });
 
+it("keeps pin-first ranking and overrides first in campaigns without an active seed", () => {
+  const old = fixture();
+  const characters = [0, 1].map(i => ({ ...old.characters[0]!, id: id(300 + i), name: `Witness ${i}`, aliases: [], pinned: i === 0, firstObservedTurn: 0, lastObservedTurn: i === 1 ? 4 : 0 }));
+  const modern = { ...old, version: "cast-context-v2" as const, characters,
+    details: characters.map(person => ({ characterId: person.id, observations: [], overrides: [] })),
+    fiction: characters.map(person => ({ characterId: person.id, fields: [
+      { field: "story.role", value: "Observed role", source: "observation", evidenceKind: "turn", evidenceId: `${id(60)}:story.role`, effectiveTurn: 1 },
+      { field: "story.background", value: "Manual history", source: "override", evidenceKind: "user", evidenceId: `${id(61)}:story.background` }
+    ] })) };
+  const result = select(modern, 1000, "Wait");
+  expect(result.explanation.selected[0]).toMatchObject({ characterId: id(300), reason: "pinned" });
+  expect(result.records[0]!.fields[0]).toMatchObject({ field: "story.background", authority: "user" });
+});
+
 it("keeps dated lower-authority state through enrollment gaps and distinguishes discovery off", () => {
   const old = fixture();
   const modern = { ...old, version: "cast-context-v2" as const, discoveryStatus: "pending" as const, trackedThroughTurn: 1,
@@ -183,11 +197,3 @@ it("keeps dated lower-authority state through enrollment gaps and distinguishes 
   expect(off.characters[0].fields).toEqual(gap.characters[0].fields);
 });
 
-it("uses authored goals during a discovery gap while respecting overrides and discovery off", () => {
-  const goal = { value: "observed", source: "observation", authored: "authored", discoveryEnabled: true, coverageCurrent: false };
-  expect(resolveCastContextGoal(goal)).toEqual({ value: "authored", source: "authored" });
-  expect(resolveCastContextGoal({ ...goal, coverageCurrent: true })).toEqual({ value: "observed", source: "observation" });
-  expect(resolveCastContextGoal({ ...goal, discoveryEnabled: false })).toEqual({ value: "observed", source: "observation" });
-  expect(resolveCastContextGoal({ ...goal, authored: "" })).toEqual({ value: "observed", source: "observation" });
-  expect(resolveCastContextGoal({ ...goal, value: "manual", source: "override" })).toEqual({ value: "manual", source: "override" });
-});

@@ -51,6 +51,8 @@ export function createLocalSingleUserPolicy(snapshot: InstanceSettings, installa
   const policy = createSeedPolicy([seed], installationId);
   policy.featureGates.castPresetsEnabled = true;
   policy.featureGates.castContextWithoutDiscoveryEnabled = true;
+  policy.featureGates.castContextEnabled = true;
+  policy.featureGates.castEditingEnabled = true;
   policy.numericBounds.workerPollIntervalMs = { min: snapshot.workerPollIntervalMs, max: 60000 };
   policy.numericBounds.workerGenerationConcurrency = { min: 1, max: snapshot.workerGenerationConcurrency };
   return policy;

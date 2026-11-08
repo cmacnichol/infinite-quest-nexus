@@ -574,6 +574,56 @@ pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts
 - Story browser checks cover the side-by-side character fields, explicit conflict resolution, alias limits, keyboard cancellation, Removed and Restore, Add and Replace, stale draft refresh and writer cutoff. [Desktop and phone screenshots](../../review/assets/unified-character-editor-phase-6)
 - The repository checks, client boundary checks and both web builds passed. Production rollout starts with the operator verifying all deployed readers and the installation’s own backup set. [Lifecycle operations](../../runbooks/campaign-cast.md)
 
+## Phase 7 · Remediate review findings
+
+Applies the [round-2 amendments](../specs/2026-11-08-unified-character-editor-and-starting-cast-design.md#round-2-amendments) and the review of the built code. An item is ticked once it is implemented and the affected suites pass. Dedicated regression tests exist for A1, A2, A3, D1, D15, Convert and D13; the other ticked items rely on the existing cast suites. D5, D7, D11, D12 and D14 already matched the decisions in the built code, and D17's name release is covered by the updated merge discovery test.
+
+### 7A · Cast authority and lifecycle
+
+- [x] **A2** Lag-published seeds keep their evidence turn and survive rewind and branch.
+- [x] **A1** Approving a held match writes a suppressing attachment.
+- [x] **A4** Seed lookups exclude merged-away and removed records.
+- [x] **A5** World entities with no roster entry go through plain discovery.
+- [x] **D16** A seed carried from another world does not count as represented.
+- [x] **D18** Not this character is blocked while the target has an active merge.
+- [x] **D19** Undo merge is rejected on a removed target.
+- [x] **D20** Promoted NPCs get `startingCastDefault: false`.
+- [x] A world version referenced by seed evidence cannot be deleted.
+
+### 7B · Narrator context
+
+- [x] **D1** New ordering applies only to campaigns with an active seed.
+- [x] **D2** Goals use the latest observation during gaps.
+- [x] **D3** Goal truncation is recorded.
+- [x] **D4** Legacy guidance is not sent for seeded NPCs.
+- [x] **D6** Linked entity prose is dropped for seeded NPCs when context is on.
+- [x] **A6** Authored fields use the canon semantic role.
+
+### 7C · Clients and settings
+
+- [x] **D13** Only skipped characters interrupt Create and start.
+- [x] **D10** Main-character save needs no guidance in Nexus.
+- [x] **D14** A `failed` generation does not lock character edits.
+- [x] **D15** Local installs can unlock context and editing gates from the panel.
+- [x] **D9** Web-Next's world summary lists selectable characters only.
+- [x] **A3** Removing a Web-Next character clears its entity links.
+- [x] **A7** The preset editor shows legacy source text read-only.
+- [x] Convert writes notes to one editable field.
+- [x] `loadWorldVersionPlayableCharacters` uses the typed client (4.22).
+
+### 7D · Standards and documentation
+
+- [x] **A8** Draft from story validates world content and shares its rules.
+- [x] **D8** The runbook requires replacing all nodes at once.
+
+### 7E · Legacy cleanup
+
+- [ ] **4.28** Remove the panel's `renderEditor`, Story's `character-profile-form.ts` use and `CHARACTER_PROFILE_FIELDS`.
+
+**Not done.** The panel renderer and the form module still serve live editing paths, so 4.28 needs its own change with full browser coverage.
+
+**Known failures.** Six unit tests fail on the phase-6 commit before this remediation: `csp-ui`, `legacy-provider-modal`, `client-web/api-client` and three in `probe-structured-output`.
+
 ## Release evidence and rollback
 
 | First incompatible change | Evidence before activation | Recovery after activation |

@@ -759,7 +759,7 @@ describe("durable cast discovery", () => {
     job.output = proposal(source.character.id);
     job.execution.admission = { identityPolicy: "unique_name" } as NonNullable<typeof job.execution.admission>;
     const currentTarget = await editor.detail(f.scope, target.character.id), currentSource = await editor.detail(f.scope, source.character.id);
-    await editor.merge!(f.scope, target.character.id, { expectedCastRevision: currentTarget.revision, expectedBoundary: boundary, expectedCharacterRevision: currentTarget.character.revision, expectedSourceCharacterRevision: currentSource.character.revision, sourceCharacterId: source.character.id, reviewedAliases: [], choices: {}, idempotencyKey: randomUUID() });
+    await editor.merge!(f.scope, target.character.id, { expectedCastRevision: currentTarget.revision, expectedBoundary: boundary, expectedCharacterRevision: currentTarget.character.revision, expectedSourceCharacterRevision: currentSource.character.revision, sourceCharacterId: source.character.id, reviewedAliases: ["Mara"], choices: {}, idempotencyKey: randomUUID() });
     const fresh = await withTransaction(pool, client => captureCastDiscoveryIdentities(client, f.scope));
     expect(fresh.historicalNames).toContainEqual({ characterId: target.character.id, name: "Mara" });
     const duplicate = validateCastDiscovery({ source: job.source, output: proposal(), knownCharacters: fresh.characters, historicalNames: fresh.historicalNames, identityPolicy: "unique_name" });
@@ -1193,6 +1193,8 @@ describe("durable cast discovery", () => {
     const resolved = await editor.resolveCandidate(f.scope, pending.candidates[0]!.id, { action: "create", expectedCastRevision: pending.revision,
       expectedBoundary: pending.boundary, idempotencyKey: "approve-world" });
     expect(resolved.character.originProfile?.entityId).toBe("mara");
+    const seedEvent = (await pool.query("SELECT attachment FROM campaign_cast_events WHERE id=$1", [resolved.character.originProfile!.seedEventId])).rows[0];
+    expect(seedEvent.attachment).toMatchObject({ characterId: resolved.character.id, basis: "unique_world_name" });
   });
   it("requires new identity review when a held world match changes before approval", async () => {
     const f = await fixture();

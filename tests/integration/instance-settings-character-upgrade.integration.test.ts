@@ -35,6 +35,8 @@ it("upgrades an active local v1 seed and keeps both gates across restart and an 
   oldPolicy.version = 1;
   delete oldPolicy.featureGates.castPresetsEnabled;
   delete oldPolicy.featureGates.castContextWithoutDiscoveryEnabled;
+  oldPolicy.featureGates.castContextEnabled = config.castContextEnabled;
+  oldPolicy.featureGates.castEditingEnabled = config.castEditingEnabled;
   const policyDigest = settingsDigest(oldPolicy);
   const owner = await initialOwnerId(pool);
   await pool.query(`INSERT INTO instance_settings_revisions(revision,snapshot,schema_version,actor_user_id,local_single_user,kind,policy_digest) VALUES(1,$1,1,$2,true,'seed',$3)`, [snapshot, owner, policyDigest]);

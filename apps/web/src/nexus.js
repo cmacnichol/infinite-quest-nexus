@@ -3171,7 +3171,7 @@ function characterFromForm({ forOrganization = false } = {}) {
     error.control = elements.characterName;
     throw error;
   }
-  if ((forOrganization || elements.characterCampaignUse.value !== "supporting") && !profileHasGuidance(profile) && !characterText && !(forOrganization && String(profile.unclassifiedNotes || "").trim())) {
+  if ((forOrganization || characterModalScope !== "campaign" && elements.characterCampaignUse.value !== "supporting") && !profileHasGuidance(profile) && !characterText && !(forOrganization && String(profile.unclassifiedNotes || "").trim())) {
     const error = new Error(forOrganization
       ? "Add notes, imported source guidance, or story details to organize."
       : "Add at least one story detail, such as a role or background, before saving.");
@@ -4637,7 +4637,7 @@ async function loadWorldVersionPlayableCharacters(selection = {}) {
   }
   setWorldCampaignReadiness("Checking whether the selected world version is campaign-ready…");
   try {
-    const response = await api(`/api/v1/world-versions/${encodeURIComponent(worldVersionId)}/playable-characters`);
+    const response = await characterApi.worlds.playableCharacters(worldVersionId);
     if (!isCurrent()) return;
     worldVersionCharacters = Array.isArray(response.characters) ? response.characters : [];
     const hasReadinessAssessment = response.readiness && typeof response.readiness.ready === "boolean";
@@ -5145,7 +5145,7 @@ async function createCampaignFromWorld(event) {
         notice = { text: "Character context status could not be checked.", href: "/app/settings?section=campaign&campaignId=" + encodeURIComponent(campaign.id), label: "Campaign settings" };
       }
     }
-    if (skipped.length || notice?.href) {
+    if (skipped.length) {
       const messages = skipped.map((item) => item.reason === "invalid_name"
         ? `${item.name}: character was skipped because its name is invalid.`
         : `${item.name}: invalid aliases were omitted: ${item.aliases.join(", ")}.`);
@@ -7749,7 +7749,7 @@ elements.convertEntities.addEventListener("click", () => {
       if (row.keep.checked && normalize(name) !== normalize(row.preview.name)
         && profile.identity.aliases.length < 20
         && !profile.identity.aliases.some((alias) => normalize(alias) === normalize(row.preview.name))) profile.identity.aliases.push(row.preview.name);
-      roster.push({ id, name, profile, characterText: row.preview.characterText, campaignUse: "supporting", startingCastDefault: false,
+      roster.push({ id, name, profile, characterText: "", campaignUse: "supporting", startingCastDefault: false,
         alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: { type: "world-entity", entityId: row.preview.entityId } });
       links.set(row.preview.entityId, id);
     }

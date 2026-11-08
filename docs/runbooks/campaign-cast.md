@@ -133,3 +133,7 @@ Deploy the v4-capable application image and migration `0132_campaign_cast_promot
 After verifying readers, set `CAST_LIFECYCLE_ENABLED=true` alongside `CAST_EDITING_ENABLED=true` for the application roles and restart them. The gate is independent of character presets. Turning it off blocks new merge, undo, remove, restore and promotion requests. Operators can still browse removed characters through the Removed filter, and those identities continue to reserve their names and aliases. Existing v4 journals still require the compatible readers.
 
 The first v4 lifecycle write is a rollback boundary. To restore an older binary, restore the pre-boundary recovery set and account for every later write. Promotion receipts are operational retry records scoped to the owner, destination draft and idempotency key. Replaying a completed request returns its stored result. Campaign rewind affects the lifecycle journal and preserves the promoted world draft revision.
+
+## Deployment model for character presets
+
+Rolling deploys are not supported for this feature. Replace every API, worker and import node at once, so no older reader sees a settings snapshot, roster or cast event it cannot parse.

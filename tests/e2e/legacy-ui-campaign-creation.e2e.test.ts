@@ -362,7 +362,7 @@ for (const [state, intent, label, section] of [
   ["capability_insufficient", "Create and start", "Character settings", "characters"],
   ["enrollment_missing", "Create and start", "Story Memory settings", "campaign"]
 ] as const) {
-  test(`shows the actionable narrator notice for ${state} after ${intent}`, async ({ page }) => {
+  test(`does not interrupt ${intent} for the ${state} narrator notice`, async ({ page }) => {
     const api = await installCreationApi(page);
     await page.route("**/api/v1/meta", route => route.fulfill({ json: { capabilities: { castPresets: true, castContext: state !== "installation_disabled" } } }));
     await page.route("**/api/v1/world-versions/*/playable-characters", route => route.fulfill({ json: {
@@ -377,11 +377,10 @@ for (const [state, intent, label, section] of [
     await openDashboardCreation(page); await fillCampaignBasics(page);
     await expect(page.locator("#startingCastNotice")).toContainText(state === "installation_disabled" ? "won't reach the narrator" : "after you create it");
     await page.locator(intent === "Create and start" ? "#createAndStartCampaign" : "#confirmCreateCampaign").click();
-    const link = page.locator("#createCampaignDialog").getByRole("link", { name: label, exact: true });
-    await expect(link).toHaveAttribute("href", section === "characters" ? "/app/settings?section=characters"
-      : "/app/settings?section=campaign&campaignId=00000000-0000-4000-8000-000000000099");
-    await expect(page.locator("#confirmCreateCampaign")).toBeDisabled();
-    await expect(page.locator("#createAndStartCampaign")).toBeDisabled();
+    if (intent === "Create and start") await page.waitForURL("**/story/00000000-0000-4000-8000-000000000099");
+    else await expect(page.locator("#createCampaignDialog")).toBeHidden();
+    await expect(page.getByRole("link", { name: label, exact: true })).toHaveCount(0);
+    void section;
     expect(api.creates).toHaveLength(1);
   });
 }

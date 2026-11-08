@@ -12,7 +12,7 @@ export const castGenerationSnapshotSchema = castSnapshotSchema.extend({
   discoveryStatus: z.enum(["off", "current", "pending", "failed"]),
   details: z.array(z.object({ characterId: z.uuid(), observations: z.array(castObservationSchema),
     overrides: z.array(castOverrideSchema) }).strict()),
-  fiction: z.array(z.object({ characterId: z.uuid(), fields: z.array(z.object({ field: castContextFictionFieldSchema, value: z.string().min(1).max(600), source: z.enum(["authored", "campaign_edit", "observation", "override"]), evidenceKind: z.enum(["turn", "user", "world", "historical_world"]).optional(), evidenceId: z.string().max(200).optional(), effectiveTurn: z.number().int().nonnegative().optional() }).strict()) }).strict()).optional()
+  fiction: z.array(z.object({ characterId: z.uuid(), fields: z.array(z.object({ field: castContextFictionFieldSchema, value: z.string().min(1).max(600), source: z.enum(["authored", "campaign_edit", "observation", "override"]), evidenceKind: z.enum(["turn", "user", "world", "historical_world"]).optional(), evidenceId: z.string().max(200).optional(), effectiveTurn: z.number().int().nonnegative().optional(), truncated: z.literal(true).optional() }).strict()) }).strict()).optional()
 }).strict().superRefine((snapshot, context) => {
   const invalid = (message: string) => context.addIssue({ code: "custom", message });
   const characters = new Set(snapshot.characters.map((character) => character.id));

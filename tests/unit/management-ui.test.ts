@@ -1477,7 +1477,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("playableCharactersFromContent(worldAuthorWorkingContent)");
     expect(managementScript).not.toContain("Legacy/default character");
     expect(managementScript).toMatch(/async function loadWorldVersionPlayableCharacters\(selection = \{\}\)/);
-    expect(managementScript).toContain('/playable-characters`');
+    expect(managementScript).toContain("characterApi.worlds.playableCharacters(worldVersionId)");
     expect(managementScript).toContain("selectedCharacterId");
     expect(managementScript).toContain("const characterCount = Array.isArray(preview.characters) ? preview.characters.length : 0;");
     expect(managementScript).toContain("all ${characterCount} playable character");
@@ -1489,7 +1489,7 @@ describe("Nexus management UI contracts", () => {
     const elements = { characterName: { value: "Mira" }, characterGuidance: { value: "" }, characterRole: {}, characterUnclassifiedNotes: {}, characterCampaignUse: { value: "playable" }, characterStartingCastDefault: { checked: true }, characterAlwaysInContext: { checked: false } };
     const profile = { story: { role: "" }, unclassifiedNotes: "A patient guide" };
     const { characterFromForm } = managementFunctions<{ characterFromForm: (options?: { forOrganization: boolean }) => unknown }>(["characterFromForm"], {
-      elements, profileFromForm: () => profile, profileHasGuidance: () => false,
+      elements, profileFromForm: () => profile, profileHasGuidance: () => false, characterModalScope: "world", editingCharacterId: "",
       characterModalWorkingCharacter: { id: "mira", extension: "preserved" }, opaqueCharacterId: () => "new", characterRowsFromForm: () => []
     });
     expect(characterFromForm({ forOrganization: true })).toMatchObject({ name: "Mira", profile, extension: "preserved" });
@@ -1512,7 +1512,7 @@ describe("Nexus management UI contracts", () => {
       ["world", null, true, false], ["world", {}, false, true], ["campaign", null, false, false]
     ] as const) {
       const { updateCharacterGeneratorAvailability } = managementFunctions<{ updateCharacterGeneratorAvailability: () => boolean }>(["updateCharacterGeneratorAvailability"], {
-        elements, characterModalScope: scope, configuredDefaultTextProvider: () => provider, worldAuthorWorkingContent: {}, worldAuthorMode: "create", characterModalBusy: false
+        elements, characterModalScope: scope, configuredDefaultTextProvider: () => provider, worldAuthorWorkingContent: {}, worldAuthorMode: "create", characterModalBusy: false, suggestionApply: null
       });
       expect(updateCharacterGeneratorAvailability()).toBe(generatorVisible);
       expect(elements.characterGeneratorUnavailable!.classList.contains("hidden")).toBe(!fallbackVisible);
@@ -1588,7 +1588,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementCss).toContain(".character-dialog-modal");
     expect(managementCss).toContain(".character-edit-row");
     expect(managementCss).toContain(".character-roster-card:hover");
-    expect(managementScript).toContain("function openCharacterDialog(characterId = \"\")");
+    expect(managementScript).toContain('function openCharacterDialog(characterId = "", preview = null, apply = null)');
     expect(managementScript).toContain('card.addEventListener("click", () => openCharacterDialog(character.id));');
     expect(managementScript).toContain('elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());');
     expect(managementScript).toContain("function updateWorldAuthorCharacters(characters)");

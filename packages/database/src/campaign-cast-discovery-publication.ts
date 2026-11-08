@@ -21,7 +21,9 @@ export function compactCastDiscoveryCharacters(cast: CastCharacter[]) {
     aliases: person.aliases.map(alias => projectCastFictionText(alias, 200)).filter(Boolean),
     profile: Object.fromEntries(Object.entries(person.profile).filter(([field]) => ["identity.pronouns", "story.role", "appearance.description"].includes(field))
       .map(([field, value]) => [field, projectCastFictionText(value)]).filter(([, value]) => value && !/\b(?:score|modifier|difficulty|target)\s*:?\s*[+-]?\d/iu.test(value))) }));
-  const historicalNames = cast.filter(person => person.mergedIntoCharacterId).flatMap(person => [person.name, ...person.aliases].map(name => ({ characterId: person.mergedIntoCharacterId!, name })));
+  // A name the reviewer omitted from the merge is free; only retained names still resolve to the target.
+  const retainedByTarget = (targetId: string, name: string) => { const target = cast.find(person => person.id === targetId); return !!target && [target.name, ...target.aliases].some(value => normalizeEntityTerm(value) === normalizeEntityTerm(name)); };
+  const historicalNames = cast.filter(person => person.mergedIntoCharacterId).flatMap(person => [person.name, ...person.aliases].filter(name => retainedByTarget(person.mergedIntoCharacterId!, name)).map(name => ({ characterId: person.mergedIntoCharacterId!, name })));
   return { characters, historicalNames, identityHints: castDiscoveryCharacterHints(cast.filter(person => !person.mergedIntoCharacterId)), seedActivations };
 }
 
@@ -155,7 +157,7 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
           characterIds.push(characterId); observationIds.push(...receipt.observationIds); accepted++;
           current = await initializeCastWithClient(client, claim.scope); continue;
         }
-      } else if (livePresetsEnabled && claim.execution.admission?.castPresetsEnabled) { unresolved.push({ candidate: proposal, code: "identity_changed" }); continue; }
+      }
     }
     if (!characterId) {
       const receipt = await applyCastBatchWithClient(client, claim.scope, { boundary: current.boundary, idempotencyKey: `${key}:identity`,

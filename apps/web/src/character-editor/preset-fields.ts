@@ -5,6 +5,13 @@ export function renderPresetFields(form: HTMLFormElement, state: PresetDraft, di
   const notice = doc.createElement("p");
   notice.textContent = "The story can't change World canon fields. You can edit them for this campaign.";
   form.append(notice);
+  const seed = state.detail.character.originProfile, legacyText = seed?.legacyCharacterText.trim() ?? "";
+  if (legacyText && legacyText !== seed?.profile.unclassifiedNotes.trim()) {
+    const label = doc.createElement("label"), source = doc.createElement("textarea");
+    label.textContent = "Original source text (read-only)"; label.htmlFor = "cast-legacy-source";
+    source.id = "cast-legacy-source"; source.readOnly = true; source.value = legacyText;
+    form.append(label, source);
+  }
   const sections = new Map<string, HTMLDetailsElement>();
   const controls = new Map<string, HTMLInputElement | HTMLTextAreaElement>();
   for (const field of presetFields) {

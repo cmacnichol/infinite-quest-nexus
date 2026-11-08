@@ -63,8 +63,10 @@ export function valueAt(settings: InstanceSettings, key: SettingsFieldKey): bool
 export function deriveSettingsPolicyForLocalMode(policy: DeploymentSettingsPolicy, implicitLocal: boolean): DeploymentSettingsPolicy {
   if (!implicitLocal || policy.version !== 1 || policy.featureGates.castPresetsEnabled !== undefined
     || policy.featureGates.castContextWithoutDiscoveryEnabled !== undefined) return policy;
-  return { ...policy, featureGates: { ...policy.featureGates, castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: true } };
+  return { ...policy, featureGates: { ...policy.featureGates, castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: true, castContextEnabled: true, castEditingEnabled: true } };
 }
+/** Gates a local single-user install can turn on from the panel alone. */
+export const LOCAL_PANEL_GATES: ReadonlySet<string> = new Set(["castPresetsEnabled", "castContextWithoutDiscoveryEnabled", "castContextEnabled", "castEditingEnabled"]);
 /** Policy disables capabilities; incompatible numeric preferences reject activation. Inputs stay immutable. */
 export function resolveInstanceSettings(requested: InstanceSettings, policy: DeploymentSettingsPolicy, capacity: RuntimeRoleCapacity): SettingsResolution {
   const parsed = instanceSettingsSchema.safeParse(requested);

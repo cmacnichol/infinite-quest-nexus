@@ -25,6 +25,8 @@ export async function loadLocalSingleUserPolicy(pool: DatabasePool, bootstrap: R
     // The historical policy remains byte-for-byte digestible; effective gates are derived at use sites.
     delete policy.featureGates.castPresetsEnabled;
     delete policy.featureGates.castContextWithoutDiscoveryEnabled;
+    policy.featureGates.castContextEnabled = seed.snapshot.castContextEnabled;
+    policy.featureGates.castEditingEnabled = seed.snapshot.castEditingEnabled;
   }
   if (seed.policy_digest !== settingsDigest(policy)) throw new Error("settings_policy_mismatch");
   return policy;

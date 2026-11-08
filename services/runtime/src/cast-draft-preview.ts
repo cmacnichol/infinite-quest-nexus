@@ -4,7 +4,7 @@ import type { CampaignCastWritePort } from "../../../packages/application/src/ca
 import { CampaignCastError } from "../../../packages/application/src/campaign-cast/ports.js";
 import { supportsCastDraftFact } from "../../../packages/domain/src/campaign-cast-discovery.js";
 import { projectCastFictionText } from "../../../packages/domain/src/character-fiction-authority.js";
-import { validateCastFiction } from "../../../packages/domain/src/campaign-cast.js";
+import { castAuthoredFieldLimit, isCastUpdatingPath, validateCastFiction } from "../../../packages/domain/src/campaign-cast.js";
 import { extractJsonObject } from "../../../packages/story-engine/src/output.js";
 import { prepareDirectAuthoringTextExecution } from "./authoring-text-execution-preparation.js";
 import { runAuthoringResponse } from "./authoring-response-adapter.js";
@@ -12,6 +12,8 @@ import type { ApiGenerationProviderCollaborators } from "./provider-application-
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 
 const outputSchema = z.object({ proposals: z.array(z.object({ path: z.string().min(1).max(200), value: z.string().min(1).max(20000), evidenceIds: z.array(z.uuid()).max(40) }).strict()).max(30) }).strict();
+
+const draftWorldSchema = z.object({ world: z.object({ premise: z.string().optional(), tone: z.string().optional() }).loose().optional() }).loose();
 
 /** An ephemeral preview: only the scoped, projected evidence leaves this service. */
 export function createCastDraftPreview(pool: DatabasePool, repository: CampaignCastWritePort, providers?: Pick<ApiGenerationProviderCollaborators, "execution" | "resolution" | "authoringTextPlans">) {
@@ -29,7 +31,7 @@ export function createCastDraftPreview(pool: DatabasePool, repository: CampaignC
       const provider = await providers.execution.text({ ownerUserId: scope.ownerUserId }, resolution.providerProfileId, "text", resolution.model);
       const prepared = await prepareDirectAuthoringTextExecution({ ownerUserId: scope.ownerUserId, execution: provider, ...(providers.authoringTextPlans ? { options: providers.authoringTextPlans } : {}), operationPrompts: { castDraft: CAST_DRAFT_SYSTEM_PROMPT_V1, castDraftRepair: CAST_DRAFT_SYSTEM_PROMPT_V1 } });
       const person = context.character;
-      const world = row.content?.world ?? {};
+      const world = draftWorldSchema.parse(row.content).world ?? {};
       const authored: Record<string, string | string[]> = {};
       let authoredSize = 0;
       for (const path of castAuthoredPathSchema.options) {
@@ -42,7 +44,7 @@ export function createCastDraftPreview(pool: DatabasePool, repository: CampaignC
         if (size && authoredSize + size <= 12000) { authored[path] = safe; authoredSize += size; }
       }
       const eligiblePaths = (person.campaignProfile ? castAuthoredPathSchema.options : castFieldSchema.options).filter(path => {
-        if (path.startsWith("state.") || path === "story.goals" || context.observedPaths.includes(path) || (person.profile as Record<string, string>)[path]?.trim()) return false;
+        if (isCastUpdatingPath(path) || context.observedPaths.includes(path) || (person.profile as Record<string, string>)[path]?.trim()) return false;
         const [section, key] = path.split(".");
         const authored = key && person.campaignProfile ? (person.campaignProfile as any)[section!]?.[key] : undefined;
         return !(typeof authored === "string" && authored.trim()) && !(Array.isArray(authored) && authored.length);
@@ -70,10 +72,10 @@ export function createCastDraftPreview(pool: DatabasePool, repository: CampaignC
         const available = eligiblePaths.includes(proposal.path as never) && (person.campaignProfile ? castAuthoredPathSchema.safeParse(proposal.path).success : field.success);
         let safeValue = true;
         try { validateCastFiction(proposal.value); } catch { safeValue = false; }
-        const invalid = seen.has(proposal.path) || !available || proposal.path.startsWith("state.") || proposal.path === "story.goals"
+        const invalid = seen.has(proposal.path) || !available || isCastUpdatingPath(proposal.path)
           || context.observedPaths.includes(proposal.path) || !safeValue
           || !!(person.profile as Record<string, string>)[proposal.path]?.trim() || typeof authored === "string" && !!authored.trim()
-          || proposal.value.length > (!person.campaignProfile || proposal.path === "identity.pronouns" || ["appearance.ancestryOrSpecies", "appearance.apparentAge", "appearance.genderPresentation", "appearance.build", "appearance.skinOrComplexion", "appearance.eyes"].includes(proposal.path) ? 2000 : 20000)
+          || proposal.value.length > (person.campaignProfile ? castAuthoredFieldLimit(proposal.path) : 2000)
           || projectCastFictionText(proposal.value, proposal.value.length + 1) !== proposal.value
           || ((!creative || references.length > 0) && (!references.length || references.some(item => !item || !supportsCastDraftFact({ paragraph: item.quote, quote: item.quote, names: [person.name, ...person.aliases], field: proposal.path, value: proposal.value }))))
           || references.some(item => !item);

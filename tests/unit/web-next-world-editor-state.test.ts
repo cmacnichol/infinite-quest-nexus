@@ -101,6 +101,17 @@ describe("World Editor draft state", () => {
     expect(() => updateCollectionItem(state, "entities", 2, {})).toThrow(RangeError);
   });
 
+  it("clears entity links when a character is removed and restores them on undo", () => {
+    const base = createWorldEditorState(worldAggregateFixture);
+    const character = { ...(base.draft.playableCharacters[0] as object), id: "linked-character" };
+    const entity = { ...(base.draft.entities[0] as object), id: "linked-entity", linkedCharacterId: "linked-character" };
+    const state = { ...base, draft: { ...base.draft, playableCharacters: [character], entities: [entity] } } as typeof base;
+    const removed = removeCollectionItem(state, "playableCharacters", 0);
+    expect(removed.draft.entities[0]).not.toHaveProperty("linkedCharacterId");
+    const restored = restoreCollectionItem(removed, removed.pendingRemovals[0]!.id);
+    expect(restored.draft.entities[0]).toMatchObject({ linkedCharacterId: "linked-character" });
+  });
+
   it("records a reversible collection removal with its original position and value", () => {
     const state = createWorldEditorState(worldAggregateFixture);
     const removed = removeCollectionItem(state, "entities", 0);

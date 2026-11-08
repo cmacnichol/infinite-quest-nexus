@@ -9,7 +9,7 @@ import { castFieldSchema, castScopeSchema, type CastScope, type CastEvidence } f
 import { castCandidateQuerySchema, castCandidateListSchema, castCandidateResolutionSchema, castDiscoverySourceSchema,
   resolveCastCandidateSchema, type CastCandidateQuery, type ResolveCastCandidate } from "../../contracts/src/campaign-cast-discovery.js";
 import { CampaignCastError } from "../../application/src/campaign-cast/ports.js";
-import { canAcceptReviewedCastObservation, resolveCastDiscoveryEvidence } from "../../domain/src/campaign-cast-discovery.js";
+import { buildCastDiscoverySource, canAcceptReviewedCastObservation, resolveCastDiscoveryEvidence } from "../../domain/src/campaign-cast-discovery.js";
 import { normalizeEntityTerm } from "../../domain/src/entity-references.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import { initializeCastWithClient, applyCastBatchWithClient, seedCampaignCastWithClient } from "./campaign-cast-repository.js";
@@ -194,11 +194,17 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
             if (decision === "review") throw new CampaignCastError("cast_invalid_request");
             if (decision === "protagonist") characterId = cast.characters.find(person => person.origin.kind === "protagonist")?.id ?? null;
             if (decision === "seed") {
-              const represented = cast.characters.filter(person => person.origin.kind === "world" && person.origin.entityId === entry.id || person.originProfile?.entityId === entry.id);
+              const represented = cast.characters.filter(person => person.origin.kind === "world" && person.origin.entityId === entry.id || person.originProfile?.evidence.kind === "world" && person.originProfile.entityId === entry.id);
               if (represented.length) throw new CampaignCastError("cast_invalid_request");
               characterId = randomUUID();
+              const citation = candidate.identityEvidence[0]!;
+              const narrated = buildCastDiscoverySource({ scope, timelineRevision: source.timelineRevision, turnId: source.turnId, turnNumber: source.turnNumber,
+                narrationRevision: source.narrationRevision, narration: turn.effective_narration }).paragraphs.find(item => item.id === citation.paragraphId);
+              const start = narrated?.text.indexOf(citation.quote) ?? -1;
+              if (start < 0) throw new CampaignCastError("cast_invalid_request");
               const receipt = await seedCampaignCastWithClient(client, scope, { characterId, worldVersionId: pinned.world_version_id, entry, index,
-                boundary: cast.boundary, idempotencyKey: `${key}:seed`, narrationAlias: candidate.name, evidenceCommands: [
+                boundary: cast.boundary, idempotencyKey: `${key}:seed`, narrationAlias: candidate.name,
+                attachment: { basis: "unique_world_name", sourceRanges: [{ turnId: source.turnId, narrationRevision: source.narrationRevision, sourceHash: source.sourceHash, paragraphId: citation.paragraphId, start, end: start + citation.quote.length }] }, evidenceCommands: [
                   { kind: "mention", characterId, evidence: evidence(candidate.identityEvidence[0]!) },
                   ...candidate.observations.map(observation => ({ kind: "observe" as const, characterId: characterId!, field: observation.field,
                     value: observation.value, mode: observation.mode, speakerCharacterId: observation.speakerCharacterId,

@@ -1,6 +1,6 @@
 # Unified Character Editor and Starting Cast Design
 
-**Status:** Revised after [independent spec review](../../review/2026-11-08-unified-character-editor-and-starting-cast-spec-review.md). The author confirmed both [product decisions](#confirmed-product-decisions) on November 8, 2026.
+**Status:** Revised after [independent spec review](../../review/2026-11-08-unified-character-editor-and-starting-cast-spec-review.md). The author confirmed both [product decisions](#confirmed-product-decisions) on November 8, 2026, and accepted the [round-2 amendments](#round-2-amendments), which take precedence over any earlier text they conflict with.
 
 **Date:** 2026-11-08
 
@@ -66,7 +66,7 @@ The design has failed, even if it works technically, if:
 | Authored stable fields | Fixed against automation | User |
 | Goals | Authored value is the start; updates from the story | User |
 | Post-start editing | All fields of story characters stay editable | User |
-| Snapshot lifecycle | Copied at campaign creation, then unique to the campaign | User |
+| Snapshot lifecycle | Copied when the character enters the campaign (creation, first appearance, approval or Add from world), then unique to the campaign | User |
 | Shared model | In shared code, so Web-Next is easier later | User |
 | One roster with a use setting, not a separate NPC list | Keeps one workspace, AI and import path | Design call |
 | Same model as main character: origin snapshot plus editable copy | Allows all fields and reset | Design call |
@@ -90,7 +90,6 @@ The design has failed, even if it works technically, if:
 | Approving a held world match copies the profile; Not this character does not re-copy automatically | Add from world handles later genuine arrivals | User |
 | A name that fails the mechanics filter is flagged and skipped, never aborting campaign creation | One bad name cannot block a campaign | User |
 | Context without discovery needs a separate opt-in | No behavior change on upgrade | User |
-| Starting cast warns when a campaign is not enrolled in Story Memory, with a link to enable it | No automatic enrollment | User |
 | Discovery may add appearance as a separate Observed in story line | Authored fields stay fixed and story detail is kept | User |
 | Nexus uses the typed `client-web` cast API for campaign character work | Shared validation, and reuse by Web-Next | User |
 | One atomic route saves a preset NPC | Two revision-checked saves conflict with each other | Design call |
@@ -117,7 +116,7 @@ The design has failed, even if it works technically, if:
 | Main-character Organize stays on the campaign page | Story has no review surface | User |
 | Aliases are entered one per line in every editor | Names can contain commas | User |
 | Every campaign editor's close prompt offers Keep editing, Save changes and Discard | One staged confirmation | User |
-| Corroborated first-appearance copies can be undone with Not this character; Add from world then restores the existing record | Avoids two records for one person | User |
+| Corroborated first-appearance copies can be undone with Not this character; Add from world then starts a fresh activation on the existing record | Avoids two records for one person | User |
 | The new flags are enabled from the panel alone on local single-user installs; managed deployments set the environment variable and re-issue the policy | Respects operator control where it exists | User |
 | With discovery off, the narrator receives last-known state as dated, lower-authority content | Values on the sheet do not silently vanish from context | User |
 | Turning presets off stops new seeding only; seeded characters stay editable and in context | Rollback must not strand existing data | User |
@@ -141,7 +140,7 @@ alwaysInContext: z.boolean().default(false)
 - `supporting` characters do not need mechanics. The editor hides mechanics for them. Mechanics on `both` apply only when the character is the main character.
 - Switching a character to Supporting keeps stored `rpgStats` and `defaultTriggers`, hidden, with the notice "Mechanics are kept but not used while this character is Supporting."
 - Changing the last selectable character to Supporting shows the warning "This world will have no character to play."
-- Each seed stores the original `characterText` as read-only legacy guidance, including when a structured `profile` also exists. Preserve both through edits, Reset, branch and archives. For a legacy-only record, initialize `unclassifiedNotes` from the text. Render or send the fallback once when the two values are identical.
+- Each seed stores the original `characterText` as read-only legacy guidance, including when a structured `profile` also exists. Preserve both through edits, Reset, branch and archives. For a legacy-only record, initialize `unclassifiedNotes` from the text. Legacy text is shown read-only and offered to Organize, and is never sent to the narrator on a seeded NPC (amendment D4).
 
 Required changes:
 
@@ -176,7 +175,7 @@ Rules:
 - Seeding requires the new `CAST_PRESETS_ENABLED` flag (default false, effective only with cast editing on). When it is off, a non-empty `startingCast` is rejected with `cast_presets_disabled`, raised as a `WorldCampaignApplicationError` with status 503 because `POST /campaigns` is not a cast route. Map this specific reason to a sanitized public 503 envelope carrying `cast_presets_disabled` and the request reference ID through both the world adapter and global HTTP handler. Keep generic 5xx redaction in place.
 - Seeding stores the validated world profile and original legacy guidance at full fidelity, including mechanics-like prose. Project provider-bound values using the [narrator context rules](#narrator-context).
 - `create` validates names and aliases with `validateCastFiction` (`campaign-cast-repository.ts:261`), and projection repeats that check. A world-origin `create` also requires the ID in `buildScopedEntityCatalog` or `castDiscoveryWorldIdentities` (`:269-270`), whose filter is stricter (`campaign-cast-world-identities.ts:11-15,37-39`). Seeding, readiness and Add from world therefore use one eligibility predicate that matches what `applyCommand` accepts. Seeding skips a character whose name fails it, omits an alias that fails, and reports both in `skippedStartingCast` on the create response. Add from world returns a field error instead.
-- A successful create consumes the form. Both Create and Create and start enter a result state associated with the returned campaign ID when there are skipped entries or a post-create enrollment link to show. Show the skipped list, applicable setup link, Open story and Close. Disable resubmission from that state. With no result to show, follow the requested close or navigation.
+- A successful create consumes the form. Both Create and Create and start enter a result state associated with the returned campaign ID only when characters were skipped (amendment D13). Show the skipped list, applicable setup link, Open story and Close. Disable resubmission from that state. With no skipped entries, follow the requested close or navigation; an enrollment link alone does not interrupt, and appears on the campaign page instead.
 - An internal function, `seedCampaignCastWithClient`, initializes cast state, pre-allocates character IDs, and writes one event per character. The boundary is turn 0, timeline revision 0. The idempotency key is `campaign-seed:{campaignId}:{characterId}`. `persistBatch` generates IDs internally, so the normal batch path cannot reference them.
 - Evidence `sourcePath` points to a value that exists in the world version, for example the entry's `name`, so `evidenceIsCurrent` accepts it for characters with no profile.
 
@@ -236,7 +235,7 @@ First appearance applies to eligible campaigns and Supporting or Both entries in
 
 ### Add from world
 
-The Story panel and campaign page offer **Add from world**, listing `supporting` and `both` characters from the pinned world version who have no active seed in the campaign. The main character is excluded, using `selectedCharacterId`. "Already represented" is decided by the latest active seed plus origin, comparing the world as well as the `entityId`. Removed and merged-away records still count, and a merged-away match resolves to its target. The server rejects duplicates.
+The Story panel and campaign page offer **Add from world**, listing `supporting` and `both` characters from the pinned world version who have no active seed in the campaign. The main character is excluded, using `selectedCharacterId`. "Already represented" is decided by the latest active seed plus origin, comparing the world as well as the `entityId`. A seed carried from a different world does not count as already represented (amendment D16). Removed and merged-away records still count, and a merged-away match resolves to its target and is never itself seeded. The server rejects duplicates.
 
 ```text
 GET  /api/v1/campaigns/:campaignId/cast/from-world-preview?characterId=...&targetCastCharacterId=...
@@ -253,7 +252,7 @@ Body: castWriteBase + { characterId, expectedWorldVersionId, previewFingerprint,
 
 ### World migration
 
-Migrating a campaign to a newer world version does not change existing copies. First-appearance copies in eligible campaigns and explicit additions after migration use the new pinned version. Older seed evidence stays valid, because a referenced world version cannot be deleted (`world-repository.ts:1019-1027`). A campaign created before this feature gets no automatic copies, even after migrating; the panel's empty state points to Add from world.
+Migrating a campaign to a newer world version does not change existing copies. First-appearance copies in eligible campaigns and explicit additions after migration use the new pinned version. Older seed evidence stays valid only while its world version exists; the deletion guard must also treat cast seed evidence as a dependency, or the evidence must be converted to `historical_world` first. A campaign created before this feature gets no automatic copies, even after migrating; the panel's empty state points to Add from world.
 
 If a job was admitted on an older pin, re-resolve the captured world and stable roster ID under the campaign lock at publication. Accept a match only when the entry is still eligible and the captured identity evidence uniquely supports its current name/aliases. Read the profile from the current pin. A rename that invalidates the evidence, removal, changed role eligibility, collision or reserved protagonist goes to identity review. Never commit the old version as a new origin or silently substitute a matching name.
 
@@ -280,7 +279,7 @@ New commands do not get correct lifecycle behavior automatically. Each path belo
 | Chronicle metadata (`campaign-cast-repository.ts:362`) | Refreshes only for `create` and `identity` commands | Also refresh for merge, unmerge, remove and restore. Merged-away and removed records leave the catalogs (`campaign-cast-chronicle-metadata.ts:14`, `chronicle-context-repository.ts:2387`, `campaign-cast-context.ts:35`) but keep counting for name uniqueness |
 | Generation capture (`:204-222`) | Rewrites old-version world evidence as `historical_world` | Apply the same rule to seed evidence, and include authored profiles in the fingerprint input |
 | Cast profile cache, `cacheSnapshot` | Stores the 11-field projected profile | Keep it as is, or extend it only if roster queries need authored values |
-| Archives, `campaign-cast-portability.ts` | Imports remap named references explicitly | Validate v3 seed activations and edits and v4 lifecycle events. Remap seed, source-character and merge-event references. Require earlier matching activation/merge for edits/undo, and preserve the campaign eligibility marker independently |
+| Archives, `campaign-cast-portability.ts` | Imports remap named references explicitly | Validate v3 seed activations and edits and v4 lifecycle events. Remap seed, source-character and merge-event references. Require an earlier or same-event matching activation/merge for edits/undo, and preserve the campaign eligibility marker independently |
 
 ## Field policy
 
@@ -300,7 +299,7 @@ Effective value:
 Name and aliases:             latest identity command value
 Seeded stable field:          campaignProfile (non-blank) -> projected observation -> Unknown
 Non-seeded stable field:      override -> projected observation -> Unknown
-Updates with story:           override -> latest valid observation -> authored value (goals only) -> Unknown
+Updates with story:           override -> latest valid observation (dated, lower authority while tracking lags or is off) -> authored value (goals only, when no usable observation exists) -> Unknown
 Observed in story:            override -> latest valid observation -> not shown
 ```
 
@@ -366,11 +365,11 @@ Main characters are not part of this policy. They keep their existing profile au
   - a stable per-field `evidenceId` composed from the supplying seed or hand-edit event ID and path, so a later campaign correction cites its own event;
   - `semanticRole` treating authored text as canon and hand-edited authored text as `corrected_state` (`:150-151`);
   - `SentCast.authority` accepting the new value (`:18`), and notice text defining authored authority (`campaign-cast-context.ts:56-57`).
-- User overrides sort with their field's position, in the order below, rather than first.
-- Authored goals fall back when tracking is incomplete. Without this rule, the existing logic at `campaign-cast-context.ts:82` drops them during gaps.
+- For campaigns using presets (an active seed in the cast), user overrides sort with their field's position, in the order below, rather than first. Other campaigns keep overrides first (amendment D1).
+- During tracking gaps the latest usable goal observation is sent dated and lower authority, honoring the Restore cutoff. Authored goals are used only when no usable observation exists (amendment D2). A goal override is capped at the same 600 characters in context and the truncation is recorded (amendment D3).
 - Field order within the existing budget (`castContextTokenBudget`, at most 3,000 tokens): role, pronouns, personality, voice, motivations, goals, appearance summary, observed appearance (marked lower authority), state, background, relationships, fears and conflicts, hooks, other guidance, notes.
 - Reserve the serialized envelope and a minimum `{characterId, name}` for each admitted character in rank order, breaking ties by stable character ID. Omit and count identities that cannot fit. Zero headroom sends no cast block. Spend remaining tokens one field per admitted character per round in the order above. Complete the core rounds before optional fields. Preserve source and authority for every sent value, skip fields that cannot fit, and report budget omissions in the explanation. Count the actual serialized content including notices and source IDs.
-- Seeded characters at turn 0 enter context when named, referenced in an open thread, or pinned. `alwaysInContext` maps to pin. A character active in the last two turns ranks above a pinned character (`campaign-cast-context.ts:47`).
+- Seeded characters at turn 0 enter context when named, referenced in an open thread, or pinned. `alwaysInContext` maps to pin. In campaigns using presets, a character active in the last two turns ranks above a pinned character; other campaigns keep today's pin-first rank (amendment D1).
 - Phase 3 versions the frozen cast snapshot/context protocol and Story prompt protocol together, per [ADR 0023](../../architecture/0023-structured-character-profiles.md). Preserve the old parser, canonical fingerprint, selector, notices and prompt renderer for already-admitted jobs, including retry after restart. New admissions freeze the compatible new pair and rebuild chains whose scoped protocol/configuration no longer matches. A stored snapshot fingerprint alone cannot select the renderer.
 
 ### Flags
@@ -410,7 +409,7 @@ They follow the existing registry path:
 
 - Add both to `instanceSettingsSchema` and the feature-key types in `packages/contracts/src/instance-settings.ts`. Stored settings saved before this change have no value for them, so a stored-snapshot reader supplies false. The patch schema must have no defaults, because `instanceSettingsChangesSchema` is `.partial()` of the full schema, and zod applies defaults through `.partial()`, so any save touching another key would otherwise reset both flags to false.
 - Keep the deployment policy valid on upgrade. `settingsFeatureGatesSchema` is strict with required booleans and is embedded in the policy (`instance-settings.ts:16-22,68`), and the runtime compares a digest of the parsed policy (`runtime/instance-settings.ts:38`, `local-single-user-settings.ts:21-22`). Add a policy version: a policy of the earlier version loads with both gates absent, without a digest mismatch.
-- Local single-user installs permit both flags from the panel alone, without depending on the original seed value (`instance-settings-composition.ts:73`). Managed deployments require the environment variable and a re-issued policy, and until then the panel shows `deployment_disabled` with that explanation.
+- Local single-user installs permit both flags, and also `castContextEnabled` and `castEditingEnabled` when they were off at seed, from the panel alone, without depending on the original seed value (amendment D15). Managed deployments require the environment variable and a re-issued policy, and until then the panel shows `deployment_disabled` with that explanation.
 - Add both to `INSTANCE_SETTING_FIELDS` with `section: "characters"` (`packages/domain/src/instance-settings.ts`). They apply on restart, like the other settings.
 - Add display labels in `apps/web-next/src/settings/page.ts:20`.
 - Add both to `packages/database/src/config.ts`, `compose.yaml` and `deploy/swarm/stack.yaml`, and to the runtime composition that reads the cast flags.
@@ -447,7 +446,7 @@ Vanilla TypeScript DOM, imported by both `nexus.js` and `story.js`, built from t
 - World mode must keep the `#characterDialog` element, its control IDs and its nesting, so browser tests remain valid.
 - The renderer mounts before `nexus.js` builds its element map (`nexus.js:19`), so `elements[id]` lookups keep working. The busy lock on `<summary>` elements moves to event delegation, because disclosures can render after load (`nexus.js:761-765`).
 - `tests/unit/management-ui.test.ts` reads the static HTML and `nexus.js` source text (`:1508-1615`). Phase 1 moves those assertions to rendered-DOM checks, keeping what each one verifies.
-- Context-only sections plug in through slots defined per `CharacterEditorContext`, following the table below. The only page-level exception is the sources link, which is Open in Story on the campaign page.
+- Context-only sections plug in through slots defined per `CharacterEditorContext`, following the table below. The model takes both the context and the host page. Organize is campaign-page only on `campaign-main`, the lock source differs by page, and the sources link is Open in Story on the campaign page.
 - Styling stays with Nexus CSS, with a shared class set for both pages.
 
 ### Behavior by entry point
@@ -456,7 +455,7 @@ Vanilla TypeScript DOM, imported by both `nexus.js` and `story.js`, built from t
 |---|---|---|---|---|
 | Opened from | World edit screen | Campaign page, Story | Campaign page, Story | Campaign page, Story |
 | Fields | All | All | All | 11 cast fields |
-| Required to save | Selectable: name plus guidance or legacy text. Supporting: name only | Existing profile rules | Name | Name |
+| Required to save | Selectable: name plus guidance or legacy text. Supporting: name only | Name and a valid profile contract; guidance is not required (amendment D10) | Name | Name |
 | Legacy guidance (`characterText`) | Read-only where present, included in Organize input | Read-only where present | Read-only source text alongside structured fields. Show a legacy-only fallback once | Not shown |
 | Create | Add to draft | No | Add from world | POST cast create, keeping draft reapply (`campaign-cast-panel.ts:317-320`) |
 | Save target | World draft, then Save world | Existing profile endpoint | Atomic authored-profile route | Existing cast PATCH |
@@ -609,7 +608,7 @@ In the campaign panel (`index.html:221`, `nexus.js:4176`):
 - It opens a searchable list with the main character first, then the shared editor for the chosen character. Add from world is available.
 - Saves use the same paths as Story. With `editing` off, NPCs are read-only.
 - Check generation state before opening an editor and before saving, and show the same lock message as Story. The server remains the final guard.
-- The lock read is `GET /campaigns/:id/sync-status`. Locked means `pendingGeneration` is present or `generationRecovery.status` is `recoverable`, matching the server (`campaign-cast-repository.ts:407`). `failed` does not lock.
+- The lock read is `GET /campaigns/:id/sync-status`. Locked means `pendingGeneration` is present or `generationRecovery.status` is `recoverable`, matching the server (`campaign-cast-repository.ts:407`). `failed` does not lock, in Story or on the campaign page (amendment D14).
 - Sources, review, tracking and scans remain in Story, with an **Open in Story** link that opens the panel at the chosen character. Add a `character` query parameter to `/story/:id`, and let the panel's `open()` take a character ID.
 - Archived campaigns allow character edits and Add from world, as they do today.
 
@@ -710,7 +709,7 @@ Expansion reuses `POST /api/v1/worlds/playable-characters/generate-preview`, wit
 | `aliases`, `alias` | `profile.identity.aliases` |
 | `role` | `profile.story.role` |
 | `background`, `lore` | `profile.story.background` |
-| `description`, `summary`, `details`, `notes` | `profile.unclassifiedNotes` and `characterText`, so the notes reach Organize as legacy guidance |
+| `description`, `summary`, `details`, `notes` | `profile.unclassifiedNotes` only, which stays editable and reaches Organize |
 | Other properties | Listed in the preview as not converted |
 
 **Flow:**
@@ -780,7 +779,7 @@ remove   { expectedCharacterRevision }
 restore  { expectedCharacterRevision }
 ```
 
-The merge preview is computed by the client from both `CastDetail` responses and needs no server route.
+The merge preview is computed by the server under owner scope and returned through a read-only preview route, so the client and the write use the same rules.
 
 ### Merge
 
@@ -894,7 +893,9 @@ Response: { worldId, draftRevision, characterId }
 After supporting characters use the shared editor:
 
 - Remove the panel's `renderEditor`, Story's use of `character-profile-form.ts`, the `CHARACTER_PROFILE_FIELDS` map and the static character fields in `index.html`.
-- Keep `apps/web/src/character-profile-form.ts` only if Web-Next's copy still depends on it.
+- Delete `apps/web/src/character-profile-form.ts` once Story stops importing it; Web-Next does not depend on it.
+
+This work belongs to phase 4 (criterion 4.28).
 - Run the boundary check and both client builds.
 
 ## Confirmed product decisions
@@ -905,6 +906,54 @@ The author confirmed both behaviors on November 8, 2026.
 |---|---|---|
 | A. Native campaign created with presets off | Automatic first-appearance copying stays off for the lifetime of the campaign. Once presets are enabled, players can use Add from world. | 3.24 |
 | B. Reapply the same world profile after detaching a mistaken match | Reuse the cast record and start a fresh activation from the pinned world values. Earlier seed-scoped hand edits remain in history and can be re-entered manually. | 4.26, 4.29 |
+
+## Round-2 amendments
+
+Accepted by the author on November 8, 2026 after the second independent review and the review of the built code. These take precedence over earlier text.
+
+### Decisions
+
+| ID | Question | Decision |
+|---|---|---|
+| D1 | Does the new context ordering apply to existing campaigns? | Only to campaigns using presets, meaning an active seed exists in the cast. Others keep today's order |
+| D2 | Which goals reach the narrator during lag or with discovery off? | Latest usable observation, dated and lower authority; authored goals only if none exists |
+| D3 | Is a truncated goal override acceptable in context? | Yes, at the 600-character context cap, with the truncation recorded |
+| D4 | Does legacy `characterText` reach the narrator on a seeded NPC? | No. Display and Organize only |
+| D5 | Is an automatic first-appearance copy pinned when the roster says Always include? | No. The roster value sets the default only for Starting cast and Add from world |
+| D6 | Is a seeded NPC's linked entity prose dropped when character context is on? | Yes. Keep only the relationship endpoint |
+| D7 | Are campaigns created with presets on before phase 4 eligible? | No. Only phase 4 and later write a true marker |
+| D8 | Are rolling deploys supported? | No. The runbook requires replacing all nodes at once |
+| D9 | Does Web-Next's world summary list Supporting characters? | No. Selectable only |
+| D10 | Does saving the main character require guidance? | No. Use Story's contract-only rule in both clients |
+| D11 | Do mention-only passages count as Draft evidence? | No. Stored observations only |
+| D12 | Are Suggest and Draft prompts editable at application level? | No. Trusted constants, like cast discovery |
+| D13 | Does the enrollment link alone interrupt Create and start? | No. Only skipped characters do |
+| D14 | Does a `failed` generation lock character edits? | No. Follow the server rule everywhere |
+| D15 | Can the panel unlock context and editing gates on local installs? | Yes, including when they were off at seed |
+| D16 | Does a seed carried from a different world count as represented? | No |
+| D17 | Does a name omitted during merge review still resolve to the target? | No. It becomes free for a new character |
+| D18 | What happens to merge choices when the target's seed is undone? | Not this character is blocked until the merge is undone |
+| D19 | Is Undo allowed on a removed target, and can a removed character be promoted? | No to both. Restore first |
+| D20 | Are promoted NPCs pre-ticked in Starting cast? | No. `startingCastDefault: false`, as for Convert |
+
+### Corrections
+
+| ID | Requirement |
+|---|---|
+| A1 | Approving a held match writes a suppressing attachment in the same event as the seed, so Not this character can undo it |
+| A2 | A lag-published seed records its earliest evidence turn as `first_observed_turn`. Rewind and branch keep its same-event `create` and `seed_profile` when that turn is within the boundary |
+| A3 | Removing a roster character clears matching `linkedCharacterId` values in every writer, including Web-Next |
+| A4 | A seed lookup never targets a merged-away or removed record directly |
+| A5 | A world entity with no roster entry goes through plain discovery, even with presets on |
+| A6 | Authored fields use the canon semantic role, and hand-edited authored fields use `corrected_state` |
+| A7 | The preset editor shows `legacyCharacterText` read-only when present, once when it equals the notes |
+| A8 | Database world content read for Draft from story is validated, and Draft eligibility and field limits have one shared implementation |
+| A9 | A campaign-page lock is checked at open and save and is not live; only Story has a live lock |
+| A10 | Restoring a tick above the 30 cap leaves it unticked with a notice. The excluded main character does not count toward the cap |
+| A11 | Phase 2's inbox uses the panel editor and existing actions; `allowedActions` and seeded fixtures arrive in phase 3. Criterion 1.9's Reapply is exercised from phase 2 |
+| A12 | Presets-off rollback has its own test: seed, turn presets off, confirm edit and context still work and from-world routes return 503 |
+
+The other round-2 review findings are recorded in the [implementation plan's remediation phase](../plans/2026-11-08-unified-character-editor-and-starting-cast.md#phase-7--remediate-review-findings), with their status.
 
 ## Follow-up decisions
 
@@ -982,7 +1031,7 @@ Write ADR 0042 first. Build with no UI that can seed yet.
 - **3.10** Seeded characters corroborate through identity hints and do not fill the review queue, using strict policy fixtures.
 - **3.11** Each phase 3 route in the [Route summary](#route-summary) has its admission, limit, mapped error statuses, contract and client method. Phases 4, 5 and 6 meet the same bar for their routes.
 - **3.12** One preset save writes authored and updating fields atomically.
-- **3.13** PATCH and review confirm on a non-blank fixed field return `cast_fixed_field_override`.
+- **3.13** PATCH and review confirm on a fixed or discoverable path of a seeded character, blank or not, return `cast_fixed_field_override`.
 - **3.14** System Archive round trips keep the new roster fields. Phase 5 extends this to `linkedCharacterId`.
 - **3.15** Older archives and in-flight generation fingerprints remain valid.
 - **3.16** A seeded character's observed appearance is latest-wins, never blanks, and follows authored appearance in context.
@@ -993,7 +1042,7 @@ Write ADR 0042 first. Build with no UI that can seed yet.
 - **3.21** Seeded characters appear with authored values in existing cast reads, so Web-Next does not show them as Unknown.
 - **3.22** Rewind drops a seed applied to an existing record, a seed does not keep a corrected-away identity alive, and Restore authored goals reaches the narrator.
 - **3.23** Identity reservation and field rounds stay within actual token headroom, prioritize recent activity above pins, and explain omissions, including at zero headroom.
-- **3.24** A native campaign created with presets off keeps `firstAppearanceEligible: false` after presets are enabled. A valid first appearance leaves it unseeded, and explicit Add from world succeeds. Migration, branch, transfer and both archive round trips preserve each campaign’s original eligibility, including when its cast is empty.
+- **3.24** (seeding half delivered in phase 4) A native campaign created with presets off keeps `firstAppearanceEligible: false` after presets are enabled. A valid first appearance leaves it unseeded, and explicit Add from world succeeds. Migration, branch, transfer and both archive round trips preserve each campaign’s original eligibility, including when its cast is empty.
 - **3.25** Full detail, atomic multi-field writes, replayed typed receipts and archives preserve maximum legal authored values, long goals and distinct legacy text. List summaries, observations and provider snapshots obey their own limits.
 - **3.26** New provider payloads use the allowlisted fiction projection. Old admitted jobs retry with the original rendered prompt and fingerprint; new admissions use the versioned pair and bootstrap incompatible chains.
 - **3.27** The scoped from-world preview reports all eligible targets and exact identity, override and profile changes. A stale pin, target or preview conflicts without partial writes.
@@ -1078,7 +1127,7 @@ Domain and contracts:
 
 - A differing discovery observation never changes or deletes a non-blank fixed field.
 - Blank stable fields fill from discovery; hand-clearing returns them to discoverable.
-- Goals: authored start, later observation wins, gap falls back to authored, override wins until cleared.
+- Goals: authored start, later observation wins, a gap sends the latest observation dated and lower authority, authored only with no usable observation, override wins until cleared.
 - Effective-value order for every field class.
 - Selection and readiness with Playable, Supporting and Both, including a Supporting-only roster.
 - Client and domain policy tables match.

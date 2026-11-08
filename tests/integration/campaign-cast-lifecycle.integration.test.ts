@@ -280,6 +280,28 @@ integration("campaign cast lifecycle", () => {
     expect((await readCastDiscoveryStatus(pool, scope, true)).coverageStartTurn).toBe(1);
     expect((await pool.query("SELECT count(*)::integer n FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [scope.campaignId])).rows[0].n).toBe(1);
   });
+  it("keeps a production-shaped lag-published seed through branch and rewind", async () => {
+    const { scope, repo } = await fixture();
+    await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [scope.campaignId]);
+    await repo.initialize(scope);
+    const source = (await pool.query(`SELECT turn_id,correction_revision,effective_narration FROM effective_turn_narrations WHERE campaign_id=$1 AND turn_number=1`, [scope.campaignId])).rows[0];
+    const { worldVersionId } = (await pool.query(`SELECT world_version_id AS "worldVersionId" FROM campaigns WHERE id=$1`, [scope.campaignId])).rows[0];
+    await pool.query("UPDATE world_versions SET content=jsonb_set(content,'{playableCharacters}',$2::jsonb) WHERE id=$1", [worldVersionId, JSON.stringify([{ id: "lagged", name: "Lagged", characterText: "Keeper", campaignUse: "supporting", rpgStats: [], defaultTriggers: [] }])]);
+    const { buildCastDiscoverySource } = await import("../../packages/domain/src/campaign-cast-discovery.js");
+    const { playableCharacterSchema } = await import("../../packages/contracts/src/world-library.js");
+    const { seedCampaignCastWithClient } = await import("../../packages/database/src/campaign-cast-repository.js");
+    const parsed = buildCastDiscoverySource({ scope, turnId: source.turn_id, turnNumber: 1, narrationRevision: source.correction_revision, timelineRevision: 0, narration: source.effective_narration });
+    const paragraph = parsed.paragraphs[0]!, quote = paragraph.text.slice(0, 10), characterId = randomUUID();
+    await withTransaction(pool, client => seedCampaignCastWithClient(client, scope, { characterId, worldVersionId, index: 0, idempotencyKey: "lag-seed", boundary: { turnNumber: 2, timelineRevision: 0 },
+      entry: playableCharacterSchema.parse({ id: "lagged", name: "Lagged", characterText: "Keeper", campaignUse: "supporting" }),
+      evidenceCommands: [{ kind: "mention", characterId, evidence: { kind: "turn", turnId: source.turn_id, turnNumber: 1, narrationRevision: source.correction_revision, sourceHash: parsed.sourceHash, paragraphId: paragraph.id, quote } }] }));
+    expect((await pool.query("SELECT first_observed_turn FROM campaign_cast_characters WHERE id=$1", [characterId])).rows[0].first_observed_turn).toBe(1);
+    const branch = await branchCampaign(pool, scope.campaignId, { targetTurnNumber: 1, title: "Lag seed branch" });
+    expect((await repo.current({ ownerUserId, campaignId: branch.id })).characters.some(person => person.name === "Lagged")).toBe(true);
+    await withTransaction(pool, client => applyCastBoundaryChange(client, scope, { turnNumber: 1, changeKey: "lag-seed-rewind" }));
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [scope.campaignId]);
+    expect((await repo.current(scope)).characters.find(person => person.id === characterId)?.originProfile?.rosterName).toBe("Lagged");
+  });
   it("retains lagged create and seed across branch and rewind, then suppresses detached and corrected evidence", async () => {
     const { scope, repo } = await fixture();
     await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [scope.campaignId]);
