@@ -83,6 +83,7 @@ export type CampaignCreationMemoryCollaborator = Pick<
 
 export type WorldRepositoryCollaborators = Readonly<{
   memory: CampaignCreationMemoryCollaborator;
+  castPresetsEnabled?: boolean;
 }>;
 
 function json(value: unknown): string {
@@ -1166,7 +1167,7 @@ function createPostgresCampaignRepository(
       } catch {
         return failure("invalid_transition", {
           worldVersionId: request.worldVersionId,
-          selectionIssue: content.playableCharacters.length > 1 && !request.selectedCharacterId ? "required" : "unknown"
+          selectionIssue: resolvePlayableCharacters(content).length > 1 && !request.selectedCharacterId ? "required" : "unknown"
         });
       }
       const snapshot = characterSnapshot(seed.character);
@@ -1179,11 +1180,11 @@ function createPostgresCampaignRepository(
       const campaign = await client.query<{ id: string }>(
         `INSERT INTO campaigns (
            owner_user_id, world_version_id, title, story_length_profile, story_context_budget_tokens, turn_control_style,
-           selected_character_id, character_snapshot, character_profile, character_profile_revision, legacy_settings
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+           selected_character_id, character_snapshot, character_profile, character_profile_revision, legacy_settings, first_appearance_eligible, selected_character_world_id
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
         [scope.ownerUserId, request.worldVersionId, request.title, request.storyLengthProfile,
           request.storyContextBudgetTokens, request.turnControlStyle, seed.character.id, json(snapshot), campaignProfile ? json(campaignProfile) : null,
-          campaignProfile ? 1 : 0, json({ useRpgStats: seed.rpgStats.length > 0 })]
+          campaignProfile ? 1 : 0, json({ useRpgStats: seed.rpgStats.length > 0 }), collaborators.castPresetsEnabled === true, source.world_id]
       );
       const campaignId = campaign.rows[0]?.id;
       if (!campaignId) throw new Error("Could not create campaign.");

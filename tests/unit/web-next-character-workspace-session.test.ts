@@ -63,6 +63,7 @@ const candidate = (extra: Record<string, unknown> = {}): PlayableCharacter => ({
   id: "mara",
   name: "Mara",
   characterText: "A patient observer.",
+  campaignUse: "playable", startingCastDefault: true, alwaysInContext: false,
   rpgStats: [],
   defaultTriggers: [],
   source: {},

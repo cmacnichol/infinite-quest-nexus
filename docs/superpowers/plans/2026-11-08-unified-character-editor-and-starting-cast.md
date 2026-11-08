@@ -187,9 +187,9 @@ Write ADR 0042 first. Implement the compatible storage, policy and application c
 
 **Interface.** Keep `resolvePlayableCharacters` selectable-only. Expose the complete roster separately for starting cast. A legacy roster entry parses as `playable`, `startingCastDefault: true`, `alwaysInContext: false`.
 
-- [ ] **Regression cases.** First record ADR 0042. Test a defaulted legacy entry, a name-only Supporting entry, a Supporting-only roster, and one selectable plus several NPCs. Import preview must auto-select the sole playable and reject a forged Supporting ID at apply. Regenerate Both synchronously and via durable review/resume, including old jobs.
-- [ ] **Implementation.** Keep world schema version 6 and playableCharacters storage. Extend campaignUse/startingCastDefault/alwaysInContext, provide separate all-roster and selectable resolvers, and validate IDs/readiness across the proper scopes. Audit generated assembly, source proposals, import, transfer and archive readers. Preserve ID, source, use, defaults and hidden mechanics at the shared apply boundary. Guard new Supporting generation until phase 5.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** First record ADR 0042. Test a defaulted legacy entry, a name-only Supporting entry, a Supporting-only roster, and one selectable plus several NPCs. Import preview must auto-select the sole playable and reject a forged Supporting ID at apply. Regenerate Both synchronously and via durable review/resume, including old jobs.
+- [x] **Implementation.** Keep world schema version 6 and playableCharacters storage. Extend campaignUse/startingCastDefault/alwaysInContext, provide separate all-roster and selectable resolvers, and validate IDs/readiness across the proper scopes. Audit generated assembly, source proposals, import, transfer and archive readers. Preserve ID, source, use, defaults and hidden mechanics at the shared apply boundary. Guard new Supporting generation until phase 5.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/world-library.test.ts tests/unit/web-next-character-workspace-model.test.ts tests/unit/web-next-character-workspace-page.test.ts
@@ -207,9 +207,9 @@ pnpm exec playwright test tests/e2e/character-authoring-simplification.e2e.test.
 
 **Interface.** Read `castPresetsEnabled` and `castContextWithoutDiscoveryEnabled` from the versioned effective settings. The patch parser treats an absent key as unchanged. Local activation and managed policy activation feed the same runtime composition.
 
-- [ ] **Regression cases.** Start from a real pre-upgrade policy digest, seed, settings snapshot and event constraint. Boot, enable both flags locally, apply/restart, then patch an unrelated key and check history. Managed settings remain deployment_disabled until env and reissued policy permit them. Exercise the discovery-off upgrade case.
-- [ ] **Implementation.** Add castPresetsEnabled and castContextWithoutDiscoveryEnabled to the Characters registry, config and both manifests, default false. Version policy parsing without changing historical digests. Supply old snapshot defaults on reads only. Derive the history-key cap and widen the SQL constraint. Context requires editing, context enabled, and discovery or opt-in. Recheck migration numbering before creating the file.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Start from a real pre-upgrade policy digest, seed, settings snapshot and event constraint. Boot, enable both flags locally, apply/restart, then patch an unrelated key and check history. Managed settings remain deployment_disabled until env and reissued policy permit them. Exercise the discovery-off upgrade case.
+- [x] **Implementation.** Add castPresetsEnabled and castContextWithoutDiscoveryEnabled to the Characters registry, config and both manifests, default false. Version policy parsing without changing historical digests. Supply old snapshot defaults on reads only. Derive the history-key cap and widen the SQL constraint. Context requires editing, context enabled, and discovery or opt-in. Recheck migration numbering before creating the file.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/instance-settings-contract.test.ts tests/unit/instance-settings-policy.test.ts
@@ -223,13 +223,13 @@ pnpm exec playwright test tests/e2e/settings-panel.e2e.test.ts
 
 **Modify** `packages/database/src/world-repository.ts`, `packages/database/src/campaign-state-repository.ts`, `packages/database/src/campaign-transfer-character-repository.ts`, `packages/database/src/portable-import-family-repository.ts`, `packages/database/src/system-archive-import-repository.ts`, `packages/database/src/system-archive-export-repository.ts`, `services/runtime/src/campaign-archive-export-composition.ts`, `packages/contracts/src/archives.ts`, `packages/contracts/src/system-archives.ts`, `packages/application/src/system-archives/portability-registry.ts`.
 
-**Create** `database/migrations/0130_campaign_first_appearance_eligibility.sql`.
+**Create** `database/migrations/0130_campaign_first_appearance_eligibility.sql` and `database/migrations/0131_selected_character_world.sql`. The second migration records the source world of a newly selected protagonist. Branches, transfers and archives carry this comparison-only provenance. A historical campaign with unknown provenance conservatively reserves its selected roster ID.
 
 **Interface.** Read/write `firstAppearanceEligible` on the campaign root and in the enclosing Campaign/System Archive record. Copy the persisted value independently of `copyCampaignCast` or the number of cast events.
 
-- [ ] **Regression cases.** Create otherwise identical empty native campaigns with effective presets on/off. Enable presets, branch, migrate, transfer, export and import each into another scope. Verify true/false even without a cast payload. Legacy rows, story-text imports and old archives missing the marker read false. Against those restored scopes, invoke the seed decision and explicit-Add service when 3E and 3H are available, before phase 3 ships.
-- [ ] **Implementation.** Write firstAppearanceEligible at native campaign creation in its existing transaction. Preserve it across every copy path and in versioned enclosing archive records. Classify as portable authority. Use the same eligibility decision for automatic discovery and held approval. Verify the persisted marker at the phase 3 boundary, then repeat these fixtures through normal publication and explicit Add in phase 4.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Create otherwise identical empty native campaigns with effective presets on/off. Enable presets, branch, migrate, transfer, export and import each into another scope. Verify true/false even without a cast payload. Legacy rows, story-text imports and old archives missing the marker read false. Against those restored scopes, invoke the seed decision and explicit-Add service when 3E and 3H are available, before phase 3 ships.
+- [x] **Implementation.** Write firstAppearanceEligible at native campaign creation in its existing transaction. Preserve it across every copy path and in versioned enclosing archive records. Classify as portable authority. Use the same eligibility decision for automatic discovery and held approval. Verify the persisted marker at the phase 3 boundary, then repeat these fixtures through normal publication and explicit Add in phase 4.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run --config vitest.integration.config.ts tests/integration/world-library.integration.test.ts tests/integration/campaign-transfer.integration.test.ts tests/integration/campaign-archive.integration.test.ts tests/integration/system-archive.integration.test.ts
@@ -243,9 +243,9 @@ pnpm exec vitest run --config vitest.integration.config.ts tests/integration/wor
 
 **Interface.** Project `(events, observations, boundary)` into `originProfile`, `campaignProfile` and effective values with their sources. Scope authored edits to `seedEventId`. Expose distinct detail, roster-summary, observation, override and snapshot schemas.
 
-- [ ] **Regression cases.** Exercise fixed, blank discoverable, updating and observed fields using conflicting facts, claims, an intentional blank appearance override and restored goals followed by a new observation. Include 3,000-character background, 20,000-character goals and distinct legacy text. Check sheet, detail, receipts, source badges and rewind before an existing-row seed.
-- [ ] **Implementation.** Add seed_profile with immutable roster identity, world evidence, structured profile and legacy guidance. Bind edit_authored_profile to seedEventId. Use one effective resolver with a domain/client policy parity test. Keep full-fidelity detail separate from 200-character roster summaries, 2,000-character observations and bounded prompt fields. Apply restore-goals cutoff after supersession. Ensure a corrected-away identity cannot be kept alive just by its seed.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Exercise fixed, blank discoverable, updating and observed fields using conflicting facts, claims, an intentional blank appearance override and restored goals followed by a new observation. Include 3,000-character background, 20,000-character goals and distinct legacy text. Check sheet, detail, receipts, source badges and rewind before an existing-row seed.
+- [x] **Implementation.** Add seed_profile with immutable roster identity, world evidence, structured profile and legacy guidance. Bind edit_authored_profile to seedEventId. Use one effective resolver with a domain/client policy parity test. Keep full-fidelity detail separate from 200-character roster summaries, 2,000-character observations and bounded prompt fields. Apply restore-goals cutoff after supersession. Ensure a corrected-away identity cannot be kept alive just by its seed.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/campaign-cast-contract.test.ts tests/unit/campaign-cast-projection.test.ts
@@ -260,9 +260,9 @@ pnpm exec vitest run --config vitest.integration.config.ts tests/integration/cam
 
 **Interface.** Expose `GET cast/from-world-preview`, `POST cast/from-world` and `POST cast/:id/authored-profile` through `createCampaignCastApi`. A preview returns the pin, target, revisions, boundary and fingerprint. An identical committed replay returns the stored `castWriteResult`.
 
-- [ ] **Regression cases.** Preview two same-name targets, a blank versus authored world role, independent goal/appearance overrides and different identity aliases. A new pin, target edit or stale revision must cause 409 without partial mutation. Replay an identical request and compare receipts. Send a worst-case escaped/multibyte multi-field body and an illegal confirm on a seeded stable field through HTTP.
-- [ ] **Implementation.** Implement GET from-world-preview, POST from-world and POST :id/authored-profile with the spec request/response shapes. Recompute the preview fingerprint under lock and validate owner, generation lock, revisions, path classes, allowlisted errors and byte limits. One event covers Apply transitions or all authored/override/identity edits. Return allowedActions per review item for both clients and recheck on write. Register typed methods, request admission and error mappings for each new route.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Preview two same-name targets, a blank versus authored world role, independent goal/appearance overrides and different identity aliases. A new pin, target edit or stale revision must cause 409 without partial mutation. Replay an identical request and compare receipts. Send a worst-case escaped/multibyte multi-field body and an illegal confirm on a seeded stable field through HTTP.
+- [x] **Implementation.** Implement GET from-world-preview, POST from-world and POST :id/authored-profile with the spec request/response shapes. Recompute the preview fingerprint under lock and validate owner, generation lock, revisions, path classes, allowlisted errors and byte limits. One event covers Apply transitions or all authored/override/identity edits. Return allowedActions per review item for both clients and recheck on write. Register typed methods, request admission and error mappings for each new route.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/campaign-cast-application.test.ts tests/unit/cast-review-queue.test.ts
@@ -278,9 +278,9 @@ pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts
 
 **Interface.** Extend `portableCampaignCastSchema`, `portableCastReferences` and `copyCampaignCast`. The v2/v3 selector inspects commands, values and receipts after validating them against their declared format.
 
-- [ ] **Regression cases.** Load historical v1 and v2 fixtures and verify original fingerprints. Export/import v2-compatible data as v2, a lone long ordinary goal override as v3, and a seeded character with receipts and world roster defaults as v3. Try an unknown version, a v3-only value labeled v2, a dangling activation and cross-owner references. Assert no partial import.
-- [ ] **Implementation.** Select cast format by commands and values including receipts. Extend enclosing archive readers before new writes. Remap seed event and world evidence IDs, preserving historical provenance on cross-world transfers. Gate existing-record seeds/edits by turn, retain lagged same-event create/seed together when appropriate, and exercise archive, branch and rewind independently. Verify metadata (/meta in task 3G) and captured-world filtering (task 3H).
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Load historical v1 and v2 fixtures and verify original fingerprints. Export/import v2-compatible data as v2, a lone long ordinary goal override as v3, and a seeded character with receipts and world roster defaults as v3. Try an unknown version, a v3-only value labeled v2, a dangling activation and cross-owner references. Assert no partial import.
+- [x] **Implementation.** Select cast format by commands and values including receipts. Extend enclosing archive readers before new writes. Remap seed event and world evidence IDs, preserving historical provenance on cross-world transfers. Gate existing-record seeds/edits by turn, retain lagged same-event create/seed together when appropriate, and exercise archive, branch and rewind independently. Verify metadata (/meta in task 3G) and captured-world filtering (task 3H).
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run --config vitest.integration.config.ts tests/integration/campaign-cast-portability.integration.test.ts tests/integration/campaign-cast-lifecycle.integration.test.ts tests/integration/campaign-archive.integration.test.ts tests/integration/system-archive.integration.test.ts
@@ -294,9 +294,9 @@ pnpm exec vitest run --config vitest.integration.config.ts tests/integration/cam
 
 **Interface.** Keep `captureCastGenerationSnapshotWithClient` and `selectCastContext` as the capture/selection boundary. Admit the new matching frozen prompt and context protocols together. Preserve the historical pair for previously admitted work.
 
-- [ ] **Regression cases.** Retry a stored pre-upgrade admission after restart and compare the rendered prompt, source IDs and fingerprint. New admissions must bootstrap an incompatible chain. Exercise zero headroom, one identity and 30 long pins plus recently active characters. Capture actual requests with synthetic credentials, private reasoning, mechanics, extension fields and a foreign campaign canary.
-- [ ] **Implementation.** Freeze the new prompt/context pair together. Retain the old parser, selector and renderer. Capture allowlisted fiction, validate and cap each field at 600 characters including joined appearance. Reserve tokens for the serialized envelope and admitted identities, fill core fields in rounds, then optional fields, with deterministic omission reasons and a 3,000-token ceiling. Send restored goals and dated lower-authority state according to discovery/enrollment status. Expose castContext and castPresets in strict /meta and verify both through the API.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Retry a stored pre-upgrade admission after restart and compare the rendered prompt, source IDs and fingerprint. New admissions must bootstrap an incompatible chain. Exercise zero headroom, one identity and 30 long pins plus recently active characters. Capture actual requests with synthetic credentials, private reasoning, mechanics, extension fields and a foreign campaign canary.
+- [x] **Implementation.** Freeze the new prompt/context pair together. Retain the old parser, selector and renderer. Capture allowlisted fiction, validate and cap each field at 600 characters including joined appearance. Reserve tokens for the serialized envelope and admitted identities, fill core fields in rounds, then optional fields, with deterministic omission reasons and a 3,000-token ceiling. Send restored goals and dated lower-authority state according to discovery/enrollment status. Expose castContext and castPresets in strict /meta and verify both through the API.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/campaign-cast-generation-protocol.test.ts tests/unit/campaign-cast-context.test.ts tests/unit/generation-context-planner.test.ts
@@ -311,9 +311,9 @@ pnpm exec vitest run --config vitest.integration.config.ts tests/integration/cam
 
 **Interface.** Pass frozen `identityHints` with the captured character IDs. The second publication validation pairs those hints with the current scoped identities and still checks identity changes.
 
-- [ ] **Regression cases.** Use strict-policy fixtures with a seeded identity that has a qualifying role/appearance hint. Confirm once at capture and again at publication, with no duplicate roster hint and no review item. Replay an older snapshot without hints. Rehearse boot/read on old data and incompatible-write boundaries on an isolated installation.
-- [ ] **Implementation.** Feed sanitized bounded role, pronoun and appearance hints into both validation passes and omit represented world identities by scoped origin. Update the rewind notice. Document deploy order for Compose and Swarm and the effective presets-off cutoff. Record when newer settings, a Supporting world, new cast values and subsequent lifecycle writes restrict rollback. Phase 3 exits with compatible API, worker, rewind/copy and archive readers everywhere.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Use strict-policy fixtures with a seeded identity that has a qualifying role/appearance hint. Confirm once at capture and again at publication, with no duplicate roster hint and no review item. Replay an older snapshot without hints. Rehearse boot/read on old data and incompatible-write boundaries on an isolated installation.
+- [x] **Implementation.** Feed sanitized bounded role, pronoun and appearance hints into both validation passes and omit represented world identities by scoped origin. Update the rewind notice. Document deploy order for Compose and Swarm and the effective presets-off cutoff. Record when newer settings, a Supporting world, new cast values and subsequent lifecycle writes restrict rollback. Phase 3 exits with compatible API, worker, rewind/copy and archive readers everywhere.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/campaign-cast-world-identities.test.ts tests/unit/campaign-cast-discovery.test.ts
@@ -321,6 +321,24 @@ pnpm exec vitest run --config vitest.integration.config.ts tests/integration/cam
 ```
 
 **Phase 3 exit.** Verify both settings are off after an unconfigured upgrade, historical archive fixtures import, old admissions retry, and every API/worker/restore role understands v3. Test Apply, skip, revision conflicts and eligibility through application boundaries using isolated fixtures. Rehearse the settings-save, roster-publication and v3-only write boundaries on a disposable recovery set.
+
+**Phase 3 verification, 2026-11-08**
+
+The full unit run passed 5,559 tests with 44 skips. The 17-suite PostgreSQL run passed 257 tests with 46 platform skips. The secure Linux archive, transfer and upgrade run passed 159 tests across eight suites without skips. The three mapped Chromium suites passed 77 tests. Both web builds, repository and TypeScript checks, and client boundaries passed. The provider checks used a deterministic text provider.
+
+| Tasks | Observed behavior |
+|---|---|
+| 3A–3C | The selectable roster excludes Supporting entries. Existing local settings retain their policy digest and can activate both new gates. Managed gates require a reissued policy and deployment permission. Campaign and System Archive imports preserve eligibility with zero cast events. |
+| 3D–3F | The HTTP service rejected a stale preview without changing the cast and replayed the original receipt after a later edit. PostgreSQL checks covered seeded field authority, field-specific review decisions, rewind, branch, transfer, v2/v3 selection and activation remapping. |
+| 3G | A retried v17 job reproduced its recorded cast content, field sources and fingerprint. A new v18 request used the bounded fiction projection. Synthetic model requests verified that private reasoning, credentials, extension fields and mechanics stayed out of provider input. |
+| 3H | Strict discovery matched a seeded identity using its frozen hints at extraction and publication. Disposable database copies exercised current and baseline API and worker processes. See the [reader and recovery rehearsal](../../review/unified-character-editor-phase-3-rehearsal.md). |
+
+| Chromium interaction | Desktop | 390px |
+|---|---|---|
+| Character authoring and review | [Review](../../review/assets/character-reader/character-review-1440.png) | [Keyboard focus](../../review/assets/character-reader/character-review-390.png) |
+| Installation gates | [Settings](../../review/assets/settings-panel/native-character-options-1440.png) | [Settings](../../review/assets/settings-panel/native-character-options-390.png) |
+| Fixed-field review in Nexus | [Review](../../review/assets/unified-character-editor-phase-3/fixed-field-legacy-1440.png) | [Review](../../review/assets/unified-character-editor-phase-3/fixed-field-legacy-390.png) |
+| Fixed-field review in Web-Next | [Review](../../review/assets/unified-character-editor-phase-3/fixed-field-next-1440.png) | [Review](../../review/assets/unified-character-editor-phase-3/fixed-field-next-390.png) |
 
 ## Phase 4 · Enable authoring and starting cast in Nexus
 

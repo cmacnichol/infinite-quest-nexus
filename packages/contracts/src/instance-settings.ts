@@ -16,7 +16,7 @@ const systemArchiveLimitsSchema = z.object({
 export const settingsFeatureGatesSchema = z.object({
   aiAuthoringJobsEnabled: z.boolean(), aiStorySourceAuthoringEnabled: z.boolean(),
   castEditingEnabled: z.boolean(), castDiscoveryEnabled: z.boolean(), castAutoMatchEnabled: z.boolean(),
-  castContextEnabled: z.boolean(), castBackfillEnabled: z.boolean(), worldSharingEnabled: z.boolean(), systemArchiveEnabled: z.boolean()
+  castContextEnabled: z.boolean(), castPresetsEnabled: z.boolean(), castContextWithoutDiscoveryEnabled: z.boolean(), castBackfillEnabled: z.boolean(), worldSharingEnabled: z.boolean(), systemArchiveEnabled: z.boolean()
 }).strict();
 export const instanceSettingsSchema = z.object({
   ...settingsFeatureGatesSchema.shape,
@@ -65,14 +65,14 @@ const numericBoundSchema = z.object({ min: integer(1), max: integer(1) }).strict
 export const runtimeRoleCapacitySchema = z.object({ role: z.enum(["all", "api", "worker", "migrate"]), databaseMaxConnections: integer(2, 100) }).strict();
 export type RuntimeRoleCapacity = z.infer<typeof runtimeRoleCapacitySchema>;
 export const deploymentSettingsPolicySchema = z.object({
-  version: z.literal(1), installationId: z.uuid(), minimumSettingsProtocolVersion: integer(1), featureGates: settingsFeatureGatesSchema,
+  version: z.union([z.literal(1), z.literal(2)]), installationId: z.uuid(), minimumSettingsProtocolVersion: integer(1), featureGates: settingsFeatureGatesSchema.partial({ castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: true }),
   numericBounds: z.record(z.enum(Object.keys(INSTANCE_SETTINGS_NUMERIC_BOUNDS) as [SettingsNumericKey, ...SettingsNumericKey[]]), numericBoundSchema),
   approvedRateTuples: z.array(z.object({ windowSeconds: integer(1, 3600), providerRequests: integer(1, 10000), generationRequests: integer(1, 10000), importRequests: integer(1, 10000) }).strict()).min(1),
   expectedRoles: z.array(runtimeRoleCapacitySchema.extend({
     role: z.enum(["all", "api", "worker"]), replicas: integer(1, 1000), maximumReplicas: integer(1, 1000).optional()
   }).strict().refine(role => (role.maximumReplicas ?? role.replicas) >= role.replicas)).min(1)
     .refine(roles => new Set(roles.map(role => role.role)).size === roles.length), systemArchiveAllowLimitIncrease: z.boolean()
-}).strict();
+}).strict().refine(policy => policy.version === 1 || settingsFeatureGatesSchema.safeParse(policy.featureGates).success);
 export type DeploymentSettingsPolicy = z.infer<typeof deploymentSettingsPolicySchema>;
 export const settingsFieldDescriptorSchema = z.object({
   key: z.enum(["logLevel", ...Object.keys(settingsFeatureGatesSchema.shape), ...Object.keys(INSTANCE_SETTINGS_NUMERIC_BOUNDS)] as [SettingsFieldKey, ...SettingsFieldKey[]]), environmentName: z.string(), label: z.string(), section: z.enum(["characters", "sharing", "performance", "diagnostics"]),
@@ -98,7 +98,7 @@ export const settingsOperatorStatusSchema = z.union([
 export const instanceSettingsHistorySchema = z.object({
   events:z.array(z.object({id:settingsRevisionSchema,kind:z.enum(["seed","proposal","rollback","activation","cancellation"]),revision:settingsRevisionSchema,
     actorUserId:z.uuid(),operatorSessionId:z.uuid().nullable(),localSingleUser:z.boolean().optional(),reasonCode:z.enum(["seed_import","operator_rollback","operator_change","maintenance_activation","maintenance_environment"]),
-    changedKeys:z.array(settingsFieldDescriptorSchema.shape.key).max(40),createdAt:z.iso.datetime()}).strict()).max(100),
+    changedKeys:z.array(settingsFieldDescriptorSchema.shape.key).max(Object.keys(settingsFieldDescriptorSchema.shape.key.enum).length),createdAt:z.iso.datetime()}).strict()).max(100),
   nextCursor:settingsRevisionSchema.nullable()
 }).strict();
 

@@ -917,6 +917,8 @@ integration("Task 14e3d durable portable composition authority", () => {
 
   secureFilesystemIt("wires every non-ZIP family through real preview, commit, and same-key replay", async () => {
     const target = await createWorldScope(`14e3d family target ${crypto.randomUUID()}`);
+    await pool.query(`UPDATE world_versions SET content=jsonb_set(content, '{playableCharacters}',
+      (content->'playableCharacters') || '[{"id":"npc","name":"Guide","characterText":"","campaignUse":"supporting"}]'::jsonb) WHERE id=$1`, [target.worldVersionId]);
     const archiveRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-family-archive-`);
     const assetRoot = await mkdtemp(`${tmpdir()}/iqn-14e3d-family-assets-`);
     const composition = await createRealComposition({
@@ -1013,9 +1015,10 @@ integration("Task 14e3d durable portable composition authority", () => {
             ownerUserId,
             stagedInput: staged,
             kind: "story_text",
-            destination: existing,
-            selectedCharacterId: "hero"
+            destination: existing
           });
+          expect(preview.projection).toMatchObject({ selectedCharacterId: "hero", characters: [{ id: "hero" }] });
+          await expect(composition.previewStoryText({ ownerUserId, stagedInput: staged, kind: "story_text", destination: existing, selectedCharacterId: "npc" })).rejects.toThrow();
           const command = { ownerUserId, kind: "story_text" as const, destination: preview.destination, previewHandle: preview.previewHandle, idempotencyKey };
           const committed = await composition.commit(command);
           return [committed, await composition.commit(command)];

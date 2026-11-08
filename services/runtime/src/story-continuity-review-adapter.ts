@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { assertContinuityReviewPromptSnapshot, CONTINUITY_REPAIR_PROTOCOL_V2 } from "../../../packages/contracts/src/prompt-library.js";
-import { CAST_STORY_AUTHORITY_CONTRACT, castStoryMemoryPromptCompatibilityIdentity } from "../../../packages/contracts/src/story-prompt.js";
+import { CAST_STORY_AUTHORITY_CONTRACT, CAST_V2_STORY_AUTHORITY_CONTRACT, castStoryMemoryPromptCompatibilityIdentity, castV2StoryMemoryPromptCompatibilityIdentity } from "../../../packages/contracts/src/story-prompt.js";
 import { generationEvidenceManifestHash, generationEvidenceManifestSchema, type GenerationEvidenceManifest } from "../../../packages/application/src/memory/generation-context.js";
 import type { StoryTurnOutput } from "../../../packages/contracts/src/story-prompt.js";
 import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
@@ -89,9 +89,9 @@ export function continuityReviewUnavailableReason(error: unknown): ContinuityRev
   return "provider_failed";
 }
 function castAuthorityContract(protocolIdentity: string | undefined, manifest: GenerationEvidenceManifest): string {
-  const enabled = protocolIdentity === castStoryMemoryPromptCompatibilityIdentity();
+  const enabled = (protocolIdentity === castStoryMemoryPromptCompatibilityIdentity() || protocolIdentity === castV2StoryMemoryPromptCompatibilityIdentity());
   if (!enabled && manifest.entries.some((entry) => entry.source.kind === "cast")) throw new ContinuityReviewUnavailableError();
-  return enabled ? `\n\n${CAST_STORY_AUTHORITY_CONTRACT}` : "";
+  return enabled ? `\n\n${protocolIdentity === castV2StoryMemoryPromptCompatibilityIdentity() ? CAST_V2_STORY_AUTHORITY_CONTRACT : CAST_STORY_AUTHORITY_CONTRACT}` : "";
 }
 export type PreparedContinuityReview = Readonly<{
   request: ProviderRequest; body: string; requestHash: string; input: ContinuityReviewInput;

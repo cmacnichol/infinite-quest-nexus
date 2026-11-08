@@ -3,6 +3,8 @@ import { castDiscoveryOutputSchema, castDiscoverySourceSchema } from "../../pack
 import { buildCastDiscoverySource, buildCastDiscoveryInput, chunkCastDiscoverySource, validateCastDiscovery, validateResolvedCastDiscovery, resolveCastDiscoveryEvidence, canAcceptReviewedCastObservation } from "../../packages/domain/src/campaign-cast-discovery.js";
 import { estimateTokens } from "../../packages/domain/src/text.js";
 import type { CastCharacter } from "../../packages/contracts/src/campaign-cast.js";
+import { characterProfileSchema } from "../../packages/contracts/src/world-library.js";
+import { compactCastDiscoveryCharacters } from "../../packages/database/src/campaign-cast-discovery-publication.js";
 
 const scope = { ownerUserId: "11111111-1111-4111-8111-111111111111", campaignId: "22222222-2222-4222-8222-222222222222" };
 const source = (narration = "Mara has blue eyes. She is the gatekeeper.") => buildCastDiscoverySource({ scope,
@@ -94,6 +96,48 @@ describe("cast discovery evidence boundary", () => {
     expect(input).not.toContain(scope.ownerUserId);
     expect(input).not.toContain(scope.campaignId);
     expect(input).not.toContain(source().sourceHash);
+  });
+  it("uses frozen character hints to corroborate strict matches", () => {
+    const person = known("44444444-4444-4444-8444-444444444444");
+    const input = { source: source(), output: { version: 1, characters: [candidate({ existingCharacterId: person.id })] }, knownCharacters: [person] };
+    expect(validateCastDiscovery(input).accepted).toHaveLength(0);
+    expect(validateCastDiscovery({ ...input, identityHints: [{ characterId: person.id, hints: ["blue eyes"] }] }).accepted).toHaveLength(1);
+  });
+  it("sanitizes previously frozen hints before provider requests and corroboration", () => {
+    const person = known("44444444-4444-4444-8444-444444444444");
+    const identityHints = [{ characterId: person.id, hints: ["blue eyes <think>SECRET_HINT</think>"] }];
+    const wire = buildCastDiscoveryInput({ source: source(), knownCharacters: [person], identityHints });
+    expect(wire).toContain("blue eyes");
+    expect(wire).not.toContain("SECRET_HINT");
+    expect(validateCastDiscovery({ source: source(), output: { version: 1, characters: [candidate({ existingCharacterId: person.id })] }, knownCharacters: [person], identityHints }).accepted).toHaveLength(1);
+  });
+  it("freezes compact seeded identity without authored authority or private extensions", () => {
+    const person = known("44444444-4444-4444-8444-444444444444");
+    const profile = characterProfileSchema.parse({ story: { role: "Guide <think>PRIVATE_ROLE</think> token=abcdef123456", background: "PRIVATE_BACKGROUND" },
+      appearance: { eyes: "blue eyes", internal: "PRIVATE_EXTENSION" } });
+    const seeded: CastCharacter = { ...person, campaignProfile: profile, originProfile: { seedEventId: "66666666-6666-4666-8666-666666666666",
+      worldVersionId: "55555555-5555-4555-8555-555555555555", entityId: "mara", rosterName: "Mara", rosterAliases: [],
+      legacyCharacterText: "PRIVATE_LEGACY", profile, evidence: { kind: "world", worldVersionId: "55555555-5555-4555-8555-555555555555", sourcePath: "/characters/mara" } } };
+    const frozen = compactCastDiscoveryCharacters([seeded]);
+    expect(frozen.seedActivations).toEqual([{ characterId: person.id, seedEventId: seeded.originProfile!.seedEventId,
+      worldVersionId: seeded.originProfile!.worldVersionId, entityId: "mara" }]);
+    expect(frozen.identityHints[0]!.hints).toEqual(["Guide", "blue eyes"]);
+    expect(JSON.stringify(frozen)).not.toMatch(/PRIVATE_|abcdef123456/);
+    expect(frozen.characters[0]).not.toHaveProperty("originProfile");
+    expect(frozen.characters[0]).not.toHaveProperty("campaignProfile");
+  });
+  it("omits a represented world identity only in its pinned scope", () => {
+    const version = "55555555-5555-4555-8555-555555555555";
+    const person = { ...known("44444444-4444-4444-8444-444444444444"), origin: { kind: "world" as const, worldVersionId: version, entityId: "mara" } };
+    const worldCharacters = [{ entityId: "mara", name: "Mara", aliases: [], identityHints: ["blue eyes"] }];
+    const identityHints = [{ characterId: person.id, hints: ["blue eyes"] }];
+    const wire = JSON.parse(buildCastDiscoveryInput({ source: source(), knownCharacters: [person], worldCharacters, identityHints, worldVersionId: version }));
+    expect(wire.knownCharacters[0].identityHints).toEqual(["blue eyes"]);
+    expect(wire.worldCharacters).toEqual([]);
+    expect(JSON.parse(buildCastDiscoveryInput({ source: source(), knownCharacters: [person], worldCharacters })).worldCharacters).toHaveLength(1);
+    const manual = { ...person, origin: { kind: "manual" as const } };
+    const seedActivations = [{ characterId: manual.id, seedEventId: "66666666-6666-4666-8666-666666666666", worldVersionId: version, entityId: "mara" }];
+    expect(JSON.parse(buildCastDiscoveryInput({ source: source(), knownCharacters: [manual], worldCharacters, seedActivations, worldVersionId: version })).worldCharacters).toEqual([]);
   });
   it("bounds prompt identities while retaining the protagonist and relevant same-name alternatives", () => {
     const protagonist = { ...known("11111111-4444-4444-8444-444444444444"), name: "Hero", origin: { kind: "protagonist" as const, selectedCharacterId: "hero" } };

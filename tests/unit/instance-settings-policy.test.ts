@@ -15,6 +15,24 @@ export function policyFixture(): DeploymentSettingsPolicy {
 }
 
 describe("installation settings policy", () => {
+  it("permits context without discovery only with the explicit opt-in and editing", () => {
+    const policy = policyFixture();
+    const request = { ...settingsFixture(), castEditingEnabled: true, castDiscoveryEnabled: false, castContextEnabled: true, castContextWithoutDiscoveryEnabled: true };
+    const enabled = resolveInstanceSettings(request, policy, workerCapacity);
+    expect(enabled.ok && enabled.effective.castContextEnabled).toBe(true);
+    const disabled = resolveInstanceSettings({ ...request, castContextWithoutDiscoveryEnabled: false }, policy, workerCapacity);
+    expect(disabled.ok && disabled.effective.castContextEnabled).toBe(false);
+    const noEditing = resolveInstanceSettings({ ...request, castEditingEnabled: false }, policy, workerCapacity);
+    expect(noEditing.ok && noEditing.effective.castContextEnabled).toBe(false);
+  });
+  it("treats absent gates in a version 1 policy as deployment disabled", () => {
+    const policy = policyFixture();
+    delete policy.featureGates.castPresetsEnabled;
+    delete policy.featureGates.castContextWithoutDiscoveryEnabled;
+    const result = resolveInstanceSettings({ ...settingsFixture(), castEditingEnabled: true, castPresetsEnabled: true }, policy, workerCapacity);
+    expect(result.ok && result.effective.castPresetsEnabled).toBe(false);
+    if (result.ok) expect(result.fields.find(field => field.key === "castPresetsEnabled")?.lockReason).toBe("deployment_disabled");
+  });
   it("rejects an enabled archive whose upload ceiling cannot hold one allowed chunk", () => {
     const settings = settingsFixture();
     settings.systemArchiveLimits.maxCompressedBytes = settings.systemArchiveChunkBytes - 1;
@@ -44,7 +62,7 @@ describe("installation settings policy", () => {
     expect(requested[key]).toBe(true);
   });
   it("maps each reviewed environment control exactly once", () => {
-    expect(INSTANCE_SETTING_FIELDS).toHaveLength(40);
+    expect(INSTANCE_SETTING_FIELDS).toHaveLength(42);
     const names = [
       "LOG_LEVEL",
       "WORKER_POLL_INTERVAL_MS",
@@ -59,6 +77,8 @@ describe("installation settings policy", () => {
       "CAST_DISCOVERY_ENABLED",
       "CAST_AUTO_MATCH_ENABLED",
       "CAST_CONTEXT_ENABLED",
+      "CAST_PRESETS_ENABLED",
+      "CAST_CONTEXT_WITHOUT_DISCOVERY_ENABLED",
       "CAST_BACKFILL_ENABLED",
       "WORLD_SHARING_ENABLED",
       "SYSTEM_ARCHIVE_ENABLED",
@@ -88,7 +108,7 @@ describe("installation settings policy", () => {
       "SYSTEM_ARCHIVE_MAX_ORIGINAL_IMAGE_BYTES",
     ];
     expect(INSTANCE_SETTING_FIELDS.map((field) => field.environmentName).sort()).toEqual(names.sort());
-    expect(new Set(INSTANCE_SETTING_FIELDS.map((field) => field.key)).size).toBe(40);
+    expect(new Set(INSTANCE_SETTING_FIELDS.map((field) => field.key)).size).toBe(42);
   });
   it("suppresses deployment-disabled features and dependencies without changing saved preferences", () => {
     const autoMatchOn = { ...settingsFixture(), castEditingEnabled: true, castDiscoveryEnabled: true, castAutoMatchEnabled: true };

@@ -20,8 +20,8 @@ import { DEDICATED_CHUNKED_AUDIT, TEXT_FALLBACK_LEGACY_AUDIT } from "../fixtures
 
 const profileOwnerId = "7f9fa38e-d5e6-45fb-a991-bd188cc3aa51";
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
-const storyScript = readFileSync("apps/web/src/story.js", "utf8");
-const storyCss = readFileSync("apps/web/public/story.css", "utf8");
+const storyScript = readFileSync("apps/web/src/story.js", "utf8").replace(/\r\n/g, "\n");
+const storyCss = readFileSync("apps/web/public/story.css", "utf8").replace(/\r\n/g, "\n");
 const tokensCss = readFileSync("apps/web/public/tokens.css", "utf8");
 const navigationCss = readFileSync("apps/web/public/navigation.css", "utf8");
 
@@ -4015,11 +4015,11 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="editCharacterProfileDialog"');
     expect(storyHtml).toContain('id="editCharacterProfileFields"');
     expect(storyHtml).toContain('id="btnSaveEditCharacterProfile"');
-    expect(storyScript).toContain('async function openEditCharacterProfile()');
+    expect(storyScript).toContain('async function openEditCharacterProfile(onClose = null)');
     expect(storyScript).toContain('apiClient.campaigns.getCharacterProfile(campaignId)');
-    expect(storyScript).toContain('apiClient.campaigns.updateCharacterProfile(session.campaignId');
-    expect(storyScript).toContain('session.form.update()');
-    expect(storyScript).toContain('const editCharacterProfileLocked = generationLocked || recoveryVisible');
+    expect(storyScript).toContain('apiClient.campaigns.updateCharacterProfile(campaignId, payload)');
+    expect(storyScript).toContain('isLocked: characterProfileGenerationLocked');
+    expect(storyScript).toContain('const editCharacterProfileLocked = characterProfileGenerationLocked()');
   });
 
   it("uses the shared slim navigation with dashboard and story first, grouped utilities, and the themed brand mark", () => {

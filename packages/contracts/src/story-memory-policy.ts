@@ -9,7 +9,7 @@ import {
 import {
   CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION,
   CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
-  HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION
+  HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION, CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, HISTORY_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION
 } from "./story-prompt.js";
 
 type DeepReadonly<T> = T extends readonly (infer U)[] ? readonly DeepReadonly<U>[]
@@ -120,8 +120,12 @@ export const HISTORY_COVERAGE_POLICY = {
   sceneHintCharacters: 1000
 } as const;
 
+export function isCastV2ContextProtocol(value: unknown): boolean {
+  return value === CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION || value === HISTORY_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION;
+}
+
 export function isHistoryCoverageContextProtocol(value: unknown): boolean {
-  return value === HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION;
+  return value === HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION || value === HISTORY_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION;
 }
 
 export function defaultStoryMemoryPolicy(capability: StoryMemoryCapability): StoryMemoryPolicy {
@@ -198,20 +202,22 @@ export const storyMemoryPolicySnapshotSchema = z.object({
   contextProtocol: z.union([
     z.literal(STORY_MEMORY_CONTEXT_POLICY_VERSION),
     z.literal(CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION),
-    z.literal(HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION)
+    z.literal(HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION), z.literal(CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION), z.literal(HISTORY_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION)
   ]),
   castContext: z.literal(true).optional(),
+  castDiscoveryEnabled: z.boolean().optional(),
   promptProtocol: z.union([
     z.literal(LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION),
     z.literal(PREVIOUS_STORY_MEMORY_PROMPT_PROTOCOL_VERSION),
-    z.literal(STORY_MEMORY_PROMPT_PROTOCOL_VERSION), z.literal(CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION)
+    z.literal(STORY_MEMORY_PROMPT_PROTOCOL_VERSION), z.literal(CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION), z.literal(CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION)
   ]),
   providerConfigurationFingerprint: z.string().regex(/^[a-f0-9]{64}$/)
 }).strict().superRefine((value, context) => {
   const cast = value.castContext === true;
-  const castContextProtocol = value.contextProtocol === CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION
-    || isHistoryCoverageContextProtocol(value.contextProtocol);
-  if (cast !== castContextProtocol || cast !== (value.promptProtocol === CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION)) {
+  const oldCast = value.contextProtocol === CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION || value.contextProtocol === HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION;
+  const newCast = value.contextProtocol === CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION || value.contextProtocol === HISTORY_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION;
+  if (newCast !== (value.castDiscoveryEnabled !== undefined)) context.addIssue({ code: "custom", message: "Cast v2 requires a frozen discovery setting." });
+  if (cast !== (oldCast || newCast) || oldCast !== (value.promptProtocol === CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION) || newCast !== (value.promptProtocol === CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION)) {
     context.addIssue({ code: "custom", message: "Cast context requires matching frozen capability and protocols." });
   }
   if (storyMemoryPolicyHash(value.policy) !== value.policyHash) context.addIssue({ code: "custom", path: ["policyHash"], message: "Policy hash does not match the frozen policy." });

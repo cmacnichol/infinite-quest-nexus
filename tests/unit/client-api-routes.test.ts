@@ -868,7 +868,7 @@ describe("client API route contracts without PostgreSQL", () => {
   });
 
   it("serves metadata without accepting caller identity as application identity", async () => {
-    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool() }));
+    const app = await buildServer(serverOptions({ config: { ...config(storageRoot), castContextEnabled: true, castPresetsEnabled: true }, pool: mockPool() }));
     try {
       const response = await app.inject({
         method: "GET",
@@ -881,6 +881,7 @@ describe("client API route contracts without PostgreSQL", () => {
       expect(response.statusCode).toBe(200);
       expect(response.headers["x-correlation-id"]).toBe("meta-route-correlation");
       expect(metaResponseSchema.parse(response.json()).application.name).toBe("Infinite Quest Nexus");
+      expect(response.json().capabilities).toMatchObject({ castContext: false, castPresets: false });
       expect(response.body).not.toContain("99999999-9999-4999-8999-999999999999");
     } finally {
       await app.close();
@@ -1630,7 +1631,7 @@ describe("client API route contracts without PostgreSQL", () => {
       worldCampaign: testWorldCampaignApplication({
         generatePlayableCharacterPreview: async (scope, request) => {
           calls.push({ scope: { ...scope }, request: { ...request } });
-          return { character: { id: "trusted-edit-id", name: "Mara", characterText: "A patient observer.", rpgStats: [], defaultTriggers: [], source: {} } };
+          return { character: { id: "trusted-edit-id", name: "Mara", characterText: "A patient observer.", rpgStats: [], defaultTriggers: [], source: {}, campaignUse: "playable", startingCastDefault: true, alwaysInContext: false } };
         }
       })
     }));

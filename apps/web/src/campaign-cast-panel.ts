@@ -19,7 +19,7 @@ export function mainProfileSourceLabel(profile: { inheritedFromSnapshot?: boolea
 }
 type List = Awaited<ReturnType<CampaignCastApi["list"]>>;
 export function createLegacyCastPanel(options: {
-  api: Omit<CampaignCastApi, "scans" | "sourceTurn"> & Partial<Pick<CampaignCastApi, "scans" | "sourceTurn">>; campaignId(): string | null; generationActive(): boolean;
+  api: Omit<CampaignCastApi, "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile"> & Partial<Pick<CampaignCastApi, "scans" | "sourceTurn">>; campaignId(): string | null; generationActive(): boolean;
   getProfile?(campaign: string): Promise<CampaignCharacterProfile & { revision: number; inheritedFromSnapshot?: boolean; storedProfile?: unknown }>;
   openProtagonist(onClose?: (saved: boolean) => void): void; navigateToTurn(turn: number): Promise<void>;
 }) {

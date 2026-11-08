@@ -277,7 +277,7 @@ export const SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS = Object.freeze({
     portable_exact: [
       "id", "world_version_id", "title", "status", "active_turn_number", "created_at", "updated_at",
       "text_provider_profile_id", "image_provider_profile_id", "story_length_profile", "story_context_budget_tokens", "selected_character_id",
-      "character_snapshot", "turn_control_style", "character_profile", "character_profile_revision"
+      "character_snapshot", "turn_control_style", "character_profile", "character_profile_revision", "first_appearance_eligible", "selected_character_world_id"
     ],
     portable_sanitized: ["legacy_settings"],
     owner_remapped: ["owner_user_id"]

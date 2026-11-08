@@ -85,6 +85,8 @@ export const metaResponseSchema = z.object({
   capabilities: z.object({
     systemArchive: z.boolean(),
     castEditing: z.boolean().optional().default(false),
+    castContext: z.boolean().optional().default(false),
+    castPresets: z.boolean().optional().default(false),
     nativeTextExecutionPlans: z.boolean().optional().default(false)
   }).strict()
 }).strict();

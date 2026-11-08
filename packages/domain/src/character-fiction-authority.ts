@@ -4,6 +4,7 @@ import {
   type CharacterProfile
 } from "../../contracts/src/world-library.js";
 import { stripCredentialLeakage, stripMechanicsLeakage } from "./text.js";
+import { validateCastFiction } from "./campaign-cast.js";
 import { effectiveCampaignCharacter } from "./world-characters.js";
 
 export type CharacterFictionAuthority = Readonly<{
@@ -32,6 +33,17 @@ function record(value: unknown): Record<string, unknown> {
 
 function fictionText(value: unknown): string {
   return stripCredentialLeakage(stripMechanicsLeakage(typeof value === "string" ? value.trim() : "").text).trim();
+}
+
+/** Provider-bound cast fields use a bounded projection, separate from stored authority. */
+export function projectCastFictionText(value: unknown, maximum = 600): string {
+  if (typeof value !== "string") return "";
+  // Remove private blocks with their contents, including an unterminated block.
+  const withoutReasoning = value.replace(/<(think|analysis|scratchpad)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/giu, " ");
+  const withoutDice = withoutReasoning.split(/(?<=[.!?])\s+|\n+/u)
+    .filter(part => !/\b\d+d\d+\b|\bDC\s*\d+\b/iu.test(part)).join(" ");
+  const safe = fictionText(withoutDice).slice(0, Math.max(0, maximum)).trim();
+  try { return validateCastFiction(safe); } catch { return ""; }
 }
 
 function fictionStrings(value: unknown): string[] {

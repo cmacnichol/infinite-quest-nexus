@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { deploymentSettingsPolicySchema, instanceSettingsSchema, settingsFeatureGatesSchema, type DeploymentSettingsPolicy, type InstanceSettings } from "../../../packages/contracts/src/instance-settings.js";
-import { resolveInstanceSettings, resolveRequestPolicy } from "../../../packages/domain/src/instance-settings.js";
+import { deriveSettingsPolicyForLocalMode, resolveInstanceSettings, resolveRequestPolicy } from "../../../packages/domain/src/instance-settings.js";
 import { validateSettingsPolicy, type SettingsState } from "../../../packages/application/src/settings/index.js";
 import { createInstanceSettingsRepository } from "../../../packages/database/src/instance-settings-repository.js";
 import { withTransaction } from "../../../packages/database/src/pool.js";
@@ -39,16 +39,17 @@ export function resolveRuntimeSettingsState(state:SettingsState, bootstrap:Runti
   if (policy.systemArchiveAllowLimitIncrease && bootstrap.systemArchiveAllowLimitIncrease !== true) throw new Error("settings_deployment_divergence");
   if(!state.active || !state.activeRevision) throw new Error('settings_active_missing');
   if(!policy.expectedRoles.some(r=>r.role===bootstrap.role && r.databaseMaxConnections===bootstrap.databaseMaxConnections)) throw new Error('settings_role_mismatch');
-  validateSettingsPolicy(state.active,policy,resolveInstanceSettings);
-  const gates={...policy.featureGates};
-  for(const key of Object.keys(settingsFeatureGatesSchema.shape) as (keyof typeof gates)[]) gates[key] = gates[key] && bootstrap[key]===true;
-  const resolved=resolveInstanceSettings(state.active,{...policy,featureGates:gates},{role:bootstrap.role,databaseMaxConnections:bootstrap.databaseMaxConnections});
+  const effectivePolicy = deriveSettingsPolicyForLocalMode(policy, bootstrap.instanceSettingsAccessMode === "local-single-user" && !bootstrap.instanceSettingsPolicyFile);
+  validateSettingsPolicy(state.active,effectivePolicy,resolveInstanceSettings);
+  const gates=Object.fromEntries(Object.keys(settingsFeatureGatesSchema.shape).map(key => [key, effectivePolicy.featureGates[key as keyof typeof effectivePolicy.featureGates]])) as typeof policy.featureGates;
+  for(const key of Object.keys(settingsFeatureGatesSchema.shape) as (keyof typeof gates)[]) gates[key] = gates[key] === true && (bootstrap.instanceSettingsAccessMode === "local-single-user" && (key === "castPresetsEnabled" || key === "castContextWithoutDiscoveryEnabled") || bootstrap[key]===true);
+  const resolved=resolveInstanceSettings(state.active,{...effectivePolicy,featureGates:gates},{role:bootstrap.role,databaseMaxConnections:bootstrap.databaseMaxConnections});
   if(!resolved.ok) throw new Error('settings_policy_rejected');
   // Emergency deployment disables are honored but divergence cannot become healthy.
-  const permitted=resolveInstanceSettings(state.active,policy,{role:bootstrap.role,databaseMaxConnections:bootstrap.databaseMaxConnections});
+  const permitted=resolveInstanceSettings(state.active,effectivePolicy,{role:bootstrap.role,databaseMaxConnections:bootstrap.databaseMaxConnections});
   if(!permitted.ok || settingsDigest(resolved.effective)!==settingsDigest(permitted.effective)) throw new Error('settings_deployment_divergence');
   const merged=mergeRuntimeSettings(bootstrap,resolved.effective);
-  const config={...merged,security:{...merged.security,...resolveRequestPolicy(resolved.effective,policy)},instanceSettingsRevision:state.activeRevision};
+  const config={...merged,security:{...merged.security,...resolveRequestPolicy(resolved.effective,effectivePolicy)},instanceSettingsRevision:state.activeRevision};
   return {config,mode:'database',activeRevision:state.activeRevision,policyDigest:settingsDigest(policy),activationEpoch:state.activationEpoch,effectiveDigest:settingsDigest(resolved.effective)};
 }
 export async function loadActiveRuntimeSettings(pool:DatabasePool,bootstrap:RuntimeConfig,policy?:DeploymentSettingsPolicy):Promise<ResolvedRuntimeSettings> {

@@ -55,7 +55,7 @@ export function createCastDiscoveryExtractor(input: { executor: PreparedAuthorin
       }
     }
     const request = { systemPrompt: plan.prompt, input: buildCastDiscoveryInput({ source: claim.source,
-      knownCharacters: claim.identities.characters, worldCharacters: claim.identities.worldCharacters }) };
+      knownCharacters: claim.identities.characters, worldCharacters: claim.identities.worldCharacters, identityHints: claim.identities.identityHints, seedActivations: claim.identities.seedActivations, worldVersionId: claim.identities.worldVersionId }) };
     const candidate = plan.candidates[0]!;
     const profile = { providerType: admission.providerType, baseUrl: "", model: candidate.modelId,
       contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens,

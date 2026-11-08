@@ -50,6 +50,7 @@ import {
   updateWorldDraft
 } from "../helpers/memory-aware-services.js";
 import {
+  branchCampaign,
   buildContextPreview,
   createCampaign,
   getCampaignCharacterProfile,
@@ -640,6 +641,21 @@ integration("World Library and campaign version integration", () => {
     expect(exported.settings.storyLength).toBe("extended");
   });
 
+  it.each([false, true])("carries native first-appearance eligibility %s through an empty-cast branch and migration", async (enabled) => {
+    const world = await publishedWorld("First appearance");
+    const ownerUserId = await initialOwnerId(pool);
+    const app = createApiWorldCampaignApplication(pool, { credentialSecret: "synthetic", castPresetsEnabled: enabled });
+    const campaign = await app.createCampaign({ ownerUserId }, campaignCreateSchema.parse({
+      title: "Synthetic root eligibility", worldVersionId: world.version.worldVersionId
+    }));
+    const branch = await branchCampaign(pool, campaign.id, { targetTurnNumber: 0, title: "Synthetic branch" });
+    const second = await publishNextVersion(world.created.id, world.title, "Two");
+    await migrateCampaignWorld(pool, campaign.id, campaignWorldMigrationSchema.parse({ worldVersionId: second.worldVersionId }));
+    const rows = await pool.query("SELECT first_appearance_eligible FROM campaigns WHERE owner_user_id=$1 AND id=ANY($2::uuid[])",
+      [ownerUserId, [campaign.id, branch.id]]);
+    expect(rows.rows.map(row => row.first_appearance_eligible)).toEqual([enabled, enabled]);
+  });
+
   it("persists the selected campaign Story context budget", async () => {
     const world = await publishedWorld("Story Context Budget");
     const campaign = await createCampaign(pool, campaignCreateSchema.parse({
@@ -1107,6 +1123,7 @@ integration("World Library and campaign version integration", () => {
       expectedRevision: 1,
       character: {
         id: "character-one", name: "Character One", characterText: "Character One wears a blue coat.",
+        campaignUse: "playable" as const, startingCastDefault: true, alwaysInContext: false,
         rpgStats: [], defaultTriggers: [], source: {}
       }
     };

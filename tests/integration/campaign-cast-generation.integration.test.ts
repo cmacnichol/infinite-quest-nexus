@@ -11,7 +11,7 @@ import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../pack
 import { runCastDiscoveryOnce } from "../../packages/application/src/campaign-cast/discovery.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { createPostgresCampaignCastRepository, captureCastGenerationSnapshotWithClient } from "../../packages/database/src/campaign-cast-repository.js";
 import { createCastDiscoveryJobRepository, enqueueCastDiscoveryWithClient } from "../../packages/database/src/campaign-cast-job-repository.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
@@ -23,6 +23,7 @@ import { createProvider, loadPromptSnapshotForTest, providerPromptProtocolVersio
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
 import { sha256 } from "../../packages/domain/src/text.js";
+import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
 import type { StreamingIllustrationConfig } from "../../packages/application/src/illustration/types.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -49,14 +50,19 @@ integration("campaign cast composed generation", () => {
   afterAll(async () => { await pool?.end(); });
   afterEach(async () => { await pool.query("DELETE FROM campaigns WHERE id=ANY($1::uuid[])", [campaignIds.splice(0)]); });
 
-  function commands(enabled = true) {
+  function commands(enabled = true, legacy = false) {
     return createPostgresGenerationCommandRepository(pool, {
       resolvePromptSnapshot: (client, owner, campaignId, policy) => policy
-        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId: owner, campaignId, scope: "campaign" }, "off", policy.castContext === true)
+        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId: owner, campaignId, scope: "campaign" }, "off", policy.castContext === true, legacy ? "v1" : "v2")
         : loadPromptSnapshotForTest(client, owner, campaignId),
       promptProtocolVersion: providerPromptProtocolVersion,
-      resolveStoryMemoryPolicySnapshot: (client, scope) => resolveStoryMemoryPolicySnapshot(client, scope,
-        { installedCapability: "r3", enforceEnabled: false, castContextEnabled: enabled }),
+      resolveStoryMemoryPolicySnapshot: async (client, scope) => {
+        const policy = await resolveStoryMemoryPolicySnapshot(client, scope,
+          { installedCapability: "r3", enforceEnabled: false, castContextEnabled: enabled, castDiscoveryEnabled: enabled });
+        if (!policy || !legacy || !policy.castContext) return policy;
+        const { castDiscoveryEnabled: _discovery, ...old } = policy;
+        return { ...old, contextProtocol: "current-continuity-v5" as const, promptProtocol: "story-v17-campaign-cast" as const };
+      },
       readTurnReportedCosts: (owner, _campaign, ids) => readTurnReportedCostsForTest(pool, owner, [...ids])
     });
   }
@@ -131,11 +137,20 @@ integration("campaign cast composed generation", () => {
 
   it.each([["action", true, false, false, false], ["scene", true, false, false, false], ["action", false, false, false, false], ["scene", false, false, false, false],
     ["action", true, true, false, false], ["scene", true, true, false, false], ["action", false, false, true, false], ["scene", false, false, true, false],
-    ["action", true, false, false, true]] as const)
+    ["action", true, false, false, true], ["action", true, false, true, false]] as const)
     ("preserves %s generation with cast=%s, commit race=%s, historical retry=%s and admission outage=%s", async (mode, enabled, race, historicalRetry, admissionOutage) => {
     const scope = await campaign(), foreign = await campaign(true);
-    const cast = createPostgresCampaignCastRepository(pool, { editingEnabled: true, discoveryEnabled: true });
+    const cast = createPostgresCampaignCastRepository(pool, { editingEnabled: true, discoveryEnabled: true, castPresetsEnabled: true });
     await cast.initialize(scope);
+    const privacyCapture = enabled && mode === "action" && !race && !historicalRetry && !admissionOutage;
+    if (privacyCapture) {
+      const world = (await pool.query("SELECT w.id,w.content FROM world_versions w JOIN campaigns c ON c.world_version_id=w.id WHERE c.id=$1", [scope.campaignId])).rows[0];
+      world.content.playableCharacters = [...(world.content.playableCharacters ?? []), { id: "privacy-canary", name: "Canary", campaignUse: "supporting", characterText: "", profile: { story: { role: "A safe keeper. <think>PRIVATE_REASONING_CANARY.</think> Roll 1d20. She watches the harbor.", background: "api_key=PRIVATE_CREDENTIAL_CANARY", extension: "PRIVATE_EXTENSION_CANARY" }, appearance: { hair: "silver", extension: "PRIVATE_VISUAL_CANARY" } } }];
+      await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [world.id, JSON.stringify(world.content)]);
+      const seed = await cast.fromWorldPreview!(scope, { characterId: "privacy-canary" });
+      await cast.fromWorld!(scope, { characterId: "privacy-canary", expectedWorldVersionId: world.id, previewFingerprint: seed.previewFingerprint,
+        expectedCastRevision: seed.castRevision, expectedBoundary: seed.boundary, idempotencyKey: randomUUID() });
+    }
     const foreignCast = await cast.initialize(foreign);
     const foreignPerson = await cast.create(foreign, { expectedCastRevision: foreignCast.revision, expectedBoundary: foreignCast.boundary,
       idempotencyKey: randomUUID(), name: "Foreign witness", aliases: ["Silver Watcher"], profile: { "story.role": "FOREIGN_CAST_PROFILE" } });
@@ -166,11 +181,13 @@ integration("campaign cast composed generation", () => {
     let edited = await cast.edit(scope, person.id, { expectedCastRevision: current.revision, expectedCharacterRevision: person.revision,
       expectedBoundary: current.boundary, idempotencyKey: randomUUID(), setOverrides: { "appearance.description": "gray eyes" } });
     await saveStoryMemoryEnrollment(pool, scope, { capability: "r3", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
-    const enqueue = (castEnabled = enabled) => commands(castEnabled).enqueueAppend(scope, generationRequestSchema.parse({ action: "The Silver Watcher returns to the road.",
+    const enqueue = (castEnabled = enabled) => commands(castEnabled, historicalRetry && enabled).enqueueAppend(scope, generationRequestSchema.parse({ action: privacyCapture ? "The Silver Watcher and Canary return to the road." : "The Silver Watcher returns to the road.",
       providerProfileId, idempotencyKey: randomUUID(), requestedInputMode: mode, resolvedInputMode: mode, inputModeSource: "explicit",
       context: { budgetTokens: 16000, compression: "full", recentTurns: 2 } }));
     const queued = await enqueue();
-    const requests: { operation: string; input: string }[] = [];
+    const legacyBefore = historicalRetry && enabled ? await withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled: true, version: "cast-context-v1" })) : null;
+    const legacySelection = legacyBefore ? selectCastContext({ snapshot: legacyBefore.snapshot, direction: "The Silver Watcher returns to the road.", currentScene: "", openThreads: [], budgetTokens: 3000 }) : null;
+    const requests: { operation: string; input: string; previousResponseId: unknown }[] = [];
     let operation = "";
     const collaborators: GenerationExecutionCollaborators = {
       memory: memoryGeneration(pool, secret),
@@ -181,7 +198,7 @@ integration("campaign cast composed generation", () => {
       loadTextExecution: async () => ({ id: providerProfileId, name: "Cast synthetic", providerRole: "text", providerType: "openai_compatible",
         model: "cast-test", endpointIdentity: sha256("http://127.0.0.1:9911"), contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0, requestTimeoutMs: 5000, configuration: { textResponseFormatPolicy: "auto" },
         execute: async (request: { input?: string }) => {
-          requests.push({ operation, input: String(request.input) });
+          requests.push({ operation, input: String(request.input), previousResponseId: (request as { previousResponseId?: string }).previousResponseId });
           if (race && operation === "story_generation") {
             await expect(cast.edit(scope, person.id, { expectedCastRevision: edited.revision, expectedCharacterRevision: edited.character.revision,
               expectedBoundary: edited.boundary, idempotencyKey: randomUUID(), setOverrides: { "appearance.description": "amber eyes" } }))
@@ -225,10 +242,18 @@ integration("campaign cast composed generation", () => {
     if (historicalRetry) {
       expect((await pool.query("SELECT status FROM generation_jobs WHERE id=$1", [queued.id])).rows[0].status).toBe("failed");
       const frozen = (await pool.query("SELECT generation_base_identity,context_options,prompt_snapshot,prompt_protocol_version FROM generation_jobs WHERE id=$1", [queued.id])).rows[0];
-      edited = await cast.edit(scope, person.id, { expectedCastRevision: edited.revision, expectedCharacterRevision: edited.character.revision,
+      if (enabled) expect(frozen.context_options.storyMemoryPolicy).toMatchObject({ contextProtocol: "current-continuity-v5", promptProtocol: "story-v17-campaign-cast" });
+      if (!enabled) edited = await cast.edit(scope, person.id, { expectedCastRevision: edited.revision, expectedCharacterRevision: edited.character.revision,
         expectedBoundary: edited.boundary, idempotencyKey: randomUUID(), setOverrides: { "appearance.description": "violet eyes" } });
       await commands(true).retry({ ownerUserId, jobId: queued.id });
       expect((await pool.query("SELECT generation_base_identity,context_options,prompt_snapshot,prompt_protocol_version FROM generation_jobs WHERE id=$1", [queued.id])).rows[0]).toEqual(frozen);
+      if (legacyBefore) {
+        const replay = await withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled: true, version: "cast-context-v1" }));
+        const replaySelection = selectCastContext({ snapshot: replay.snapshot, direction: "The Silver Watcher returns to the road.", currentScene: "", openThreads: [], budgetTokens: 3000 });
+        expect(replay.fingerprint).toBe(legacyBefore.fingerprint);
+        expect(replaySelection.content).toBe(legacySelection!.content);
+        expect(replaySelection.records.flatMap(record => record.fields.map(field => field.evidenceId))).toEqual(legacySelection!.records.flatMap(record => record.fields.map(field => field.evidenceId)));
+      }
       const retried = await repository.claimNext({ workerId: "cast-generation", leaseSeconds: 30 });
       expect(retried?.jobId).toBe(queued.id);
       expect(await createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: retried!, workerId: "cast-generation", leaseSeconds: 30 })).toBe(true);
@@ -246,6 +271,7 @@ integration("campaign cast composed generation", () => {
       .toEqual([{ status: "completed", error_code: null, error_message: null }]);
     const outgoing = requests.findLast((request) => request.operation === "story_generation")!;
     expect(outgoing).toBeDefined();
+    expect(outgoing.previousResponseId).toBeUndefined();
     const payload = JSON.parse(outgoing.input).authoritative_context;
     expect(JSON.parse(outgoing.input).current_turn_input.mode).toBe(mode);
     if (enabled) {
@@ -253,9 +279,19 @@ integration("campaign cast composed generation", () => {
         fields: expect.arrayContaining([expect.objectContaining({ field: "appearance.description", value: "gray eyes", authority: "user" }),
           expect.objectContaining({ field: "story.role", source: expect.objectContaining({ turnNumber: 1 }) })]) })]));
       expect(payload.cast.notice).toContain("incomplete");
-      expect(JSON.stringify(payload.cast)).not.toContain('"state.location"');
+      if (historicalRetry && enabled) expect(JSON.stringify(payload.cast)).not.toContain('"state.location"');
+      else expect(JSON.stringify(payload.cast)).toContain('"state.location"');
     } else expect(payload).not.toHaveProperty("cast");
     if (historicalRetry) expect(outgoing.input).not.toContain("violet eyes");
+    if (legacySelection) expect(payload.cast).toEqual(JSON.parse(legacySelection.content));
+    if (privacyCapture) {
+      expect(payload.cast.characters.find((entry: { name: string }) => entry.name === "Canary").fields).toEqual(expect.arrayContaining([
+        expect.objectContaining({ field: "story.role", authority: "authored", evidenceId: expect.stringMatching(/:story\.role$/), source: { kind: "world" } })
+      ]));
+      expect(outgoing.input).toContain("A safe keeper");
+      expect(outgoing.input).toContain("silver");
+      expect(outgoing.input).not.toMatch(/PRIVATE_REASONING_CANARY|PRIVATE_CREDENTIAL_CANARY|PRIVATE_EXTENSION_CANARY|PRIVATE_VISUAL_CANARY|1d20/);
+    }
     expect(outgoing.input).not.toContain("FOREIGN_CAST_SECRET");
     expect(outgoing.input).not.toContain("FOREIGN_CAST_PROFILE");
     expect(outgoing.input).not.toContain(foreignPerson.character.id);
@@ -270,10 +306,10 @@ integration("campaign cast composed generation", () => {
     const nextEnabled = enabled || historicalRetry;
     const next = await enqueue(nextEnabled);
     const authority = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client,
-      { ...scope, operationKind: "append", expectedTurnNumber: 10, baseIdentityVersion: nextEnabled ? "generation-base-v4" : "generation-base-v3" }));
+      { ...scope, operationKind: "append", expectedTurnNumber: 10, baseIdentityVersion: nextEnabled ? "generation-base-v4" : "generation-base-v3", castContextVersion: historicalRetry && enabled ? "cast-context-v1" : "cast-context-v2", castDiscoveryEnabled: historicalRetry && enabled ? true : nextEnabled }));
     if (nextEnabled) {
       expect(authority.castSnapshot).toMatchObject({ revision: expect.any(Number), boundary: { turnNumber: 9 },
-        characters: expect.arrayContaining([expect.objectContaining({ id: person.id, profile: expect.objectContaining({ "appearance.description": historicalRetry ? "violet eyes" : "gray eyes" }) })]) });
+        characters: expect.arrayContaining([expect.objectContaining({ id: person.id, profile: expect.objectContaining({ "appearance.description": historicalRetry && !enabled ? "violet eyes" : "gray eyes" }) })]) });
       if (!("castFingerprint" in authority.baseIdentity)) throw new Error("Next generation did not capture cast authority.");
       expect((await pool.query("SELECT generation_base_identity FROM generation_jobs WHERE id=$1", [next.id])).rows[0].generation_base_identity.castFingerprint)
         .toBe(authority.baseIdentity.castFingerprint);

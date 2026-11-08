@@ -54,6 +54,10 @@ export type CastDiscoverySource = z.infer<typeof castDiscoverySourceSchema>;
 
 export const castDiscoveryIdentitySnapshotSchema = z.object({
   revision: z.number().int().nonnegative(), characters: z.array(castCharacterSchema), worldVersionId: z.uuid(),
+  identityHints: z.array(z.object({ characterId: z.uuid(), hints: z.array(z.string().min(1).max(2000)).max(20) }).strict()).optional(),
+  seedActivations: z.array(z.object({ characterId: z.uuid(), seedEventId: z.uuid(), worldVersionId: z.uuid(), entityId: z.string().min(1).max(200) }).strict()).optional(),
+  representedWorldCharacters: z.array(z.object({ characterId: z.uuid(), entityId: z.string().min(1).max(200), name: z.string().min(1).max(200),
+    aliases: z.array(z.string().min(1).max(200)).max(20), identityHints: z.array(z.string().min(1).max(2000)).max(20).optional() }).strict()).optional(),
   worldCharacters: z.array(z.object({ entityId: z.string().min(1).max(200), name: z.string().min(1).max(200),
     aliases: z.array(z.string().min(1).max(200)).max(20), identityHints: z.array(z.string().min(1).max(2000)).max(20).optional() }).strict())
 }).strict();

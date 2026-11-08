@@ -10,7 +10,8 @@ export function reviewedCharacterParent(job: AuthoringJobView): WorldContent {
   if (selectedId) {
     const index = parent.playableCharacters.findIndex(character => character.id === selectedId);
     if (index < 0 || candidate.id !== selectedId) throw new Error("Character identity changed.");
-    parent.playableCharacters[index] = candidate;
+    const original = parent.playableCharacters[index]!;
+    parent.playableCharacters[index] = { ...candidate, id: original.id, source: original.source, campaignUse: original.campaignUse, startingCastDefault: original.startingCastDefault, alwaysInContext: original.alwaysInContext };
   } else {
     if (candidate.id !== job.result?.id || parent.playableCharacters.some(character => character.id === candidate.id)) throw new Error("Character identity changed.");
     parent.playableCharacters.push(candidate);

@@ -1,6 +1,8 @@
+import { castFromWorldPreviewQuerySchema, castFromWorldPreviewSchema, castFromWorldSchema, editAuthoredCastProfileSchema,
+  type CastFromWorld, type CastFromWorldPreviewQuery, type EditAuthoredCastProfile } from "@infinite-quest/contracts";
 import { reviewCastDetailSchema, reviewCastDetailResultSchema, type ReviewCastDetail } from "@infinite-quest/contracts";
 import { detachCastAttachmentSchema, detachCastAttachmentResultSchema, type DetachCastAttachment } from "@infinite-quest/contracts";
-import { castScopeSchema, castListQuerySchema, createCastCharacterSchema, editCastCharacterSchema,
+import { castRosterCharacterSchema, castScopeSchema, castListQuerySchema, createCastCharacterSchema, editCastCharacterSchema,
   castWriteResultSchema, castDetailSchema, type CastScope, type CastListQuery,
   type CreateCastCharacter, type EditCastCharacter } from "@infinite-quest/contracts";
 import { CampaignCastError, type CampaignCastWritePort } from "./ports.js";
@@ -59,7 +61,7 @@ export function createCampaignCastApplication(repository: CampaignCastWritePort,
         .sort((a, b) => a.id.localeCompare(b.id));
       const offset = query.cursor ? matches.findIndex((person) => person.id === query.cursor) + 1 : 0;
       if (query.cursor && offset === 0) throw new CampaignCastError("cast_revision_conflict");
-      const characters = matches.slice(offset, offset + query.limit);
+      const characters = matches.slice(offset, offset + query.limit).map(person => castRosterCharacterSchema.parse(person));
       const attention = characters.map((person) => ({ characterId: person.id, review: workspace?.reviewIds.includes(person.id) === true,
         conflict: workspace?.conflictIds.includes(person.id) === true,
         ...(workspace?.attentionCounts?.[person.id] ? { reviewCount: workspace.attentionCounts[person.id]!.review, conflictCount: workspace.attentionCounts[person.id]!.conflict } : {}) })).filter((item) => item.review || item.conflict);
@@ -67,6 +69,18 @@ export function createCampaignCastApplication(repository: CampaignCastWritePort,
     },
     async detail(scope: CastScope, id: string) {
       return castDetailSchema.parse(await repository.detail(castScopeSchema.parse(scope), id));
+    },
+    async fromWorldPreview(scope: CastScope, query: CastFromWorldPreviewQuery) {
+      if (!repository.fromWorldPreview) throw new CampaignCastError("cast_presets_disabled");
+      return castFromWorldPreviewSchema.parse(await repository.fromWorldPreview(castScopeSchema.parse(scope), castFromWorldPreviewQuerySchema.parse(query)));
+    },
+    async fromWorld(scope: CastScope, input: CastFromWorld) {
+      if (!repository.fromWorld) throw new CampaignCastError("cast_presets_disabled");
+      return castWriteResultSchema.parse(await repository.fromWorld(castScopeSchema.parse(scope), castFromWorldSchema.parse(input)));
+    },
+    async editAuthoredProfile(scope: CastScope, id: string, input: EditAuthoredCastProfile) {
+      if (!repository.editAuthoredProfile) throw new CampaignCastError("cast_not_seeded");
+      return castWriteResultSchema.parse(await repository.editAuthoredProfile(castScopeSchema.parse(scope), id, editAuthoredCastProfileSchema.parse(input)));
     },
     async create(scope: CastScope, input: CreateCastCharacter) {
       const parsedScope = castScopeSchema.parse(scope), parsedInput = createCastCharacterSchema.parse(input);

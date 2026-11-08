@@ -1,7 +1,7 @@
 import { createReviewSource } from "./character-review-source.js";
 import type { CastCharacter, CastCandidateList } from "@infinite-quest/contracts";
 import { buildReviewQueue, type ReviewItem, type CampaignCastApi } from "@infinite-quest/client-web";
-export function renderCastReview(options: { document: Document; container: HTMLElement; api: Omit<CampaignCastApi, "scans" | "sourceTurn"> & Partial<Pick<CampaignCastApi, "sourceTurn">>; campaign: string; current(): boolean; editing(): boolean; navigate(turn: number): void; back(): void; key(operation: string, value: unknown): string; clearKeys(): void; autoMatch?: boolean | null; initialItem?: string }) {
+export function renderCastReview(options: { document: Document; container: HTMLElement; api: Omit<CampaignCastApi, "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile"> & Partial<Pick<CampaignCastApi, "sourceTurn">>; campaign: string; current(): boolean; editing(): boolean; navigate(turn: number): void; back(): void; key(operation: string, value: unknown): string; clearKeys(): void; autoMatch?: boolean | null; initialItem?: string }) {
   const { document, container, api, campaign } = options;
   const drafts = new Map<string, string>();
   const skipped = new Set<string>(); let busy = false; let epoch = 0; let prioritizeCharacter: string | null = null; let initialItem = options.initialItem; let cached: { matches: CastCandidateList; details: CastCandidateList; targets: CastCharacter[] } | null = null;
@@ -125,7 +125,8 @@ export function renderCastReview(options: { document: Document; container: HTMLE
           const protagonist = person?.origin?.kind === "protagonist";
           const permits = (action: "accept" | "confirm" | "dismiss") => detail.allowedActions ? detail.allowedActions.includes(action) : action === "dismiss" || !protagonist && (action !== "accept" || detail.canAcceptObservation === true);
           if (permits("confirm")) row.append(disclosure);
-          else row.append(node("p", "Use the main character profile to change this field, or dismiss the suggestion."));
+          else if (protagonist) row.append(node("p", "Use the main character profile to change this field, or dismiss the suggestion."));
+          else if (!permits("accept")) row.append(node("p", "This field belongs to the authored character profile."));
           let pending: { signature: string; request: Parameters<typeof api.resolveDetail>[2] } | null = null;
           async function decide(action: "accept" | "confirm" | "dismiss") {
             if (locked() || !permits(action)) return;

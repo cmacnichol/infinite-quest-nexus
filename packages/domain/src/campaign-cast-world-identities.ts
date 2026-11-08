@@ -1,8 +1,10 @@
 import type { CastDiscoveryWorldIdentity } from "./campaign-cast-discovery.js";
 import { buildScopedEntityCatalog } from "./entity-references.js";
-import { characterFictionAuthority } from "./character-fiction-authority.js";
+import { characterFictionAuthority, projectCastFictionText } from "./character-fiction-authority.js";
 import { validateCastFiction } from "./campaign-cast.js";
 import { stripCredentialLeakage } from "./text.js";
+import type { CastCharacter } from "../../contracts/src/campaign-cast.js";
+import { characterProfileSchema } from "../../contracts/src/world-library.js";
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -15,7 +17,21 @@ function fiction(value: unknown): value is string {
 }
 
 function hints(values: unknown[]): string[] {
-  return [...new Set(values.flat().filter(fiction))].slice(0, 20);
+  return [...new Set(values.flat().map((value) => projectCastFictionText(value, 2001))
+    .filter((value) => value.length > 0 && value.length <= 600 && !/\b(?:score|modifier|difficulty|target)\s*:?\s*[+-]?\d/iu.test(value)))].slice(0, 20);
+}
+
+export function castDiscoveryCharacterHints(characters: CastCharacter[]) {
+  return characters.map((person) => {
+    const profile = person.campaignProfile;
+    const appearance = profile?.appearance;
+    return { characterId: person.id, hints: hints(profile
+      ? [profile.story?.role, profile.identity?.pronouns, appearance?.ancestryOrSpecies, appearance?.apparentAge,
+        appearance?.genderPresentation, appearance?.build, appearance?.skinOrComplexion, appearance?.face,
+        appearance?.eyes, appearance?.hair, appearance?.distinguishingFeatures, appearance?.clothing,
+        appearance?.equipmentAndAccessories, appearance?.otherVisualDetails]
+      : [person.profile["story.role"], person.profile["identity.pronouns"], person.profile["appearance.description"]]) };
+  });
 }
 
 /** Only explicit fiction fields from the supplied immutable world; no mechanics or extensions. */
@@ -36,11 +52,18 @@ export function castDiscoveryWorldIdentities(content: unknown): CastDiscoveryWor
     const row = record(value);
     if (typeof row.id !== "string" || !row.id.trim() || !fiction(row.name)) continue;
     const authority = characterFictionAuthority(null, row);
+    const parsedProfile = characterProfileSchema.safeParse(row.profile);
+    const rawProfile = parsedProfile.success ? parsedProfile.data : null;
     if (!fiction(authority.name)) continue;
     result.push({ entityId: row.id, name: authority.name,
-      aliases: (authority.profile?.identity.aliases ?? []).filter(fiction), identityHints: hints(authority.profile
-        ? [...Object.values(authority.profile.appearance), authority.profile.story.role, authority.profile.identity.pronouns]
-        : [authority.characterText]) });
+      aliases: (rawProfile?.identity.aliases ?? []).filter(fiction), identityHints: hints(rawProfile
+        ? [rawProfile.appearance.ancestryOrSpecies, rawProfile.appearance.apparentAge,
+          rawProfile.appearance.genderPresentation, rawProfile.appearance.build, rawProfile.appearance.skinOrComplexion,
+          rawProfile.appearance.face, rawProfile.appearance.eyes, rawProfile.appearance.hair,
+          rawProfile.appearance.distinguishingFeatures, rawProfile.appearance.clothing,
+          rawProfile.appearance.equipmentAndAccessories, rawProfile.appearance.otherVisualDetails,
+          rawProfile.story.role, rawProfile.identity.pronouns]
+        : [row.characterText]) });
   }
   // Keep colliding declarations visible to the validator instead of selecting an arbitrary winner.
   return result.filter((person) => person.entityId.length <= 200 && person.name.length <= 200

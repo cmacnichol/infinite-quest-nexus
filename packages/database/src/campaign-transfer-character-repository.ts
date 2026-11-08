@@ -35,7 +35,7 @@ import {
 import { assessCampaignTransferCompatibility } from "../../domain/src/campaign-transfer.js";
 import { normalizeCampaignStateSnapshot, normalizeCampaignTrackers } from "../../domain/src/campaign-trackers.js";
 import { removeProviderSecrets, sha256, stableStringify } from "../../domain/src/text.js";
-import { effectiveCampaignCharacter } from "../../domain/src/world-characters.js";
+import { effectiveCampaignCharacter, resolvePlayableCharacters } from "../../domain/src/world-characters.js";
 import {
   preseedAcceptedTurnSnapshotFactIds,
   remapAcceptedTurnSnapshotFactReferences,
@@ -233,6 +233,7 @@ export function createPostgresCharacterProfileRepository(): CharacterProfileRepo
 }
 
 const sourceRowSchema = z.object({
+  first_appearance_eligible: z.boolean(), selected_character_world_id: z.uuid().nullable(),
   id: z.uuid(), title: z.string(), status: z.string(), active_turn_number: z.number().int().nonnegative(),
   story_length_profile: z.string(), story_context_budget_tokens: z.number().int(), turn_control_style: z.string(), selected_character_id: z.string().nullable(),
   character_snapshot: playableCharacterSchema.nullable(), character_profile: campaignCharacterProfileSchema.nullable(),
@@ -284,7 +285,7 @@ function transferableLegacySettings(value: Record<string, unknown>): Record<stri
 async function loadTransferSource(client: DatabaseClient, scope: CampaignScope, lock = false): Promise<SourceRow> {
   const result = await client.query(
     `SELECT c.id, c.title, c.status, c.active_turn_number, c.story_length_profile, c.story_context_budget_tokens, c.turn_control_style,
-            c.selected_character_id, c.character_snapshot, c.character_profile, c.legacy_settings,
+            c.selected_character_id, c.character_snapshot, c.character_profile, c.legacy_settings, c.first_appearance_eligible, c.selected_character_world_id,
             c.text_provider_profile_id, c.image_provider_profile_id, c.world_version_id,
             w.id AS world_id, w.title AS world_title, wv.version_number AS world_version_number,
             wv.content AS world_content, cs.revision AS state_revision, cs.scratchpad_private,
@@ -408,12 +409,12 @@ async function cloneTransferredCampaign(
     `INSERT INTO campaigns (
        owner_user_id, world_version_id, title, status, active_turn_number, story_length_profile, story_context_budget_tokens, turn_control_style,
        selected_character_id, character_snapshot, character_profile, character_profile_revision,
-       legacy_settings, text_provider_profile_id, image_provider_profile_id
-     ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+       legacy_settings, text_provider_profile_id, image_provider_profile_id, first_appearance_eligible, selected_character_world_id
+     ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
     [scope.ownerUserId, target.id, title, source.active_turn_number, source.story_length_profile,
       source.story_context_budget_tokens, source.turn_control_style, source.selected_character_id, json(source.character_snapshot),
       source.character_profile ? json(source.character_profile) : null, source.character_profile ? 1 : 0,
-      json(transferableLegacySettings(source.legacy_settings)), source.text_provider_profile_id, source.image_provider_profile_id],
+      json(transferableLegacySettings(source.legacy_settings)), source.text_provider_profile_id, source.image_provider_profile_id, source.first_appearance_eligible, source.selected_character_world_id],
   );
   const campaignId = created.rows[0]?.id;
   if (!campaignId) transferUnavailable(scope, target.id);
@@ -595,7 +596,7 @@ async function cloneTransferredCampaign(
       [scope.ownerUserId, reference.asset_id, campaignId, mappedTurnId, reference.asset_role, reference.created_at],
     );
   }
-  await copyCampaignCast(client, scope, { ownerUserId: scope.ownerUserId, campaignId }, source.active_turn_number, turnIds);
+  await copyCampaignCast(client, scope, { ownerUserId: scope.ownerUserId, campaignId }, source.active_turn_number, turnIds, source.world_id !== target.world_id);
   const memoryScope = { ownerUserId: scope.ownerUserId, campaignId, worldVersionId: target.id };
   const memoryCount = await memory.rebuildCampaignMemories(client, memoryScope);
   await enqueueChunkIndexBestEffort(client, memory, memoryScope);
@@ -674,7 +675,7 @@ export function createPostgresCampaignTransferRepository(
         counts: { turns: counts.turn_count, stateEdits: counts.state_edit_count, summaries: counts.summary_count, assets: counts.asset_count },
         character: {
           id: source.selected_character_id, name: snapshotName,
-          targetMatches: target.content.playableCharacters.filter((character) => (
+          targetMatches: resolvePlayableCharacters(target.content).filter((character) => (
             character.id === source.selected_character_id
             || Boolean(snapshotName && character.name.toLocaleLowerCase() === snapshotName.toLocaleLowerCase())
           )).map((character) => ({ id: character.id, name: character.name }))

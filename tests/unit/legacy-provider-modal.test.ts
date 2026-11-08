@@ -52,7 +52,7 @@ describe("legacy provider and authoring dismissal", () => {
   });
 
   it("labels world-scoped character application as a local draft operation", () => {
-    expect(markup).toContain("Apply to world draft");
+    expect(nexusSource).toContain('elements.saveCharacter.textContent = "Apply to world draft"');
     expect(nexusSource).toContain("worldAuthorWorkingContent");
     expect(nexusSource).toContain("Save the world form to persist this change");
   });

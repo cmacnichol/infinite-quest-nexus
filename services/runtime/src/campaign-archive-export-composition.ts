@@ -98,12 +98,14 @@ function legacyPayload(snapshot: CampaignArchiveExportSnapshot, exportedAt: stri
   const selectedCharacterText = characterLegacyText(row.character_profile, row.character_snapshot);
   return sanitizePortableValue({
     format: "infinite-quest-campaign",
-    formatVersion: 4,
+    formatVersion: 5,
     generationPolicyVersion: 1,
     exportedAt,
     campaign: {
       title: row.title,
       sourceCampaignId: row.id,
+      firstAppearanceEligible: row.first_appearance_eligible === true,
+      selectedCharacterWorldId: row.selected_character_world_id ?? null,
       sourceWorldVersionId: row.world_version_id,
       sourceWorldVersionNumber: row.version_number,
       selectedCharacterId: row.selected_character_id ?? null,
@@ -296,7 +298,7 @@ export async function buildCampaignArchiveArtifact(
       worldId: snapshot.campaign.world_id,
       worldVersionId: snapshot.campaign.world_version_id,
       entries: [...entries],
-      payloads: jsonEntries.map(([path, kind]) => ({ kind, path, formatVersion: kind === "campaign" ? 4 : 1 })),
+      payloads: jsonEntries.map(([path, kind]) => ({ kind, path, formatVersion: kind === "campaign" ? 5 : 1 })),
       assets: [...snapshot.assets.records],
     } satisfies ArchiveManifest;
   }, command.limits);

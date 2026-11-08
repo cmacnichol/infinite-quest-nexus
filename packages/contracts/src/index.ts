@@ -49,3 +49,4 @@ export * from "./characters-workspace.js";
 export * from "./instance-settings.js";
 
 export * from "./archive-policy.js";
+export * from "./campaign-cast-authored.js";

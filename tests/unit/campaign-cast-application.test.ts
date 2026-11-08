@@ -14,12 +14,14 @@ describe("cast editing application boundary", () => {
     const app = createCampaignCastApplication(repository);
     await expect(app.list(scope)).resolves.toMatchObject({ characters: [], nextCursor: null });
     await expect(app.discoveryStatus(scope)).rejects.toThrow("status unavailable");
-    const people = ["identity", "conflict"].map(id => ({ id, name: id, aliases: [], ignored: false }));
+    const ids = ["10000000-0000-4000-8000-000000000001", "10000000-0000-4000-8000-000000000002"];
+    const people = ids.map((id, i) => ({ id, name: i ? "conflict" : "identity", aliases: [], ignored: false, profile: {},
+      origin: { kind: "manual" }, pinned: false, revision: 0, firstObservedTurn: 0, lastObservedTurn: 0 }));
     const reviewed = createCampaignCastApplication({ workspaceRead: async () => ({
       snapshot: { revision: 0, boundary: { turnNumber: 0, timelineRevision: 0 }, characters: people },
-      reviewIds: ["identity", "conflict"], conflictIds: ["conflict"]
+      reviewIds: ids, conflictIds: [ids[1]]
     }) } as unknown as CampaignCastWritePort);
-    expect((await reviewed.list(scope, { filter: "conflicts" })).characters.map(person => person.id)).toEqual(["conflict"]);
+    expect((await reviewed.list(scope, { filter: "conflicts" })).characters.map(person => person.name)).toEqual(["conflict"]);
     expect((await reviewed.list(scope, { filter: "needs_review" })).characters).toHaveLength(2);
   });
   it("preserves intentional blanks and rejects ambiguous reset/set and empty edits", () => {

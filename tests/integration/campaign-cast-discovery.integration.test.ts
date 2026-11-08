@@ -27,7 +27,8 @@ import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider
 import { createApiCampaignCastApplication, createWorkerCampaignCastApplication } from "../../services/runtime/src/campaign-cast-composition.js";
 import { applyCastBoundaryChange } from "../../packages/database/src/campaign-cast-lifecycle.js";
 import { exportCampaignCast, importCampaignCast } from "../../packages/database/src/campaign-cast-portability.js";
-import { applyValidatedCastDiscovery } from "../../packages/database/src/campaign-cast-discovery-publication.js";
+import { applyValidatedCastDiscovery, captureCastDiscoveryIdentities } from "../../packages/database/src/campaign-cast-discovery-publication.js";
+import { readFirstAppearanceDecision } from "../../packages/database/src/campaign-cast-first-appearance.js";
 import { createCastBackfillRepository } from "../../packages/database/src/campaign-cast-backfill-repository.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
@@ -67,6 +68,39 @@ describe("durable cast discovery", () => {
     return { scope, turnIds, enqueue, execution, versionId };
   }
   const emptyOutput = { version: 1 as const, characters: [] };
+  it("reserves a matching protagonist when its source world is unknown but not when it is known to differ", async () => {
+    const f = await fixture(1, false), foreignWorld = randomUUID();
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [f.versionId, JSON.stringify({ world: { title: "Fixture" }, playableCharacters: [
+      { id: "hero", name: "Hero", characterText: "A guide", campaignUse: "both" }
+    ] })]);
+    await pool.query("UPDATE campaigns SET selected_character_id='hero',character_snapshot=$2 WHERE id=$1", [f.scope.campaignId, JSON.stringify({ id: "hero", name: "Hero", characterText: "A guide" })]);
+    const unknown = await withTransaction(pool, client => captureCastDiscoveryIdentities(client, f.scope));
+    expect(unknown.worldCharacters.some(person => person.entityId === "hero")).toBe(false);
+    expect(unknown.representedWorldCharacters).toContainEqual(expect.objectContaining({ entityId: "hero", characterId: expect.any(String) }));
+    await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Other')", [foreignWorld, ownerUserId]);
+    await pool.query("UPDATE campaigns SET selected_character_world_id=$2 WHERE id=$1", [f.scope.campaignId, foreignWorld]);
+    const different = await withTransaction(pool, client => captureCastDiscoveryIdentities(client, f.scope));
+    expect(different.worldCharacters.some(person => person.entityId === "hero")).toBe(true);
+    expect(different.representedWorldCharacters?.some(person => person.entityId === "hero")).toBe(false);
+  });
+  it("reads the persisted first-appearance marker and current scoped roster under lock", async () => {
+    const f = await fixture();
+    const world = (await pool.query<{ world_id: string }>("SELECT world_id FROM world_versions WHERE id=$1", [f.versionId])).rows[0]!.world_id;
+    await pool.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1", [f.versionId, JSON.stringify({ world: { title: "Test" }, playableCharacters: [
+      { id: "hero", name: "Hero", characterText: "Guide" }, { id: "mara", name: "Mara", characterText: "", campaignUse: "supporting" }
+    ] })]);
+    await pool.query("UPDATE campaigns SET selected_character_id='hero',selected_character_world_id=$2 WHERE id=$1", [f.scope.campaignId, world]);
+    const input = { frozenPermission: true, livePermission: true, sourceWorldId: world, rosterCharacterId: "mara", identityStillSupported: true, unique: true, detached: false };
+    const decide = (overrides = {}) => withTransaction(pool, (client) => readFirstAppearanceDecision(client, f.scope, { ...input, ...overrides }));
+    expect(await decide()).toBe("plain");
+    await pool.query("UPDATE campaigns SET first_appearance_eligible=true WHERE id=$1", [f.scope.campaignId]);
+    expect(await decide()).toBe("seed");
+    expect(await decide({ frozenPermission: false })).toBe("plain");
+    expect(await decide({ livePermission: false })).toBe("plain");
+    expect(await decide({ rosterCharacterId: "hero" })).toBe("protagonist");
+    expect(await decide({ rosterCharacterId: "missing" })).toBe("review");
+    expect(await decide({ identityStillSupported: false })).toBe("review");
+  });
   it.each(["matching", "profile revision mismatch", "authority revision mismatch"] as const)(
     "admits a generation-created native preset discovery route across a pre-commit retry with %s revisions",
     async (revisionCase) => {
@@ -1084,6 +1118,12 @@ describe("durable cast discovery", () => {
     await f.enqueue();
     const repo = createCastDiscoveryJobRepository(pool, () => true), job = (await repo.claim("a"))!;
     expect(job.identities.characters.find((p) => p.id === created.character.id)?.profile).toEqual({ "appearance.description": "blue eyes" });
+    expect(job.identities.identityHints?.find((item) => item.characterId === created.character.id)?.hints).toContain("blue eyes");
+    // The full seeded value may not be in the compact cast projection; both
+    // publication validations must use the frozen ID-scoped hint itself.
+    const frozen = structuredClone(job.identities);
+    frozen.characters.find((p) => p.id === created.character.id)!.profile = {};
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET identity_snapshot=$2::jsonb WHERE id=$1", [job.id, JSON.stringify(frozen)]);
     await repo.checkpoint(job, proposal(created.character.id));
     await editor.edit(f.scope, created.character.id, { expectedCastRevision: created.revision, expectedCharacterRevision: created.character.revision,
       expectedBoundary: created.boundary, idempotencyKey: "manual-green", setOverrides: { "appearance.description": "green eyes" } });
@@ -1091,6 +1131,35 @@ describe("durable cast discovery", () => {
     const detail = await editor.detail(f.scope, created.character.id);
     expect(detail.character.profile["appearance.description"]).toBe("green eyes");
     expect(detail.observations.map((o) => o.value)).toEqual(["blue eyes"]);
+  });
+  it("freezes only compact safe seeded identity and publishes using its captured hint", async () => {
+    const f = await fixture(2), repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [f.versionId, JSON.stringify({ world: { title: "Discovery fixture" }, playableCharacters: [
+      { id: "mara", name: "Mara", characterText: "PRIVATE_LEGACY", campaignUse: "supporting", profile: { story: { role: "Guide", background: "PRIVATE_BACKGROUND" }, appearance: { eyes: "blue eyes", extension: "PRIVATE_EXTENSION" } } }
+    ] })]);
+    const preview = await repo.fromWorldPreview!(f.scope, { characterId: "mara" });
+    const added = await repo.fromWorld!(f.scope, { characterId: "mara", expectedWorldVersionId: f.versionId, expectedCastRevision: preview.castRevision,
+      expectedBoundary: preview.boundary, idempotencyKey: "seed-mara", previewFingerprint: preview.previewFingerprint });
+    const migratedVersion = randomUUID();
+    await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) SELECT $2,world_id,owner_user_id,2,content FROM world_versions WHERE id=$1", [f.versionId, migratedVersion]);
+    await pool.query("UPDATE campaigns SET world_version_id=$2 WHERE id=$1", [f.scope.campaignId, migratedVersion]);
+    await f.enqueue();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), job = (await jobs.claim("seed-privacy"))!;
+    expect(job.identities.seedActivations).toContainEqual(expect.objectContaining({ characterId: added.character.id, seedEventId: added.character.originProfile!.seedEventId }));
+    expect(job.identities.worldCharacters.some(person => person.entityId === "mara")).toBe(false);
+    expect(JSON.stringify(job.identities)).not.toMatch(/PRIVATE_(?:LEGACY|BACKGROUND|EXTENSION)/);
+    expect(job.identities.characters.find(person => person.id === added.character.id)).not.toHaveProperty("originProfile");
+    await jobs.checkpoint(job, proposal(added.character.id));
+    expect(await jobs.publish(job)).toBe("complete");
+    expect((await repo.candidates(f.scope, { view: "matches" })).candidates).toHaveLength(0);
+    await f.enqueue(1);
+    const later = (await jobs.claim("seed-changed"))!;
+    const stale = structuredClone(later.identities);
+    stale.seedActivations!.find(item => item.characterId === added.character.id)!.seedEventId = randomUUID();
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET identity_snapshot=$2::jsonb WHERE id=$1", [later.id, JSON.stringify(stale)]);
+    await jobs.checkpoint(later, proposal(added.character.id));
+    expect(await jobs.publish(later)).toBe("complete");
+    expect((await repo.candidates(f.scope, { view: "matches" })).candidates).toEqual([expect.objectContaining({ reason: "identity_changed" })]);
   });
   it("retains ambiguous identities for review and rejects forged evidence without creating characters", async () => {
     const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });

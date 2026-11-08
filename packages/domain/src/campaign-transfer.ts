@@ -1,6 +1,6 @@
 import type { CampaignTransferFinding } from "../../contracts/src/campaign-transfer.js";
 import type { WorldContent } from "../../contracts/src/world-library.js";
-import { assessWorldCampaignReadiness } from "./world-characters.js";
+import { assessWorldCampaignReadiness, resolvePlayableCharacters } from "./world-characters.js";
 
 type CompatibilityInput = {
   sourceWorldId: string;
@@ -69,7 +69,7 @@ export function assessCampaignTransferCompatibility(input: CompatibilityInput): 
     });
   }
   const snapshotName = typeof input.characterSnapshot?.name === "string" ? input.characterSnapshot.name.trim() : "";
-  const targetCharacter = input.targetContent.playableCharacters.find((character) => (
+  const targetCharacter = resolvePlayableCharacters(input.targetContent).find((character) => (
     character.id === input.selectedCharacterId || (snapshotName && character.name.toLocaleLowerCase() === snapshotName.toLocaleLowerCase())
   ));
   if (!targetCharacter) {

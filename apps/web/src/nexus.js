@@ -4077,7 +4077,7 @@ async function generateCharacterFromPrompt() {
       ...base,
       ...candidate,
       id: editingCharacterId || String(candidate.id || base.id || opaqueCharacterId()),
-      ...(editingCharacterId && base.source !== undefined ? { source: base.source } : {})
+      ...(editingCharacterId ? { source: base.source, campaignUse: base.campaignUse, startingCastDefault: base.startingCastDefault, alwaysInContext: base.alwaysInContext } : {})
     };
     populateCharacterForm(merged, false);
     setCharacterStatus("Character generated. Review every field, then add it to the world form.", "success");

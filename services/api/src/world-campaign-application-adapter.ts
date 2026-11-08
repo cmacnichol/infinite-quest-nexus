@@ -32,10 +32,11 @@ function applicationErrorMessage(error: WorldCampaignApplicationError): string {
     const eventIndex = typeof issue?.eventIndex === "number" && issue.eventIndex >= 0 && issue.eventIndex < 200
       ? issue.eventIndex + 1 : null;
     if (issue?.code === "no-playable-characters") return "This world version has no playable characters.";
-    if (issue?.code === "missing-character-id" && index) return `Playable character ${index} is missing an ID.`;
-    if (issue?.code === "duplicate-character-id" && index) return `Playable character ${index} has a duplicate ID.`;
-    if (issue?.code === "missing-character-name" && index) return `Playable character ${index} is missing a name.`;
-    if (issue?.code === "missing-character-text" && index) return `Playable character ${index} is missing character guidance.`;
+    if (issue?.code === "no-selectable-characters") return "This world version has no selectable characters.";
+    if (issue?.code === "missing-character-id" && index) return `Character ${index} is missing an ID.`;
+    if (issue?.code === "duplicate-character-id" && index) return `Character ${index} has a duplicate ID.`;
+    if (issue?.code === "missing-character-name" && index) return `Character ${index} is missing a name.`;
+    if (issue?.code === "missing-character-text" && index) return `Character ${index} is missing character guidance.`;
     if (issue?.code === "invalid-event-rule") {
       if (eventIndex) {
         const field = ["id", "label", "timing", "condition", "effect", "addTextAfter", "triggeredCount", "lastTriggeredTurn", "lastTriggeredAt"].includes(issue.field ?? "")
@@ -90,7 +91,7 @@ export function mapWorldCampaignApplicationError(
         ? 503
         : 409;
   const safeIssues = error.details.issues?.slice(0, 5).flatMap((issue) => {
-    const codes = ["no-playable-characters", "missing-character-id", "duplicate-character-id", "missing-character-name", "missing-character-text", "invalid-event-rule"];
+    const codes = ["no-playable-characters", "no-selectable-characters", "missing-character-id", "duplicate-character-id", "missing-character-name", "missing-character-text", "invalid-event-rule"];
     if (!codes.includes(issue.code)) return [];
     const fields = ["id", "label", "timing", "condition", "effect", "addTextAfter", "triggeredCount", "lastTriggeredTurn", "lastTriggeredAt"];
     return [{

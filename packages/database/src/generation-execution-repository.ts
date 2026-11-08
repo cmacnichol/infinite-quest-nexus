@@ -7,7 +7,7 @@ import { enqueueCastDiscoveryWithClient, type CastDiscoveryExecution } from "./c
 import { assertContinuityReviewCommit, assertGenerationReviewAcceptance, bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, type ContinuityReviewCheckpoint } from "../../application/src/memory/continuity-review-checkpoint.js";
 import { generationReviewCheckpointSchema, generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../application/src/generation/review-checkpoint.js";
 import type { GenerationFailureDiagnostic } from "../../contracts/src/generation-review.js";
-import { storyMemoryPolicySnapshotSchema, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
+import { storyMemoryPolicySnapshotSchema, isCastV2ContextProtocol, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
 import { assertContinuityReviewPromptSnapshot } from "../../contracts/src/prompt-library.js";
 import { sha256Hex } from "../../contracts/src/hash.js";
 import { responseFormatDiagnosticCodeSchema, responseInvocationKeySchema, type ResponseInvocationKeyV2 } from "../../contracts/src/text-response-format.js";
@@ -1549,7 +1549,7 @@ async function commitAcceptedTurn(
     campaignId: job.campaign_id,
     operationKind: job.operation_kind,
     expectedTurnNumber: job.expected_turn_number,
-    ...(hasGenerationCharacterAuthority(storedBaseIdentity) ? { baseIdentityVersion: storedBaseIdentity.version, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined,
+    ...(hasGenerationCharacterAuthority(storedBaseIdentity) ? { baseIdentityVersion: storedBaseIdentity.version, castContextVersion: isCastV2ContextProtocol(frozenStoryMemoryPolicy?.contextProtocol) ? "cast-context-v2" as const : "cast-context-v1" as const, ...(frozenStoryMemoryPolicy?.castDiscoveryEnabled === undefined ? {} : { castDiscoveryEnabled: frozenStoryMemoryPolicy.castDiscoveryEnabled }), captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined,
       ...(storedBaseIdentity.recentWindowTurns === undefined ? {} : { recentWindowTurns: storedBaseIdentity.recentWindowTurns }) } : {})
   });
   if (!matchesGenerationBaseIdentity(storedBaseIdentity, authority.baseIdentity)) {
@@ -2050,7 +2050,7 @@ export function createPostgresGenerationExecutionRepository(
           campaignId: row.campaign_id,
           operationKind: row.operation_kind,
           expectedTurnNumber: row.expected_turn_number,
-          ...(hasGenerationCharacterAuthority(storedBaseIdentity) ? { baseIdentityVersion: storedBaseIdentity.version, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined,
+          ...(hasGenerationCharacterAuthority(storedBaseIdentity) ? { baseIdentityVersion: storedBaseIdentity.version, castContextVersion: isCastV2ContextProtocol(frozenStoryMemoryPolicy?.contextProtocol) ? "cast-context-v2" as const : "cast-context-v1" as const, ...(frozenStoryMemoryPolicy?.castDiscoveryEnabled === undefined ? {} : { castDiscoveryEnabled: frozenStoryMemoryPolicy.castDiscoveryEnabled }), captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined,
             ...(storedBaseIdentity.recentWindowTurns === undefined ? {} : { recentWindowTurns: storedBaseIdentity.recentWindowTurns }) } : {})
         });
       } catch (error) {

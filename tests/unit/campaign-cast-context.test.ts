@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { castGenerationSnapshotSchema, castGenerationSnapshotFingerprint } from "../../packages/contracts/src/campaign-cast-context.js";
-import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
+import { resolveCastContextGoal, selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
 import { estimateTokens } from "../../packages/domain/src/text.js";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -129,4 +129,65 @@ describe("captured cast context", () => {
     expect(selectCastContext({ snapshot: castGenerationSnapshotSchema.parse(input), budgetTokens: 3000,
       direction: "Mara", currentScene: "", openThreads: ["Find Sela"] })).toEqual(result);
   });
+});
+
+it("selects v2 fiction under headroom while preserving the legacy selector", () => {
+  const old = fixture();
+  const modern = { ...old, version: "cast-context-v2" as const,
+    details: [{ characterId: id(1), observations: [], overrides: [] }],
+    fiction: [{ characterId: id(1), fields: [{ field: "story.role", value: "a guardian", source: "authored", evidenceId: id(11) }] }] };
+  expect(select(modern, 0).content).toBe("");
+  const result = select(modern, 3000);
+  expect(result.content).toContain("a guardian");
+  expect(castGenerationSnapshotSchema.safeParse({ ...modern, fiction: [{ characterId: id(1), fields: [{ field: "extension.private", value: "secret", source: "authored" }] }] }).success).toBe(false);
+  expect(castGenerationSnapshotSchema.safeParse({ ...modern, fiction: [{ characterId: id(1), fields: [modern.fiction[0]!.fields[0], modern.fiction[0]!.fields[0]] }] }).success).toBe(false);
+  expect(result.estimatedTokens).toBeLessThanOrEqual(3000);
+  expect(select(old).content).toContain("blue eyes");
+});
+
+it("prioritizes recent activity above thirty pins and explains field budget omissions", () => {
+  const old = fixture();
+  const characters = Array.from({ length: 30 }, (_, i) => ({ ...old.characters[0]!, id: id(200 + i), name: `Witness ${i}`, aliases: [], pinned: true,
+    firstObservedTurn: 0, lastObservedTurn: i === 29 ? 4 : 0 }));
+  const modern = { ...old, version: "cast-context-v2" as const, characters,
+    details: characters.map(person => ({ characterId: person.id, observations: [], overrides: [] })),
+    fiction: characters.map(person => ({ characterId: person.id, fields: [
+      { field: "story.role", value: "r".repeat(600), source: "authored", evidenceId: `${id(50)}:story.role` },
+      { field: "story.background", value: "b".repeat(600), source: "campaign_edit", evidenceId: `${id(51)}:story.background` }
+    ] })) };
+  const result = select(modern, 1000, "Wait");
+  expect(result.estimatedTokens).toBeLessThanOrEqual(1000);
+  expect(result.explanation.selected[0]).toMatchObject({ characterId: id(229), reason: "recent_observation" });
+  expect(result.explanation.omittedFields?.length).toBeGreaterThan(0);
+  expect(result.explanation.omittedFields?.every(item => item.reason === "budget")).toBe(true);
+  expect(result.records.flatMap(record => record.fields).every(field => field.evidenceId.includes(":"))).toBe(true);
+  expect(select(modern, 0, "Wait").omittedCharacterIds).toHaveLength(30);
+});
+
+it("keeps dated lower-authority state through enrollment gaps and distinguishes discovery off", () => {
+  const old = fixture();
+  const modern = { ...old, version: "cast-context-v2" as const, discoveryStatus: "pending" as const, trackedThroughTurn: 1,
+    details: [{ characterId: id(1), observations: [], overrides: [] }],
+    fiction: [{ characterId: id(1), fields: [
+      { field: "story.goals", value: "find the ship", source: "observation", evidenceId: `${id(11)}:story.goals`, evidenceKind: "turn" as const, effectiveTurn: 1 },
+      { field: "state.location", value: "the harbor", source: "observation", evidenceId: `${id(12)}:state.location`, evidenceKind: "turn" as const, effectiveTurn: 1 }
+    ] }] };
+  const gap = JSON.parse(select(modern).content);
+  expect(gap.notice).toContain("incomplete");
+  expect(gap.characters[0].fields).toEqual(expect.arrayContaining([
+    expect.objectContaining({ field: "story.goals", authority: "observation", source: { kind: "turn", turnNumber: 1 } }),
+    expect.objectContaining({ field: "state.location", authority: "observation", source: { kind: "turn", turnNumber: 1 } })
+  ]));
+  const off = JSON.parse(select({ ...modern, discoveryStatus: "off" }).content);
+  expect(off.notice).toContain("discovery is off");
+  expect(off.characters[0].fields).toEqual(gap.characters[0].fields);
+});
+
+it("uses authored goals during a discovery gap while respecting overrides and discovery off", () => {
+  const goal = { value: "observed", source: "observation", authored: "authored", discoveryEnabled: true, coverageCurrent: false };
+  expect(resolveCastContextGoal(goal)).toEqual({ value: "authored", source: "authored" });
+  expect(resolveCastContextGoal({ ...goal, coverageCurrent: true })).toEqual({ value: "observed", source: "observation" });
+  expect(resolveCastContextGoal({ ...goal, discoveryEnabled: false })).toEqual({ value: "observed", source: "observation" });
+  expect(resolveCastContextGoal({ ...goal, authored: "" })).toEqual({ value: "observed", source: "observation" });
+  expect(resolveCastContextGoal({ ...goal, value: "manual", source: "override" })).toEqual({ value: "manual", source: "override" });
 });

@@ -79,6 +79,7 @@ export type RuntimeRoleDependencies = Readonly<{
       chronicle: ApiProviderApplicationComposition["chronicle"];
       generation: Pick<ApiProviderApplicationComposition["generation"], "reads">;
     }>,
+    castPresetsEnabled?: boolean,
   ): WorldCampaignApplication;
   createWorkerIllustration(
     pool: DatabasePool,
@@ -224,7 +225,7 @@ export async function dispatchRuntimeRole(
             policyDigest: settingsDigest(settings.localPolicy), expectedEpoch: requested.epoch,
             maintenanceReference: `local-restart/${requested.operationId}`,
             actor: { userId: await initialOwnerId(pool), localSingleUser: true }
-          }, createSettingsActivationGuard(settings.localPolicy));
+          }, createSettingsActivationGuard(settings.localPolicy, { implicitLocal: !bootstrapConfig.instanceSettingsPolicyFile }));
           await lock!.query("COMMIT");
         } catch (error) {
           await lock!.query("ROLLBACK").catch(() => undefined);
@@ -275,11 +276,11 @@ async function dispatchResolvedRuntimeRole(
     const generation = dependencies.createApiGeneration(pool, providerGraph.generation, {
       installedCapability: config.storyMemoryCapability ?? null,
       enforceEnabled: config.storyMemoryEnforceEnabled === true,
-      ...(config.castContextEnabled === true ? { castContextEnabled: true, historyCoverageEnabled: config.historyCoverageEnabled !== false } : {})
+      ...(config.castContextEnabled === true ? { castContextEnabled: true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, historyCoverageEnabled: config.historyCoverageEnabled !== false } : {})
     });
     const illustration = dependencies.createApiIllustration(pool, providerGraph.illustration);
     const memory = dependencies.createApiMemory(pool, providerGraph.chronicle);
-    const worldCampaign = dependencies.createApiWorldCampaign(pool, providerGraph);
+    const worldCampaign = dependencies.createApiWorldCampaign(pool, providerGraph, config.castPresetsEnabled === true);
     const authoring = dependencies.createApiAuthoring(pool);
     const providers = dependencies.createProviderApiAdapter(providerGraph);
     const server = await dependencies.buildServer({
@@ -330,13 +331,13 @@ async function dispatchResolvedRuntimeRole(
   const apiGeneration = dependencies.createApiGeneration(pool, apiProviderGraph.generation, {
     installedCapability: config.storyMemoryCapability ?? null,
     enforceEnabled: config.storyMemoryEnforceEnabled === true,
-    ...(config.castContextEnabled === true ? { castContextEnabled: true, historyCoverageEnabled: config.historyCoverageEnabled !== false } : {})
+    ...(config.castContextEnabled === true ? { castContextEnabled: true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, historyCoverageEnabled: config.historyCoverageEnabled !== false } : {})
   });
   const illustration = dependencies.createApiIllustration(pool, apiProviderGraph.illustration);
   const memory = dependencies.createApiMemory(pool, apiProviderGraph.chronicle);
   const workerIllustrationTransactions = dependencies.createApiIllustration(pool, workerProviderGraph.illustration);
   const workerMemoryTransactions = dependencies.createApiMemory(pool, workerProviderGraph.chronicle);
-  const worldCampaign = dependencies.createApiWorldCampaign(pool, apiProviderGraph);
+  const worldCampaign = dependencies.createApiWorldCampaign(pool, apiProviderGraph, config.castPresetsEnabled === true);
   const providers = dependencies.createProviderApiAdapter(apiProviderGraph);
   const apiAuthoring = dependencies.createApiAuthoring(pool);
   if (!generationEvents) throw new Error("The all role requires a generation event source.");

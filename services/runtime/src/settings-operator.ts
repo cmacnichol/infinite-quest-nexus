@@ -4,8 +4,8 @@ import { deploymentSettingsPolicySchema, instanceSettingsSchema, runtimeRoleCapa
 import { validateSettingsPolicy, type SettingsActor, type SettingsRepositoryPort } from "../../../packages/application/src/settings/index.js";
 import type { RuntimeConfig } from "../../../packages/database/src/index.js";
 import { projectRuntimeSettings, settingsDigest, SETTINGS_PROTOCOL_VERSION } from "./instance-settings.js";
-const seedSchema=z.object({version:z.literal(1),role:runtimeRoleCapacitySchema,snapshot:instanceSettingsSchema,digest:z.string().regex(/^[a-f0-9]{64}$/)}).strict();
-export type SettingsSeedExport=z.infer<typeof seedSchema>;
+const seedSchema=z.object({version:z.literal(1),role:runtimeRoleCapacitySchema,snapshot:instanceSettingsSchema.partial({castPresetsEnabled:true,castContextWithoutDiscoveryEnabled:true}),digest:z.string().regex(/^[a-f0-9]{64}$/)}).strict();
+export type SettingsSeedExport=Omit<z.infer<typeof seedSchema>, "snapshot"> & { snapshot: InstanceSettings };
 export function exportSettingsSeed(config:RuntimeConfig):SettingsSeedExport {
   const snapshot=projectRuntimeSettings(config);
   return {version:1,role:{role:config.role,databaseMaxConnections:config.databaseMaxConnections},snapshot,digest:settingsDigest(snapshot)};
@@ -13,8 +13,9 @@ export function exportSettingsSeed(config:RuntimeConfig):SettingsSeedExport {
 export function reconcileSettingsSeeds(input:unknown,policy:DeploymentSettingsPolicy):InstanceSettings {
   const seeds=z.array(seedSchema).parse(input);
   if(!seeds.length) throw new Error('settings_seed_roles_missing');
-  const snapshot=seeds[0]!.snapshot;
-  for(const seed of seeds) if(seed.digest!==settingsDigest(seed.snapshot) || settingsDigest(seed.snapshot)!==settingsDigest(snapshot)) throw new Error('settings_seed_inconsistent');
+  const original=seeds[0]!.snapshot;
+  for(const seed of seeds) if(seed.digest!==settingsDigest(seed.snapshot) || settingsDigest(seed.snapshot)!==settingsDigest(original)) throw new Error('settings_seed_inconsistent');
+  const snapshot=instanceSettingsSchema.parse({castPresetsEnabled:false,castContextWithoutDiscoveryEnabled:false,...original});
   for(const intended of policy.expectedRoles) if(seeds.filter(seed=>seed.role.role===intended.role && seed.role.databaseMaxConnections===intended.databaseMaxConnections).length!==intended.replicas) throw new Error('settings_seed_roles_missing');
   if(seeds.length!==policy.expectedRoles.reduce((n,r)=>n+r.replicas,0)) throw new Error('settings_seed_roles_unexpected');
   validateSettingsPolicy(snapshot,policy,resolveInstanceSettings);
@@ -22,7 +23,7 @@ export function reconcileSettingsSeeds(input:unknown,policy:DeploymentSettingsPo
 }
 export function createSeedPolicy(input: unknown, installationId: string): DeploymentSettingsPolicy {
   const seeds = z.array(seedSchema).min(1).parse(input);
-  const snapshot = seeds[0]!.snapshot;
+  const snapshot = instanceSettingsSchema.parse({ castPresetsEnabled: false, castContextWithoutDiscoveryEnabled: false, ...seeds[0]!.snapshot });
   const roles = new Map<string, { role: string; replicas: number; databaseMaxConnections: number }>();
   for (const { role } of seeds) {
     const existing = roles.get(role.role);
@@ -34,7 +35,7 @@ export function createSeedPolicy(input: unknown, installationId: string): Deploy
     return [f.key, { min: value, max: value }];
   }));
   const policy = deploymentSettingsPolicySchema.parse({
-    version: 1, installationId, minimumSettingsProtocolVersion: 1, systemArchiveAllowLimitIncrease: false,
+    version: 2, installationId, minimumSettingsProtocolVersion: 1, systemArchiveAllowLimitIncrease: false,
     expectedRoles: [...roles.values()], numericBounds,
     featureGates: Object.fromEntries(INSTANCE_SETTING_FIELDS.filter(f => f.kind === "boolean").map(f => [f.key, valueAt(snapshot, f.key)])),
     approvedRateTuples: [{ windowSeconds: snapshot.apiRateLimitWindowSeconds, providerRequests: snapshot.apiRateLimitProviderRequests,
@@ -48,6 +49,8 @@ export function createSeedPolicy(input: unknown, installationId: string): Deploy
 export function createLocalSingleUserPolicy(snapshot: InstanceSettings, installationId: string, databaseMaxConnections: number): DeploymentSettingsPolicy {
   const seed = { version: 1 as const, role: { role: "all" as const, databaseMaxConnections }, snapshot, digest: settingsDigest(snapshot) };
   const policy = createSeedPolicy([seed], installationId);
+  policy.featureGates.castPresetsEnabled = true;
+  policy.featureGates.castContextWithoutDiscoveryEnabled = true;
   policy.numericBounds.workerPollIntervalMs = { min: snapshot.workerPollIntervalMs, max: 60000 };
   policy.numericBounds.workerGenerationConcurrency = { min: 1, max: snapshot.workerGenerationConcurrency };
   return policy;

@@ -5,8 +5,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool, withTransaction } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { applyCastBatchWithClient, createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { campaignCreateSchema, worldCreateSchema, worldPublishSchema } from "../../packages/contracts/src/world-library.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
-import { importLegacyStory, branchCampaign, rewindCampaign, previewCampaignWorldTransfer, transferCampaignWorld } from "../helpers/memory-aware-services.js";
+import { importLegacyStory, branchCampaign, rewindCampaign, previewCampaignWorldTransfer, transferCampaignWorld, createWorld, publishWorld, createCampaign } from "../helpers/memory-aware-services.js";
 import { applyCastBoundaryChange } from "../../packages/database/src/campaign-cast-lifecycle.js";
 import { createPostgresTurnCorrectionRepository } from "../../packages/database/src/turn-correction-repository.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
@@ -214,6 +215,158 @@ integration("campaign cast lifecycle", () => {
     expect((await readCastDiscoveryStatus(pool, scope, true)).coverageStartTurn).toBe(1);
     expect((await pool.query("SELECT count(*)::integer n FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [scope.campaignId])).rows[0].n).toBe(1);
   });
+  it("retains lagged create and seed across branch and rewind, then suppresses detached and corrected evidence", async () => {
+    const { scope, repo } = await fixture();
+    await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [scope.campaignId]);
+    await repo.initialize(scope);
+    const source = (await pool.query(`SELECT turn_id,turn_number,correction_revision,effective_narration FROM effective_turn_narrations
+      WHERE campaign_id=$1 AND turn_number=1`, [scope.campaignId])).rows[0];
+    const version = (await pool.query("SELECT world_version_id FROM campaigns WHERE id=$1", [scope.campaignId])).rows[0].world_version_id;
+    const { characterProfileSchema } = await import("../../packages/contracts/src/world-library.js");
+    const { buildCastDiscoverySource } = await import("../../packages/domain/src/campaign-cast-discovery.js");
+    const parsed = buildCastDiscoverySource({ scope, turnId: source.turn_id, turnNumber: 1, narrationRevision: source.correction_revision,
+      timelineRevision: 0, narration: source.effective_narration });
+    const paragraph = parsed.paragraphs[0]!, quote = paragraph.text.slice(0, 10);
+    const characterId = randomUUID(), eventId = randomUUID();
+    const turnEvidence = { kind: "turn", turnId: source.turn_id, turnNumber: 1, narrationRevision: source.correction_revision,
+      sourceHash: parsed.sourceHash, paragraphId: paragraph.id, quote };
+    const worldEvidence = { kind: "world", worldVersionId: version, sourcePath: "/world" };
+    const seed = { kind: "seed_profile", characterId, worldVersionId: version, entityId: "lagged", rosterName: "Lagged", rosterAliases: [],
+      legacyCharacterText: "Legacy", profile: characterProfileSchema.parse({ story: { role: "Keeper" } }), evidence: worldEvidence };
+    const payload = [{ characterId, command: { kind: "create", name: "Lagged", aliases: [], origin: { kind: "discovered" }, evidence: turnEvidence } },
+      { command: seed }, { command: { kind: "pin", characterId, value: true } }];
+    const attachment = { eventId, characterId, basis: "unique_world_name", sourceRanges: [{ turnId: source.turn_id,
+      narrationRevision: source.correction_revision, sourceHash: parsed.sourceHash, paragraphId: paragraph.id, start: 0, end: quote.length }], observationIds: [] };
+    await pool.query("INSERT INTO campaign_cast_characters(id,owner_user_id,campaign_id,origin,first_observed_turn) VALUES($1,$2,$3,$4,1)", [characterId, ownerUserId, scope.campaignId, JSON.stringify({ kind: "discovered" })]);
+    await pool.query(`INSERT INTO campaign_cast_events(id,owner_user_id,campaign_id,effective_turn_number,timeline_revision,idempotency_key,request_hash,payload,receipt,attachment)
+      VALUES($1,$2,$3,2,0,'lagged-seed',$4,$5,$6,$7)`, [eventId, ownerUserId, scope.campaignId, "a".repeat(64), JSON.stringify(payload),
+      JSON.stringify({ eventId, revision: 1, characterIds: [characterId], observationIds: [] }), JSON.stringify(attachment)]);
+    await pool.query("UPDATE campaign_cast_state SET revision=1 WHERE campaign_id=$1", [scope.campaignId]);
+    const branch = await branchCampaign(pool, scope.campaignId, { targetTurnNumber: 1, title: "Lagged seed branch" });
+    const copied = (await repo.current({ ownerUserId, campaignId: branch.id })).characters.find((person) => person.name === "Lagged")!;
+    expect(copied.profile["story.role"]).toBe("Keeper");
+    expect(copied.originProfile?.seedEventId).not.toBe(eventId);
+    expect(copied.pinned).toBe(false);
+    await rewindCampaign(pool, scope.campaignId, { targetTurnNumber: 1 });
+    const retained = (await repo.current(scope)).characters.find((person) => person.id === characterId)!;
+    expect(retained.profile["story.role"]).toBe("Keeper");
+    expect(retained.pinned).toBe(false);
+    const detail = await repo.detail(scope, characterId);
+    await repo.detachAttachment(scope, characterId, eventId, { expectedBoundary: detail.boundary, expectedCastRevision: detail.revision,
+      expectedCharacterRevision: detail.character.revision, idempotencyKey: "detach-lagged" });
+    expect((await repo.detail(scope, characterId)).character.originProfile).toBeUndefined();
+    const correction = await createPostgresTurnCorrectionRepository(pool, { memory: memoryGeneration(pool) }).correctNarration(scope,
+      { turnId: source.turn_id, expectedActiveTurnNumber: 1, expectedCorrectionRevision: source.correction_revision,
+        narration: "Changed evidence.", source: "user_edit" });
+    expect(correction.ok).toBe(true);
+    expect((await repo.current(scope)).characters.some((person) => person.id === characterId)).toBe(false);
+  });
+
+  it("turn-gates an existing-row seed and preserves v3 edits through cross-world transfer and restore", async () => {
+    const { scope } = await fixture(), destination = await fixture(), restore = await fixture();
+    const sourceVersion = (await pool.query("SELECT world_version_id FROM campaigns WHERE id=$1", [scope.campaignId])).rows[0].world_version_id;
+    const targetVersion = (await pool.query("SELECT world_version_id FROM campaigns WHERE id=$1", [destination.scope.campaignId])).rows[0].world_version_id;
+    await pool.query(`UPDATE world_versions SET content=jsonb_set(content,'{playableCharacters}', $2::jsonb) WHERE id=$1`, [sourceVersion,
+      JSON.stringify([{ id: "mara", name: "Mara", characterText: "Legacy guidance", campaignUse: "supporting", profile: { story: { role: "Guide", background: "b".repeat(3000) } } }])]);
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [scope.campaignId]);
+    const initial = await repo.current(scope);
+    const manual = await repo.create(scope, { name: "Mara", aliases: [], profile: { "story.role": "Scout" }, expectedCastRevision: initial.revision,
+      expectedBoundary: initial.boundary, idempotencyKey: "manual-mara" });
+    await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [scope.campaignId]);
+    const preview = await repo.fromWorldPreview!(scope, { characterId: "mara", targetCastCharacterId: manual.character.id });
+    const seeded = await repo.fromWorld!(scope, { characterId: "mara", targetCastCharacterId: manual.character.id,
+      expectedCharacterRevision: manual.character.revision, expectedWorldVersionId: sourceVersion, previewFingerprint: preview.previewFingerprint,
+      expectedCastRevision: preview.castRevision, expectedBoundary: preview.boundary, idempotencyKey: "seed-existing" });
+    const edited = await repo.editAuthoredProfile!(scope, manual.character.id, { expectedCastRevision: seeded.revision,
+      expectedCharacterRevision: seeded.character.revision, expectedBoundary: seeded.boundary, idempotencyKey: "seed-edit",
+      set: { "story.role": "Warden" }, setOverrides: { "story.goals": "g".repeat(20000) } });
+    const early = await branchCampaign(pool, scope.campaignId, { targetTurnNumber: 1, title: "Before seed" });
+    const earlyPerson = (await repo.current({ ownerUserId, campaignId: early.id })).characters.find((person) => person.name === "Mara")!;
+    expect(earlyPerson.originProfile).toBeUndefined();
+    expect(earlyPerson.profile["story.role"]).toBe("Scout");
+    const later = await branchCampaign(pool, scope.campaignId, { targetTurnNumber: 2, title: "After seed" });
+    const laterPerson = (await repo.current({ ownerUserId, campaignId: later.id })).characters.find((person) => person.name === "Mara")!;
+    expect(laterPerson.profile["story.role"]).toBe("Warden");
+    expect(laterPerson.originProfile?.seedEventId).not.toBe(edited.character.originProfile!.seedEventId);
+    const request = campaignTransferPreviewRequestSchema.parse({ targetWorldVersionId: targetVersion });
+    const transferPreview = await previewCampaignWorldTransfer(pool, scope.campaignId, request);
+    const transferred = await transferCampaignWorld(pool, scope.campaignId, campaignTransferCommitRequestSchema.parse({ ...request, idempotencyKey: randomUUID(),
+      expectedActiveTurnNumber: transferPreview.expectedActiveTurnNumber, expectedStateRevision: transferPreview.expectedStateRevision, sourceFingerprint: transferPreview.sourceFingerprint }));
+    const transferredScope = { ownerUserId, campaignId: transferred.targetCampaignId };
+    const person = (await repo.current(transferredScope)).characters.find((item) => item.name === "Mara")!;
+    expect(person.originProfile?.evidence).toMatchObject({ kind: "historical_world", sourceWorldVersionId: sourceVersion });
+    expect(person.profile["story.role"]).toBe("Warden");
+    expect(person.profile["story.goals"]).toHaveLength(20000);
+    const { exportCampaignCast, importCampaignCast } = await import("../../packages/database/src/campaign-cast-portability.js");
+    const sourceTurns = (await pool.query("SELECT id,turn_number FROM turns WHERE campaign_id=$1", [transferredScope.campaignId])).rows;
+    const targetTurns = (await pool.query("SELECT id,turn_number FROM turns WHERE campaign_id=$1", [restore.scope.campaignId])).rows;
+    await withTransaction(pool, async (client) => {
+      const archive = await exportCampaignCast(client, transferredScope);
+      expect(archive?.formatVersion).toBe(3);
+      const seedEvent = archive!.events.find((event) => event.commands.some((item) => item.command.kind === "seed_profile"))!;
+      const editEvent = archive!.events.find((event) => event.commands.some((item) => item.command.kind === "edit_authored_profile"))!;
+      const seedCommand = seedEvent.commands.find((item) => item.command.kind === "seed_profile")!.command;
+      const editCommand = editEvent.commands.find((item) => item.command.kind === "edit_authored_profile")!.command;
+      expect(seedCommand.kind === "seed_profile" && seedCommand.evidence).toMatchObject({ kind: "historical_world", sourceWorldVersionId: sourceVersion });
+      expect(editCommand.kind === "edit_authored_profile" && editCommand.seedEventId).toBe(seedEvent.id);
+      expect(editEvent.receipt?.result?.character.profile["story.goals"]).toHaveLength(20000);
+      await importCampaignCast(client, restore.scope, archive, { worlds: new Map(), turns: new Map(sourceTurns.map((turn) => [turn.id, targetTurns.find((item) => item.turn_number === turn.turn_number)!.id])) });
+    });
+    const restored = (await repo.current(restore.scope)).characters.find((item) => item.name === "Mara")!;
+    expect(restored.originProfile?.evidence).toMatchObject({ kind: "historical_world", sourceWorldVersionId: sourceVersion });
+    expect(restored.profile["story.role"]).toBe("Warden");
+    expect(restored.profile["story.goals"]).toHaveLength(20000);
+    await rewindCampaign(pool, scope.campaignId, { targetTurnNumber: 1 });
+    const rewound = (await repo.current(scope)).characters.find((item) => item.id === manual.character.id)!;
+    expect(rewound.originProfile).toBeUndefined();
+    expect(rewound.profile["story.role"]).toBe("Scout");
+  });
+
+  it("reserves the protagonist by source world through transfers, a branch, and return to source", async () => {
+    const createPublished = async (title: string, campaignUse: "playable" | "both") => {
+      const world = await createWorld(pool, worldCreateSchema.parse({ title, content: { world: { title, premise: "A story", firstAction: "Begin" },
+        playableCharacters: [{ id: "hero", name: campaignUse === "both" ? "Different hero" : "Original hero", characterText: "A thoughtful traveller.", campaignUse }] } }));
+      const version = await publishWorld(pool, world.id, worldPublishSchema.parse({ expectedRevision: world.draftRevision, releaseNotes: "Test" }));
+      return { world, version };
+    };
+    const source = await createPublished(`Source ${randomUUID()}`, "playable"), destination = await createPublished(`Destination ${randomUUID()}`, "both");
+    const campaign = await createCampaign(pool, campaignCreateSchema.parse({ worldVersionId: source.version.worldVersionId, title: "Protagonist", selectedCharacterId: "hero" }));
+    const original = { ownerUserId, campaignId: campaign.id };
+    expect((await pool.query("SELECT selected_character_world_id FROM campaigns WHERE id=$1", [campaign.id])).rows[0].selected_character_world_id).toBe(source.world.id);
+    const transfer = async (campaignId: string, targetWorldVersionId: string) => {
+      const request = campaignTransferPreviewRequestSchema.parse({ targetWorldVersionId });
+      const preview = await previewCampaignWorldTransfer(pool, campaignId, request);
+      return transferCampaignWorld(pool, campaignId, campaignTransferCommitRequestSchema.parse({ ...request, idempotencyKey: randomUUID(),
+        expectedActiveTurnNumber: preview.expectedActiveTurnNumber, expectedStateRevision: preview.expectedStateRevision, sourceFingerprint: preview.sourceFingerprint }));
+    };
+    const moved = await transfer(campaign.id, destination.version.worldVersionId);
+    const movedScope = { ownerUserId, campaignId: moved.targetCampaignId }, repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+    await pool.query("UPDATE campaigns SET selected_character_world_id=NULL WHERE id=$1", [movedScope.campaignId]);
+    await expect(repo.fromWorldPreview!(movedScope, { characterId: "hero" })).rejects.toMatchObject({ code: "cast_world_character_unavailable" });
+    await pool.query("UPDATE campaigns SET selected_character_world_id=$2 WHERE id=$1", [movedScope.campaignId, source.world.id]);
+    const preview = await repo.fromWorldPreview!(movedScope, { characterId: "hero" });
+    expect(preview.worldVersionId).toBe(destination.version.worldVersionId);
+    const { readFirstAppearanceDecision } = await import("../../packages/database/src/campaign-cast-first-appearance.js");
+    const decision = (scope: typeof movedScope, worldId: string) => withTransaction(pool, (client) => readFirstAppearanceDecision(client, scope, {
+      frozenPermission: true, livePermission: true, sourceWorldId: worldId, rosterCharacterId: "hero", identityStillSupported: true, unique: true, detached: false }));
+    await pool.query("UPDATE campaigns SET first_appearance_eligible=true WHERE id=$1", [movedScope.campaignId]);
+    expect(await decision(movedScope, destination.world.id)).toBe("seed");
+    const added = await repo.fromWorld!(movedScope, { characterId: "hero", expectedWorldVersionId: destination.version.worldVersionId,
+      expectedCastRevision: preview.castRevision, expectedBoundary: preview.boundary, previewFingerprint: preview.previewFingerprint, idempotencyKey: "collision-add" });
+    expect(added.character.name).toBe("Different hero");
+    expect(added.character.originProfile?.entityId).toBe("hero");
+    const branch = await branchCampaign(pool, movedScope.campaignId, { targetTurnNumber: 0, title: "Transferred branch" });
+    const branchScope = { ownerUserId, campaignId: branch.id };
+    expect((await pool.query("SELECT selected_character_world_id FROM campaigns WHERE id=$1", [branch.id])).rows[0].selected_character_world_id).toBe(source.world.id);
+    expect((await repo.current(branchScope)).characters.some((person) => person.name === "Different hero" && person.originProfile?.entityId === "hero")).toBe(true);
+    const returned = await transfer(branch.id, source.version.worldVersionId), returnedScope = { ownerUserId, campaignId: returned.targetCampaignId };
+    expect((await pool.query("SELECT selected_character_world_id FROM campaigns WHERE id=$1", [returnedScope.campaignId])).rows[0].selected_character_world_id).toBe(source.world.id);
+    await expect(repo.fromWorldPreview!(returnedScope, { characterId: "hero" })).rejects.toMatchObject({ code: "cast_world_character_unavailable" });
+    expect(await decision(returnedScope, source.world.id)).toBe("protagonist");
+    expect((await pool.query("SELECT selected_character_world_id FROM campaigns WHERE id=$1", [original.campaignId])).rows[0].selected_character_world_id).toBe(source.world.id);
+  });
+
   it("branches only retained identities, remaps IDs and preserves user blanks", async () => {
     const { scope, repo } = await fixture();
     await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [scope.campaignId]);
@@ -291,7 +444,7 @@ integration("campaign cast lifecycle", () => {
       expectedStateRevision: preview.expectedStateRevision, sourceFingerprint: preview.sourceFingerprint }));
     const current = await repo.current({ ownerUserId, campaignId: transferred.targetCampaignId });
     expect(current.characters.filter((c) => c.origin.kind !== "protagonist")).toEqual([
-      expect.objectContaining({ name: "Mara", origin: { kind: "world", worldVersionId: sourceVersion, entityId: "mara" }, profile: { "story.role": "guide" } })
+      expect.objectContaining({ name: "Mara", origin: { kind: "historical_world", sourceWorldVersionId: sourceVersion, entityId: "mara" }, profile: { "story.role": "guide" } })
     ]);
   });
   it("preserves corrected evidence and never reactivates old facts during transfer", async () => {

@@ -51,9 +51,9 @@ export function createWorkerIllustrationApplication(
 
 export function createApiWorldCampaignApplication(
   pool: DatabasePool,
-  dependencies: Readonly<{ credentialSecret: string }>,
+  dependencies: Readonly<{ credentialSecret: string; castPresetsEnabled?: boolean }>,
 ) {
-  return composeWorldCampaign(pool, apiProviderGraph(pool, dependencies.credentialSecret));
+  return composeWorldCampaign(pool, apiProviderGraph(pool, dependencies.credentialSecret), dependencies.castPresetsEnabled);
 }
 
 export function createApiMemoryApplication(

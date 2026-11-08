@@ -1030,6 +1030,8 @@ export async function buildServer({
     capabilities: {
       systemArchive: config.systemArchiveEnabled === true,
       castEditing: config.castEditingEnabled === true && cast !== undefined,
+      castContext: config.castEditingEnabled === true && config.castContextEnabled === true && !!config.storyMemoryCapability,
+      castPresets: config.castEditingEnabled === true && config.castPresetsEnabled === true && cast !== undefined,
       nativeTextExecutionPlans: config.nativeTextExecutionPlanAdmission === true
     },
   }));

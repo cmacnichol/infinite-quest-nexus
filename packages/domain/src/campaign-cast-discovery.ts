@@ -1,32 +1,46 @@
 import { CAST_DISCOVERY_PROTOCOL, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoveryCandidate, type CastDiscoveryIdentitySnapshot, type CastDiscoverySource, type CastIdentityPolicy, type CastIdentityBasis } from "../../contracts/src/campaign-cast-discovery.js";
 import type { CastCharacter, CastField, CastOrigin } from "../../contracts/src/campaign-cast.js";
 import { estimateTokens, sha256, stableStringify } from "./text.js";
+import { projectCastFictionText } from "./character-fiction-authority.js";
 import { validateCastFiction } from "./campaign-cast.js";
 import { normalizeEntityTerm } from "./entity-references.js";
 
 export type CastDiscoveryWorldIdentity = CastDiscoveryIdentitySnapshot["worldCharacters"][number];
 
+function safeHint(value: unknown, maximum: number): string {
+  const projected = projectCastFictionText(value, 2001);
+  return projected.length <= maximum && !/\b(?:score|modifier|difficulty|target)\s*:?\s*[+-]?\d/iu.test(projected) ? projected : "";
+}
+
 /** Callers supply campaign-scoped validated identities, never a raw generation context. */
 export function buildCastDiscoveryInput(input: {
   source: CastDiscoverySource; knownCharacters: CastCharacter[]; worldCharacters?: CastDiscoveryWorldIdentity[];
+  identityHints?: CastDiscoveryIdentitySnapshot["identityHints"];
+  seedActivations?: CastDiscoveryIdentitySnapshot["seedActivations"];
+  worldVersionId?: string;
 }): string {
   const source = castDiscoverySourceSchema.parse(input.source);
   const narration = source.paragraphs.map((paragraph) => paragraph.text).join("\n");
   const relevant = (person: { name: string; aliases: string[] }) => [person.name, ...person.aliases].some((alias) => contains(narration, alias));
-  const knownCharacters: { id: string; name: string; aliases: string[]; profile: CastCharacter["profile"]; protagonist: boolean }[] = [];
+  const knownCharacters: { id: string; name: string; aliases: string[]; profile: CastCharacter["profile"]; protagonist: boolean; identityHints?: string[] }[] = [];
   const worldCharacters: CastDiscoveryWorldIdentity[] = [];
   const fits = () => knownCharacters.length + worldCharacters.length <= 24
     && estimateTokens(stableStringify({ knownCharacters, worldCharacters })) <= 2000;
   const candidates = input.knownCharacters.filter((person) => person.origin.kind === "protagonist" || relevant(person))
     .sort((a, b) => Number(b.origin.kind === "protagonist") - Number(a.origin.kind === "protagonist") || a.id.localeCompare(b.id));
   for (const person of candidates) {
-    const profile = Object.fromEntries(Object.entries(person.profile).filter(([, value]) => value.length <= 256).slice(0, 4));
-    knownCharacters.push({ id: person.id, name: person.name, aliases: person.aliases.slice(0, 4), profile, protagonist: person.origin.kind === "protagonist" });
+    const profile = Object.fromEntries(Object.entries(person.profile).filter(([field]) => ["story.role", "identity.pronouns", "appearance.description"].includes(field))
+      .map(([field, value]) => [field, safeHint(value, 256)]).filter(([, value]) => value).slice(0, 4));
+    const frozen = input.identityHints?.find((item) => item.characterId === person.id)?.hints.map((hint) => safeHint(hint, 256)).filter(Boolean).slice(0, 4);
+    knownCharacters.push({ id: person.id, name: projectCastFictionText(person.name, 200) || "Unnamed character", aliases: person.aliases.map(alias => projectCastFictionText(alias, 200)).filter(Boolean).slice(0, 4), profile, protagonist: person.origin.kind === "protagonist", ...(frozen?.length ? { identityHints: frozen } : {}) });
     if (!fits()) knownCharacters.pop();
   }
   for (const person of (input.worldCharacters ?? []).filter(relevant).sort((a, b) => a.entityId.localeCompare(b.entityId))) {
-    worldCharacters.push({ entityId: person.entityId, name: person.name, aliases: person.aliases.slice(0, 4),
-      identityHints: (person.identityHints ?? []).filter((hint) => hint.length <= 256).slice(0, 4) });
+    if (input.worldVersionId && input.knownCharacters.some((known) => (known.origin.kind === "world" && known.origin.worldVersionId === input.worldVersionId && known.origin.entityId === person.entityId)
+      || (known.originProfile?.worldVersionId === input.worldVersionId && known.originProfile?.entityId === person.entityId)
+      || input.seedActivations?.some(seed => seed.characterId === known.id && seed.worldVersionId === input.worldVersionId && seed.entityId === person.entityId))) continue;
+    worldCharacters.push({ entityId: person.entityId, name: projectCastFictionText(person.name, 200) || "Unnamed character", aliases: person.aliases.map(alias => projectCastFictionText(alias, 200)).filter(Boolean).slice(0, 4),
+      identityHints: (person.identityHints ?? []).map((hint) => safeHint(hint, 256)).filter(Boolean).slice(0, 4) });
     if (!fits()) worldCharacters.pop();
   }
   return stableStringify({ protocol: CAST_DISCOVERY_PROTOCOL,
@@ -128,6 +142,7 @@ function explicitlyLinksAlias(text: string, name: string, alias: string) {
 type DiscoveryValidationInput = {
   source: CastDiscoverySource; output: unknown; knownCharacters: CastCharacter[];
   worldCharacters?: CastDiscoveryWorldIdentity[]; worldVersionId?: string; identityPolicy?: CastIdentityPolicy;
+  identityHints?: CastDiscoveryIdentitySnapshot["identityHints"];
 };
 export function validateCastDiscovery(input: DiscoveryValidationInput): CastDiscoveryValidation {
   return validateDiscovery(input, false);
@@ -192,14 +207,17 @@ function validateDiscovery(input: DiscoveryValidationInput, explicitIdentity: bo
       person.aliases.some((alias) => normalizeEntityTerm(alias) !== normalizeEntityTerm(person.name)
         && explicitlyLinksAlias(identityText, person.name, alias))
       || hints.some((value) => value.trim().length >= 3 && directlyAttributes(identityText, [person.name, ...person.aliases], value));
-    const campaignCorroborated = !!candidate.existingCharacterId && corroborates(known.get(candidate.existingCharacterId)!, Object.values(known.get(candidate.existingCharacterId)!.profile));
+    const campaignCorroborated = !!candidate.existingCharacterId && corroborates(known.get(candidate.existingCharacterId)!, [
+      ...Object.values(known.get(candidate.existingCharacterId)!.profile),
+      ...(input.identityHints?.find((item) => item.characterId === candidate.existingCharacterId)?.hints ?? [])
+    ].map((hint) => safeHint(hint, 600)).filter(Boolean));
     if (!explicitIdentity && candidate.existingCharacterId && !campaignCorroborated && input.identityPolicy !== "unique_name") {
       hold("identity_needs_review"); continue;
     }
     const worldMatches = (input.worldCharacters ?? []).filter((person) => [person.name, ...person.aliases].some((alias) => terms.includes(normalizeEntityTerm(alias)) && contains(identityText, alias)));
     if (!candidate.existingCharacterId && (worldMatches.length > 1 || worldMatches.some((match) =>
       (input.worldCharacters ?? []).filter((person) => person.entityId === match.entityId).length > 1))) { hold("identity_needs_review"); continue; }
-    const worldCorroborated = !!worldMatches[0] && corroborates(worldMatches[0], worldMatches[0].identityHints ?? []);
+    const worldCorroborated = !!worldMatches[0] && corroborates(worldMatches[0], (worldMatches[0].identityHints ?? []).map((hint) => safeHint(hint, 600)).filter(Boolean));
     if (!explicitIdentity && !candidate.existingCharacterId && worldMatches[0] && !worldCorroborated && input.identityPolicy !== "unique_name") {
       hold("identity_needs_review"); continue;
     }

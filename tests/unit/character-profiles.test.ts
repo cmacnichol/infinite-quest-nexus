@@ -365,7 +365,7 @@ describe("strict character profile organizer validation", () => {
     const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
     const result = organizeWorldCharacterProfileForOwner(
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Blue coat", rpgStats: [], defaultTriggers: [], source: {} } },
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Blue coat", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
       {
         resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
         execution: { text: async () => ({ execute: async (request: { input: string }) => { requests.push(request); return { content: JSON.stringify(responses.shift()), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
@@ -463,7 +463,7 @@ describe("strict character profile organizer validation", () => {
     const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
     const result = await organizeWorldCharacterProfileForOwner(
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", rpgStats: [], defaultTriggers: [], source: {} } },
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
       {
         resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId, model: "model" }) },
         execution: { text: async () => ({ id: providerProfileId, name: "Native", providerRole: "text", providerType: "openrouter", model: "model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, configuration: {}, executionRevision: "execution", authorityRevision: "authority", textSelection: { kind: "openrouter_preset", slug: "organizer" }, execute: async () => { throw new Error("legacy execute must not receive enabled native work"); } }) },
@@ -511,7 +511,7 @@ describe("strict character profile organizer validation", () => {
     const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
     await organizeWorldCharacterProfileForOwner(
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", rpgStats: [], defaultTriggers: [], source: {} } },
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
       {
         resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
         execution: { text: async () => ({ execute: async (request: unknown) => { requests.push(request as { systemPrompt: string; input: string }); return { content: JSON.stringify(responses.shift()), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
@@ -529,7 +529,7 @@ describe("strict character profile organizer validation", () => {
     const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
     await expect(organizeWorldCharacterProfileForOwner(
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", rpgStats: [], defaultTriggers: [], source: {} } },
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
       {
         resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
         execution: { text: async () => ({ execute: async (request: unknown) => { requests.push(request); return { content: "not JSON", responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
@@ -544,7 +544,7 @@ describe("strict character profile organizer validation", () => {
     const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
     await expect(organizeWorldCharacterProfileForOwner(
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", rpgStats: [], defaultTriggers: [], source: {} } },
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
       { resolution: { resolveDirect: async () => ({ status: "unavailable" }) } } as never
     )).rejects.toMatchObject({ name: "AuthoringResponseError", statusCode: 503, authoringFailure: { code: "authoring_provider_unavailable", stage: "organizer" } });
   });
@@ -553,7 +553,7 @@ describe("strict character profile organizer validation", () => {
     const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
     await expect(organizeWorldCharacterProfileForOwner(
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", rpgStats: [], defaultTriggers: [], source: {} } },
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
       {
         resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "missing", model: "model" }) },
         execution: { text: async () => { throw Object.assign(new Error("missing"), { statusCode: 404 }); } }
@@ -570,7 +570,7 @@ describe("strict character profile organizer validation", () => {
       const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
       const pending = organizeWorldCharacterProfileForOwner(
         { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-        "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", rpgStats: [], defaultTriggers: [], source: {} } },
+        "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
         {
           resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
           execution: { text: async () => ({ execute: requests }) },
@@ -642,6 +642,7 @@ describe("strict character profile organizer validation", () => {
       name: "Mira",
       characterText: "",
       profile: characterProfileSchema.parse({}),
+      campaignUse: "playable", startingCastDefault: true, alwaysInContext: false,
       rpgStats: [],
       defaultTriggers: [],
       source: {}

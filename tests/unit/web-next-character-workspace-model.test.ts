@@ -232,6 +232,13 @@ describe("character workspace model", () => {
     }
   });
 
+  it("preserves roster authority when regenerating a Both character", () => {
+    const original = { ...completeCharacter(), campaignUse: "both" as const, startingCastDefault: false, alwaysInContext: true, source: { type: "import" } };
+    const initial = createCharacterWorkspaceState({ roster: [], candidate: original });
+    const generated = applyGeneratedCharacter(initial, { ...completeCharacter(), campaignUse: "playable", source: { type: "generated" } });
+    expect(generated.candidate).toMatchObject({ id: original.id, campaignUse: "both", startingCastDefault: false, alwaysInContext: true, source: original.source });
+  });
+
   it("enforces shared mechanics bounds and stage readiness", () => {
     let state = createCharacterWorkspaceState({ roster: [], method: "manual", idFactory: () => "trusted-character" });
     state = setCharacterStage(state, "identity");

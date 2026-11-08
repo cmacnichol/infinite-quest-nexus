@@ -71,6 +71,8 @@ export type RuntimeConfig = {
   worldSharingEnabled?: boolean;
   castEditingEnabled?: boolean;
   castDiscoveryEnabled?: boolean;
+  castPresetsEnabled?: boolean;
+  castContextWithoutDiscoveryEnabled?: boolean;
   castAutoMatchEnabled?: boolean;
   castContextEnabled?: boolean;
   /** New eligible jobs use v5 unless an operator performs a compatible-reader rollback. */
@@ -246,6 +248,8 @@ export function loadRuntimeConfig(): RuntimeConfig {
   }
   const systemArchiveAllowLimitIncrease = booleanSetting("SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE", false);
   const castEditingEnabled = booleanSetting("CAST_EDITING_ENABLED", false);
+  const castPresetsEnabled = booleanSetting("CAST_PRESETS_ENABLED", false) && castEditingEnabled;
+  const castContextWithoutDiscoveryEnabled = booleanSetting("CAST_CONTEXT_WITHOUT_DISCOVERY_ENABLED", false) && castEditingEnabled;
   const castDiscoveryEnabled = booleanSetting("CAST_DISCOVERY_ENABLED", false) && castEditingEnabled;
 
   return {
@@ -297,8 +301,10 @@ export function loadRuntimeConfig(): RuntimeConfig {
     worldSharingEnabled: booleanSetting("WORLD_SHARING_ENABLED", false),
     castEditingEnabled,
     castDiscoveryEnabled,
+    castPresetsEnabled,
+    castContextWithoutDiscoveryEnabled,
     castAutoMatchEnabled: booleanSetting("CAST_AUTO_MATCH_ENABLED", false) && castDiscoveryEnabled,
-    castContextEnabled: booleanSetting("CAST_CONTEXT_ENABLED", false) && castDiscoveryEnabled,
+    castContextEnabled: booleanSetting("CAST_CONTEXT_ENABLED", false) && castEditingEnabled && (castDiscoveryEnabled || castContextWithoutDiscoveryEnabled),
     historyCoverageEnabled: booleanSetting("HISTORY_COVERAGE_ENABLED", true),
     castBackfillEnabled: booleanSetting("CAST_BACKFILL_ENABLED", false) && castDiscoveryEnabled,
     textProviderConcurrency: requiredIntegerSetting("TEXT_PROVIDER_CONCURRENCY", 2, 1, 1000),

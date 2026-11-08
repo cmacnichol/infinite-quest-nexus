@@ -48,7 +48,11 @@ export const CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION = "story-v17-campaign-cas
 export const CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION = "current-continuity-v4";
 /** Frozen reader-only protocol for bounded history coverage. Enqueue remains v4 until rollout. */
 export const HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION = "current-continuity-v5";
+export const CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION = "story-v18-fiction-cast";
+export const CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION = "current-continuity-v6";
+export const HISTORY_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION = "current-continuity-v7";
 export const CAST_STORY_AUTHORITY_CONTRACT = "Campaign cast authority: use only the selected cast records and supplied evidence. User field overrides govern current portrayal from their effective turn, including intentional empty values. Older conflicting facts remain dated historical evidence; do not restore them as current attributes or treat compliance with a correction as a contradiction. Immutable world rules still apply; unresolved conflicts require uncertainty. Cast coverage is bounded: when tracking is incomplete, use accepted recent history for intervening events, and never infer that an omitted character or field is absent. Aliases identify the supplied stable character only when unambiguous. Prose relationship guidance is not a structured relationship record.";
+export const CAST_V2_STORY_AUTHORITY_CONTRACT = `${CAST_STORY_AUTHORITY_CONTRACT} Authored fields and deliberate campaign edits guide portrayal. Observations are lower-authority dated evidence. When discovery is off, use last-known observations with accepted history; during a tracking gap, an authored goal takes precedence over an older observed goal unless a user override applies. An authored appearance summary and an observed appearance are distinct.`;
 export const MAX_CONTINUITY_OPEN_THREADS = 500;
 
 /**
@@ -359,11 +363,16 @@ export function castStoryMemoryPromptCompatibilityIdentity(): string {
   return `${CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION}`;
 }
 
+export function castV2StoryMemoryPromptCompatibilityIdentity(): string {
+  return `${CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION}`;
+}
+
 export function previousStoryMemoryPromptCompatibilityIdentity(): string {
   return `${PREVIOUS_STORY_MEMORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${STORY_MEMORY_CONTEXT_POLICY_VERSION}`;
 }
 
 export function storyMemoryMandatoryContract(promptProtocol: string = STORY_MEMORY_PROMPT_PROTOCOL_VERSION): string {
+  if (promptProtocol === CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION) return `${STORY_MEMORY_MANDATORY_CONTRACT}\n${CAST_V2_STORY_AUTHORITY_CONTRACT}`;
   if (promptProtocol === CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION) return `${STORY_MEMORY_MANDATORY_CONTRACT}\n${CAST_STORY_AUTHORITY_CONTRACT}`;
   if (promptProtocol === STORY_MEMORY_PROMPT_PROTOCOL_VERSION) return STORY_MEMORY_MANDATORY_CONTRACT;
   if (promptProtocol === PREVIOUS_STORY_MEMORY_PROMPT_PROTOCOL_VERSION) return PREVIOUS_STORY_MEMORY_MANDATORY_CONTRACT;

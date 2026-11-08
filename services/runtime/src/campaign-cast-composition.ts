@@ -11,11 +11,11 @@ import { logger } from "../../../packages/logger/src/index.js";
 import { createCastBackfillRepository } from "../../../packages/database/src/campaign-cast-backfill-repository.js";
 import { createApiCastBackfillApplication } from "./campaign-cast-backfill-composition.js";
 
-export function createApiCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castEditingEnabled" | "castDiscoveryEnabled" | "castBackfillEnabled" | "castAutoMatchEnabled" | "castContextEnabled" | "storyMemoryCapability">,
+export function createApiCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castPresetsEnabled" | "castEditingEnabled" | "castDiscoveryEnabled" | "castBackfillEnabled" | "castAutoMatchEnabled" | "castContextEnabled" | "storyMemoryCapability">,
   providers?: Pick<ApiGenerationProviderCollaborators, "execution" | "resolution" | "prepareCastDiscoveryExecution">) {
   const jobs = createCastDiscoveryJobRepository(pool, () => config.castEditingEnabled === true && config.castDiscoveryEnabled === true);
   return createCampaignCastApplication(createPostgresCampaignCastRepository(pool, {
-    editingEnabled: config.castEditingEnabled === true, discoveryEnabled: config.castDiscoveryEnabled === true, backfillEnabled: config.castBackfillEnabled === true, castAutoMatchEnabled: config.castAutoMatchEnabled === true, castContextEnabled: config.castContextEnabled === true, storyMemoryCapability: config.storyMemoryCapability ?? null }), {
+    castPresetsEnabled: config.castPresetsEnabled === true, editingEnabled: config.castEditingEnabled === true, discoveryEnabled: config.castDiscoveryEnabled === true, backfillEnabled: config.castBackfillEnabled === true, castAutoMatchEnabled: config.castAutoMatchEnabled === true, castContextEnabled: config.castContextEnabled === true, storyMemoryCapability: config.storyMemoryCapability ?? null }), {
     async retryFailed(scope, id, request) {
       try { return await jobs.retryFailed(scope, id, request); }
       catch (error) {

@@ -1,5 +1,5 @@
 import {
-  deploymentSettingsPolicySchema, instanceSettingsSchema, runtimeRoleCapacitySchema, INSTANCE_SETTINGS_NUMERIC_BOUNDS,
+  deploymentSettingsPolicySchema, instanceSettingsSchema, settingsFeatureGatesSchema, runtimeRoleCapacitySchema, INSTANCE_SETTINGS_NUMERIC_BOUNDS,
   type DeploymentSettingsPolicy, type InstanceSettings, type RuntimeRoleCapacity, type SettingsFieldDescriptor,
   type SettingsFieldKey, type SettingsFeatureKey, type SettingsNumericKey
 } from "../../contracts/src/instance-settings.js";
@@ -19,6 +19,8 @@ export const INSTANCE_SETTING_FIELDS: readonly RegistryField[] = [
   { key: "castDiscoveryEnabled", environmentName: "CAST_DISCOVERY_ENABLED", label: "Cast discovery enabled", section: "characters", unit: "boolean", kind: "boolean" },
   { key: "castAutoMatchEnabled", environmentName: "CAST_AUTO_MATCH_ENABLED", label: "Cast auto match enabled", section: "characters", unit: "boolean", kind: "boolean" },
   { key: "castContextEnabled", environmentName: "CAST_CONTEXT_ENABLED", label: "Cast context enabled", section: "characters", unit: "boolean", kind: "boolean" },
+  { key: "castPresetsEnabled", environmentName: "CAST_PRESETS_ENABLED", label: "Character presets", section: "characters", unit: "boolean", kind: "boolean" },
+  { key: "castContextWithoutDiscoveryEnabled", environmentName: "CAST_CONTEXT_WITHOUT_DISCOVERY_ENABLED", label: "Character context without discovery", section: "characters", unit: "boolean", kind: "boolean" },
   { key: "castBackfillEnabled", environmentName: "CAST_BACKFILL_ENABLED", label: "Cast backfill enabled", section: "characters", unit: "boolean", kind: "boolean" },
   { key: "worldSharingEnabled", environmentName: "WORLD_SHARING_ENABLED", label: "World sharing enabled", section: "sharing", unit: "boolean", kind: "boolean" },
   { key: "systemArchiveEnabled", environmentName: "SYSTEM_ARCHIVE_ENABLED", label: "System archive enabled", section: "sharing", unit: "boolean", kind: "boolean" },
@@ -57,6 +59,12 @@ export function valueAt(settings: InstanceSettings, key: SettingsFieldKey): bool
   if (property) return settings[group as "campaignArchiveLimits" | "systemArchiveLimits"][property as keyof InstanceSettings["campaignArchiveLimits"]];
   return settings[key as Exclude<SettingsFieldKey, SettingsNumericKey> | Exclude<SettingsNumericKey, `${string}.${string}`>];
 }
+/** Derive effective gates for the immutable pre-v2 local seed without changing its signed policy. */
+export function deriveSettingsPolicyForLocalMode(policy: DeploymentSettingsPolicy, implicitLocal: boolean): DeploymentSettingsPolicy {
+  if (!implicitLocal || policy.version !== 1 || policy.featureGates.castPresetsEnabled !== undefined
+    || policy.featureGates.castContextWithoutDiscoveryEnabled !== undefined) return policy;
+  return { ...policy, featureGates: { ...policy.featureGates, castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: true } };
+}
 /** Policy disables capabilities; incompatible numeric preferences reject activation. Inputs stay immutable. */
 export function resolveInstanceSettings(requested: InstanceSettings, policy: DeploymentSettingsPolicy, capacity: RuntimeRoleCapacity): SettingsResolution {
   const parsed = instanceSettingsSchema.safeParse(requested);
@@ -79,18 +87,23 @@ export function resolveInstanceSettings(requested: InstanceSettings, policy: Dep
   if (!policy.approvedRateTuples.some((tuple) => tuple.windowSeconds === effective.apiRateLimitWindowSeconds && tuple.providerRequests === effective.apiRateLimitProviderRequests && tuple.generationRequests === effective.apiRateLimitGenerationRequests && tuple.importRequests === effective.apiRateLimitImportRequests)) errors.push({ code: "rate_policy" });
   if (errors.length) return { ok: false, errors };
   const locks = new Map<SettingsFieldKey, SettingsFieldDescriptor["lockReason"]>();
-  for (const [key, allowed] of Object.entries(policy.featureGates)) {
+  for (const key of Object.keys(settingsFeatureGatesSchema.shape) as SettingsFeatureKey[]) {
+    const allowed = policy.featureGates[key];
     if (!allowed) { effective[key as SettingsFeatureKey] = false; locks.set(key as SettingsFeatureKey, "deployment_disabled"); }
   }
   const dependencies: Partial<Record<SettingsFeatureKey, SettingsFeatureKey>> = {
     castDiscoveryEnabled: "castEditingEnabled", castAutoMatchEnabled: "castDiscoveryEnabled",
-    castContextEnabled: "castDiscoveryEnabled", castBackfillEnabled: "castDiscoveryEnabled"
+    castPresetsEnabled: "castEditingEnabled", castContextWithoutDiscoveryEnabled: "castEditingEnabled", castBackfillEnabled: "castDiscoveryEnabled"
   };
   for (const [child, parent] of Object.entries(dependencies)) {
     if (!effective[parent]) {
       effective[child as SettingsFeatureKey] = false;
       if (!locks.has(child as SettingsFeatureKey)) locks.set(child as SettingsFeatureKey, "dependency_disabled");
     }
+  }
+  if (!effective.castEditingEnabled || (!effective.castDiscoveryEnabled && !effective.castContextWithoutDiscoveryEnabled)) {
+    effective.castContextEnabled = false;
+    if (!locks.has("castContextEnabled")) locks.set("castContextEnabled", "dependency_disabled");
   }
   // Both the API route and resumable coordinator require this same capacity.
   // Evaluate after capability gates: a disabled archive has no upload admission.

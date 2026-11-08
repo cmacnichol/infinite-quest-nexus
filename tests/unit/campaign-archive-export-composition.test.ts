@@ -44,7 +44,8 @@ const snapshot: CampaignArchiveExportSnapshot = {
 };
 
 const exportedPolicyFieldsSchema = z.object({
-  formatVersion: z.literal(4),
+  formatVersion: z.literal(5),
+  campaign: z.object({ firstAppearanceEligible: z.boolean() }),
   generationPolicyVersion: z.literal(1),
   settings: z.object({ turnControlStyle: z.literal("flexible_scene") }),
   turns: z.array(z.object({
@@ -54,11 +55,12 @@ const exportedPolicyFieldsSchema = z.object({
 });
 
 describe("campaign archive policy projection", () => {
-  it("writes v4 with the retained setting and safe accepted policy provenance", () => {
+  it("writes v5 with eligibility, the retained setting and safe accepted policy provenance", () => {
     const original = structuredClone(snapshot);
     const payload = campaignArchivePayloads(snapshot).campaign;
     const campaign = exportedPolicyFieldsSchema.parse(payload);
-    expect(campaign.formatVersion).toBe(4);
+    expect(campaign.formatVersion).toBe(5);
+    expect(campaign.campaign.firstAppearanceEligible).toBe(false);
     expect(campaign.generationPolicyVersion).toBe(1);
     expect(campaign.settings.turnControlStyle).toBe("flexible_scene");
     expect(campaign.turns[0]?.portableAcceptedGenerationPolicyProvenance).toEqual({

@@ -89,6 +89,9 @@ export const playableCharacterSchema = z.object({
   name: z.string().trim().min(1).max(200),
   characterText: longText,
   profile: characterProfileSchema.optional(),
+  campaignUse: z.enum(["playable", "supporting", "both"]).default("playable"),
+  startingCastDefault: z.boolean().default(true),
+  alwaysInContext: z.boolean().default(false),
   rpgStats: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
   defaultTriggers: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
   source: z.record(z.string(), z.unknown()).default({})

@@ -49,7 +49,7 @@ export async function transitionToEnvironment(pool: DatabasePool, config: Runtim
     const { state, exported } = await lockedExport(client, config, policy);
     if (settingsDigest(reviewed) !== settingsDigest(exported)) throw new Error("settings_rollback_stale");
     // Validate the current active policy, even when a separately requested revision has a different policy.
-    await createSettingsActivationGuard(policy)(client, { ...state, requested: state.active }, {
+    await createSettingsActivationGuard(policy, { implicitLocal: config.instanceSettingsAccessMode === "local-single-user" && !config.instanceSettingsPolicyFile })(client, { ...state, requested: state.active }, {
       expectedActiveRevision: exported.activeRevision, expectedRequestedRevision: exported.requestedRevision,
       expectedEpoch: exported.activationEpoch, policyDigest: exported.policyDigest, maintenanceReference, actor
     });

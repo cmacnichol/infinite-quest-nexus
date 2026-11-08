@@ -2951,6 +2951,9 @@ integration("deterministic owner-wide System Archive export", () => {
       id: restoredSnapshot.id,
       name: restoredSnapshot.name,
       characterText: restoredSnapshot.characterText,
+      campaignUse: "both",
+      startingCastDefault: false,
+      alwaysInContext: true,
       profile: restoredSnapshot.profile,
       rpgStats: restoredSnapshot.rpgStats,
       defaultTriggers: restoredSnapshot.defaultTriggers,
@@ -3384,6 +3387,8 @@ integration("deterministic owner-wide System Archive export", () => {
       turn_control_style: "flexible_action",
       legacy_settings: { turnControlStyle: "flexible_action" },
     }] });
+    const restoredWorld = await pool.query<{ content: { playableCharacters: unknown[] } }>("SELECT content FROM world_versions WHERE id=$1", [versionId]);
+    expect(restoredWorld.rows[0]!.content.playableCharacters[0]).toMatchObject({ campaignUse: "both", startingCastDefault: false, alwaysInContext: true });
     await expect(pool.query(
       `SELECT campaign.selected_character_id,campaign.character_snapshot,
               campaign.character_profile,campaign.character_profile_revision,

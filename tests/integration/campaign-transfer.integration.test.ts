@@ -66,7 +66,7 @@ integration("cross-world campaign transfer", () => {
     };
     await pool.query(
       `UPDATE campaigns
-          SET character_profile = $3, character_profile_revision = 4, updated_at = now()
+          SET first_appearance_eligible = true, character_profile = $3, character_profile_revision = 4, updated_at = now()
         WHERE id = $1 AND owner_user_id = $2`,
       [source.id, ownerUserId, JSON.stringify(currentProfile)]
     );
@@ -124,6 +124,8 @@ integration("cross-world campaign transfer", () => {
       sourceFingerprint: preview.sourceFingerprint
     });
     const transferred = await transferCampaignWorld(pool, source.id, commitRequest);
+    expect((await pool.query("SELECT first_appearance_eligible FROM campaigns WHERE id=$1 AND owner_user_id=$2",
+      [transferred.targetCampaignId, ownerUserId])).rows[0]?.first_appearance_eligible).toBe(true);
     const retried = await transferCampaignWorld(pool, source.id, commitRequest);
     expect(retried).toMatchObject({ targetCampaignId: transferred.targetCampaignId, reused: true });
 

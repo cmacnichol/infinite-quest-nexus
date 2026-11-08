@@ -75,7 +75,15 @@ for (const width of [1440, 390]) test(`AI character creation goes from concept t
   await expect(review).toContainText("Green");
   await expect(review).toContainText("Guide");
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
-  if (screenshots) await page.screenshot({ path: `${screenshots}/character-review-${width}.png`, fullPage: true });
+  if (width === 390) {
+    const exit = page.getByText("Return without using this character", { exact: true });
+    await exit.evaluate(el => el.scrollIntoView({ block: "center" }));
+    await exit.focus();
+    await expect(exit).toBeFocused();
+    await expect(exit).toBeInViewport();
+    await exit.click({ trial: true });
+  }
+  if (screenshots) await page.screenshot({ path: `${screenshots}/character-review-${width}.png`, fullPage: width !== 390 });
   await page.locator('[data-character-edit-stage="mechanics"]').click();
   await page.locator('[data-action="remove-character-mechanic"]').click();
   await expect(page.locator("[data-mechanics-list]")).not.toContainText("Resolve");

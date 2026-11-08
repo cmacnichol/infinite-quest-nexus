@@ -8,7 +8,7 @@ import {
   instanceSettingsHistorySchema, instanceSettingsPatchSchema, instanceSettingsViewSchema, instanceSettingsSchema,
   settingsFeatureGatesSchema, type DeploymentSettingsPolicy, type InstanceSettings, type SettingsFieldKey, type SettingsFeatureKey
 } from "../../../packages/contracts/src/instance-settings.js";
-import { resolveInstanceSettings, INSTANCE_SETTING_FIELDS } from "../../../packages/domain/src/instance-settings.js";
+import { deriveSettingsPolicyForLocalMode, resolveInstanceSettings, INSTANCE_SETTING_FIELDS } from "../../../packages/domain/src/instance-settings.js";
 import { createSettingsOperatorSessions, SettingsHttpError } from "./settings-operator-session.js";
 
 function effectiveValue(snapshot: InstanceSettings, key: SettingsFieldKey) {
@@ -67,10 +67,10 @@ export function createInstanceSettingsHttpComposition(
     return mounted;
   };
   const constrainedPolicy = () => {
-    const mounted = currentPolicy();
-    const gates = { ...mounted.featureGates };
+    const mounted = deriveSettingsPolicyForLocalMode(currentPolicy(), bootstrap.instanceSettingsAccessMode === "local-single-user" && !bootstrap.instanceSettingsPolicyFile);
+    const gates = Object.fromEntries(Object.keys(settingsFeatureGatesSchema.shape).map(key => [key, mounted.featureGates[key as SettingsFeatureKey]])) as typeof mounted.featureGates;
     for (const key of Object.keys(settingsFeatureGatesSchema.shape) as SettingsFeatureKey[]) {
-      gates[key] = gates[key] && bootstrap[key] === true;
+      gates[key] = gates[key] === true && (bootstrap.instanceSettingsAccessMode === "local-single-user" && (key === "castPresetsEnabled" || key === "castContextWithoutDiscoveryEnabled") || bootstrap[key] === true);
     }
     return { ...mounted, featureGates: gates };
   };
@@ -103,7 +103,7 @@ export function createInstanceSettingsHttpComposition(
       const { rows: [seed] } = await pool.query<{ snapshot: unknown }>(
         "SELECT snapshot FROM instance_settings_revisions WHERE revision=1 AND kind='seed'"
       );
-      const parsed = instanceSettingsSchema.safeParse(seed?.snapshot);
+      const parsed = instanceSettingsSchema.safeParse({ castPresetsEnabled: false, castContextWithoutDiscoveryEnabled: false, ...seed?.snapshot as object });
       resetSource = parsed.success ? parsed.data : null;
     }
     const resetResolution = resetSource ? resolveInstanceSettings(resetSource, constrainedPolicy(), {

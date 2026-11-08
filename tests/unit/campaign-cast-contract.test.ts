@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { castBoundarySchema, castCharacterSchema, castEvidenceSchema, castObservationSchema, castProfileSchema, castScopeSchema, portableCampaignCastSchema } from "../../packages/contracts/src/campaign-cast.js";
+import { castAuthoredValuesSchema, castBoundarySchema, castCharacterSchema, castEvidenceSchema, castObservationSchema, castProfileSchema, castScopeSchema, castCommandSchema, castDetailProfileSchema, castOverrideProfileSchema, portableCampaignCastSchema } from "../../packages/contracts/src/campaign-cast.js";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const evidence = { kind: "turn", turnId: id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: "Mara arrived." };
@@ -48,4 +48,40 @@ it("rejects v2 attachments that claim another character's observation", () => {
         sourceHash: "a".repeat(64), paragraphId: "p1", start: 0, end: 4 }], observationIds: [obs] } }
   ] };
   expect(portableCampaignCastSchema.safeParse(payload).success).toBe(false);
+});
+
+
+it("keeps full detail and goal overrides separate from observation limits", () => {
+  expect(castDetailProfileSchema.safeParse({ "story.background": "x".repeat(3000), "story.goals": "g".repeat(20000) }).success).toBe(true);
+  expect(castDetailProfileSchema.safeParse({ "state.location": "x".repeat(2001) }).success).toBe(false);
+  expect(castOverrideProfileSchema.safeParse({ "story.goals": "x".repeat(20000) }).success).toBe(true);
+  expect(castOverrideProfileSchema.safeParse({ "story.role": "x".repeat(2001) }).success).toBe(false);
+  expect(castCommandSchema.safeParse({ kind: "edit_authored_profile", characterId: id, seedEventId: id, set: { "identity.aliases": ["alias"] }, reset: [] }).success).toBe(false);
+});
+
+it("validates authored edits as one non-overlapping atomic request", async () => {
+  const { editAuthoredCastProfileSchema } = await import("../../packages/contracts/src/campaign-cast-authored.js");
+  const base = { expectedCastRevision: 1, expectedCharacterRevision: 1, expectedBoundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: "edit" };
+  expect(editAuthoredCastProfileSchema.safeParse({ ...base, set: { "story.background": "x".repeat(3000) }, setOverrides: { "story.goals": "y".repeat(20000) } }).success).toBe(true);
+  expect(editAuthoredCastProfileSchema.safeParse({ ...base, set: { "story.role": "one" }, reset: ["story.role"] }).success).toBe(false);
+  expect(editAuthoredCastProfileSchema.safeParse({ ...base, resetIdentity: true, name: "Mara" }).success).toBe(false);
+  expect(editAuthoredCastProfileSchema.safeParse({ ...base }).success).toBe(false);
+});
+
+it("rejects a second active seed for the same character", () => {
+  const seedId = "22222222-2222-4222-8222-222222222222", laterId = "33333333-3333-4333-8333-333333333333";
+  const world = "44444444-4444-4444-8444-444444444444", origin = { kind: "manual" };
+  const seed = { kind: "seed_profile", characterId: id, worldVersionId: world, entityId: "mara", rosterName: "Mara", rosterAliases: [],
+    legacyCharacterText: "", profile: {}, evidence: { kind: "world", worldVersionId: world, sourcePath: "/playableCharacters/0" } };
+  const payload = { formatVersion: 3, revision: 2, characters: [{ id, origin, firstObservedTurn: 0 }], events: [
+    { id: seedId, effectiveTurnNumber: 0, revision: 1, commands: [{ characterId: id, command: { kind: "create", name: "Mara", aliases: [], origin } }, { command: seed }] },
+    { id: laterId, effectiveTurnNumber: 0, revision: 2, commands: [{ command: seed }] }
+  ] };
+  expect(portableCampaignCastSchema.safeParse(payload).success).toBe(false);
+});
+
+it("rejects authored text that cannot be represented in stored JSON", () => {
+  expect(castAuthoredValuesSchema.safeParse({ "story.role": "A\u0000B" }).success).toBe(false);
+  expect(castAuthoredValuesSchema.safeParse({ "story.role": "\ud800" }).success).toBe(false);
+  expect(castAuthoredValuesSchema.safeParse({ "story.role": "Keeper 🌙" }).success).toBe(true);
 });

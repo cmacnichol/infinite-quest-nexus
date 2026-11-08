@@ -365,6 +365,9 @@ function projectWorldContent(value: unknown): Record<string, unknown> {
     const character = objectValue(candidate, "System Archive playable character");
     const projected: Record<string, unknown> = {
       ...pick(character, ["id", "name", "characterText"], "System Archive playable character"),
+      campaignUse: character.campaignUse,
+      startingCastDefault: character.startingCastDefault,
+      alwaysInContext: character.alwaysInContext,
       rpgStats: projectArray(character.rpgStats, ["id", "name", "value", "note"], "System Archive character RPG stats"),
       defaultTriggers: projectDefaultTriggers(character.defaultTriggers),
     };
@@ -688,6 +691,8 @@ const DOMAIN_SQL = {
                'characterSnapshot',campaign.character_snapshot,
                'characterProfile',campaign.character_profile,
                'characterProfileRevision',campaign.character_profile_revision,
+               'campaignRecordVersion',4,'firstAppearanceEligible',campaign.first_appearance_eligible,
+               'selectedCharacterWorldId',campaign.selected_character_world_id,
                'createdAt',campaign.created_at,'updatedAt',campaign.updated_at,
                'authority',jsonb_build_object(
                  'textProviderProfileId',campaign.text_provider_profile_id,

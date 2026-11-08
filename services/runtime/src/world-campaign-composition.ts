@@ -132,6 +132,7 @@ export function createProviderWorldGenerationCollaborator(
 export function createApiWorldCampaignApplication(
   pool: DatabasePool,
   dependencies: WorldCampaignCompositionDependencies,
+  castPresetsEnabled = false,
 ): WorldCampaignApplication {
   const memory = createPostgresChronicleGenerationTransactionPort({
     embeddings: createChroniclePlatformBindings(dependencies.chronicle).embeddings
@@ -140,7 +141,7 @@ export function createApiWorldCampaignApplication(
     turnReportedCosts: async (_database, ownerUserId, campaignId, turnIds) =>
       new Map(await dependencies.generation.reads.getTurnCosts({ ownerUserId, campaignId, turnIds }))
   });
-  const worldAdapters = createPostgresWorldRepositoryAdapters(pool, { memory });
+  const worldAdapters = createPostgresWorldRepositoryAdapters(pool, { memory, castPresetsEnabled });
   const authorityAdapters = createPostgresCampaignAuthorityAdapters(pool, { memory, turnPages });
   const progress = createPostgresWorldGenerationProgressRepository();
   return createWorldCampaignApplication({

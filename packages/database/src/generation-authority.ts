@@ -37,6 +37,8 @@ type ResolveRequest = Readonly<{
   expectedTurnNumber: number;
   /** Policy attempts bind effective character authority; historical jobs retain their stored legacy shape. */
   baseIdentityVersion?: "legacy" | "generation-base-v3" | "generation-base-v4";
+  castContextVersion?: "cast-context-v1" | "cast-context-v2";
+  castDiscoveryEnabled?: boolean;
   captureRecentWindow?: boolean;
   /** Explicit frozen v5 history window. Absence retains the historical two-turn reader. */
   recentWindowTurns?: 11;
@@ -254,7 +256,7 @@ export async function resolveGenerationAuthoritySnapshot(
     }
     : legacyIdentity;
   const cast = request.baseIdentityVersion === "generation-base-v4" ? await captureCastGenerationSnapshotWithClient(client,
-    { ownerUserId: request.ownerUserId, campaignId: request.campaignId }, { discoveryEnabled: true, turnNumber: baseTurnNumber }) : undefined;
+    { ownerUserId: request.ownerUserId, campaignId: request.campaignId }, { discoveryEnabled: request.castDiscoveryEnabled ?? true, turnNumber: baseTurnNumber, version: request.castContextVersion ?? "cast-context-v1" }) : undefined;
   const baseIdentity: GenerationBaseIdentity = cast ? {
     ...characterBase as GenerationBaseIdentityV3, version: "generation-base-v4",
     castRevision: cast.snapshot.revision, castTimelineRevision: cast.snapshot.boundary.timelineRevision,

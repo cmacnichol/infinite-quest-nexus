@@ -15,7 +15,7 @@ import { reserveNewestWholeSuffix } from "../../../packages/application/src/memo
 import type { ProtectedFact } from "../../../packages/application/src/memory/story-history-facts.js";
 
 type SentCast = { coverage: CastContextSelection["coverage"]; notice: string; characters: {
-  characterId: string; revision: number; fields: { authority: "user" | "observation"; evidenceId: string;
+  characterId: string; revision: number; fields: { authority: "user" | "authored" | "observation"; evidenceId: string;
     source: { kind: string; effectiveTurnNumber?: number; turnNumber?: number } }[]
 }[] };
 
