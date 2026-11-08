@@ -1,5 +1,5 @@
 import { extractEntities } from "./text.js";
-import { castCharacterSchema, type CastCharacter } from "../../contracts/src/campaign-cast.js";
+import { castCharacterSchema, normalizeCastAlias, type CastCharacter } from "../../contracts/src/campaign-cast.js";
 
 export type EntityReferenceSource = "world" | "character" | "campaign";
 
@@ -49,11 +49,7 @@ const textValues = (value: unknown): string[] => {
 
 /** Normalization used only for comparison; display spelling remains untouched. */
 export function normalizeEntityTerm(value: string): string {
-  return String(value ?? "")
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/\s+/gu, " ")
-    .trim();
+  return normalizeCastAlias(String(value ?? ""));
 }
 
 function compareDeterministically(left: string, right: string): number {
@@ -178,18 +174,30 @@ export function buildScopedEntityCatalog(
       const parsed = castCharacterSchema.safeParse(value);
       return parsed.success && parsed.data.origin.kind !== "protagonist" ? [parsed.data] : [];
     }) : [];
-  const consumed = new Set<string>();
+  const worldOrigin = (person: CastCharacter) => person.origin.kind === "world" ? person.origin : person.originProfile;
+  // A hidden cast occurrence also holds its pinned world identity so it cannot reappear as a second catalog entry.
   for (const person of campaignCharacters) {
+    const origin = worldOrigin(person);
+    if ((!person.removed && !person.mergedIntoCharacterId) || !origin || origin.worldVersionId !== possibleInput?.worldVersionId) continue;
+    const id = "world:" + origin.entityId;
+    const index = candidates.findIndex(entry => entry.source === "world" && (entry.id === id || entry.equivalentIds?.includes(id)));
+    if (index >= 0) candidates.splice(index, 1);
+  }
+  const visibleCharacters = campaignCharacters.filter(person => !person.removed && !person.mergedIntoCharacterId);
+  const consumed = new Set<string>();
+  for (const person of visibleCharacters) {
     if (consumed.has(person.id)) continue;
     const reference = toReference(person, "campaign", "character")!;
-    if (person.origin.kind === "world" && person.origin.worldVersionId === possibleInput?.worldVersionId) {
-      const origin = person.origin;
+    const origin = worldOrigin(person);
+    if (origin && origin.worldVersionId === possibleInput?.worldVersionId) {
       const worldIndex = candidates.findIndex((entry) => entry.source === "world" && (entry.id === `world:${origin.entityId}` || entry.equivalentIds?.includes(`world:${origin.entityId}`)));
       const world = candidates[worldIndex];
       const ids = world ? [world.id, ...world.equivalentIds ?? []] : [`world:${origin.entityId}`];
-      const occurrences = campaignCharacters.filter((entry) => entry.origin.kind === "world"
-        && entry.origin.worldVersionId === origin.worldVersionId && ids.includes(`world:${entry.origin.entityId}`));
-      const origins = occurrences.map((entry) => entry.origin.kind === "world" ? entry.origin.entityId : "");
+      const occurrences = visibleCharacters.filter((entry) => {
+        const value = worldOrigin(entry);
+        return value?.worldVersionId === origin.worldVersionId && ids.includes(`world:${value.entityId}`);
+      });
+      const origins = occurrences.map((entry) => worldOrigin(entry)?.entityId ?? "");
       if (world && new Set(origins).size === origins.length) {
         reference.equivalentIds = [...ids, ...occurrences.filter((entry) => entry.id !== person.id).map((entry) => `campaign:${entry.id}`)];
         reference.aliases = uniqueAliases([...reference.aliases, ...world.aliases,

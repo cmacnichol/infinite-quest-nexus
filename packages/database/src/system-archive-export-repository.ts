@@ -374,7 +374,7 @@ function projectWorldContent(value: unknown): Record<string, unknown> {
     const source = character.source as Record<string, unknown> | undefined;
     if (source?.type === "world-entity" && typeof source.entityId === "string") {
       projected.source = { type: "world-entity", entityId: source.entityId };
-    }
+    } else if (source?.type === "campaign-promotion") { projected.source = { type: "campaign-promotion" }; }
     if (character.profile !== undefined) {
       const profile = objectValue(character.profile, "System Archive character profile");
       projected.profile = {

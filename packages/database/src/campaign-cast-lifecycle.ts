@@ -79,9 +79,9 @@ export async function copyCampaignCast(client: DatabaseClient, source: CastScope
     if (Array.isArray(value)) return value.map((item) => remap(item, key === "characterIds" ? "characterId" : key === "observationIds" ? "observationId" : key));
     if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, remap(item, name)]));
     if (typeof value !== "string") return value;
-    const mapping = ["characterId", "speakerCharacterId"].includes(key) ? characterIds
+    const mapping = ["characterId", "sourceCharacterId", "mergedIntoCharacterId", "speakerCharacterId"].includes(key) ? characterIds
       : ["observationId", "supersedesObservationId"].includes(key) ? observationIds
-      : ["eventId", "editId", "seedEventId"].includes(key) ? eventIds : key === "turnId" ? turnIds : null;
+      : ["eventId", "editId", "seedEventId", "mergeEventId"].includes(key) ? eventIds : key === "turnId" ? turnIds : null;
     if (!mapping) return value;
     const mapped = mapping.get(value);
     if (!mapped) throw new Error(`Invalid retained cast reference: ${key}`);
@@ -111,6 +111,8 @@ export async function copyCampaignCast(client: DatabaseClient, source: CastScope
       if (command.kind === "mention") return characterIds.has(command.characterId) && turnIds.has(command.evidence.turnId);
       if (command.kind === "seed_profile") return characterIds.has(command.characterId) && (event.effective_turn_number <= throughTurn
         || event.payload.some((entry: { command: { kind: string }; characterId?: string }) => entry.command.kind === "create" && entry.characterId === command.characterId));
+      if (command.kind === "merge") return event.effective_turn_number <= throughTurn && characterIds.has(command.characterId) && characterIds.has(command.sourceCharacterId);
+      if (command.kind === "unmerge") return event.effective_turn_number <= throughTurn && characterIds.has(command.characterId) && copiedEvents.has(command.mergeEventId);
       if (command.kind === "detach") return event.effective_turn_number <= throughTurn && characterIds.has(command.characterId) && copyableAttachments.has(command.eventId);
       return event.effective_turn_number <= throughTurn && characterIds.has(command.characterId);
     });

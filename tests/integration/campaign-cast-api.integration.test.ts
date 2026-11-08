@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import Fastify from "fastify";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { withTransaction, createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { captureCastGenerationSnapshotWithClient, createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
 import { createCampaignCastApplication } from "../../packages/application/src/campaign-cast/use-cases.js";
 import { registerCampaignCastRoutes } from "../../services/api/src/campaign-cast-routes.js";
 import { buildServer } from "../../services/api/src/server.js";
@@ -22,14 +22,67 @@ integration("campaign cast editing API", () => {
     ownerUserId = await initialOwnerId(pool);
   }, 60_000);
   afterAll(async () => { await pool?.end(); });
-  async function fixture(enabled = true, presets = false) {
+  it("hides removed characters from the roster and narrator until explicitly restored", async () => {
+    const { app, campaignId, base, write } = await fixture(true, false, true);
+    const created = await app.inject({ method: "POST", url: base, payload: { ...write, name: "Keela", aliases: [], profile: {} } });
+    expect(created.statusCode).toBe(201);
+    const initial = created.json(), id = initial.character.id, scope = { ownerUserId, campaignId };
+    const command = (revision: number, characterRevision: number) => ({ expectedCastRevision: revision, expectedCharacterRevision: characterRevision,
+      expectedBoundary: write.expectedBoundary, idempotencyKey: randomUUID() });
+    const remove = command(initial.revision, initial.character.revision);
+    const request = () => app.inject({ method: "POST", url: base + "/" + id + "/remove", payload: remove });
+    const result = await request(); expect(result.statusCode).toBe(200); expect(result.json().character.removed).toBe(true);
+    expect((await request()).json()).toEqual(result.json());
+    expect((await app.inject({ url: base })).json().characters.map((row: {id:string}) => row.id)).not.toContain(id);
+    expect((await app.inject({ url: base + "?filter=removed" })).json().characters.map((row: {id:string}) => row.id)).toEqual([id]);
+    const capture = async () => withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled: false, version: "cast-context-v2" }));
+    expect(JSON.stringify((await capture()).snapshot)).not.toContain("Keela");
+    const restored = await app.inject({ method: "POST", url: base + "/" + id + "/restore", payload: command(result.json().revision,result.json().character.revision) });
+    expect(restored.statusCode).toBe(200); expect(restored.json().character.removed).toBeFalsy(); expect(JSON.stringify((await capture()).snapshot)).toContain("Keela");
+    const main = (await app.inject({ url: base })).json().characters.find((row: {origin:{kind:string}}) => row.origin.kind === "protagonist");
+    const rejected = await app.inject({ method: "POST", url: base + "/" + main.id + "/remove", payload: command(restored.json().revision,main.revision) });
+    expect(rejected.statusCode).toBe(422); expect(rejected.json().code).toBe("cast_protagonist_read_only"); await app.close();
+  });
+  it("keeps lifecycle writers gated independently of cast editing and presets", async () => {
+    const { app, base, write } = await fixture(true, true);
+    const response = await app.inject({ method:"POST", url: base + "/" + randomUUID() + "/remove", payload: {...write,expectedCharacterRevision:0} });
+    expect(response.statusCode).toBe(503); expect(response.json().code).toBe("cast_lifecycle_disabled"); await app.close();
+  });
+  it("keeps removed characters readable while lifecycle writers are disabled after rollback", async () => {
+    const { app, base, campaignId, write } = await fixture(true, false, true);
+    const created = (await app.inject({ method: "POST", url: base, payload: { ...write, name: "Rollback companion", aliases: [], profile: {} } })).json();
+    const id = created.character.id;
+    const removed = (await app.inject({ method: "POST", url: `${base}/${id}/remove`, payload: { ...write, expectedCastRevision: created.revision,
+      expectedCharacterRevision: created.character.revision, idempotencyKey: randomUUID() } })).json();
+    await app.close();
+    const rollback = Fastify(), repository = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: false });
+    await rollback.register(registerCampaignCastRoutes, { application: createCampaignCastApplication(repository), enabled: true, lifecycleEnabled: false, resolveOwner: async () => ({ ownerUserId }) });
+    try {
+      const roster = await rollback.inject({ url: `${base}?filter=removed` });
+      expect(roster.statusCode).toBe(200);
+      expect(roster.json()).toMatchObject({ capabilities: { castEditing: true, castLifecycle: false }, characters: [{ id, removed: true }] });
+      const detail = await rollback.inject({ url: `${base}/${id}` });
+      expect(detail.json()).toMatchObject({ character: { id, removed: true }, capabilities: { castEditing: true, castLifecycle: false } });
+      for (const operation of ["restore", "remove", "merge", "unmerge", "promote"]) {
+        const response = await rollback.inject({ method: "POST", url: `${base}/${id}/${operation}`, payload: {} });
+        expect(response.statusCode).toBe(503); expect(response.json().code).toBe("cast_lifecycle_disabled");
+      }
+      for (const operation of ["merge-preview", "unmerge-preview", "promotion-preview"]) {
+        const response = await rollback.inject({ url: `${base}/${id}/${operation}` });
+        expect(response.statusCode).toBe(503); expect(response.json().code).toBe("cast_lifecycle_disabled");
+      }
+      expect((await rollback.inject({ url: `${base}/${id}` })).json().revision).toBe(removed.revision);
+      expect((await repository.current({ ownerUserId, campaignId })).characters.find(item => item.id === id)?.removed).toBe(true);
+    } finally { await rollback.close(); }
+  });
+  async function fixture(enabled = true, presets = false, lifecycle = false) {
     const world = randomUUID(), version = randomUUID(), campaignId = randomUUID();
     await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Cast API')", [world, ownerUserId]);
     await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) VALUES($1,$2,$3,1,'{}')", [version, world, ownerUserId]);
     await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title) VALUES($1,$2,$3,'Cast API')", [campaignId, ownerUserId, version]);
     const app = Fastify();
-    const application = createCampaignCastApplication(createPostgresCampaignCastRepository(pool, { editingEnabled: enabled, castPresetsEnabled: presets }));
-    await app.register(registerCampaignCastRoutes, { application, enabled, presetsEnabled: presets, resolveOwner: async () => ({ ownerUserId }) });
+    const application = createCampaignCastApplication(createPostgresCampaignCastRepository(pool, { editingEnabled: enabled, castPresetsEnabled: presets, lifecycleEnabled: lifecycle }));
+    await app.register(registerCampaignCastRoutes, { application, enabled, presetsEnabled: presets, lifecycleEnabled: lifecycle, resolveOwner: async () => ({ ownerUserId }) });
     const base = `/api/v1/campaigns/${campaignId}/cast`;
     const write = { expectedCastRevision: 0, expectedBoundary: { turnNumber: 0, timelineRevision: 0 }, idempotencyKey: randomUUID() };
     return { app, base, campaignId, version, write };

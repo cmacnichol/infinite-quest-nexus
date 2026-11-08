@@ -71,6 +71,7 @@ export type RuntimeConfig = {
   worldSharingEnabled?: boolean;
   castEditingEnabled?: boolean;
   castDiscoveryEnabled?: boolean;
+  castLifecycleEnabled?: boolean;
   castPresetsEnabled?: boolean;
   castContextWithoutDiscoveryEnabled?: boolean;
   castAutoMatchEnabled?: boolean;
@@ -301,6 +302,9 @@ export function loadRuntimeConfig(): RuntimeConfig {
     worldSharingEnabled: booleanSetting("WORLD_SHARING_ENABLED", false),
     castEditingEnabled,
     castDiscoveryEnabled,
+    // Cast editing may be enabled by managed settings after environment bootstrap.
+    // Writers check both the deployment gate and effective cast editing.
+    castLifecycleEnabled: booleanSetting("CAST_LIFECYCLE_ENABLED", false),
     castPresetsEnabled,
     castContextWithoutDiscoveryEnabled,
     castAutoMatchEnabled: booleanSetting("CAST_AUTO_MATCH_ENABLED", false) && castDiscoveryEnabled,

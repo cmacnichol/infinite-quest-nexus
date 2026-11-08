@@ -1,3 +1,6 @@
+import { castLifecycleChangeSchema, castCharacterSchema, castBoundarySchema, castMergeRequestSchema, castMergePreviewSchema, castUnmergeRequestSchema,
+  castPromotionPreviewSchema, castPromoteSchema, castPromoteResultSchema, type CastLifecycleChange, type CastMergeRequest,
+  type CastUnmergeRequest, type CastPromote } from "@infinite-quest/contracts";
 import { castWorldChoicesSchema } from "@infinite-quest/contracts";
 import { castDraftPreviewRequestSchema, castDraftPreviewResponseSchema, type CastDraftPreviewRequest } from "@infinite-quest/contracts";
 import { castFromWorldPreviewQuerySchema, castFromWorldPreviewSchema, castFromWorldSchema, editAuthoredCastProfileSchema,
@@ -18,7 +21,7 @@ import { readerTurnResponseSchema, readerTurnNumberSchema } from "@infinite-ques
 import { castBackfillRequestSchema, castBackfillPreviewSchema, castBackfillProgressSchema, castBackfillRetrySchema,
   type CastBackfillRequest, type CastBackfillRetry } from "@infinite-quest/contracts";
 
-const capabilities = z.object({ castEditing: z.boolean(), castPresets: z.boolean().optional() });
+const capabilities = z.object({ castEditing: z.boolean(), castPresets: z.boolean().optional(), castLifecycle: z.boolean().optional() });
 export const castListResponseSchema = castSnapshotSchema.extend({ characters: z.array(castRosterCharacterSchema), nextCursor: z.uuid().nullable(), recentWindow: z.number().int().positive().optional(), capabilities,
   attention: z.array(z.object({ characterId: z.uuid(), review: z.boolean(), conflict: z.boolean(), reviewCount: z.number().int().nonnegative().optional(), conflictCount: z.number().int().nonnegative().optional() }).strict()).max(50).optional() });
 export const castDetailResponseSchema = castDetailSchema.extend({ capabilities });
@@ -27,7 +30,39 @@ export function createCampaignCastApi(options: NexusHttpClientOptions = {
 }) {
   const http = createNexusHttpClient(options);
   const pathFor = (campaignId: string) => `/campaigns/${encodeURIComponent(campaignId)}/cast`;
+  const characterPath = (campaign: string, id: string) => pathFor(campaign) + "/" + encodeURIComponent(id);
   return {
+    lifecycle: {
+      changeRemoval(campaign: string, id: string, action: "remove" | "restore", input: CastLifecycleChange) {
+        return http.request({ method: "POST", path: characterPath(campaign, id) + "/" + action, body: { kind: "json", value: castLifecycleChangeSchema.parse(input) }, responseSchema: castWriteResultSchema });
+      },
+      mergePreview(campaign: string, id: string, sourceId: string) {
+        return http.request({ method: "GET", path: characterPath(campaign, id) + "/merge-preview?" + new URLSearchParams({ sourceCharacterId: sourceId }), responseSchema: castMergePreviewSchema });
+      },
+      merge(campaign: string, id: string, input: CastMergeRequest) {
+        return http.request({ method: "POST", path: characterPath(campaign, id) + "/merge", body: { kind: "json", value: castMergeRequestSchema.parse(input) }, responseSchema: castWriteResultSchema });
+      },
+      unmergePreview(campaign: string, id: string, eventId: string) {
+        return http.request({ method: "GET", path: characterPath(campaign, id) + "/unmerge-preview?" + new URLSearchParams({ mergeEventId: eventId }),
+          responseSchema: z.object({ target: castCharacterSchema, source: castCharacterSchema, expectedCharacterRevision: z.number().int().nonnegative(), expectedSourceCharacterRevision: z.number().int().nonnegative(), revision: z.number().int().nonnegative(), boundary: castBoundarySchema }) });
+      },
+      unmerge(campaign: string, id: string, input: CastUnmergeRequest) {
+        return http.request({ method: "POST", path: characterPath(campaign, id) + "/unmerge", body: { kind: "json", value: castUnmergeRequestSchema.parse(input) }, responseSchema: castWriteResultSchema });
+      },
+      async worlds(campaign: string) {
+        const [worlds, campaigns] = await Promise.all([
+          http.request({ method: "GET", path: "/worlds", responseSchema: z.object({ worlds: z.array(z.object({ id: z.uuid(), title: z.string(), status: z.string() })) }) }),
+          http.request({ method: "GET", path: "/campaigns", responseSchema: z.object({ campaigns: z.array(z.object({ id: z.uuid(), worldId: z.uuid() })) }) })
+        ]);
+        return { worlds: worlds.worlds.filter(world => world.status !== "archived"), sourceWorldId: campaigns.campaigns.find(row => row.id === campaign)?.worldId };
+      },
+      promotionPreview(campaign: string, id: string, worldId: string) {
+        return http.request({ method: "GET", path: characterPath(campaign, id) + "/promotion-preview?" + new URLSearchParams({ worldId }), responseSchema: castPromotionPreviewSchema });
+      },
+      promote(campaign: string, id: string, input: CastPromote) {
+        return http.request({ method: "POST", path: characterPath(campaign, id) + "/promote", body: { kind: "json", value: castPromoteSchema.parse(input) }, responseSchema: castPromoteResultSchema });
+      }
+    },
     draftPreview(campaignId: string, id: string, input: CastDraftPreviewRequest, signal?: AbortSignal) {
       const path = `${pathFor(campaignId)}/${encodeURIComponent(id)}/draft-preview`, value = validatedRequest(castDraftPreviewRequestSchema, input, "POST", path);
       return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: castDraftPreviewResponseSchema, ...(signal ? { signal } : {}) });

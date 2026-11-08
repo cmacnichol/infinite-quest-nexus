@@ -26,6 +26,7 @@ const securitySettingNames = [
   "AI_STORY_SOURCE_AUTHORING_ENABLED",
   "NATIVE_TEXT_EXECUTION_PLAN_ADMISSION",
   "SYSTEM_ARCHIVE_ENABLED",
+  "CAST_LIFECYCLE_ENABLED",
   "CAST_EDITING_ENABLED",
   "CAST_DISCOVERY_ENABLED",
   "CAST_AUTO_MATCH_ENABLED",
@@ -85,6 +86,15 @@ describe("runtime security configuration", () => {
     expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: true, castEditingEnabled: true });
     process.env.CAST_DISCOVERY_ENABLED = "false";
     expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: false, castEditingEnabled: true });
+  });
+  it("keeps the lifecycle deployment cutoff independent of managed cast editing", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig().castLifecycleEnabled).toBe(false);
+    process.env.CAST_LIFECYCLE_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castLifecycleEnabled: true, castEditingEnabled: false });
+    process.env.CAST_EDITING_ENABLED = "true";
+    process.env.CAST_LIFECYCLE_ENABLED = "false";
+    expect(loadRuntimeConfig()).toMatchObject({ castLifecycleEnabled: false, castEditingEnabled: true });
   });
   it("keeps cast editing off until explicitly enabled by the operator", () => {
     minimumEnvironment();

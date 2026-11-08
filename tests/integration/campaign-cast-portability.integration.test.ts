@@ -17,7 +17,7 @@ import { createPostgresPortableFamilyMutationRepository } from "../../packages/d
 import { createPostgresWorldRepositoryAdapters } from "../../packages/database/src/world-repository.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
 import { sha256 } from "../../packages/domain/src/text.js";
-import { applyCastBoundaryChange } from "../../packages/database/src/campaign-cast-lifecycle.js";
+import { applyCastBoundaryChange, copyCampaignCast } from "../../packages/database/src/campaign-cast-lifecycle.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 integration("campaign cast portable authority", () => {
@@ -31,10 +31,59 @@ integration("campaign cast portable authority", () => {
   async function fixture() {
     const world = randomUUID(), version = randomUUID(), campaignId = randomUUID();
     await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Cast portable')", [world, ownerUserId]);
-    await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) VALUES($1,$2,$3,1,'{}')", [version, world, ownerUserId]);
+    await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) VALUES($1,$2,$3,1,$4)", [version, world, ownerUserId, { world: { title: "Cast portable" } }]);
     await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title) VALUES($1,$2,$3,'Cast portable')", [campaignId, ownerUserId, version]);
     return { ownerUserId, campaignId };
   }
+  it("round-trips v4 merge receipts and preserves later alias edits through undo", async () => {
+    const source = await fixture(), destination = await fixture();
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true });
+    const initial = await repo.current(source);
+    const target = await repo.create(source, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary,
+      idempotencyKey: randomUUID(), name: "Mara", aliases: ["First"], profile: {} });
+    const other = await repo.create(source, { expectedCastRevision: target.revision, expectedBoundary: target.boundary,
+      idempotencyKey: randomUUID(), name: "Mara Two", aliases: [], profile: {} });
+    const beforeArchive = await withTransaction(pool, client => exportCampaignCast(client, source));
+    const before = await repo.current(source), a = before.characters.find(person => person.id === target.character.id)!, b = before.characters.find(person => person.id === other.character.id)!;
+    const merged = await repo.merge!(source, a.id, { expectedCastRevision: before.revision, expectedBoundary: before.boundary,
+      expectedCharacterRevision: a.revision, expectedSourceCharacterRevision: b.revision, sourceCharacterId: b.id,
+      reviewedAliases: ["First", "Mara Two"], choices: {}, idempotencyKey: randomUUID() });
+    await repo.edit(source, a.id, { expectedCastRevision: merged.revision, expectedBoundary: merged.boundary,
+      expectedCharacterRevision: merged.character.revision, aliases: ["Mara Two", "Later"], idempotencyKey: randomUUID() });
+    const archive = await withTransaction(pool, client => exportCampaignCast(client, source));
+    expect(archive?.formatVersion).toBe(4);
+    const malformed = structuredClone(archive!);
+    const laterIdentity = malformed.events.flatMap(event => event.commands).find(item => item.command.kind === "identity" && item.command.aliasChanges);
+    if (!laterIdentity || laterIdentity.command.kind !== "identity" || !laterIdentity.command.aliasChanges) throw new Error("Expected later alias edit");
+    laterIdentity.command.aliasChanges.added = [];
+    await expect(withTransaction(pool, client => importCampaignCast(client, destination, malformed, { turns: new Map(), worlds: new Map() }))).rejects.toThrow();
+    expect((await pool.query("SELECT count(*)::int AS n FROM campaign_cast_state WHERE campaign_id=$1", [destination.campaignId])).rows[0].n).toBe(0);
+    if (process.env.IQ_PHASE6_BASELINE) {
+      const oldReader = await import(`${process.env.IQ_PHASE6_BASELINE}/packages/contracts/src/campaign-cast.ts`);
+      expect(oldReader.portableCampaignCastSchema.safeParse(beforeArchive).success).toBe(true);
+      expect(oldReader.portableCampaignCastSchema.safeParse(archive).success).toBe(false);
+    }
+    await withTransaction(pool, client => importCampaignCast(client, destination, archive, { turns: new Map(), worlds: new Map() }));
+    const restored = await repo.current(destination), restoredTarget = restored.characters.find(person => person.name === "Mara")!;
+    const restoredSource = restored.characters.find(person => person.name === "Mara Two")!;
+    expect(restoredSource.mergedIntoCharacterId).toBe(restoredTarget.id);
+    expect(restoredTarget.activeMerges?.[0]?.sourceCharacterId).toBe(restoredSource.id);
+    const imported = await withTransaction(pool, client => exportCampaignCast(client, destination));
+    const receipt = imported!.events.at(-1)!.receipt!.result!.character;
+    expect(receipt.activeMerges?.[0]?.sourceCharacterId).toBe(restoredSource.id);
+    expect(receipt.activeMerges?.[0]?.mergeEventId).toBe(restoredTarget.activeMerges![0]!.mergeEventId);
+    const branch = await fixture();
+    await withTransaction(pool, client => copyCampaignCast(client, source, branch, 0, new Map()));
+    const branchCast = await repo.current(branch), branchTarget = branchCast.characters.find(person => person.name === "Mara")!;
+    const branchSource = branchCast.characters.find(person => person.name === "Mara Two")!;
+    expect(branchSource.mergedIntoCharacterId).toBe(branchTarget.id);
+    expect(branchTarget.activeMerges?.[0]?.sourceCharacterId).toBe(branchSource.id);
+    expect(branchTarget.activeMerges?.[0]?.mergeEventId).not.toBe(restoredTarget.activeMerges?.[0]?.mergeEventId);
+    const undone = await repo.unmerge!(destination, restoredTarget.id, { expectedCastRevision: restored.revision,
+      expectedBoundary: restored.boundary, expectedCharacterRevision: restoredTarget.revision,
+      expectedSourceCharacterRevision: restoredSource.revision, mergeEventId: restoredTarget.activeMerges![0]!.mergeEventId, idempotencyKey: randomUUID() });
+    expect(undone.character.aliases).toEqual(["Later"]);
+  });
   it("round-trips empty-cast eligibility in both archive families and defaults historical records to false", async () => {
     const samples: Array<{ campaignId: string; worldId: string; worldVersionId: string; selectedWorldId: string | null; marker: boolean | undefined }> = [];
     for (const marker of [true, false, undefined]) {
@@ -86,7 +135,7 @@ integration("campaign cast portable authority", () => {
     story.world.title = `Cast system restore ${randomUUID()}`;
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "cast.story", story }));
     const scope = { ownerUserId, campaignId: imported.campaignId };
-    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true });
     const initial = await repo.current(scope);
     const created = await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: "system",
       name: "Mara", aliases: [], profile: { "appearance.description": "" } });
@@ -96,6 +145,13 @@ integration("campaign cast portable authority", () => {
       commands: [{ kind: "observe", characterId: created.character.id, field: "appearance.description", value: "blue eyes", mode: "fact", speakerCharacterId: null, supersedesObservationId: null,
         evidence: { kind: "turn", turnId: turn.turn_id, turnNumber: turn.turn_number, narrationRevision: turn.correction_revision, sourceHash, paragraphId: "p1", quote } }] },
       { attachment: { characterId: created.character.id, basis: "unique_name", sourceRanges: [{ turnId: turn.turn_id, narrationRevision: turn.correction_revision, sourceHash, paragraphId: "p1", start: 0, end: quote.length }] } }));
+    const current = await repo.current(scope);
+    const second = await repo.create(scope, { expectedCastRevision: current.revision, expectedBoundary: current.boundary,
+      idempotencyKey: "system-second", name: "Mary", aliases: [], profile: {} });
+    const targetBefore = (await repo.current(scope)).characters.find(person => person.id === created.character.id)!;
+    await repo.merge!(scope, created.character.id, { expectedCastRevision: second.revision, expectedBoundary: second.boundary,
+      expectedCharacterRevision: targetBefore.revision, expectedSourceCharacterRevision: second.character.revision,
+      sourceCharacterId: second.character.id, reviewedAliases: ["Mary"], choices: {}, idempotencyKey: "system-merge" });
     await pool.query("UPDATE campaigns SET first_appearance_eligible=true WHERE id=$1", [scope.campaignId]);
     const records: SystemRecordEnvelope[] = [];
     await createPostgresSystemArchiveExportRepository(pool, { sourceApplicationVersion: "0.1.0" }).withOwnerSnapshot({ ownerUserId }, async (snapshot) => {
@@ -114,12 +170,13 @@ integration("campaign cast portable authority", () => {
       });
       expect((await destination.query("SELECT first_appearance_eligible FROM campaigns WHERE id=$1", [scope.campaignId])).rows[0].first_appearance_eligible).toBe(true);
       const value = await createPostgresCampaignCastRepository(destination).current({ ...target, campaignId: scope.campaignId });
-      expect(value.characters.filter((c) => c.origin.kind !== "protagonist")).toEqual([
-        expect.objectContaining({ name: "Mara", profile: { "appearance.description": "" } })
-      ]);
+      const person = value.characters.find(character => character.name === "Mara")!;
+      const hidden = value.characters.find(character => character.name === "Mary")!;
+      expect(person.profile).toEqual({ "appearance.description": "" });
+      expect(hidden.mergedIntoCharacterId).toBe(person.id);
+      expect(person.activeMerges?.[0]?.sourceCharacterId).toBe(hidden.id);
       const restoredRepository = createPostgresCampaignCastRepository(destination, { editingEnabled: true });
       const restoredScope = { ...target, campaignId: scope.campaignId };
-      const person = value.characters.find(character => character.name === "Mara")!;
       const detail = await restoredRepository.detail(restoredScope, person.id);
       expect(detail.autoMatches).toHaveLength(1);
       await restoredRepository.detachAttachment(restoredScope, person.id, detail.autoMatches[0]!.eventId, {
@@ -181,11 +238,12 @@ integration("campaign cast portable authority", () => {
     expect(restored.originProfile).toMatchObject({ legacyCharacterText: "Original note", evidence: { kind: "historical_world", sourceWorldVersionId: version } });
     expect(restored.originProfile?.seedEventId).not.toBe(added.character.originProfile?.seedEventId);
     const saved = (await withTransaction(pool, client => exportCampaignCast(client, destination)))!;
-    expect(saved.events.at(-1)?.receipt?.result?.character).toEqual(restored);
+    const { removed: _removed, mergedIntoCharacterId: _merged, activeMerges: _merges, ...preLifecycle } = restored;
+    expect(saved.events.at(-1)?.receipt?.result?.character).toEqual(preLifecycle);
   });
   it("round-trips separate identities and user blanks with new IDs and no profile caches", async () => {
     const source = await fixture(), destination = await fixture();
-    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true });
     const first = await repo.create(source, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 0, timelineRevision: 0 }, idempotencyKey: "first", name: "Mara", aliases: [], profile: { "appearance.description": "" } });
     await repo.create(source, { expectedCastRevision: first.revision, expectedBoundary: first.boundary, idempotencyKey: "second", name: "Mara", aliases: [], profile: { "story.role": "guide" } });
     await withTransaction(pool, async (client) => {
@@ -284,12 +342,14 @@ integration("campaign cast portable authority", () => {
     story.world.title = `Cast export ${randomUUID()}`;
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "cast.story", story }));
     const scope = { ownerUserId, campaignId: imported.campaignId };
-    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true });
     const initial = await repo.current(scope);
-    await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: "cast-export",
+    const created = await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: "cast-export",
       name: "Mara", aliases: [], profile: { "appearance.description": "" } });
+    await repo.changeRemoval!(scope, created.character.id, "remove", { expectedCastRevision: created.revision, expectedBoundary: created.boundary,
+      expectedCharacterRevision: created.character.revision, idempotencyKey: "cast-export-remove" });
     const projected = campaignArchivePayloads(await loadCampaignArchiveExportSnapshot(pool, ownerUserId, scope.campaignId));
-    expect(projected.campaign.archiveRecords).toHaveProperty("cast.formatVersion", 2);
+    expect(projected.campaign.archiveRecords).toHaveProperty("cast.formatVersion", 4);
     const mutations = createPostgresPortableFamilyMutationRepository(createPostgresWorldRepositoryAdapters(pool, { memory: memoryGeneration(pool) }).worlds);
     const restored = await withTransaction(pool, (client) => mutations.commitCampaignZip(client, {
       owner: { ownerUserId }, destination: { kind: "existing_world_version", worldId: imported.worldId, worldVersionId: imported.worldVersionId },
@@ -297,12 +357,12 @@ integration("campaign cast portable authority", () => {
       payload: JSON.parse(JSON.stringify({ archiveFormat: "manifest_v1", sourceName: "cast.zip", ...projected }))
     }));
     expect((await repo.current({ ownerUserId, campaignId: restored.campaignId! })).characters.filter((c) => c.origin.kind !== "protagonist"))
-      .toEqual([expect.objectContaining({ name: "Mara", profile: { "appearance.description": "" } })]);
+      .toEqual([expect.objectContaining({ name: "Mara", removed: true, profile: { "appearance.description": "" } })]);
     const system = createPostgresSystemArchiveExportRepository(pool, { sourceApplicationVersion: "0.1.0" });
     await system.withOwnerSnapshot({ ownerUserId }, async (snapshot) => {
       let found = false;
       for await (const envelope of snapshot.streamDomain("campaigns")) if (envelope.sourceId === scope.campaignId) {
-        expect(envelope.record).toHaveProperty("cast.formatVersion", 2);
+        expect(envelope.record).toHaveProperty("cast.formatVersion", 4);
         found = true;
       }
       expect(found).toBe(true);

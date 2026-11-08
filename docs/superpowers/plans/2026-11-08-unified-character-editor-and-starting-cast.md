@@ -501,9 +501,9 @@ Start a separate release branch or PR series from the accepted phase 5 baseline.
 
 **Interface.** Phase 6 adds portable v4. `mergeEventId`, `sourceCharacterId`, seed references and source evidence must resolve after remapping. Lower-format payloads must continue to round-trip after v4 support is installed.
 
-- [ ] **Regression cases.** Start from v1–v3 fixtures and a lifecycle-only v4 fixture without presets. Test import into the new reader and rejection before mutation by the phase 5 reader. Verify valid command order, both IDs on copy, stale merge references, rewind before/after events, branch, transfer and both archive families.
-- [ ] **Implementation.** Define v4 discriminants merge/unmerge/remove/restore, including merge choices, scope checks and alias provenance. Extend live projection and portable reference remapping. Keep all new writers disabled during reader distribution. Repeat these tests with actual events from 6B–6D before activation.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Start from v1–v3 fixtures and a lifecycle-only v4 fixture without presets. Test import into the new reader and rejection before mutation by the phase 5 reader. Verify valid command order, both IDs on copy, stale merge references, rewind before/after events, branch, transfer and both archive families.
+- [x] **Implementation.** Define v4 discriminants merge/unmerge/remove/restore, including merge choices, scope checks and alias provenance. Extend live projection and portable reference remapping. Keep all new writers disabled during reader distribution. Repeat these tests with actual events from 6B–6D before activation.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/campaign-cast-contract.test.ts
@@ -518,9 +518,9 @@ pnpm exec vitest run --config vitest.integration.config.ts tests/integration/cam
 
 **Interface.** `POST cast/:id/merge` takes the target in the URL, both character revisions, `sourceCharacterId`, `reviewedAliases` and field choices. `unmerge` identifies the original `mergeEventId`.
 
-- [ ] **Regression cases.** Preview 21 candidate aliases, conflicting manual goals and an intentional blank appearance override. Reject a forged alias, wrong target, missing choice or stale source revision. Undo after an independent target edit and alias removal/re-entry. Verify pending candidates, outstanding jobs and detach follow the effective identity, and Resolve does not recreate the source.
-- [ ] **Implementation.** Compute preview from two full detail reads. Submit reviewedAliases and source/target choices, revalidate both records with revision/boundary and generation checks, require the seeded target when only one is seeded and reject the protagonist. Persist manual precedence, earlier alias ownership and merge-owned changes. Resolve chains on projected copies; undo replays independent edits while respecting subsequent active merge dependencies.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Preview 21 candidate aliases, conflicting manual goals and an intentional blank appearance override. Reject a forged alias, wrong target, missing choice or stale source revision. Undo after an independent target edit and alias removal/re-entry. Verify pending candidates, outstanding jobs and detach follow the effective identity, and Resolve does not recreate the source.
+- [x] **Implementation.** Compute preview from two full detail reads. Submit reviewedAliases and source/target choices, revalidate both records with revision/boundary and generation checks, require the seeded target when only one is seeded and reject the protagonist. Persist manual precedence, earlier alias ownership and merge-owned changes. Resolve chains on projected copies; undo replays independent edits while respecting subsequent active merge dependencies.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/campaign-cast-projection.test.ts
@@ -536,9 +536,9 @@ pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts
 
 **Interface.** `remove` and `restore` operate on the supporting character with the standard cast write fences. Use the `removed` list filter and return `cast_character_removed` on stale pending-item resolution.
 
-- [ ] **Regression cases.** Remove with pending identity and resolved-detail items. Resolve from a stale tab, complete a paused job and invalidate one old quote before Restore. Assert 409 on stale resolution, silent valid updates, name held for uniqueness, no context/catalog/attention entry while removed, and only valid pending items on restore. Run catalog assertions for merge/unmerge as well.
-- [ ] **Implementation.** Write turn-gated soft remove/restore events and refresh Chronicle on all four lifecycle commands. Filter read, count and resolve using the current merge-resolved target. Include a Removed roster filter, confirmation, and Restore on duplicate name. Preserve the seed, evidence and valid post-removal updates.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Remove with pending identity and resolved-detail items. Resolve from a stale tab, complete a paused job and invalidate one old quote before Restore. Assert 409 on stale resolution, silent valid updates, name held for uniqueness, no context/catalog/attention entry while removed, and only valid pending items on restore. Run catalog assertions for merge/unmerge as well.
+- [x] **Implementation.** Write turn-gated soft remove/restore events and refresh Chronicle on all four lifecycle commands. Filter read, count and resolve using the current merge-resolved target. Include a Removed roster filter, confirmation, and Restore on duplicate name. Preserve the seed, evidence and valid post-removal updates.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run --config vitest.integration.config.ts tests/integration/campaign-cast-discovery.integration.test.ts tests/integration/campaign-cast-api.integration.test.ts tests/integration/campaign-cast-generation.integration.test.ts
@@ -551,13 +551,13 @@ pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts
 
 **Modify** `packages/contracts/src/campaign-cast.ts`, `services/api/src/campaign-cast-routes.ts`, `packages/client-web/src/campaign-cast-api.ts`, `packages/application/src/campaign-cast/ports.ts`, `packages/database/src/authoring-world-apply-adapter.ts`, `packages/database/src/world-repository.ts`, `packages/database/src/system-archive-export-repository.ts`, `packages/database/src/system-archive-import-repository.ts`, `packages/contracts/src/system-archives.ts`, `packages/application/src/system-archives/portability-registry.ts`, `apps/web/src/campaign-cast-panel.ts`, `docs/player-guide/characters-and-stats.md`.
 
-**Create** `database/migrations/0131_campaign_cast_promotion_receipts.sql` (use the next free number at phase 6 integration).
+**Create** `database/migrations/0132_campaign_cast_promotion_receipts.sql`. Migration 0131 already belongs to selected-character world identity.
 
 **Interface.** `GET cast/:id/promotion-preview?worldId=...` returns destination-keyed candidates. `POST cast/:id/promote` receives the selected source for each destination, both scopes’ revision fences and the idempotency key.
 
-- [ ] **Regression cases.** Target a foreign or archived world, a stale target revision and a protagonist. Verify client and server reject prohibited lifecycle actions. On Add, omit a valid name or supply two sources for one destination. On Replace, send a single approved appearance choice, leave goals unticked and retry the request. Assert one draft revision, immutable published/campaign data and no exported campaign IDs.
-- [ ] **Implementation.** Implement typed promotion-preview and promote. Build destination-keyed choices, require an Add name and resolve authored versus observed appearance explicitly. In one owner-scoped transaction lock the draft and campaign as needed, check revisions/lock, permit only confirmed fields and store an idempotency receipt with the draft write. Preserve target ID, mechanics and use on Replace. Classify receipt as operational, and only the typed campaign-promotion provenance as portable. Add a draft-write receipt migration in the phase 6 release, keyed by owner, destination draft and idempotency key. Compare the request fingerprint on replay, return the original result before checking stale revisions for an identical retry, and reject key reuse with a different payload.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Target a foreign or archived world, a stale target revision and a protagonist. Verify client and server reject prohibited lifecycle actions. On Add, omit a valid name or supply two sources for one destination. On Replace, send a single approved appearance choice, leave goals unticked and retry the request. Assert one draft revision, immutable published/campaign data and no exported campaign IDs.
+- [x] **Implementation.** Implement typed promotion-preview and promote. Build destination-keyed choices, require an Add name and resolve authored versus observed appearance explicitly. In one owner-scoped transaction lock the draft and campaign as needed, check revisions/lock, permit only confirmed fields and store an idempotency receipt with the draft write. Preserve target ID, mechanics and use on Replace. Classify receipt as operational, and only the typed campaign-promotion provenance as portable. Add a draft-write receipt migration in the phase 6 release, keyed by owner, destination draft and idempotency key. Compare the request fingerprint on replay, return the original result before checking stale revisions for an identical retry, and reject key reuse with a different payload.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run --config vitest.integration.config.ts tests/integration/campaign-cast-api.integration.test.ts tests/integration/world-library.integration.test.ts tests/integration/system-archive.integration.test.ts
@@ -565,6 +565,14 @@ pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts
 ```
 
 **Phase 6 exit.** Record the reader versions in use by the API, worker, CLI/import and recovery paths. Exercise a no-presets campaign whose first lifecycle write is Remove. Rehearse v4 import, replay and rollback before writer activation. Capture merge/undo, Removed/Restore and promotion screens at both widths. Publish the lifecycle guide and updated cast runbook with this release.
+
+**Phase 6 verification, 2026-11-08.** The separate release branch starts at the Phase 5 commit `1006fa71`. New installations and upgrades start with `CAST_LIFECYCLE_ENABLED=false`. The compatible reader can display removed records while the writer cutoff is in effect.
+
+- The four mapped Linux PostgreSQL archive and lifecycle suites passed all 117 tests. Coverage includes lifecycle-only v4 data, invalid alias deltas before import, rewind, branch, cross-world transfer and both archive families. A separate recovery drill opened a restored pre-boundary database with the exact Phase 5 reader and accounted for the later Remove. [Reader inventory and recovery drill](../../runbooks/deployment.md#cast-lifecycle-reader-rollout-and-rollback)
+- All 426 tests in the 35 affected unit suites passed. Six additional PostgreSQL suites passed 174 tests covering cast API, discovery, generation, repository, merge and world library behavior. The cast browser suite passed 74 checks, and the campaign editor browser suite passed 10.
+- The PostgreSQL-backed campaign-page browser proof merged, previewed undo, restored both identities, removed and restored a supporting character, and promoted selected fields to a world draft. It checked the persisted draft revision and provenance. To repeat, run the World Library integration suite with the opt-in browser settings documented under Phase 4.
+- Story browser checks cover the side-by-side character fields, explicit conflict resolution, alias limits, keyboard cancellation, Removed and Restore, Add and Replace, stale draft refresh and writer cutoff. [Desktop and phone screenshots](../../review/assets/unified-character-editor-phase-6)
+- The repository checks, client boundary checks and both web builds passed. Production rollout starts with the operator verifying all deployed readers and the installation’s own backup set. [Lifecycle operations](../../runbooks/campaign-cast.md)
 
 ## Release evidence and rollback
 

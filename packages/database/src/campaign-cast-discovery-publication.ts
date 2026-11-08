@@ -1,4 +1,4 @@
-import { castDiscoveryIdentitySnapshotSchema, type CastDiscoveryIdentitySnapshot } from "../../contracts/src/campaign-cast-discovery.js";
+import { castDiscoveryIdentitySnapshotSchema, castDiscoveryOutputSchema, type CastDiscoveryIdentitySnapshot } from "../../contracts/src/campaign-cast-discovery.js";
 import type { CastCharacter, CastEvidence, CastScope } from "../../contracts/src/campaign-cast.js";
 import { buildCastDiscoverySource, validateCastDiscovery } from "../../domain/src/campaign-cast-discovery.js";
 import { castDiscoveryCharacterHints, castDiscoveryWorldIdentities } from "../../domain/src/campaign-cast-world-identities.js";
@@ -16,12 +16,13 @@ import type { DatabaseClient } from "./pool.js";
 export function compactCastDiscoveryCharacters(cast: CastCharacter[]) {
   const seedActivations = cast.flatMap(person => person.originProfile ? [{ characterId: person.id,
     seedEventId: person.originProfile.seedEventId, worldVersionId: person.originProfile.worldVersionId, entityId: person.originProfile.entityId }] : []);
-  const characters = cast.map(({ originProfile: _origin, campaignProfile: _campaign, fieldSources: _sources, ...person }) => ({ ...person,
+  const characters = cast.filter(person => !person.mergedIntoCharacterId).map(({ originProfile: _origin, campaignProfile: _campaign, fieldSources: _sources, ...person }) => ({ ...person,
     name: projectCastFictionText(person.name, 200) || "Unnamed character",
     aliases: person.aliases.map(alias => projectCastFictionText(alias, 200)).filter(Boolean),
     profile: Object.fromEntries(Object.entries(person.profile).filter(([field]) => ["identity.pronouns", "story.role", "appearance.description"].includes(field))
       .map(([field, value]) => [field, projectCastFictionText(value)]).filter(([, value]) => value && !/\b(?:score|modifier|difficulty|target)\s*:?\s*[+-]?\d/iu.test(value))) }));
-  return { characters, identityHints: castDiscoveryCharacterHints(cast), seedActivations };
+  const historicalNames = cast.filter(person => person.mergedIntoCharacterId).flatMap(person => [person.name, ...person.aliases].map(name => ({ characterId: person.mergedIntoCharacterId!, name })));
+  return { characters, historicalNames, identityHints: castDiscoveryCharacterHints(cast.filter(person => !person.mergedIntoCharacterId)), seedActivations };
 }
 
 /** Capture once per chunk, before the first physical extraction attempt. */
@@ -43,7 +44,7 @@ export async function captureCastDiscoveryIdentities(client: DatabaseClient, sco
   const represented = origins.filter(origin => sameWorldVersions.has(origin.worldVersionId));
   const allWorldCharacters = castDiscoveryWorldIdentities(world.content);
   const worldCharacters = allWorldCharacters.filter(person => !represented.some(origin => [person.entityId, ...person.equivalentEntityIds ?? []].includes(origin.entityId)));
-  const representedWorldCharacters = allWorldCharacters.flatMap(person => [...new Set(represented.filter(origin => [person.entityId, ...person.equivalentEntityIds ?? []].includes(origin.entityId)).map(origin => origin.characterId))]
+  const representedWorldCharacters = allWorldCharacters.flatMap(person => [...new Set(represented.filter(origin => [person.entityId, ...person.equivalentEntityIds ?? []].includes(origin.entityId)).map(origin => cast.characters.find(person => person.id === origin.characterId)?.mergedIntoCharacterId ?? origin.characterId))]
     .map(characterId => ({ ...person, characterId })));
   return castDiscoveryIdentitySnapshotSchema.parse({ revision: cast.revision, ...compactCastDiscoveryCharacters(cast.characters), worldVersionId: world.world_version_id, worldCharacters, representedWorldCharacters });
 }
@@ -58,8 +59,17 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
   const captured = claim.identities;
   const identityPolicy = claim.execution.admission?.identityPolicy ?? "strict";
   const validationWorldCharacters = [...captured.worldCharacters, ...(captured.representedWorldCharacters ?? [])];
-  const first = validateCastDiscovery({ source: claim.source, output: claim.output, knownCharacters: captured.characters,
-    worldCharacters: validationWorldCharacters, worldVersionId: captured.worldVersionId, identityPolicy, identityHints: captured.identityHints });
+  const output = castDiscoveryOutputSchema.parse(claim.output);
+  const resolvedOutput = { ...output, characters: output.characters.map(candidate => {
+    if (candidate.existingCharacterId) return candidate;
+    const terms = [candidate.name, ...candidate.aliases].map(normalizeEntityTerm);
+    const historical = [...new Set((captured.historicalNames ?? []).filter(item => terms.includes(normalizeEntityTerm(item.name))).map(item => item.characterId))];
+    const matches = captured.characters.filter(person => [person.name, ...person.aliases].some(name => terms.includes(normalizeEntityTerm(name)))).map(person => person.id);
+    const ids = [...new Set([...historical, ...matches])];
+    return historical.length && ids.length === 1 ? { ...candidate, existingCharacterId: ids[0]! } : candidate;
+  }) };
+  const first = validateCastDiscovery({ source: claim.source, output: resolvedOutput, knownCharacters: captured.characters,
+    worldCharacters: validationWorldCharacters, worldVersionId: captured.worldVersionId, identityPolicy, identityHints: captured.identityHints, historicalNames: captured.historicalNames });
   let current = await initializeCastWithClient(client, claim.scope);
   const pinned = (await client.query(`SELECT c.world_version_id,w.world_id,w.content FROM campaigns c JOIN world_versions w ON w.id=c.world_version_id AND w.owner_user_id=c.owner_user_id WHERE c.id=$1 AND c.owner_user_id=$2`, [claim.scope.campaignId, claim.scope.ownerUserId])).rows[0];
   const capturedWorld = (await client.query("SELECT world_id FROM world_versions WHERE id=$1 AND owner_user_id=$2", [captured.worldVersionId, claim.scope.ownerUserId])).rows[0];
@@ -87,15 +97,18 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
     const prior = captured.characters.find((person) => person.id === matchedId);
     const now = current.characters.find((person) => person.id === matchedId);
     const capturedSeed = captured.seedActivations?.find(item => item.characterId === prior?.id)?.seedEventId ?? prior?.originProfile?.seedEventId;
-    if (prior && (!now || stableStringify([prior.name, prior.aliases, prior.origin, capturedSeed]) !== stableStringify([now.name, now.aliases, now.origin, now.originProfile?.seedEventId]))) {
+    if (prior && (!now || (!now.mergedIntoCharacterId && stableStringify([prior.name, prior.aliases, prior.origin, capturedSeed]) !== stableStringify([now.name, now.aliases.filter(alias => prior.aliases.includes(alias)), now.origin, now.originProfile?.seedEventId])))) {
       unresolved.push({ candidate: proposal, code: "identity_changed" }); continue;
     }
     // Manual value overrides do not erase old evidence or turn an identity hint into a new model assertion.
     // Recheck identity collisions against today's roster, retaining the captured hint values for the same IDs.
-    const reconciled = current.characters.map((person) => ({ ...person,
+    const reconciled = current.characters.filter(person => !person.mergedIntoCharacterId).map((person) => ({ ...person,
+      aliases: now?.mergedIntoCharacterId === person.id && ![person.name, ...person.aliases].some(name => normalizeEntityTerm(name) === normalizeEntityTerm(candidate.name))
+        ? [...person.aliases.slice(0, 19), candidate.name] : person.aliases,
       profile: captured.characters.find((old) => old.id === person.id)?.profile ?? person.profile }));
-    const checked = validateCastDiscovery({ source: claim.source, output: { version: 1, characters: [proposal] }, knownCharacters: reconciled,
-      worldCharacters: validationWorldCharacters, worldVersionId: captured.worldVersionId, identityPolicy, identityHints: captured.identityHints });
+    const effectiveNow = now?.mergedIntoCharacterId ?? now?.id;
+    const checked = validateCastDiscovery({ source: claim.source, output: { version: 1, characters: [{ ...proposal, existingCharacterId: effectiveNow ?? proposal.existingCharacterId }] }, knownCharacters: reconciled,
+      worldCharacters: validationWorldCharacters, worldVersionId: captured.worldVersionId, identityPolicy, identityHints: captured.identityHints, historicalNames: captured.historicalNames });
     if (!checked.accepted.length) { rejected.push(...checked.rejected); unresolved.push(...checked.unresolved); continue; }
     let characterId = candidate.existingCharacterId;
     if (!characterId && resolvedOrigin.kind === "world") {
@@ -162,6 +175,9 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
   // Refresh once using the complete roster, so shared aliases remain ambiguous.
   if (characterIds.length) await refreshCastChronicleMetadata(client, claim.scope, current);
   for (const item of unresolved) {
+    const original = current.characters.find(person => person.id === item.candidate.existingCharacterId);
+    const target = current.characters.find(person => person.id === (original?.mergedIntoCharacterId ?? original?.id));
+    if (target?.removed) continue;
     await client.query(`INSERT INTO campaign_cast_discovery_candidates(owner_user_id,campaign_id,job_id,chunk_ordinal,local_key,source,proposal,reason)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(job_id,chunk_ordinal,local_key) DO NOTHING`,
     [claim.scope.ownerUserId, claim.scope.campaignId, claim.id, claim.chunkOrdinal, item.candidate.localKey, JSON.stringify(claim.source), JSON.stringify(item.candidate), item.code]);

@@ -16,6 +16,7 @@ function safeHint(value: unknown, maximum: number): string {
 export function buildCastDiscoveryInput(input: {
   source: CastDiscoverySource; knownCharacters: CastCharacter[]; worldCharacters?: CastDiscoveryWorldIdentity[];
   identityHints?: CastDiscoveryIdentitySnapshot["identityHints"];
+  historicalNames?: CastDiscoveryIdentitySnapshot["historicalNames"];
   seedActivations?: CastDiscoveryIdentitySnapshot["seedActivations"];
   worldVersionId?: string;
 }): string {
@@ -180,6 +181,7 @@ type DiscoveryValidationInput = {
   source: CastDiscoverySource; output: unknown; knownCharacters: CastCharacter[];
   worldCharacters?: CastDiscoveryWorldIdentity[]; worldVersionId?: string; identityPolicy?: CastIdentityPolicy;
   identityHints?: CastDiscoveryIdentitySnapshot["identityHints"];
+  historicalNames?: CastDiscoveryIdentitySnapshot["historicalNames"];
 };
 export function validateCastDiscovery(input: DiscoveryValidationInput): CastDiscoveryValidation {
   return validateDiscovery(input, false);
@@ -237,7 +239,7 @@ function validateDiscovery(input: DiscoveryValidationInput, explicitIdentity: bo
     if (candidate.identityEvidence.some((evidence) => prospective.test(paragraphs.get(evidence.paragraphId)!))) { hold("non_actual_identity"); continue; }
     if (/^(?:crowd|people|guards|villagers|everyone|someone|a person)$/iu.test(candidate.name)) { hold("insufficient_identity"); continue; }
     const terms = [candidate.name, ...candidate.aliases].map(normalizeEntityTerm);
-    const matches = input.knownCharacters.filter((person) => [person.name, ...person.aliases].some((alias) => terms.includes(normalizeEntityTerm(alias)) && contains(identityText, alias)));
+    const matches = input.knownCharacters.filter((person) => [person.name, ...person.aliases, ...(input.historicalNames ?? []).filter(item => item.characterId === person.id).map(item => item.name)].some((alias) => terms.includes(normalizeEntityTerm(alias)) && contains(identityText, alias)));
     if (!explicitIdentity && (matches.length > 1 || matches.length === 1 && candidate.existingCharacterId !== matches[0]!.id
       || candidate.existingCharacterId && !matches.some((person) => person.id === candidate.existingCharacterId))) { hold("identity_needs_review"); continue; }
     const corroborates = (person: { name: string; aliases: string[] }, hints: string[]) =>

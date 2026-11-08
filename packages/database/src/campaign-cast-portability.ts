@@ -48,14 +48,15 @@ export async function exportCampaignCast(client: DatabaseClient, scope: CastScop
       || event.commands.some(({ command }: ReturnType<typeof castStoredCommandSchema.parse>) => command.kind === "seed_profile" || command.kind === "edit_authored_profile"
         || command.kind === "override" && command.value.length > 2_000);
   });
-  return portableCampaignCastSchema.parse({ formatVersion: needsV3 ? 3 : 2, revision: state.revision, characters,
-    events: needsV3 ? retained : retained.map(({ receipt, ...event }) => event) });
+  const needsV4 = retained.some(event => event.commands.some(({ command }: ReturnType<typeof castStoredCommandSchema.parse>) => ["merge", "unmerge", "remove", "restore"].includes(command.kind) || command.kind === "identity" && command.aliasChanges));
+  return portableCampaignCastSchema.parse({ formatVersion: needsV4 ? 4 : needsV3 ? 3 : 2, revision: state.revision, characters,
+    events: needsV4 || needsV3 ? retained : retained.map(({ receipt, ...event }) => event) });
 }
 
 export async function importCampaignCast(client: DatabaseClient, scope: CastScope, raw: unknown,
   maps: { turns: ReadonlyMap<string, string>; worlds: ReadonlyMap<string, string> }): Promise<void> {
   if (raw === undefined || raw === null) return;
-  if (typeof raw === "object" && "formatVersion" in raw && raw.formatVersion !== 1 && raw.formatVersion !== 2 && raw.formatVersion !== 3) throw new Error("cast_archive_version_unsupported");
+  if (typeof raw === "object" && "formatVersion" in raw && raw.formatVersion !== 1 && raw.formatVersion !== 2 && raw.formatVersion !== 3 && raw.formatVersion !== 4) throw new Error("cast_archive_version_unsupported");
   const payload = portableCampaignCastSchema.parse(raw);
   const characterIds = new Map(payload.characters.map((person) => [person.id, randomUUID()]));
   const eventIds = new Map(payload.events.map((event) => [event.id, randomUUID()]));
@@ -92,6 +93,9 @@ export async function importCampaignCast(client: DatabaseClient, scope: CastScop
       observationIds: receipt.observationIds.map(id => requireId(observationIds, id)),
       ...(result && person ? { result: { ...result, character: { ...person, id: requireId(characterIds, person.id),
         origin: people.find(row => row.id === requireId(characterIds, person.id))!.origin,
+        ...(person.mergedIntoCharacterId ? { mergedIntoCharacterId: requireId(characterIds, person.mergedIntoCharacterId) } : {}),
+        ...(person.activeMerges ? { activeMerges: person.activeMerges.map(merge => ({ ...merge,
+          mergeEventId: requireId(eventIds, merge.mergeEventId), sourceCharacterId: requireId(characterIds, merge.sourceCharacterId) })) } : {}),
         ...(seed && seedEvidence ? { originProfile: { ...seed, seedEventId: requireId(eventIds, seed.seedEventId),
           worldVersionId: seedEvidence.kind === "world" ? seedEvidence.worldVersionId : seed.worldVersionId, evidence: seedEvidence } } : {}) } } } : {}) };
   };
@@ -117,7 +121,7 @@ export async function importCampaignCast(client: DatabaseClient, scope: CastScop
         ...(command.evidence ? { evidence: evidence(command.evidence) } : {}) }
         : { ...command, characterId: requireId(characterIds, command.characterId), ...(command.kind === "seed_profile" ? {
           evidence: evidence(command.evidence), worldVersionId: command.evidence.kind === "world" ? maps.worlds.get(command.worldVersionId) ?? command.worldVersionId : command.worldVersionId
-        } : command.kind === "edit_authored_profile" ? { seedEventId: requireId(eventIds, command.seedEventId) } : command.kind === "detach" ? { eventId: requireId(eventIds, command.eventId) } : command.kind === "observe" ? {
+        } : command.kind === "merge" ? { sourceCharacterId: requireId(characterIds, command.sourceCharacterId) } : command.kind === "unmerge" ? { mergeEventId: requireId(eventIds, command.mergeEventId) } : command.kind === "edit_authored_profile" ? { seedEventId: requireId(eventIds, command.seedEventId) } : command.kind === "detach" ? { eventId: requireId(eventIds, command.eventId) } : command.kind === "observe" ? {
           evidence: evidence(command.evidence), speakerCharacterId: command.speakerCharacterId ? requireId(characterIds, command.speakerCharacterId) : null,
           supersedesObservationId: command.supersedesObservationId ? requireId(observationIds, command.supersedesObservationId) : null
         } : command.kind === "mention" ? { evidence: evidence(command.evidence), ...(command.sourceRange ? { sourceRange: { ...command.sourceRange, turnId: command.evidence.invalidated

@@ -174,8 +174,10 @@ integration("campaign cast composed generation", () => {
     } })).toBe("complete");
     const pending = (await pool.query("SELECT reason FROM campaign_cast_discovery_candidates WHERE campaign_id=$1", [scope.campaignId])).rows;
     expect(pending).toEqual([]);
-    expect((await pool.query("SELECT validation_summary FROM campaign_cast_discovery_receipts WHERE campaign_id=$1", [scope.campaignId])).rows)
-      .toEqual([expect.objectContaining({ validation_summary: { accepted: 1, unresolved: 0, rejected: [] } })]);
+    const receipts = (await pool.query("SELECT validation_summary FROM campaign_cast_discovery_receipts WHERE campaign_id=$1", [scope.campaignId])).rows;
+    expect(receipts).toMatchObject([{ validation_summary: { accepted: 1, unresolved: 0, rejected: [],
+      worldIdentitySnapshot: { worldVersionId: expect.any(String), identities: expect.any(Array) } } }]);
+    expect(JSON.stringify(receipts)).not.toMatch(/PRIVATE_REASONING_CANARY|PRIVATE_CREDENTIAL_CANARY|PRIVATE_EXTENSION_CANARY|PRIVATE_VISUAL_CANARY/);
     const current = await cast.current(scope), person = current.characters.find((item) => item.name === "Mara")!;
     expect(person).toMatchObject({ origin: { kind: "discovered" }, aliases: ["Silver Watcher"] });
     let edited = await cast.edit(scope, person.id, { expectedCastRevision: current.revision, expectedCharacterRevision: person.revision,

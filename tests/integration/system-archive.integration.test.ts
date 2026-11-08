@@ -1054,6 +1054,8 @@ integration("deterministic owner-wide System Archive export", () => {
     const content = structuredClone(original.rows[0]!.content);
     const characters = [{ id: "converted-character", name: "New", characterText: "Lore", campaignUse: "supporting", startingCastDefault: false,
       alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: { type: "world-entity", entityId: "converted-npc", private: "omit" } }];
+    characters.push({ id: "promoted-character", name: "Promoted", characterText: "Lore", campaignUse: "supporting", startingCastDefault: false,
+      alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: { type: "campaign-promotion", entityId: "", private: "private-campaign-id" } });
     content.playableCharacters = characters;
     content.entities = [{ id: "converted-npc", name: "Old", kind: "npc", description: "Lore", tags: [], facts: [], linkedCharacterId: characters[0]!.id }];
     await pool.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1", [worldVersionId, JSON.stringify(content)]);
@@ -1064,6 +1066,8 @@ integration("deterministic owner-wide System Archive export", () => {
         .map((entry) => entry.async("string")))).flatMap((entry) => entry.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)));
       const saved = records.find((entry) => entry.sourceId === worldVersionId).record.content;
       expect(saved.playableCharacters[0].source).toEqual({ type: "world-entity", entityId: "converted-npc" });
+      expect(saved.playableCharacters[1].source).toEqual({ type: "campaign-promotion" });
+      expect(JSON.stringify(saved)).not.toContain("private-campaign-id");
       expect(saved.entities[0].linkedCharacterId).toBe(characters[0]!.id);
     } finally {
       await pool.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1", [worldVersionId, JSON.stringify(original.rows[0]!.content)]);

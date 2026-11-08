@@ -1,3 +1,5 @@
+import { castPromotionPreviewSchema, castPromoteSchema, castPromoteResultSchema, type CastPromote } from "@infinite-quest/contracts";
+import { castMergePreviewSchema, castMergeRequestSchema, castUnmergeRequestSchema, type CastMergeRequest, type CastUnmergeRequest } from "@infinite-quest/contracts";
 import { castWorldChoicesSchema, castFromWorldPreviewQuerySchema, castFromWorldPreviewSchema, castFromWorldSchema, editAuthoredCastProfileSchema,
   type CastFromWorld, type CastFromWorldPreviewQuery, type EditAuthoredCastProfile } from "@infinite-quest/contracts";
 import { reviewCastDetailSchema, reviewCastDetailResultSchema, type ReviewCastDetail } from "@infinite-quest/contracts";
@@ -16,6 +18,35 @@ export function createCampaignCastApplication(repository: CampaignCastWritePort,
   scans?: CastBackfillApplication,
   draftPreview?: (scope: CastScope, id: string, request: import("@infinite-quest/contracts").CastDraftPreviewRequest) => Promise<import("@infinite-quest/contracts").CastDraftPreviewResponse>) {
   return {
+    async promotionPreview(scope: CastScope, id: string, worldId: string) {
+      if (!repository.promotionPreview) throw new CampaignCastError("cast_lifecycle_disabled");
+      return castPromotionPreviewSchema.parse(await repository.promotionPreview(castScopeSchema.parse(scope), id, worldId));
+    },
+    async promote(scope: CastScope, id: string, request: CastPromote) {
+      if (!repository.promote) throw new CampaignCastError("cast_lifecycle_disabled");
+      return castPromoteResultSchema.parse(await repository.promote(castScopeSchema.parse(scope), id, castPromoteSchema.parse(request)));
+    },
+    async unmergePreview(scope: CastScope, targetId: string, mergeEventId: string) {
+      if (!repository.unmergePreview) throw new CampaignCastError("cast_lifecycle_disabled");
+      return repository.unmergePreview(castScopeSchema.parse(scope), targetId, mergeEventId);
+    },
+    async mergePreview(scope: CastScope, targetId: string, sourceId: string) {
+      if (!repository.mergePreview) throw new CampaignCastError("cast_lifecycle_disabled");
+      return castMergePreviewSchema.parse(await repository.mergePreview(castScopeSchema.parse(scope), targetId, sourceId));
+    },
+    async merge(scope: CastScope, targetId: string, request: CastMergeRequest) {
+      if (!repository.merge) throw new CampaignCastError("cast_lifecycle_disabled");
+      return castWriteResultSchema.parse(await repository.merge(castScopeSchema.parse(scope), targetId, castMergeRequestSchema.parse(request)));
+    },
+    async unmerge(scope: CastScope, targetId: string, request: CastUnmergeRequest) {
+      if (!repository.unmerge) throw new CampaignCastError("cast_lifecycle_disabled");
+      return castWriteResultSchema.parse(await repository.unmerge(castScopeSchema.parse(scope), targetId, castUnmergeRequestSchema.parse(request)));
+    },
+    async changeRemoval(scope: CastScope, id: string, action: "remove" | "restore", input: unknown) {
+      if (!repository.changeRemoval) throw new CampaignCastError("cast_lifecycle_disabled");
+      const { castLifecycleChangeSchema } = await import("@infinite-quest/contracts");
+      return castWriteResultSchema.parse(await repository.changeRemoval(castScopeSchema.parse(scope), id, action, castLifecycleChangeSchema.parse(input)));
+    },
     async draftPreview(scope: CastScope, id: string, request: import("@infinite-quest/contracts").CastDraftPreviewRequest) {
       const { castDraftPreviewRequestSchema, castDraftPreviewResponseSchema } = await import("@infinite-quest/contracts");
       if (!draftPreview) throw new CampaignCastError("cast_discovery_unavailable");
@@ -55,7 +86,8 @@ export function createCampaignCastApplication(repository: CampaignCastWritePort,
       if (query.expectedRevision !== undefined && query.expectedRevision !== value.revision
         || query.expectedTurnNumber !== undefined && query.expectedTurnNumber !== value.boundary.turnNumber
         || query.expectedTimelineRevision !== undefined && query.expectedTimelineRevision !== value.boundary.timelineRevision) throw new CampaignCastError("cast_revision_conflict");
-      const matches = value.characters.filter((person) => query.filter === "ignored" ? person.ignored : !person.ignored)
+      const matches = value.characters.filter(person => !person.mergedIntoCharacterId &&
+        (query.filter === "removed" ? person.removed : !person.removed && (query.filter === "all" || (query.filter === "ignored" ? person.ignored : !person.ignored))))
         .filter((person) => query.filter === "main" ? person.origin.kind === "protagonist"
           : query.filter === "pinned" ? person.pinned
           : query.filter === "conflicts" ? workspace?.conflictIds.includes(person.id) === true

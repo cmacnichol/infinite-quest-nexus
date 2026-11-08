@@ -1,3 +1,4 @@
+import { showLifecycle } from "./character-editor/cast-lifecycle.js";
 import { createStoryDraftReview } from "./character-editor/story-draft.js";
 import { renderPresetFields } from "./character-editor/preset-fields.js";
 import { renderWorldCastPicker } from "./character-editor/world-cast-picker.js";
@@ -8,6 +9,7 @@ import { buildCharacterSheet, canSaveCastEditor, createCastEditor, changeCastEdi
   failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, characterProvenanceLabel, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
 import { buildReviewQueue, createCharactersWorkspaceSession, type CampaignCastApi } from "@infinite-quest/client-web";
 import type { CampaignCharacterProfile, CharacterFilter, CastDetail, CastDiscoveryStatus, CastField, CastCandidateList, ResolveCastCandidate, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
+import { normalizeCastAlias } from "@infinite-quest/contracts";
 import { castScanRecovery, renderLegacyCastScan } from "./campaign-cast-scan-panel.js";
 
 const fields = SUPPORTING_FIELDS.map(field => [field.path as CastField, field.label] as const);
@@ -18,7 +20,7 @@ export function mainProfileSourceLabel(profile: { inheritedFromSnapshot?: boolea
 }
 type List = Awaited<ReturnType<CampaignCastApi["list"]>>;
 export function createLegacyCastPanel(options: {
-  api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview"> & Partial<Pick<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview">>; campaignId(): string | null; generationActive(): boolean;
+  api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle"> & Partial<Pick<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle">>; campaignId(): string | null; generationActive(): boolean;
   campaignPage?: boolean;
   checkLock?(campaign: string): Promise<boolean>;
   getProfile?(campaign: string): Promise<CampaignCharacterProfile & { revision: number; inheritedFromSnapshot?: boolean; storedProfile?: unknown }>;
@@ -88,7 +90,7 @@ export function createLegacyCastPanel(options: {
     const dismiss = () => { prompt.remove(); for (const child of background) child.removeAttribute("inert"); };
     const keep = button("Keep editing", () => { dismiss(); previous?.focus(); });
     const discard = button("Discard changes", () => { dismiss(); editor = null; preset = null; action(); });
-    const save = button("Save changes", () => { dismiss(); void saveDraft(action); }, !enabled || locked() || (!preset && (!editor || !canSaveCastEditor(editor))));
+    const save = button("Save changes", () => { dismiss(); void saveDraft(action); }, !enabled || locked() || (!preset && (!editor || !canSaveCastEditor(editor) || Boolean(dialog.querySelector<HTMLButtonElement>("#cast-save")?.disabled))));
     prompt.addEventListener("keydown", event => {
       if (event.key !== "Tab") return;
       const choices = [keep, discard, save].filter(item => !item.disabled);
@@ -314,7 +316,7 @@ export function createLegacyCastPanel(options: {
     const search = node("input"); search.id = "cast-search"; search.type = "search"; search.value = query; search.maxLength = 200;
     const submit = node("button", "Search"); submit.type = "submit";
     const filterLabel = node("label", "Filter characters"), filterSelect = node("select"); filterLabel.htmlFor = "cast-filter"; filterSelect.id = "cast-filter";
-    for (const [value, label] of [["all", "All"], ["main", "Main"], ["recent", recentFilterLabel(list?.recentWindow)], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"]]) { const option = node("option", label); option.value = value!; option.selected = value === filter; filterSelect.append(option); }
+    for (const [value, label] of [["all", "All"], ["main", "Main"], ["recent", recentFilterLabel(list?.recentWindow)], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"], ...(list?.capabilities.castLifecycle !== undefined ? [["removed", "Removed"]] : [])]) { const option = node("option", label); option.value = value!; option.selected = value === filter; filterSelect.append(option); }
     filterSelect.addEventListener("change", () => { filter = filterSelect.value as CharacterFilter; query = search.value; workspace.setQuery(query, filter); void loadRoster(); });
     controls.append(label, search, filterLabel, filterSelect, submit);
     controls.addEventListener("submit", (event) => { event.preventDefault(); query = search.value; workspace.setQuery(query, filter); void loadRoster(); });
@@ -359,7 +361,7 @@ export function createLegacyCastPanel(options: {
       dialog.append(button("Back to characters", () => { void loadRoster(); }));
     }
   }
-  function renderSheet(detail: CastDetail, profile: (CampaignCharacterProfile & { revision: number; inheritedFromSnapshot?: boolean; storedProfile?: unknown }) | null = null) {
+  function renderSheet(detail: CastDetail & { capabilities?: List["capabilities"] }, profile: (CampaignCharacterProfile & { revision: number; inheritedFromSnapshot?: boolean; storedProfile?: unknown }) | null = null) {
     const sheet = profile ? buildCharacterSheet({ kind: "protagonist", profile: { name: profile.name, profile: profile.profile }, revision: profile.revision }) : buildCharacterSheet({ kind: "supporting", detail });
     shell(sheet.name); dialog.classList.add("cast-sheet-layout");
     const sidebar = node("nav"); sidebar.className = "cast-sheet-roster"; sidebar.setAttribute("aria-label", "Characters");
@@ -386,8 +388,28 @@ export function createLegacyCastPanel(options: {
         else if (dialog.open && opener.isConnected) opener.focus();
       }); });
       opener.dataset.editProtagonist = ""; dialog.append(opener);
-    } else {
-      dialog.append(button("Edit character", async () => {
+    } else if (!detail.character.mergedIntoCharacterId) {
+      const lifecycle = options.api.lifecycle;
+      if (lifecycle && (detail.capabilities ?? list?.capabilities)?.castLifecycle) {
+        const launch = (action: Parameters<typeof showLifecycle>[0], mergeEventId?: string) => showLifecycle(action, {
+          api: lifecycle, campaign, detail, list: options.api.list, lock: syncLock, ...(mergeEventId ? { mergeEventId } : {}),
+          finished(id, notice) {
+            if (!id) void loadRoster(undefined, notice);
+            else void openDetail(id).then(() => { if (dialog.open) status(notice); });
+          }
+        });
+        const actions = node("div"); actions.className = "cast-lifecycle-actions";
+        if (detail.character.removed) actions.append(button("Restore", () => launch("restore"), locked()));
+        else {
+          actions.append(button("Merge with another character", () => launch("merge"), locked()),
+            button("Remove from cast", () => launch("remove"), locked()), button("Add to world draft", () => launch("promote"), locked()));
+          for (const merge of detail.character.activeMerges ?? []) {
+            actions.append(node("p", "Merged from " + merge.sourceName), button("Undo merge", () => launch("unmerge", merge.mergeEventId), locked() || !merge.canUndo));
+          }
+        }
+        dialog.append(actions);
+      }
+      if (!detail.character.removed) dialog.append(button("Edit character", async () => {
         const token = epoch; if (options.checkLock) await syncLock(); if (!current(token)) return;
         if (detail.character.originProfile) preset = createPresetDraft(detail);
         workspace.setDraft(editor); renderEditor();
@@ -540,7 +562,7 @@ export function createLegacyCastPanel(options: {
     form.dataset.characterContext = "campaign-supporting";
     form.append(node("p", editor.characterId ? "Saved facts are filled in. Edit only what needs changing." : "Only a name is required. Add details you know, or review story matches to fill characters from evidence."));
     const save = node("button", editor.saving ? "Saving…" : "Save character"); save.type = "submit"; save.className = "primary"; save.id = "cast-save";
-    const syncSave = () => { save.disabled = Boolean(locked) || !canSaveCastEditor(editor!); };
+    const syncSave = () => { save.disabled = Boolean(locked) || !canSaveCastEditor(editor!) || heldMatches().length > 0; };
     function textInput(label: string, id: string, value: string, max: number, changed: (value: string) => void, multiline = false) {
       const wrap = node("div"), caption = node("label", label); caption.htmlFor = id;
       const input = multiline ? node("textarea") : node("input"); input.id = id; input.value = value; input.maxLength = max;
@@ -559,17 +581,35 @@ export function createLegacyCastPanel(options: {
           people.push(...page.characters); cursor = page.nextCursor ?? undefined;
         } while (cursor);
         if (!dialog.contains(duplicateWarning)) return;
+        if (!editor?.characterId) {
+          let removedCursor: string | undefined;
+          do {
+            const removed = await options.api.list(campaign, { filter: "removed", limit: 50, ...(revision === undefined ? {} : { expectedRevision: revision }), ...(removedCursor ? { cursor: removedCursor } : {}) });
+            if (removed.revision !== revision) return;
+            people.push(...removed.characters); removedCursor = removed.nextCursor ?? undefined;
+          } while (removedCursor && dialog.contains(duplicateWarning));
+        }
+        if (!dialog.contains(duplicateWarning)) return;
         duplicateRoster = people; updateDuplicateWarning();
-      } catch { /* A duplicate warning is advisory; saving remains available. */ }
+      } catch { /* The server checks held names under the campaign lock. */ }
     })();
+    function heldMatches() {
+      if (editor!.characterId) return [];
+      const terms = new Set([editor!.draft.name, ...editor!.draft.aliases].map(normalizeCastAlias).filter(Boolean));
+      return duplicateRoster.filter(person => person.removed && [person.name, ...person.aliases].some(value => terms.has(normalizeCastAlias(value))));
+    }
     function updateDuplicateWarning() {
-      const name = editor!.draft.name.trim().toLocaleLowerCase();
-      const duplicate = name && duplicateRoster.some(person => person.id !== editor!.characterId && [person.name, ...person.aliases].some(value => value.trim().toLocaleLowerCase() === name));
-      duplicateWarning.textContent = duplicate ? "A character with this name already exists. You can still save." : "";
+      const name = normalizeCastAlias(editor!.draft.name), held = heldMatches();
+      const duplicate = name && duplicateRoster.some(person => !person.removed && person.id !== editor!.characterId && [person.name, ...person.aliases].some(value => normalizeCastAlias(value) === name));
+      duplicateWarning.textContent = held.length ? "A removed character holds this name. Restore them instead." : duplicate ? "A character with this name already exists. You can still save." : "";
+      for (const person of held) {
+        duplicateWarning.append(button("Restore " + person.name, () => requestNavigation(() => void openDetail(person.id)), !options.api.lifecycle || !list?.capabilities.castLifecycle));
+      }
+      syncSave();
     }
     updateDuplicateWarning();
     textInput("Aliases (one per line)", "cast-aliases", editor.draft.aliases.join("\n"), 4020,
-      (value) => { editor = changeCastEditor(editor!, { aliases: value.split("\n").map((v) => v.trim()).filter(Boolean) }); }, true);
+      (value) => { editor = changeCastEditor(editor!, { aliases: value.split("\n").map((v) => v.trim()).filter(Boolean) }); updateDuplicateWarning(); }, true);
     renderSupportingEditorFields(form, { expanded, existing: Boolean(editor.characterId), field(path, label) {
       const field = path as CastField;
       const wrap = textInput(label, `cast-${field.replace(".", "-")}`, editor!.draft.profile[field] ?? "", 2000,

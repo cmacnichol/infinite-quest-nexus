@@ -55,3 +55,13 @@ Save and reset actions are available again after pending or recoverable generati
 Open a companion or supporting character and choose **Edit character**. When the character has an eligible citation and generation is idle, **Draft from story** can suggest details for blank fields. You can give the campaign text model a direction. Review each suggestion alongside its current value, quoted passage and turn link. **Creative guidance** identifies optional writing guidance without a factual citation.
 
 **Apply selected suggestions** fills the local draft. **Save character** records your selections as hand edits. If the cited narration changes before saving, the editor keeps your draft and asks you to review fresh evidence. You can also enter your own details directly.
+
+## Manage a campaign character
+
+Open **Characters** in Story or on the Nexus campaign page, then select a supporting character. When lifecycle operations are enabled, the sheet offers the following actions.
+
+- **Merge with another character** lets you find a duplicate, compare both records and choose the aliases and conflicting field values to keep. The preview identifies the surviving character. Choose **Confirm merge** to combine their histories. **Undo merge** previews the two restored identities and preserves later independent edits. If another active merge depends on this one, undo that later merge first.
+- **Remove from cast** hides the character from the normal roster, narrator context and Chronicle catalog. The character keeps their history and reserves their name for matching. Choose the **Removed** filter and select **Restore** to return them to the cast. If a new character’s name or alias matches a removed character, the editor offers to restore the existing record. Ignore remains available for a visible character you want to exclude from narrator context.
+- **Add to world draft** opens a choice of active worlds. Review the destination fields, select Add or Replace, and choose one source where several values could fill a field. Add requires a name. Replace preserves unticked fields and the target's mechanics. **Confirm draft change** updates the draft. Publish it when you want the character available for future campaigns.
+
+These actions require an idle campaign. If the campaign or world draft changes during review, refresh the preview and check the new values before confirming.

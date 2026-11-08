@@ -2,7 +2,7 @@ import { z } from "zod";
 import { castBoundarySchema } from "./campaign-cast.js";
 import { castDiscoveryStatusSchema } from "./campaign-cast-discovery.js";
 
-export const characterFilterSchema = z.enum(["all", "main", "recent", "pinned", "needs_review", "conflicts", "ignored"]);
+export const characterFilterSchema = z.enum(["all", "main", "recent", "pinned", "needs_review", "conflicts", "ignored", "removed"]);
 export type CharacterFilter = z.infer<typeof characterFilterSchema>;
 export const castNarratorStateSchema = z.enum(["installation_disabled", "enrollment_missing", "capability_insufficient", "discovery_off", "ready"]);
 export type CastNarratorState = z.infer<typeof castNarratorStateSchema>;

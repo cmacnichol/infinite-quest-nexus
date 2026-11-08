@@ -4,19 +4,32 @@ import { CampaignCastError, type CampaignCastApplication } from "../../../packag
 import { registerCampaignCastScanRoutes } from "./campaign-cast-scan-routes.js";
 
 export async function registerCampaignCastRoutes(app: FastifyInstance, options: {
-  application: CampaignCastApplication; enabled: boolean; presetsEnabled?: boolean; resolveOwner(): Promise<{ ownerUserId: string }>;
+  application: CampaignCastApplication; enabled: boolean; lifecycleEnabled?: boolean; presetsEnabled?: boolean; resolveOwner(): Promise<{ ownerUserId: string }>;
 }) {
   await registerCampaignCastScanRoutes(app, { ...(options.application.scans ? { application: options.application.scans } : {}), resolveOwner: options.resolveOwner });
   const base = "/api/v1/campaigns/:campaignId/cast";
   const params = z.object({ campaignId: z.uuid(), characterId: z.uuid().optional(), candidateId: z.uuid().optional(), jobId: z.uuid().optional(), eventId: z.uuid().optional() });
-  for (const [method, path] of [["GET", base], ["GET", `${base}/from-world`], ["GET", `${base}/from-world-preview`], ["POST", `${base}/from-world`], ["POST", `${base}/:characterId/authored-profile`], ["POST", `${base}/:characterId/draft-preview`], ["POST", base], ["GET", `${base}/workspace-status`], ["GET", `${base}/discovery`], ["GET", `${base}/candidates`],
+  for (const [method, path] of [["GET", base], ["GET", `${base}/:characterId/merge-preview`], ["GET", `${base}/:characterId/unmerge-preview`],
+    ["GET", `${base}/:characterId/promotion-preview`], ["POST", `${base}/:characterId/merge`], ["POST", `${base}/:characterId/unmerge`],
+    ["POST", `${base}/:characterId/remove`], ["POST", `${base}/:characterId/restore`], ["POST", `${base}/:characterId/promote`], ["GET", `${base}/from-world`], ["GET", `${base}/from-world-preview`], ["POST", `${base}/from-world`], ["POST", `${base}/:characterId/authored-profile`], ["POST", `${base}/:characterId/draft-preview`], ["POST", base], ["GET", `${base}/workspace-status`], ["GET", `${base}/discovery`], ["GET", `${base}/candidates`],
     ["POST", `${base}/:characterId/attachments/:eventId/detach`], ["POST", `${base}/discovery/:jobId/retry`], ["POST", `${base}/candidates/:candidateId/details/resolve`], ["POST", `${base}/candidates/:candidateId/resolve`], ["GET", `${base}/:characterId`], ["PATCH", `${base}/:characterId`]] as const) {
     app.route({ method, url: path, bodyLimit: path.endsWith("/authored-profile") ? 16 * 1024 * 1024
       : method === "PATCH" ? 4 * 1024 * 1024 : method === "POST" && path === base ? 320 * 1024 : 64 * 1024, handler: async (request, reply) => {
       try {
         const ids = params.parse(request.params);
         const scope = { ...await options.resolveOwner(), campaignId: ids.campaignId };
-        const capabilities = { castEditing: options.enabled, ...(options.enabled && options.presetsEnabled ? { castPresets: true } : {}) };
+        const capabilities = { castEditing: options.enabled, ...(options.lifecycleEnabled !== undefined ? { castLifecycle: options.enabled && options.lifecycleEnabled } : {}), ...(options.enabled && options.presetsEnabled ? { castPresets: true } : {}) };
+        const operation = path.slice(path.lastIndexOf("/") + 1);
+        if (ids.characterId && ["merge-preview", "unmerge-preview", "promotion-preview", "merge", "unmerge", "remove", "restore", "promote"].includes(operation)) {
+          if (!options.enabled || !options.lifecycleEnabled) throw new CampaignCastError("cast_lifecycle_disabled");
+          if (operation === "merge-preview") return await options.application.mergePreview(scope, ids.characterId, z.object({ sourceCharacterId: z.uuid() }).strict().parse(request.query).sourceCharacterId);
+          if (operation === "unmerge-preview") return await options.application.unmergePreview(scope, ids.characterId, z.object({ mergeEventId: z.uuid() }).strict().parse(request.query).mergeEventId);
+          if (operation === "promotion-preview") return await options.application.promotionPreview(scope, ids.characterId, z.object({ worldId: z.uuid() }).strict().parse(request.query).worldId);
+          if (operation === "remove" || operation === "restore") return await options.application.changeRemoval(scope, ids.characterId, operation, request.body);
+          if (operation === "merge") return await options.application.merge(scope, ids.characterId, request.body as never);
+          if (operation === "unmerge") return await options.application.unmerge(scope, ids.characterId, request.body as never);
+          return await options.application.promote(scope, ids.characterId, request.body as never);
+        }
         if (method === "GET" && path === `${base}/from-world`) return await options.application.worldChoices(scope);
         if (path === `${base}/workspace-status`) return await options.application.workspaceStatus(scope);
         if (path === `${base}/discovery`) return await options.application.discoveryStatus(scope);
@@ -42,8 +55,8 @@ export async function registerCampaignCastRoutes(app: FastifyInstance, options: 
         if (error instanceof z.ZodError) return reply.code(422).send({ code: "cast_invalid_request",
           error: "CastValidationError", message: "Check the character fields and request limits.", correlationId: request.id, details: { fields: error.issues.map(issue => ({ path: issue.path.join("."), code: issue.code })) } });
         if (!(error instanceof CampaignCastError)) throw error;
-        const status = ["cast_not_found", "cast_world_character_unavailable"].includes(error.code) ? 404 : ["cast_presets_disabled", "cast_editing_disabled", "cast_discovery_disabled", "cast_discovery_admission_required", "cast_discovery_unavailable"].includes(error.code) ? 503
-          : ["cast_invalid_request", "cast_protagonist_read_only", "cast_invalid_field_class", "cast_not_seeded", "cast_fixed_field_override"].includes(error.code) ? 422 : 409;
+        const status = ["cast_not_found", "cast_world_character_unavailable"].includes(error.code) ? 404 : ["cast_lifecycle_disabled", "cast_presets_disabled", "cast_editing_disabled", "cast_discovery_disabled", "cast_discovery_admission_required", "cast_discovery_unavailable"].includes(error.code) ? 503
+          : ["cast_merge_invalid", "cast_invalid_request", "cast_protagonist_read_only", "cast_invalid_field_class", "cast_not_seeded", "cast_fixed_field_override"].includes(error.code) ? 422 : 409;
         return reply.code(status).send({ code: error.code, error: "CampaignCastError", message: error.message,
           correlationId: request.id, details: { code: error.code, ...(error.fields.length ? { fields: error.fields } : {}) }, ...(error.code === "cast_protagonist_read_only"
           ? { editorDestination: `/api/v1/campaigns/${params.parse(request.params).campaignId}/character-profile` } : {}) });

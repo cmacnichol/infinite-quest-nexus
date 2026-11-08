@@ -4,6 +4,13 @@ import type { CreateCastCharacter, EditCastCharacter, CastWriteResult, CastDetai
   CastCandidateList, CastCandidateQuery, ResolveCastCandidate, CastCandidateResolution } from "@infinite-quest/contracts";
 
 export interface CampaignCastWritePort {
+  promotionPreview?(scope: CastScope, id: string, worldId: string): Promise<import("@infinite-quest/contracts").CastPromotionPreview>;
+  promote?(scope: CastScope, id: string, request: import("@infinite-quest/contracts").CastPromote): Promise<import("@infinite-quest/contracts").CastPromoteResult>;
+  unmergePreview?(scope: CastScope, targetId: string, mergeEventId: string): Promise<{ target: import("@infinite-quest/contracts").CastCharacter; source: import("@infinite-quest/contracts").CastCharacter; revision: number; boundary: CastBoundary; expectedCharacterRevision: number; expectedSourceCharacterRevision: number }>;
+  mergePreview?(scope: CastScope, targetId: string, sourceId: string): Promise<import("@infinite-quest/contracts").CastMergePreview>;
+  merge?(scope: CastScope, targetId: string, request: import("@infinite-quest/contracts").CastMergeRequest): Promise<CastWriteResult>;
+  unmerge?(scope: CastScope, targetId: string, request: import("@infinite-quest/contracts").CastUnmergeRequest): Promise<CastWriteResult>;
+  changeRemoval?(scope: CastScope, id: string, action: "remove" | "restore", request: import("@infinite-quest/contracts").CastLifecycleChange): Promise<CastWriteResult>;
   draftPreviewContext?(scope: CastScope, id: string, input: import("@infinite-quest/contracts").CastDraftPreviewRequest): Promise<{ character: import("@infinite-quest/contracts").CastCharacter; boundary: CastBoundary; evidence: import("@infinite-quest/contracts").CastDraftPreviewResponse["evidence"]; observedPaths: string[] }>;
   worldChoices?(scope: CastScope): Promise<import("@infinite-quest/contracts").CastWorldChoices>;
   fromWorldPreview?(scope: CastScope, input: import("@infinite-quest/contracts").CastFromWorldPreviewQuery): Promise<import("@infinite-quest/contracts").CastFromWorldPreview>;
@@ -22,9 +29,9 @@ export interface CampaignCastWritePort {
 }
 
 export class CampaignCastError extends Error {
-  constructor(readonly code: "cast_not_found" | "cast_revision_conflict" | "cast_generation_active"
+  constructor(readonly code: "cast_lifecycle_disabled" | "cast_character_removed" | "cast_character_merged" | "cast_not_found" | "cast_revision_conflict" | "cast_promotion_conflict" | "cast_generation_active"
     | "cast_idempotency_conflict" | "cast_invalid_request" | "cast_editing_disabled" | "cast_protagonist_read_only"
-    | "cast_not_seeded" | "cast_invalid_field_class" | "cast_fixed_field_override" | "cast_world_character_unavailable"
+    | "cast_merge_invalid" | "cast_not_seeded" | "cast_invalid_field_class" | "cast_fixed_field_override" | "cast_world_character_unavailable"
     | "cast_presets_disabled" | "cast_world_preview_changed" | "cast_discovery_disabled" | "cast_discovery_admission_required" | "cast_discovery_unavailable" | "cast_draft_evidence_changed", readonly fields: { path: string; code: string }[] = []) {
     super(code.replaceAll("_", " "));
   }

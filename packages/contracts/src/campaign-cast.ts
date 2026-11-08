@@ -3,6 +3,17 @@ import { characterProfileSchema } from "./world-library.js";
 
 const ordinal = z.number().int().nonnegative();
 const name = z.string().trim().min(1).max(200);
+export const normalizeCastAlias = (value: string) => value.normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").trim();
+export function castAliasDelta(before: readonly string[], after: readonly string[]) {
+  const old = new Set(before.map(normalizeCastAlias)), next = new Set(after.map(normalizeCastAlias));
+  return { added: after.filter(alias => !old.has(normalizeCastAlias(alias))), removed: before.filter(alias => !next.has(normalizeCastAlias(alias))) };
+}
+export function applyCastAliasDelta(before: readonly string[], delta: { added: readonly string[]; removed: readonly string[] }): string[] {
+  const removed = new Set(delta.removed.map(normalizeCastAlias));
+  const aliases = before.filter(alias => !removed.has(normalizeCastAlias(alias)));
+  for (const alias of delta.added) if (!aliases.some(existing => normalizeCastAlias(existing) === normalizeCastAlias(alias))) aliases.push(alias);
+  return aliases;
+}
 export const castScopeSchema = z.object({ ownerUserId: z.uuid(), campaignId: z.uuid() }).strict();
 export const castBoundarySchema = z.object({ turnNumber: ordinal, timelineRevision: ordinal }).strict();
 export const castOriginSchema = z.discriminatedUnion("kind", [
@@ -82,7 +93,7 @@ export const castSeedProfileSchema = z.object({ seedEventId: z.uuid(), worldVers
 export const castCharacterSchema = z.object({
   id: z.uuid(), name, aliases: z.array(name).max(20), origin: castOriginSchema,
   profile: castDetailProfileSchema, originProfile: castSeedProfileSchema.optional(), campaignProfile: characterProfileSchema.optional(),
-  fieldSources: z.partialRecord(z.enum([...castFieldSchema.options, ...castAuthoredPathSchema.options]), z.enum(["authored", "campaign_edit", "observation", "override", "none"])).optional(), pinned: z.boolean(), ignored: z.boolean(), revision: ordinal,
+  fieldSources: z.partialRecord(z.enum([...castFieldSchema.options, ...castAuthoredPathSchema.options]), z.enum(["authored", "campaign_edit", "observation", "override", "none"])).optional(), pinned: z.boolean(), ignored: z.boolean(), removed: z.boolean().optional(), mergedIntoCharacterId: z.uuid().nullable().optional(), activeMerges: z.array(z.object({ mergeEventId: z.uuid(), sourceCharacterId: z.uuid(), sourceName: name, canUndo: z.boolean() }).strict()).optional(), revision: ordinal,
   firstObservedTurn: ordinal, lastObservedTurn: ordinal, lastMentionedTurn: ordinal.nullable().default(null)
 }).strict().refine((value) => value.lastObservedTurn >= value.firstObservedTurn, "Invalid character chronology.");
 /** List readers may receive full legacy rows. Compact them at this boundary; never use summaries for editing. */
@@ -119,7 +130,11 @@ export const castCommandSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("detach"), characterId: z.uuid(), eventId: z.uuid() }).strict(),
   z.object({ kind: z.literal("override"), characterId: z.uuid(), field: castFieldSchema, value: z.string().max(20_000) }).strict().refine((value) => value.field === "story.goals" || value.value.length <= 2000),
   z.object({ kind: z.literal("clear_override"), characterId: z.uuid(), field: castFieldSchema }).strict(),
-  z.object({ kind: z.literal("identity"), characterId: z.uuid(), name, aliases: z.array(name).max(20) }).strict(),
+  z.object({ kind: z.literal("identity"), characterId: z.uuid(), name, aliases: z.array(name).max(20), aliasChanges: z.object({ added: z.array(name).max(20), removed: z.array(name).max(20) }).strict().optional() }).strict(),
+  z.object({ kind: z.literal("merge"), characterId: z.uuid(), sourceCharacterId: z.uuid(), reviewedAliases: z.array(name).max(20), choices: z.partialRecord(z.enum([...new Set([...castFieldSchema.options, ...castAuthoredPathSchema.options])]), z.enum(["source", "target"])), aliasChanges: z.object({ priorTargetAliases: z.array(name).max(20), added: z.array(name).max(20), removed: z.array(name).max(20) }).strict() }).strict().refine(value => value.characterId !== value.sourceCharacterId),
+  z.object({ kind: z.literal("unmerge"), characterId: z.uuid(), mergeEventId: z.uuid() }).strict(),
+  z.object({ kind: z.literal("remove"), characterId: z.uuid() }).strict(),
+  z.object({ kind: z.literal("restore"), characterId: z.uuid() }).strict(),
   z.object({ kind: z.literal("pin"), characterId: z.uuid(), value: z.boolean() }).strict(),
   z.object({ kind: z.literal("ignore"), characterId: z.uuid(), value: z.boolean() }).strict()
 ]);
@@ -167,6 +182,8 @@ export const editCastCharacterSchema = z.object({ ...castWriteBase,
   "Cannot set and clear the same override.").refine((value) => value.name !== undefined || value.aliases !== undefined
     || Object.keys(value.setOverrides ?? {}).length > 0 || (value.clearOverrides?.length ?? 0) > 0
     || value.pinned !== undefined || value.ignored !== undefined, "An edit must change at least one field.");
+export const castLifecycleChangeSchema = z.object({ ...castWriteBase, expectedCharacterRevision: ordinal }).strict();
+export type CastLifecycleChange = z.infer<typeof castLifecycleChangeSchema>;
 export const detachCastAttachmentSchema = z.object({ ...castWriteBase, expectedCharacterRevision: ordinal }).strict();
 export type DetachCastAttachment = z.infer<typeof detachCastAttachmentSchema>;
 export const castWriteResultSchema = z.object({ character: castCharacterSchema, revision: ordinal, boundary: castBoundarySchema }).strict();
@@ -174,7 +191,7 @@ export const detachCastAttachmentResultSchema = castWriteResultSchema.extend({ d
 export type DetachCastAttachmentResult = z.infer<typeof detachCastAttachmentResultSchema>;
 export const castListQuerySchema = z.object({ limit: z.coerce.number().int().min(1).max(50).default(50),
   cursor: z.uuid().optional(), query: z.string().trim().max(200).default(""),
-  filter: z.enum(["all", "main", "recent", "pinned", "needs_review", "conflicts", "ignored"]).default("all"),
+  filter: z.enum(["all", "main", "recent", "pinned", "needs_review", "conflicts", "ignored", "removed"]).default("all"),
   expectedRevision: z.coerce.number().int().nonnegative().optional(),
   expectedTurnNumber: z.coerce.number().int().nonnegative().optional(),
   expectedTimelineRevision: z.coerce.number().int().nonnegative().optional() }).strict();
@@ -192,7 +209,7 @@ export type CastListQuery = z.infer<typeof castListQuerySchema>;
 
 export const castStoredCommandSchema = z.object({ command: castCommandSchema, characterId: z.uuid().optional(), observationId: z.uuid().optional() }).strict();
 export const portableCampaignCastSchema = z.object({
-  formatVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]), revision: ordinal,
+  formatVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]), revision: ordinal,
   characters: z.array(z.object({ id: z.uuid(), origin: castOriginSchema, firstObservedTurn: ordinal }).strict()).max(10000),
   events: z.array(z.object({ id: z.uuid(), effectiveTurnNumber: ordinal, revision: ordinal,
     receipt: castBatchReceiptSchema.optional(), commands: z.array(castStoredCommandSchema).min(1).max(100), attachment: castAttachmentSchema.optional() }).strict()).max(100000)
@@ -210,8 +227,29 @@ export const portableCampaignCastSchema = z.object({
     : item && typeof item === "object" ? `{${Object.entries(item).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b))
       .map(([key, value]) => `${JSON.stringify(key)}:${canonical(value)}`).join(",")}}` : JSON.stringify(item);
   const detached = new Set<string>();
-  for (const event of value.events) {
+  const activeMerges = new Map<string, { target: string; source: string; order: number }>();
+  const removed = new Set<string>();
+  type AliasOperation = { eventId: string; aliases: string[]; delta?: { added: string[]; removed: string[] }; mergeOwned: boolean };
+  const aliasHistory = new Map<string, AliasOperation[]>(), currentAliases = new Map<string, string[]>(), undoneAliases = new Set<string>();
+  const replayAliases = (characterId: string) => {
+    let aliases: string[] = [];
+    for (const operation of aliasHistory.get(characterId) ?? []) {
+      if (operation.mergeOwned && undoneAliases.has(operation.eventId)) continue;
+      aliases = operation.delta ? applyCastAliasDelta(aliases, operation.delta) : operation.aliases;
+    }
+    currentAliases.set(characterId, aliases);
+  };
+  for (const [order, event] of value.events.entries()) {
     const receipt = event.receipt;
+    const merges = event.commands.filter(item => item.command.kind === "merge");
+    if (merges.length) {
+      const merge = merges[0]!.command;
+      const identities = event.commands.filter(item => item.command.kind === "identity");
+      if (merges.length !== 1 || merge.kind !== "merge" || event.commands.some(({ command }) => command !== merge
+        && (!("characterId" in command) || command.characterId !== merge.characterId || !["identity", "override", "edit_authored_profile"].includes(command.kind)))
+        || identities.length !== 1 || identities[0]!.command.kind !== "identity"
+        || canonical(identities[0]!.command.aliases) !== canonical(merge.reviewedAliases)) fail();
+    }
     if (receipt && (value.formatVersion < 3 || receipt.eventId !== event.id || receipt.revision !== event.revision
       || receipt.characterIds.some(id => !characters.has(id))
       || receipt.result && (receipt.result.revision !== event.revision || !characters.has(receipt.result.character.id)))) fail();
@@ -229,6 +267,33 @@ export const portableCampaignCastSchema = z.object({
     }
     for (const item of event.commands) {
     const command = item.command;
+    if (value.formatVersion < 4 && (["merge", "unmerge", "remove", "restore"].includes(command.kind) || command.kind === "identity" && command.aliasChanges)) fail();
+    if (command.kind === "merge") {
+      if (!created.has(command.sourceCharacterId) || command.sourceCharacterId === command.characterId
+        || characters.get(command.sourceCharacterId)?.origin.kind === "protagonist" || characters.get(command.characterId)?.origin.kind === "protagonist"
+        || [...activeMerges.values()].some(merge => merge.source === command.sourceCharacterId || merge.source === command.characterId)
+        || removed.has(command.sourceCharacterId) || removed.has(command.characterId)) fail();
+      const before = currentAliases.get(command.characterId) ?? [];
+      if (canonical(command.aliasChanges.priorTargetAliases) !== canonical(before)
+        || canonical({ added: command.aliasChanges.added, removed: command.aliasChanges.removed }) !== canonical(castAliasDelta(before, command.reviewedAliases))) fail();
+      activeMerges.set(event.id, { target: command.characterId, source: command.sourceCharacterId, order });
+    }
+    if (command.kind === "unmerge") {
+      const merge = activeMerges.get(command.mergeEventId);
+      if (!merge || merge.target !== command.characterId || [...activeMerges.values()].some(later => later.order > merge.order && (later.source === merge.source || later.target === merge.source || later.source === merge.target || later.target === merge.target))) fail();
+      activeMerges.delete(command.mergeEventId);
+      undoneAliases.add(command.mergeEventId);
+      replayAliases(command.characterId);
+      if (![...activeMerges.values()].some(item => item.target === command.characterId)) {
+        aliasHistory.set(command.characterId, [{ eventId: event.id, aliases: currentAliases.get(command.characterId) ?? [], mergeOwned: false }]);
+      }
+    }
+    if (command.kind === "remove") {
+      if (removed.has(command.characterId) || characters.get(command.characterId)?.origin.kind === "protagonist"
+        || [...activeMerges.values()].some(merge => merge.source === command.characterId)) fail();
+      removed.add(command.characterId);
+    }
+    if (command.kind === "restore") { if (!removed.has(command.characterId) || characters.get(command.characterId)?.origin.kind === "protagonist") fail(); removed.delete(command.characterId); }
     if (value.formatVersion < 3 && (command.kind === "seed_profile" || command.kind === "edit_authored_profile"
       || command.kind === "override" && command.field === "story.goals" && command.value.length > 2000)) fail();
     if (command.kind === "seed_profile") {
@@ -259,11 +324,24 @@ export const portableCampaignCastSchema = z.object({
         || command.origin.kind === "discovered" && command.evidence?.kind !== "turn") fail();
       if (!item.characterId || !characters.has(item.characterId) || created.has(item.characterId)
         || JSON.stringify(characters.get(item.characterId)?.origin) !== JSON.stringify(command.origin)) fail();
-      else created.add(item.characterId);
+      else {
+        created.add(item.characterId);
+        aliasHistory.set(item.characterId, [{ eventId: event.id, aliases: command.aliases, mergeOwned: false }]);
+        currentAliases.set(item.characterId, command.aliases);
+      }
     } else {
       const protagonistEvidence = (command.kind === "observe" || command.kind === "mention") && characters.get(command.characterId)?.origin.kind === "protagonist";
       if (!characters.has(command.characterId) || !created.has(command.characterId) && !protagonistEvidence
         || characters.get(command.characterId)!.firstObservedTurn > event.effectiveTurnNumber) fail();
+      if (command.kind === "identity") {
+        const mergeOwned = merges.length > 0, before = currentAliases.get(command.characterId) ?? [];
+        if (!mergeOwned && [...activeMerges.values()].some(merge => merge.target === command.characterId) && !command.aliasChanges) fail();
+        if (command.aliasChanges && canonical(command.aliasChanges) !== canonical(castAliasDelta(before, command.aliases))) fail();
+        const operation: AliasOperation = { eventId: event.id, aliases: command.aliases, mergeOwned, ...(command.aliasChanges ? { delta: command.aliasChanges } : {}) };
+        const history = aliasHistory.get(command.characterId) ?? [];
+        history.push(operation); aliasHistory.set(command.characterId, history);
+        currentAliases.set(command.characterId, operation.delta ? applyCastAliasDelta(before, operation.delta) : operation.aliases);
+      }
       if (command.kind === "observe") {
         if (command.evidence.kind === "turn" && command.evidence.invalidated) fail();
         if (!item.observationId || observations.has(item.observationId)
