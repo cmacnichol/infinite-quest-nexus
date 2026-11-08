@@ -1,6 +1,11 @@
 import { createActivityApi, type ActivityApi } from "./activity-api.js";
 import { ApiContractError } from "@infinite-quest/client-core";
 import {
+  worldGenerationProgressResponseSchema,
+  playableCharacterGenerationPreviewRequestSchema,
+  playableCharacterGenerationPreviewResponseSchema,
+  characterProfileOrganizationRequestSchema,
+  characterProfileOrganizationResultSchema,
   campaignListResponseSchema,
   campaignBranchSchema,
   campaignBranchResponseSchema,
@@ -40,6 +45,11 @@ import {
   acceptedTurnCorrectionViewSchema
 } from "@infinite-quest/contracts";
 import type {
+  WorldGenerationProgressResponse,
+  PlayableCharacterGenerationPreviewRequest,
+  PlayableCharacterGenerationPreviewResponse,
+  CharacterProfileOrganizationRequest,
+  CharacterProfileOrganizationResult,
   CampaignBranchRequest,
   CampaignBranchResponse,
   CampaignCreateRequest,
@@ -82,12 +92,16 @@ import { createIllustrationApi } from "./illustration-api.js";
 import type { IllustrationApi } from "./illustration-api.js";
 
 export interface WorldApi {
+  generateCharacterPreview(request: PlayableCharacterGenerationPreviewRequest, signal?: AbortSignal): Promise<PlayableCharacterGenerationPreviewResponse>;
+  loadCharacterGenerationProgress(progressKey: string, signal?: AbortSignal): Promise<WorldGenerationProgressResponse>;
+  organizeCharacter(worldId: string, request: CharacterProfileOrganizationRequest, signal?: AbortSignal): Promise<CharacterProfileOrganizationResult>;
   list(signal?: AbortSignal): Promise<WorldListResponse>;
   create(request: WorldCreateRequest, signal?: AbortSignal): Promise<WorldCreateResponse>;
   playableCharacters(worldVersionId: string, signal?: AbortSignal): Promise<PlayableCharacterListResponse>;
 }
 
 export interface CampaignApi {
+  organizeCharacter(campaignId: string, request: CharacterProfileOrganizationRequest, signal?: AbortSignal): Promise<CharacterProfileOrganizationResult>;
   list(signal?: AbortSignal): Promise<CampaignListResponse>;
   readableExport(campaignId: string, format: "markdown" | "html", signal?: AbortSignal): Promise<Blob>;
   turns(campaignId: string, options?: TurnPageRequest | AbortSignal, signal?: AbortSignal): Promise<TurnListResponse>;
@@ -179,6 +193,17 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
   const illustrations = createIllustrationApi(http);
 
   const worlds: WorldApi = {
+    async generateCharacterPreview(request, signal) {
+      const path = "/worlds/playable-characters/generate-preview";
+      const body = validatedRequest(playableCharacterGenerationPreviewRequestSchema, request, "POST", path);
+      return http.request(withSignal({ method: "POST", path, body: { kind: "json", value: body }, responseSchema: playableCharacterGenerationPreviewResponseSchema }, signal));
+    },
+    loadCharacterGenerationProgress: (key, signal) => http.request(withSignal({ method: "GET", path: `/worlds/generate-progress?key=${encodeURIComponent(key)}`, responseSchema: worldGenerationProgressResponseSchema }, signal)),
+    async organizeCharacter(worldId, request, signal) {
+      const path = `/worlds/${encodedPathSegment(worldId)}/draft/playable-characters/organize`;
+      const body = validatedRequest(characterProfileOrganizationRequestSchema, request, "POST", path);
+      return http.request(withSignal({ method: "POST", path, body: { kind: "json", value: body }, responseSchema: characterProfileOrganizationResultSchema }, signal));
+    },
     list: (signal) => http.request(withSignal({ method: "GET", path: "/worlds", responseSchema: worldListResponseSchema }, signal)),
     async create(request, signal) {
       const method: HttpMethod = "POST";
@@ -193,6 +218,11 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
     }, signal))
   };
   const campaigns: CampaignApi = {
+    async organizeCharacter(campaignId, request, signal) {
+      const path = `/campaigns/${encodedPathSegment(campaignId)}/character-profile/organize`;
+      const body = validatedRequest(characterProfileOrganizationRequestSchema, request, "POST", path);
+      return http.request(withSignal({ method: "POST", path, body: { kind: "json", value: body }, responseSchema: characterProfileOrganizationResultSchema }, signal));
+    },
     list: (signal) => http.request(withSignal({ method: "GET", path: "/campaigns", responseSchema: campaignListResponseSchema }, signal)),
     readableExport: (campaignId, format, signal) => http.request({
       method: "GET",

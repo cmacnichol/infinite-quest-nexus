@@ -184,3 +184,4 @@ export * from "./characters/profile-fields.js";
 export * from "./characters/sheet.js";
 export * from "./characters/workspace.js";
 export * from "./settings-session.js";
+export * from "./characters/editor-model.js";

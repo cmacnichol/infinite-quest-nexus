@@ -425,3 +425,12 @@ export type SyncStatusRequest = z.input<typeof syncStatusRequestSchema>;
 export type GenerationEnqueueResponse = z.infer<typeof generationEnqueueResponseSchema>;
 export type GenerationResult = z.infer<typeof generationResultSchema>;
 export type GenerationActionResponse = z.infer<typeof generationActionResponseSchema>;
+
+export const worldGenerationProgressResponseSchema = z.object({
+  status: z.enum(["processing", "completed", "failed", "unknown"]),
+  phase: z.string(),
+  progressPercent: z.number().min(0).max(100),
+  message: z.string(),
+  errorMessage: z.string().optional()
+}).strict();
+export type WorldGenerationProgressResponse = z.infer<typeof worldGenerationProgressResponseSchema>;

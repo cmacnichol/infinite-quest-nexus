@@ -1,8 +1,15 @@
+import { renderCharacterEditor } from "./character-editor/renderer.js";
 import { settingsBookmarkDestination } from "./settings-bookmark.js";
-import { createStoryMemoryApi, writeCampaignSettings, browserDeviceStorage } from "@infinite-quest/client-web";
+import { createStoryMemoryApi, createNexusApiClient, createNoopSessionPort, writeCampaignSettings, browserDeviceStorage } from "@infinite-quest/client-web";
 import { mountLegacyDeviceProfile } from "../../shared-ui/profile/legacy-device-profile.js";
 import { mountReaderPreferenceFields } from "../../shared-ui/profile/profile-controls.js";
 import {
+  WORLD_PROFILE_FIELDS,
+  createEditorDraft,
+  setEditorDraftField,
+  buildEditorPayload,
+  projectEditorProfile,
+  stageEditorOrganize,
   buildCampaignCreateRequest,
   createCampaignCreationDraft,
   createEditSession,
@@ -15,6 +22,20 @@ import { createLegacySectionLoader } from "./legacy-section-loader.js";
 import { bindLegacyTabGroup } from "./legacy-tabs.js";
 const ownerDevice = browserDeviceStorage(window);
 const campaignMemoryApi = createStoryMemoryApi();
+const characterApi = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort() });
+
+renderCharacterEditor(document.getElementById("characterDialog"), null, {
+  save: saveCharacterFromModal,
+  close: () => dismissEditDialog(elements.characterDialog),
+  generate: generateCharacterFromPrompt,
+  organize: organizeCharacterProfile,
+  delete: deleteCharacterFromModal,
+  addStat: () => addCharacterEditorRow("stat"),
+  addTracker: () => addCharacterEditorRow("tracker"),
+  change: (path, value) => {
+    if (characterEditorDraft) characterEditorDraft = setEditorDraftField(characterEditorDraft, path, value);
+  }
+});
 
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
 const campaignSectionLoader = createLegacySectionLoader({
@@ -188,11 +209,11 @@ let campaignCreationEntryPoint = "management";
 let playableCharacterLoadSequence = 0;
 let editingCharacterId = "";
 let characterModalWorkingCharacter = null;
+let characterEditorDraft = null;
 let characterModalBusy = false;
 let characterModalScope = "world";
 let campaignCharacterProfileRevision = 0;
 let characterProfileOrganizationResult = null;
-let characterProfileOrganizationApplied = false;
 const characterRowOriginals = new WeakMap();
 const legacyStorageKey = "infiniteQuestNexusClientState.v1";
 let detectedBrowserStory = null;
@@ -557,33 +578,9 @@ function clearCampaignEditorSelection({ focus = false } = {}) {
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
-const CHARACTER_PROFILE_FIELDS = Object.freeze({
-  "identity.aliases": "characterAliases",
-  "identity.pronouns": "characterPronouns",
-  "story.role": "characterRole",
-  "story.background": "characterBackground",
-  "story.personality": "characterPersonality",
-  "story.motivations": "characterMotivations",
-  "story.goals": "characterGoals",
-  "story.fearsAndConflicts": "characterFearsAndConflicts",
-  "story.keyRelationships": "characterKeyRelationships",
-  "story.narrativeHooks": "characterNarrativeHooks",
-  "story.voiceAndMannerisms": "characterVoiceAndMannerisms",
-  "story.otherGuidance": "characterOtherGuidance",
-  "appearance.ancestryOrSpecies": "characterAncestryOrSpecies",
-  "appearance.apparentAge": "characterApparentAge",
-  "appearance.genderPresentation": "characterGenderPresentation",
-  "appearance.build": "characterBuild",
-  "appearance.skinOrComplexion": "characterSkinOrComplexion",
-  "appearance.face": "characterFace",
-  "appearance.eyes": "characterEyes",
-  "appearance.hair": "characterHair",
-  "appearance.distinguishingFeatures": "characterDistinguishingFeatures",
-  "appearance.clothing": "characterClothing",
-  "appearance.equipmentAndAccessories": "characterEquipmentAndAccessories",
-  "appearance.otherVisualDetails": "characterOtherVisualDetails",
-  unclassifiedNotes: "characterUnclassifiedNotes"
-});
+const CHARACTER_PROFILE_FIELDS = Object.freeze(Object.fromEntries(
+  WORLD_PROFILE_FIELDS.map((field) => [field.path, field.world.id])
+));
 const SOGNI_DEFAULT_CONFIGURATION = Object.freeze({
   defaultWidth: 1280,
   defaultHeight: 720,
@@ -758,10 +755,8 @@ function installClickAwayModalDismissal() {
       if (worldAuthorBusy) event.preventDefault();
     });
   });
-  elements.characterDialog.querySelectorAll("details > summary").forEach((summary) => {
-    summary.addEventListener("click", (event) => {
-      if (characterModalBusy) event.preventDefault();
-    });
+  elements.characterDialog.addEventListener("click", (event) => {
+    if (characterModalBusy && event.target.closest("details > summary")) event.preventDefault();
   });
 }
 
@@ -2952,32 +2947,17 @@ function profileValue(profile, path) {
   return path.split(".").reduce((value, key) => value?.[key], profile);
 }
 
-function setProfileValue(profile, path, value) {
-  const keys = path.split(".");
-  let target = profile;
-  for (const key of keys.slice(0, -1)) {
-    target[key] ||= {};
-    target = target[key];
-  }
-  target[keys.at(-1)] = value;
-}
-
 function profileFromForm() {
-  const sourceProfile = characterModalWorkingCharacter?.profile;
-  const profile = sourceProfile && typeof sourceProfile === "object"
-    ? copyJsonValue(sourceProfile)
-    : emptyCharacterProfile();
   for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
     const raw = elements[id].value.trim();
-    if (sourceProfile && !raw && profileValue(sourceProfile, path) === undefined) continue;
-    const value = path === "identity.aliases"
-      ? raw.split(",").map((entry) => entry.trim()).filter(Boolean)
-      : path === "appearance.distinguishingFeatures"
-        ? raw.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean)
-        : raw;
-    setProfileValue(profile, path, value);
+    const value = path === "identity.aliases" || path === "appearance.distinguishingFeatures"
+      ? raw.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean)
+      : raw;
+    if (JSON.stringify(characterEditorDraft.values[path]) !== JSON.stringify(value)) {
+      characterEditorDraft = setEditorDraftField(characterEditorDraft, path, value);
+    }
   }
-  return profile;
+  return projectEditorProfile(characterEditorDraft);
 }
 
 function profileHasGuidance(profile) {
@@ -2989,6 +2969,7 @@ function profileHasGuidance(profile) {
 
 function populateCharacterForm(character, readOnly = false) {
   characterModalWorkingCharacter = copyJsonValue(character);
+  characterEditorDraft = createEditorDraft(characterModalScope === "campaign" ? "campaign-main" : "world-draft", character);
   elements.characterDialog.querySelectorAll(".character-advanced-disclosure").forEach((disclosure) => { disclosure.open = false; });
   elements.characterName.value = String(character.name || "");
   elements.characterGuidance.value = String(character.characterText || "");
@@ -2997,7 +2978,7 @@ function populateCharacterForm(character, readOnly = false) {
   for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
     const value = profileValue(profile, path);
     elements[id].value = Array.isArray(value)
-      ? value.join(path === "identity.aliases" ? ", " : "\n")
+      ? value.join("\n")
       : String(value || "");
   }
   elements.characterStats.replaceChildren();
@@ -3055,7 +3036,6 @@ function openCharacterDialog(characterId = "") {
   characterModalScope = "world";
   elements.characterPlayableContext.textContent = "Playable character · This character is part of the world's playable roster.";
   characterProfileOrganizationResult = null;
-  characterProfileOrganizationApplied = false;
   const initial = character || { id: "", name: "", characterText: "", rpgStats: [], defaultTriggers: [], source: { type: "world-library-editor" } };
   populateCharacterForm(initial, readOnly);
   elements.characterGeneratorPrompt.value = "";
@@ -4021,6 +4001,13 @@ async function saveWorldDraft(event) {
   }
 }
 
+function characterAdmissionError(error) {
+  const message = error.message || String(error);
+  const reference = typeof error.correlationId === "string" && /^[a-z0-9-]{1,80}$/iu.test(error.correlationId)
+    ? ` Reference: ${error.correlationId}.` : "";
+  return `${message}${reference}`;
+}
+
 async function generateCharacterFromPrompt() {
   if ((worldAuthorBusy && characterModalScope === "world") || !worldAuthorWorkingContent || characterModalBusy) return;
   const prompt = elements.characterGeneratorPrompt.value.trim();
@@ -4043,13 +4030,9 @@ async function generateCharacterFromPrompt() {
   setCharacterModalControls(false, true);
   setCharacterStatus("Generating a complete character from the current world draft…");
   try {
-    const result = await api("/api/v1/worlds/playable-characters/generate-preview", {
-      method: "POST",
-      body: JSON.stringify({
-        content: worldContentFromForm(),
-        prompt,
-        ...(editingCharacterId ? { characterId: editingCharacterId } : {})
-      })
+    const result = await characterApi.worlds.generateCharacterPreview({
+      content: worldContentFromForm(), prompt,
+      ...(editingCharacterId ? { characterId: editingCharacterId } : {})
     });
     const candidate = result?.character;
     if (!candidate || typeof candidate !== "object" || !String(candidate.name || "").trim() || !candidate.profile) {
@@ -4070,9 +4053,9 @@ async function generateCharacterFromPrompt() {
     elements.characterGuidance.value = previousGuidance;
     for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
       const value = profileValue(previousProfile, path);
-      elements[id].value = Array.isArray(value) ? value.join(path === "identity.aliases" ? ", " : "\n") : String(value || "");
+      elements[id].value = Array.isArray(value) ? value.join("\n") : String(value || "");
     }
-    setCharacterStatus(error.message || String(error), "error");
+    setCharacterStatus(characterAdmissionError(error), "error");
   } finally {
     setCharacterModalControls(false, false);
   }
@@ -4122,7 +4105,7 @@ async function organizeCharacterProfile() {
   try {
     character = characterFromForm({ forOrganization: true });
   } catch (error) {
-    setCharacterStatus(error.message || String(error), "error");
+    setCharacterStatus(characterAdmissionError(error), "error");
     const control = error.control;
     if (control instanceof HTMLElement) {
       const disclosure = control.closest("details");
@@ -4134,22 +4117,18 @@ async function organizeCharacterProfile() {
   }
   const campaignScope = characterModalScope === "campaign";
   if (campaignScope ? !selectedCampaign : !selectedWorld) return;
-  const endpoint = campaignScope
-    ? `/api/v1/campaigns/${selectedCampaign.id}/character-profile/organize`
-    : `/api/v1/worlds/${selectedWorld.id}/draft/playable-characters/organize`;
   const expectedRevision = campaignScope ? campaignCharacterProfileRevision : selectedWorld.draftRevision;
   setCharacterModalControls(false, true);
   setCharacterProfileOrganizationProgress(true);
   setCharacterStatus("Organizing supplied facts into targeted profile fields…");
   try {
-    const result = await api(endpoint, {
-      method: "POST",
-      body: JSON.stringify({ expectedRevision, character })
-    });
+    const result = await (campaignScope
+      ? characterApi.campaigns.organizeCharacter(selectedCampaign.id, { expectedRevision, character })
+      : characterApi.worlds.organizeCharacter(selectedWorld.id, { expectedRevision, character }));
     renderCharacterProfileReview(result);
     setCharacterStatus("Review the evidence-backed proposals before applying them.", "success");
   } catch (error) {
-    setCharacterStatus(error.message || String(error), "error");
+    setCharacterStatus(characterAdmissionError(error), "error");
   } finally {
     setCharacterProfileOrganizationProgress(false);
     setCharacterModalControls(false, false);
@@ -4158,17 +4137,22 @@ async function organizeCharacterProfile() {
 
 function applyCharacterProfileReview() {
   if ((worldAuthorBusy && characterModalScope === "world") || !characterProfileOrganizationResult) return;
-  let appliedCount = 0;
+  const stagedValues = {};
   for (const checkbox of elements.characterProfileReviewList.querySelectorAll("[data-profile-path]:checked")) {
     const path = checkbox.dataset.profilePath;
-    const id = CHARACTER_PROFILE_FIELDS[path];
     const value = profileValue(characterProfileOrganizationResult.candidate, path);
-    elements[id].value = Array.isArray(value)
-      ? value.join(path === "identity.aliases" ? ", " : "\n")
-      : String(value || "");
-    appliedCount += 1;
+    stagedValues[path] = value;
   }
-  characterProfileOrganizationApplied = appliedCount > 0;
+  try {
+    characterEditorDraft = stageEditorOrganize(characterEditorDraft, stagedValues, characterProfileOrganizationResult.protocolVersion);
+  } catch (error) {
+    elements.characterProfileReviewWarnings.textContent = error.message;
+    elements.characterProfileReviewWarnings.classList.remove("hidden");
+    return;
+  }
+  for (const [path, value] of Object.entries(stagedValues)) {
+    elements[CHARACTER_PROFILE_FIELDS[path]].value = Array.isArray(value) ? value.join("\n") : String(value || "");
+  }
   elements.characterProfileReviewDialog.close();
   setCharacterStatus("Selected proposals applied to the unsaved form. Save the character to persist them.", "success");
 }
@@ -4176,13 +4160,12 @@ function applyCharacterProfileReview() {
 async function openCampaignCharacterDialog() {
   if (!selectedCampaign) return;
   try {
-    const result = await api(`/api/v1/campaigns/${selectedCampaign.id}/character-profile`);
+    const result = await characterApi.campaigns.getCharacterProfile(selectedCampaign.id);
     characterModalScope = "campaign";
     campaignCharacterProfileRevision = result.revision;
     editingCharacterId = result.characterId || "";
     characterProfileOrganizationResult = null;
-    characterProfileOrganizationApplied = false;
-    populateCharacterForm({
+      populateCharacterForm({
       id: result.characterId || "",
       name: result.name || "Player Character",
       characterText: result.legacyCharacterText || "",
@@ -4233,15 +4216,10 @@ async function saveCharacterFromModal(event) {
     setCharacterModalControls(false, true);
     setCharacterStatus("Saving campaign character profile…");
     try {
-      const saved = await api(`/api/v1/campaigns/${selectedCampaign.id}/character-profile`, {
-        method: "PUT",
-        body: JSON.stringify({
-          expectedRevision: campaignCharacterProfileRevision,
-          name: character.name,
-          profile: character.profile,
-          editSource: characterProfileOrganizationApplied ? "ai_organized" : "manual"
-        })
-      });
+      characterEditorDraft = setEditorDraftField(characterEditorDraft, "name", character.name);
+      const saved = await characterApi.campaigns.updateCharacterProfile(
+        selectedCampaign.id, buildEditorPayload(characterEditorDraft, { expectedRevision: campaignCharacterProfileRevision })
+      );
       campaignCharacterProfileRevision = saved.revision;
       elements.characterDialog.close();
       await loadCampaigns(selectedCampaign.id);
@@ -7342,27 +7320,19 @@ elements.worldForm.addEventListener("click", (event) => {
   if (worldAuthorBusy && event.target instanceof Element && event.target.closest("summary")) event.preventDefault();
 }, true);
 elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());
-elements.characterForm.addEventListener("submit", saveCharacterFromModal);
-elements.cancelCharacter.addEventListener("click", () => dismissEditDialog(elements.characterDialog));
-elements.deleteCharacter.addEventListener("click", deleteCharacterFromModal);
-elements.generateCharacter.addEventListener("click", generateCharacterFromPrompt);
-elements.organizeCharacterProfile.addEventListener("click", organizeCharacterProfile);
 elements.cancelCharacterProfileReview.addEventListener("click", () => {
   characterProfileOrganizationResult = null;
-  characterProfileOrganizationApplied = false;
   elements.characterProfileReviewDialog.close();
 });
 elements.applyCharacterProfileReview.addEventListener("click", applyCharacterProfileReview);
 elements.editCampaignCharacter.addEventListener("click", openCampaignCharacterDialog);
-elements.addCharacterStat.addEventListener("click", () => addCharacterEditorRow("stat"));
-elements.addCharacterTracker.addEventListener("click", () => addCharacterEditorRow("tracker"));
 elements.characterDialog.addEventListener("close", () => {
   editingCharacterId = "";
   characterModalWorkingCharacter = null;
+  characterEditorDraft = null;
   characterModalBusy = false;
   characterModalScope = "world";
   characterProfileOrganizationResult = null;
-  characterProfileOrganizationApplied = false;
   setCharacterProfileOrganizationProgress(false);
   elements.characterGenerator.open = false;
   elements.characterGeneratorPrompt.value = "";

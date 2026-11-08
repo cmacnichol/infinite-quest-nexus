@@ -1,6 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { characterProfileSchema } from "../../packages/contracts/src/world-library.js";
 import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
@@ -92,9 +93,15 @@ test("closed character disclosures preserve appearance, mechanics, and imported 
   await page.locator("#characterUnclassifiedNotes").fill("Unsorted imported-era note");
   await page.locator("#characterName").fill("Mira Vale");
   await page.locator("#characterRole").fill("Guide");
+  await page.locator("#characterIdentityDetails > summary").click();
+  await page.locator("#characterAliases").fill("Wren, the Keeper\nNorth Star");
   for (const selector of ["#characterAppearance > summary", "#characterMechanics > summary"]) await page.locator(selector).click();
   await page.locator("#saveCharacter").click();
   await expect(page.locator("#playableCharacterRoster")).toContainText("Mira Vale");
+  await page.getByRole("button", { name: "Edit Mira Vale" }).click();
+  await page.locator("#characterIdentityDetails > summary").click();
+  await expect(page.locator("#characterAliases")).toHaveValue("Wren, the Keeper\nNorth Star");
+  await page.locator("#cancelCharacter").click();
   expect(writes).toEqual([]);
   await page.locator("#saveWorldDraft").click();
   await expect(page.locator("#worldAuthorDialog")).toBeHidden();
@@ -103,7 +110,68 @@ test("closed character disclosures preserve appearance, mechanics, and imported 
   const character = posted.content?.playableCharacters?.[0];
   expect(character).toMatchObject({ name: "Mira Vale", profile: { story: { role: "Guide" }, appearance: { clothing: "Blue travel coat" }, unclassifiedNotes: "Unsorted imported-era note" } });
   expect(character?.rpgStats).toEqual([expect.objectContaining({ name: "Resolve", value: 17 })]);
+  expect(character?.profile.identity.aliases).toEqual(["Wren, the Keeper", "North Star"]);
   await page.screenshot({ path: resolve(evidenceDirectory, "closed-character-fields-saved.png") });
+});
+
+test("deleting an existing character edits only the open World draft", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 0, worldCount: 1, campaignCount: 0 });
+  const api = await installLegacyUiFixture(page, fixture);
+  await page.goto(`${origin}/nexus/index.html#world-library`);
+  await page.locator(`#worldManagementCarousel [data-world-id="${fixture.worldId}"]`).click();
+  await page.locator("#editWorldDraft").click();
+  await page.locator('[data-world-author-step="character"]').click();
+  await page.getByRole("button", { name: "Edit The Observer" }).click();
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.locator("#deleteCharacter").click();
+  await expect(page.locator("#characterDialog")).toBeVisible();
+  page.once("dialog", dialog => dialog.accept());
+  await page.locator("#deleteCharacter").click();
+  await expect(page.locator("#playableCharacterRoster")).toContainText("No playable characters");
+  expect(api.writes).toHaveLength(0);
+});
+
+for (const width of [1440, 390]) test(`campaign aliases and reviewed Organize provenance survive Save at ${width}px`, async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
+  const path = `/api/v1/campaigns/${fixture.campaignId}/character-profile`;
+  const api = await installLegacyUiFixture(page, fixture);
+  const saves = () => api.writes.filter(write => write.path === path && write.method === "PUT").map(write => write.body);
+  const protocolVersion = "fixture-organizer-reviewed-v3";
+  await page.route(`**${path}/organize`, route => route.fulfill({ json: {
+    candidate: characterProfileSchema.parse({ appearance: { clothing: "blue cloak" } }),
+    evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "blue cloak" }],
+    conflicts: [], warnings: [], unassignedText: [], protocolVersion
+  } }));
+  await page.setViewportSize({ width, height: 900 });
+  await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await page.locator(`#campaignList [data-campaign-id="${fixture.campaignId}"]`).click();
+  await page.locator("#editCampaignCharacter").click();
+  await page.locator("#characterIdentityDetails > summary").click();
+  await page.locator("#characterAliases").fill("Wren, the Keeper\nNorth Star");
+  await page.locator("#organizeCharacterProfile").click();
+  await expect(page.locator("#characterProfileReviewList")).toContainText("blue cloak");
+  expect(await page.locator("#characterProfileReviewDialog").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: resolve(evidenceDirectory, `campaign-organize-review-${width}.png`) });
+  await page.locator("#applyCharacterProfileReview").click();
+  expect(saves()).toHaveLength(0);
+  await page.locator("#saveCharacter").click();
+  await expect(page.locator("#characterDialog")).toBeHidden();
+  expect(saves()).toHaveLength(1);
+  expect(saves()[0]).toMatchObject({
+    expectedRevision: 3, editSource: "ai_organized", organizerProtocolVersion: protocolVersion,
+    profile: { identity: { aliases: ["Wren, the Keeper", "North Star"] }, appearance: { clothing: "blue cloak" } }
+  });
+  await page.locator("#editCampaignCharacter").click();
+  await page.locator("#characterIdentityDetails > summary").click();
+  await expect(page.locator("#characterAliases")).toHaveValue("Wren, the Keeper\nNorth Star");
+  await page.locator("#organizeCharacterProfile").click();
+  await page.locator("#cancelCharacterProfileReview").click();
+  await page.locator("#characterRole").fill("Archivist");
+  await page.locator("#saveCharacter").click();
+  await expect(page.locator("#characterDialog")).toBeHidden();
+  expect(saves()).toHaveLength(2);
+  expect(saves()[1]).toMatchObject({ expectedRevision: 4, editSource: "manual" });
+  expect(saves()[1]).not.toHaveProperty("organizerProtocolVersion");
 });
 
 test("invalid hidden mechanics field opens its disclosure before focus", async ({ page }) => {

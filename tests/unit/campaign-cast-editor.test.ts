@@ -65,3 +65,15 @@ it("keeps claims distinct from facts and exposes conflicting observations", asyn
   const current = buildCharacterSheet({ kind: "supporting", detail: revised }).sections.flatMap((section) => section.fields);
   expect(current.find((field) => field.path === "appearance.description")?.origin).toBe("unknown");
 });
+
+it("keeps descriptor order and emits only changed supporting fields with the supplied key", async () => {
+  const { PROFILE_FIELDS, SUPPORTING_FIELDS } = await import("../../packages/client-core/src/characters/profile-fields.js");
+  const { createEditorDraft, setEditorDraftField, buildEditorPayload } = await import("../../packages/client-core/src/characters/editor-model.js");
+  expect(PROFILE_FIELDS.slice(0, 4).map((field) => field.path)).toEqual(["name", "identity.aliases", "identity.pronouns", "story.role"]);
+  expect(SUPPORTING_FIELDS.map((field) => field.path)).toEqual(["identity.pronouns", "story.role", "story.background", "story.personality", "story.motivations", "story.goals", "story.voiceAndMannerisms", "appearance.description", "state.location", "state.condition", "state.clothing"]);
+  const draft = setEditorDraftField(createEditorDraft("campaign-supporting", { name: "Mara", aliases: ["Smith, Jr."], profile: { "story.role": "Scout", "state.location": "Home" } }), "story.role", "Captain");
+  const detail = { revision: 3, boundary, character: { id: "11111111-1111-4111-8111-111111111111", name: "Mara", aliases: ["Smith, Jr."], origin: { kind: "manual" as const }, profile: { "story.role": "Scout", "state.location": "Home" }, pinned: false, ignored: false, revision: 2, firstObservedTurn: 0, lastObservedTurn: 4, lastMentionedTurn: null }, observations: [], autoMatches: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null };
+  const payload = buildEditorPayload(draft, { idempotencyKey: "supplied", castEditor: createCastEditor(detail, detail) });
+  const { editCastCharacterSchema } = await import("../../packages/contracts/src/campaign-cast.js");
+  expect(editCastCharacterSchema.parse(payload)).toEqual({ expectedCastRevision: 3, expectedBoundary: boundary, expectedCharacterRevision: 2, setOverrides: { "story.role": "Captain" }, idempotencyKey: "supplied" });
+});

@@ -2,6 +2,11 @@ import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { buildEditorPayload, createEditorDraft, discardEditorOrganize, reapplyEditorDraft, setEditorDraftField, stageEditorOrganize } from "../../packages/client-core/src/characters/editor-model.js";
+import { buildServer } from "../../services/api/src/server.js";
+import { runtimeConfigFixture } from "../fixtures/instance-settings.js";
+import { inertStorageServerOptions } from "../helpers/build-server-options.js";
+import { createApiWorldCampaignApplication } from "../helpers/runtime-application-fixtures.js";
 import { exportCampaign } from "../legacy-api/src/campaign-archive-service.js";
 import {
   campaignCreateSchema,
@@ -1137,7 +1142,7 @@ integration("World Library and campaign version integration", () => {
       .toMatchObject({ rows: campaignBefore.rows });
   });
 
-  it("keeps successful organizer proposals preview-only until revision-checked saves without changing published canon", async () => {
+  it("keeps organizer previews local and records the reviewed protocol after a conflicting campaign edit is reapplied", async ({ onTestFinished }) => {
     const title = `Synthetic Organizer Save ${crypto.randomUUID()}`;
     const authored = worldContentSchema.parse({
       world: { title },
@@ -1202,21 +1207,76 @@ integration("World Library and campaign version integration", () => {
     expect(afterWorldSave.version).toEqual(before.version);
     expect(afterWorldSave.edits).toEqual(before.edits);
 
-    const profileSave = campaignCharacterProfileUpdateSchema.parse({
-      expectedRevision: profileRevision, name: character.name, profile: campaignProposal.candidate,
-      editSource: "ai_organized", organizerProtocolVersion: campaignProposal.protocolVersion
-    });
-    const savedProfile = await updateCampaignCharacterProfile(pool, campaign.id, profileSave);
-    expect(savedProfile).toMatchObject({ revision: profileRevision + 1, profile: candidate });
+    const config = { ...runtimeConfigFixture(), databaseUrl: databaseUrl!, role: "api" as const,
+      legacyWebRoot: resolve("apps/web/dist"), nextWebRoot: resolve("apps/web-next/dist") };
+    const server = await buildServer(inertStorageServerOptions({
+      pool, config, worldCampaign: createApiWorldCampaignApplication(pool, { credentialSecret: config.credentialEncryptionKey })
+    }));
+    onTestFinished(() => server.close());
+    const url = `/api/v1/campaigns/${campaign.id}/character-profile`;
+    const save = (payload: Record<string, unknown>) => server.inject({ method: "PUT", url, payload });
+    const loaded = (await server.inject(url)).json();
+    const staged = stageEditorOrganize(createEditorDraft("campaign-main", loaded), {
+      "appearance.clothing": campaignProposal.candidate.appearance.clothing
+    }, campaignProposal.protocolVersion);
+    const profileSave = campaignCharacterProfileUpdateSchema.parse(buildEditorPayload(staged, { expectedRevision: profileRevision }));
+    // With a built Nexus client, send the stale PUT from the rendered editor to this same database.
+    // The explicit conflict controls arrive in phase 2. Reapply below uses their shared model.
+    let submitStale = async () => (await save(profileSave)).statusCode;
+    if (process.env.NEXUS_EDITOR_BROWSER_PROOF === "1") {
+      const { chromium } = await import("@playwright/test");
+      const { installLegacyUiFixture, legacyUiFixture } = await import("../e2e/helpers/legacy-ui-fixtures.js");
+      const origin = await server.listen({ host: "127.0.0.1", port: 0 });
+      const browser = await chromium.launch();
+      onTestFinished(() => browser.close());
+      const page = await browser.newPage();
+      const base = legacyUiFixture({ campaignCount: 1, worldCount: 1, turnCount: 1 });
+      const fixture = { ...base, campaignId: campaign.id, campaigns: [{ ...base.campaigns[0], id: campaign.id }] };
+      await installLegacyUiFixture(page, fixture);
+      await page.route(`**${url}`, route => route.continue());
+      await page.route(`**${url}/organize`, route => route.fulfill({ json: campaignProposal }));
+      await page.goto(`${origin}/nexus/index.html#campaigns`);
+      await page.locator(`#campaignList [data-campaign-id="${campaign.id}"]`).click();
+      await page.locator("#editCampaignCharacter").click();
+      await page.locator("#organizeCharacterProfile").click();
+      await page.locator("#applyCharacterProfileReview").click();
+      submitStale = async () => {
+        const pending = page.waitForResponse(res => res.request().method() === "PUT" && new URL(res.url()).pathname === url);
+        await page.locator("#saveCharacter").click();
+        const result = await pending;
+        expect(result.request().postDataJSON()).toEqual(profileSave);
+        return result.status();
+      };
+    }
+    // A concurrent manual save follows a discarded review.
+    const manual = setEditorDraftField(discardEditorOrganize(staged), "name", "Renamed guide");
+    expect((await save(buildEditorPayload(manual, { expectedRevision: profileRevision }))).statusCode).toBe(200);
+    expect(await submitStale()).toBe(409);
+    const latest = (await server.inject(url)).json();
+    expect(latest).toMatchObject({ revision: profileRevision + 1, name: "Renamed guide", profile: { appearance: { clothing: "" } } });
+    const reapplied = reapplyEditorDraft(staged, latest);
+    const response = await save(buildEditorPayload(reapplied, { expectedRevision: latest.revision }));
+    expect(response.statusCode).toBe(200);
+    const savedProfile = response.json();
+    expect(savedProfile).toMatchObject({ revision: profileRevision + 2, name: latest.name, profile: candidate });
+    expect((await server.inject(url)).json()).toMatchObject(savedProfile);
     const afterSaves = await snapshot();
     expect(afterSaves.campaign[0]).toMatchObject({
-      character_profile_revision: profileRevision + 1, character_profile: { name: character.name, profile: candidate },
+      character_profile_revision: profileRevision + 2, character_profile: { name: latest.name, profile: candidate },
       character_snapshot: before.campaign[0]!.character_snapshot
     });
     expect(afterSaves.version).toEqual(before.version);
     expect(afterSaves.draft).toEqual(afterWorldSave.draft);
-    expect(afterSaves.edits).toHaveLength(before.edits.length + 1);
-    expect(afterSaves.edits.at(-1)).toMatchObject({ revision: profileRevision + 1, edit_source: "ai_organized", next_profile: { name: character.name, profile: candidate } });
+    expect(afterSaves.edits).toHaveLength(before.edits.length + 2);
+    expect(afterSaves.edits.at(-1)).toMatchObject({ revision: profileRevision + 2, edit_source: "ai_organized", next_profile: { name: latest.name, profile: candidate } });
+    const audit = await pool.query(
+      "SELECT details FROM activity_events WHERE owner_user_id = $1 AND campaign_id = $2 AND event_type = 'campaign_character_profile_updated' ORDER BY (details->>'characterProfileRevision')::int",
+      [ownerUserId, campaign.id]
+    );
+    expect(audit.rows.map(row => row.details)).toEqual([
+      { characterProfileRevision: profileRevision + 1, editSource: "manual", organizerProtocolVersion: null },
+      { characterProfileRevision: profileRevision + 2, editSource: "ai_organized", organizerProtocolVersion: campaignProposal.protocolVersion }
+    ]);
 
     await expect(updateWorldDraft(pool, created.id, worldDraftUpdateSchema.parse({
       expectedRevision: draftRevision, content: authored

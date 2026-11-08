@@ -1,7 +1,6 @@
 import { ApiContractError, NexusApiError } from "@infinite-quest/client-core";
 import type { HttpMethod, SessionPort } from "@infinite-quest/client-core";
-import { apiErrorEnvelopeSchema } from "@infinite-quest/contracts";
-import type { z } from "zod";
+import { z } from "zod";
 import { apiPath, normalizeBasePath } from "./api-url.js";
 
 export type { HttpMethod } from "@infinite-quest/client-core";
@@ -87,7 +86,14 @@ async function parseHttpError(response: Response): Promise<NexusApiError> {
     });
   }
 
-  const parsed = apiErrorEnvelopeSchema.safeParse(payload);
+  const parsed = z.object({
+    message: z.string().trim().min(1).optional(),
+    error: z.string().trim().min(1).optional(),
+    correlationId: z.string().trim().min(1).optional(),
+    code: z.string().trim().min(1).optional(),
+    details: z.record(z.string(), z.unknown()).optional(),
+    issues: z.unknown().optional()
+  }).safeParse(payload);
   if (!parsed.success) {
     return new NexusApiError(`Request failed with HTTP ${response.status}.`, {
       statusCode: response.status,
@@ -97,11 +103,11 @@ async function parseHttpError(response: Response): Promise<NexusApiError> {
   }
 
   const envelope = parsed.data;
-  return new NexusApiError(envelope.message, {
+  return new NexusApiError(envelope.message ?? `Request failed with HTTP ${response.status}.`, {
     statusCode: response.status,
-    correlationId: envelope.correlationId,
-    errorName: envelope.error,
-    domainCode: envelope.details.code ?? envelope.code ?? null,
+    correlationId: envelope.correlationId ?? headerCorrelationId,
+    ...(envelope.error ? { errorName: envelope.error } : {}),
+    domainCode: typeof envelope.details?.code === "string" ? envelope.details.code : envelope.code ?? null,
     details: envelope.details,
     issues: envelope.issues,
     retryAfter
@@ -133,6 +139,7 @@ async function parseSuccessfulResponse<TResponse>(
   try {
     body = await response.json();
   } catch (cause) {
+    if (spec.signal?.aborted || (cause instanceof Error && cause.name === "AbortError")) throw cause;
     throw new ApiContractError("The API returned malformed JSON.", {
       phase: "response",
       kind: "malformed_json",
