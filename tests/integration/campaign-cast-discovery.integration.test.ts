@@ -1023,6 +1023,105 @@ describe("durable cast discovery", () => {
     identityEvidence: [{ paragraphId: "p1", quote: "Mara has blue eyes." }], observations: [{ field: "appearance.description" as const,
       value: "blue eyes", mode: "fact" as const, speakerCharacterId: null, paragraphId: "p1", quote: "Mara has blue eyes." }] }] });
 
+  it.each([[true, true, true], [false, true, false], [true, false, false]] as const)(
+    "seeds a first appearance only with frozen %s and live %s permission", async (frozen, live, seeded) => {
+      const f = await fixture();
+      await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [f.versionId, JSON.stringify({ world: { title: "Fixture" }, playableCharacters: [
+        { id: "mara", name: "Mara", characterText: "A watchful guide", campaignUse: "supporting", profile: { appearance: { eyes: "blue eyes" } } }
+      ] })]);
+      await pool.query("UPDATE campaigns SET first_appearance_eligible=true WHERE id=$1", [f.scope.campaignId]);
+      await f.enqueue();
+      const job = (await createCastDiscoveryJobRepository(pool, () => true).claim("first-appearance"))!;
+      job.output = proposal();
+      job.execution.admission = { castPresetsEnabled: frozen } as NonNullable<typeof job.execution.admission>;
+      await withTransaction(pool, client => applyValidatedCastDiscovery(client, job, live));
+      const person = (await createPostgresCampaignCastRepository(pool).current(f.scope)).characters.find(character => character.name === "Mara")!;
+      expect(Boolean(person.originProfile)).toBe(seeded);
+      if (seeded) {
+        const event = (await pool.query("SELECT id,attachment FROM campaign_cast_events WHERE campaign_id=$1 AND attachment IS NOT NULL", [f.scope.campaignId])).rows[0];
+        expect(event.attachment.characterId).toBe(person.id);
+        const editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+        const second = await withTransaction(pool, client => applyCastBatchWithClient(client, f.scope, { boundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: "later-attachment",
+          commands: [{ kind: "mention", characterId: person.id, evidence: { kind: "turn", turnId: f.turnIds[0]!, turnNumber: 1,
+            narrationRevision: job.source.narrationRevision, sourceHash: job.source.sourceHash, paragraphId: "p1", quote: "Mara has blue eyes." } }] },
+        { attachment: { characterId: person.id, basis: "unique_name", sourceRanges: [{ turnId: f.turnIds[0]!, narrationRevision: job.source.narrationRevision,
+          sourceHash: job.source.sourceHash, paragraphId: "p1", start: 0, end: "Mara has blue eyes.".length }] } }));
+        const beforeDetach = await editor.current(f.scope), beforePerson = beforeDetach.characters.find(character => character.id === person.id)!;
+        const laterDetached = await editor.detachAttachment!(f.scope, person.id, second.eventId, { expectedCastRevision: beforeDetach.revision,
+          expectedBoundary: beforeDetach.boundary, expectedCharacterRevision: beforePerson.revision, idempotencyKey: "detach-later" });
+        expect(laterDetached.character.originProfile?.seedEventId).toBe(event.id);
+        const before = await editor.current(f.scope), currentPerson = before.characters.find(character => character.id === person.id)!;
+        const edited = await editor.editAuthoredProfile!(f.scope, person.id, { expectedCastRevision: before.revision, expectedBoundary: before.boundary,
+          expectedCharacterRevision: currentPerson.revision, idempotencyKey: "authored-before-detach", set: { "story.background": "My edit" }, reset: [] });
+        const detached = await editor.detachAttachment!(f.scope, person.id, event.id, { expectedCastRevision: edited.revision, expectedBoundary: edited.boundary,
+          expectedCharacterRevision: edited.character.revision, idempotencyKey: "detach-seed" });
+        expect(detached.character.originProfile).toBeUndefined();
+        expect((await editor.detail(f.scope, person.id)).authoredHistory).toContainEqual(expect.objectContaining({ seedEventId: event.id, set: { "story.background": "My edit" } }));
+        await pool.query("UPDATE turns SET narration='A corrected account.' WHERE id=$1", [f.turnIds[0]]);
+        const archived = await withTransaction(pool, client => exportCampaignCast(client, f.scope));
+        expect(archived!.events.find(item => item.id === event.id)?.attachment).toBeDefined();
+        expect(archived!.events.some(item => item.commands.some(({ command }) => command.kind === "detach" && command.eventId === event.id))).toBe(true);
+        const destination = await fixture(1, false);
+        await pool.query("UPDATE world_versions SET content=(SELECT content FROM world_versions WHERE id=$1) WHERE id=$2", [f.versionId, destination.versionId]);
+        await pool.query("UPDATE turns SET narration='A corrected account.' WHERE id=$1", [destination.turnIds[0]]);
+        await withTransaction(pool, client => importCampaignCast(client, destination.scope, archived,
+          { turns: new Map([[f.turnIds[0]!, destination.turnIds[0]!]]), worlds: new Map([[f.versionId, destination.versionId]]) }));
+        expect((await createPostgresCampaignCastRepository(pool).current(destination.scope)).characters.find(character => character.name === "Mara")?.originProfile).toBeUndefined();
+        const renamed = await editor.edit(f.scope, person.id, { expectedCastRevision: detached.revision, expectedBoundary: detached.boundary,
+          expectedCharacterRevision: detached.character.revision, idempotencyKey: "rename-detached", name: "A different name" });
+        const nextVersion = randomUUID(), nextTurn = randomUUID();
+        await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) SELECT $2,world_id,owner_user_id,2,$3 FROM world_versions WHERE id=$1", [f.versionId, nextVersion,
+          JSON.stringify({ world: { title: "Fixture" }, playableCharacters: [{ id: "mara", name: "Mara", characterText: "A different world profile", campaignUse: "supporting", profile: { story: { background: "New world background" } } }] })]);
+        await pool.query("UPDATE campaigns SET world_version_id=$2,active_turn_number=2 WHERE id=$1", [f.scope.campaignId, nextVersion]);
+        await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,2,'The story continues.')", [nextTurn, ownerUserId, f.scope.campaignId]);
+        const preview = await editor.fromWorldPreview!(f.scope, { characterId: "mara", targetCastCharacterId: person.id });
+        expect(preview.eligibleTargets).toContainEqual(expect.objectContaining({ id: person.id }));
+        const restored = await editor.fromWorld!(f.scope, { characterId: "mara", targetCastCharacterId: person.id, expectedCharacterRevision: renamed.character.revision,
+          expectedCastRevision: renamed.revision, expectedBoundary: preview.boundary, expectedWorldVersionId: nextVersion,
+          previewFingerprint: preview.previewFingerprint, idempotencyKey: "reapply-seed" });
+        expect(restored.character.id).toBe(person.id);
+        expect(restored.character.originProfile?.seedEventId).not.toBe(event.id);
+        expect(restored.character.campaignProfile?.story.background).toBe("New world background");
+        await withTransaction(pool, async client => {
+          await client.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [f.scope.campaignId]);
+          await applyCastBoundaryChange(client, f.scope, { turnNumber: 1, changeKey: "rewind-reapplied-seed" });
+        });
+        expect((await editor.current(f.scope)).characters.find(character => character.id === person.id)?.originProfile).toBeUndefined();
+      }
+    });
+
+  it("seeds an approved held match only when its captured world identity still matches the pin", async () => {
+    const f = await fixture();
+    const content = { world: { title: "Fixture" }, playableCharacters: [{ id: "mara", name: "Mara", characterText: "A guide", campaignUse: "supporting" }] };
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [f.versionId, JSON.stringify(content)]);
+    await pool.query("UPDATE campaigns SET first_appearance_eligible=true WHERE id=$1", [f.scope.campaignId]);
+    await f.enqueue();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), job = (await jobs.claim("held-preset"))!;
+    await jobs.checkpoint(job, proposal());
+    expect(await jobs.publish(job)).toBe("complete");
+    const editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+    const pending = await editor.candidates(f.scope, {});
+    const resolved = await editor.resolveCandidate(f.scope, pending.candidates[0]!.id, { action: "create", expectedCastRevision: pending.revision,
+      expectedBoundary: pending.boundary, idempotencyKey: "approve-world" });
+    expect(resolved.character.originProfile?.entityId).toBe("mara");
+  });
+  it("requires new identity review when a held world match changes before approval", async () => {
+    const f = await fixture();
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [f.versionId, JSON.stringify({ world: { title: "Fixture" },
+      playableCharacters: [{ id: "mara", name: "Mara", characterText: "A guide", campaignUse: "supporting" }] })]);
+    await pool.query("UPDATE campaigns SET first_appearance_eligible=true WHERE id=$1", [f.scope.campaignId]);
+    await f.enqueue();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), job = (await jobs.claim("held-stale"))!;
+    await jobs.checkpoint(job, proposal()); await jobs.publish(job);
+    const next = randomUUID();
+    await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) SELECT $2,world_id,owner_user_id,2,$3 FROM world_versions WHERE id=$1", [f.versionId, next,
+      JSON.stringify({ world: { title: "Fixture" }, playableCharacters: [{ id: "mara", name: "Mara Reed", characterText: "A guide", campaignUse: "supporting", profile: { identity: { aliases: ["Mara"] } } }] })]);
+    await pool.query("UPDATE campaigns SET world_version_id=$2 WHERE id=$1", [f.scope.campaignId, next]);
+    const editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true }), pending = await editor.candidates(f.scope, {});
+    await expect(editor.resolveCandidate(f.scope, pending.candidates[0]!.id, { action: "create", expectedCastRevision: pending.revision,
+      expectedBoundary: pending.boundary, idempotencyKey: "approve-stale" })).rejects.toMatchObject({ code: "cast_invalid_request" });
+  });
+
   it("refreshes Chronicle metadata once for a multi-character publication chunk", async () => {
     const f = await fixture();
     await pool.query("UPDATE turns SET narration='Mara has blue eyes. Sera has green eyes.' WHERE id=$1", [f.turnIds[0]]);

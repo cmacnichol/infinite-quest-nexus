@@ -8,7 +8,7 @@ import {
 } from "../../contracts/src/world-library.js";
 import { stripMechanicsLeakage, truncateAtBoundary } from "./text.js";
 import { validateCampaignEventTriggers } from "./campaign-event-triggers.js";
-import { validateCastFiction } from "./campaign-cast.js";
+import { castDiscoveryWorldIdentities } from "./campaign-cast-world-identities.js";
 export { characterFictionAuthority, completeCharacterFictionProfile, type CharacterFictionAuthority } from "./character-fiction-authority.js";
 
 export type CampaignCharacterSeed = {
@@ -26,6 +26,7 @@ export type WorldCampaignReadinessIssueCode =
   | "missing-character-text"
   | "supporting-character-missing-guidance"
   | "supporting-character-invalid-fiction-name"
+  | "supporting-character-invalid-fiction-alias"
   | "invalid-event-rule";
 
 export type WorldCampaignReadinessIssue = {
@@ -113,7 +114,11 @@ export function assessWorldCampaignReadiness(content: WorldContent): WorldCampai
     }
     if (character.campaignUse === "supporting") {
       if (!characterText && !hasProfile) warnings.push({ code: "supporting-character-missing-guidance", message: `Character ${characterIndex + 1} is missing character guidance.`, characterIndex, ...(id ? { characterId: id } : {}) });
-      try { validateCastFiction(name); } catch { warnings.push({ code: "supporting-character-invalid-fiction-name", message: `Character ${characterIndex + 1} has a name that cannot be used for character tracking.`, characterIndex, ...(id ? { characterId: id } : {}) }); }
+    }
+    if (character.campaignUse !== "playable") {
+      const identity = castDiscoveryWorldIdentities({ playableCharacters: [character] })[0];
+      if (!identity || identity.name !== name) warnings.push({ code: "supporting-character-invalid-fiction-name", message: `Character ${characterIndex + 1} has a name that cannot be used for character tracking.`, characterIndex, ...(id ? { characterId: id } : {}) });
+      if (identity && (character.profile?.identity.aliases ?? []).some(alias => !identity.aliases.includes(alias))) warnings.push({ code: "supporting-character-invalid-fiction-alias", message: `Character ${characterIndex + 1} has an alias that cannot be used for character tracking.`, characterIndex, ...(id ? { characterId: id } : {}) });
     }
   }
 

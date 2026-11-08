@@ -27,7 +27,7 @@ async function installCreationApi(page: Page, worldCount = 1) {
         return route.fulfill({ status: 503, json: { message: "Campaign create failed." } });
       }
       await holdCreate;
-      return route.fulfill({ status: 201, json: { id: "created-campaign", title: "A campaign", selectedCharacterName: "The Observer" } });
+      return route.fulfill({ status: 201, json: { id: "00000000-0000-4000-8000-000000000099", title: "A campaign", status: "active", activeTurnNumber: 0, storyLengthProfile: "standard", storyContextBudgetTokens: 32000, worldId: fixture.worlds[0]!.id, worldVersionId: "00000000-0000-4000-8000-000000000098", worldVersionNumber: 1, selectedCharacterId: "fixture-observer", selectedCharacterName: "The Observer", textProviderProfileId: null, imageProviderProfileId: null } });
     }
     if (route.request().method() === "GET" && failCampaignRefresh) {
       return route.fulfill({ status: 503, json: { message: "Campaign list refresh failed." } });
@@ -53,7 +53,7 @@ async function installCreationApi(page: Page, worldCount = 1) {
     }
     return route.fallback();
   });
-  await page.route("**/story/created-campaign", route => route.fulfill({ contentType: "text/html", body: "<title>Committed story</title>" }));
+  await page.route("**/story/00000000-0000-4000-8000-000000000099", route => route.fulfill({ contentType: "text/html", body: "<title>Committed story</title>" }));
   return {
     creates,
     requests: base.requests,
@@ -136,9 +136,9 @@ test("create and start opens the committed campaign ID", async ({ page }) => {
   await openDashboardCreation(page);
   await fillCampaignBasics(page);
   await page.getByRole("button", { name: "Create and start" }).click();
-  await expect(page).toHaveURL(/\/story\/created-campaign$/u);
+  await expect(page).toHaveURL(/\/story\/00000000-0000-4000-8000-000000000099$/u);
   expect(api.creates).toHaveLength(1);
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("infinite-quest.user.10000000-0000-4000-8000-0000000003e7.infiniteQuestLastCampaignId"))).toBe("created-campaign");
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("infinite-quest.user.10000000-0000-4000-8000-0000000003e7.infiniteQuestLastCampaignId"))).toBe("00000000-0000-4000-8000-000000000099");
 });
 
 test("Enter uses the safe Create only default and leaves the user in management", async ({ page }) => {
@@ -200,7 +200,7 @@ test("double submission makes one POST and a failed post-commit refresh offers t
   await page.locator("#createCampaignDialog").locator("form").evaluate((form: HTMLFormElement) => form.requestSubmit());
   expect(api.creates).toHaveLength(1);
   await page.getByRole("button", { name: "Open story" }).click();
-  await expect(page).toHaveURL(/\/story\/created-campaign$/u);
+  await expect(page).toHaveURL(/\/story\/00000000-0000-4000-8000-000000000099$/u);
   expect(api.creates).toHaveLength(1);
 });
 
@@ -227,7 +227,8 @@ test("late readiness from a closed dialog cannot overwrite a reopened draft", as
   const api = await installCreationApi(page);
   let releaseReadiness!: () => void;
   api.delayNextReadiness(new Promise<void>(resolve => { releaseReadiness = resolve; }), {
-    characters: [{ id: "stale-character", name: "Stale result" }],
+    characters: [{ id: "stale-character", name: "Stale result", rpgStatCount: 0, defaultTriggerCount: 0 }],
+    startingCastCandidates: [],
     readiness: { ready: true, issues: [] }
   });
   await openDashboardCreation(page);
@@ -258,6 +259,7 @@ test("management readiness for another world cannot replace the open dashboard c
   await page.route(`**/api/v1/world-versions/${otherWorld.latestVersionId}/playable-characters`, async route => {
     await route.fulfill({ json: {
       characters: [{ id: "other-world-character", name: "Other World Hero", rpgStatCount: 0, defaultTriggerCount: 0 }],
+      startingCastCandidates: [],
       readiness: { ready: true, issues: [] }
     } });
     signalOtherReadiness();
@@ -272,3 +274,114 @@ test("management readiness for another world cannot replace the open dashboard c
   await expect(page.locator("#newCampaignCharacter")).toHaveValue("fixture-observer");
   await expect(page.locator("#createCampaignWorldVersion")).toContainText("Fixture World 1 · Version 1");
 });
+
+test("starting cast keeps selections as the protagonist changes", async ({ page }) => {
+  await installCreationApi(page);
+  await page.route("**/api/v1/meta", route => route.fulfill({ json: { application: { version: "fixture" }, capabilities: { castPresets: true } } }));
+  await page.route("**/api/v1/world-versions/*/playable-characters", route => route.fulfill({ json: {
+    characters: [{ id: "fixture-observer", name: "The Observer", rpgStatCount: 0, defaultTriggerCount: 0 }, { id: "ally", name: "Ally", rpgStatCount: 0, defaultTriggerCount: 0 }],
+    startingCastCandidates: [{ id: "ally", name: "Ally", campaignUse: "both", startingCastDefault: true, alwaysInContext: false, role: "Guide", summary: "Knows the roads." }, { id: "scout", name: "Scout", campaignUse: "supporting", startingCastDefault: true, alwaysInContext: true, role: "Scout", summary: "" }],
+    readiness: { ready: true, issues: [] }
+  } }));
+  await openDashboardCreation(page);
+  await fillCampaignBasics(page);
+  await expect(page.getByLabel("Ally · Guide")).toBeChecked();
+  await page.locator("#newCampaignCharacter").selectOption("ally");
+  await expect(page.getByLabel("Ally · Guide")).toHaveCount(0);
+  await page.locator("#newCampaignCharacter").selectOption("fixture-observer");
+  await expect(page.getByLabel("Ally · Guide")).toBeChecked();
+  await expect(page.locator("#startingCastNotice")).toContainText("2 of 30");
+  if (process.env.CAST_SCREENSHOT_ROOT) await page.screenshot({ path: resolve(process.env.CAST_SCREENSHOT_ROOT, "starting-cast.png") });
+});
+
+for (const intent of ["Create only", "Create and start"]) {
+  test(`skipped starting cast leaves a committed result for ${intent}`, async ({ page }) => {
+    await installCreationApi(page);
+    let creates = 0;
+    await page.route("**/api/v1/campaigns", async route => {
+      if (route.request().method() !== "POST") return route.fallback();
+      creates += 1;
+      return route.fulfill({ status: 201, json: { id: "00000000-0000-4000-8000-000000000099", title: "Campaign", status: "active", activeTurnNumber: 0, storyLengthProfile: "standard", storyContextBudgetTokens: 32000, worldId: "00000000-0000-4000-8000-000000000097", worldVersionId: "00000000-0000-4000-8000-000000000098", worldVersionNumber: 1, selectedCharacterId: "fixture-observer", selectedCharacterName: "The Observer", textProviderProfileId: null, imageProviderProfileId: null, skippedStartingCast: [{ characterId: "bad", name: "Bad name", aliases: [], reason: "invalid_name" }, { characterId: "ally", name: "Ally", aliases: ["bad alias"], reason: "invalid_alias" }] } });
+    });
+    await openDashboardCreation(page);
+    await fillCampaignBasics(page);
+    await page.getByRole("button", { name: intent, exact: true }).click();
+    await expect(page.locator("#createCampaignStatus")).toContainText("Bad name: character was skipped");
+    await expect(page.locator("#createCampaignStatus")).toContainText("bad alias");
+    await expect(page.locator("#openCommittedCampaign")).toBeVisible();
+    await expect(page.locator("#confirmCreateCampaign")).toBeDisabled();
+    expect(creates).toBe(1);
+  });
+}
+
+test("starting cast caps defaults and keeps ticks across protagonist switches", async ({ page }) => {
+  await installCreationApi(page);
+  await page.route("**/api/v1/meta", route => route.fulfill({ json: { application: { version: "fixture" }, capabilities: { castPresets: true } } }));
+  const candidates = Array.from({ length: 31 }, (_, i) => ({ id: `cast-${i}`, name: `Companion ${i}`, campaignUse: i === 0 ? "both" : "supporting", startingCastDefault: true, alwaysInContext: i < 6, role: "", summary: "" }));
+  await page.route("**/api/v1/world-versions/*/playable-characters", route => route.fulfill({ json: {
+    characters: [{ id: "fixture-observer", name: "The Observer", rpgStatCount: 0, defaultTriggerCount: 0 }, { id: "cast-0", name: "Companion 0", rpgStatCount: 0, defaultTriggerCount: 0 }],
+    startingCastCandidates: candidates, readiness: { ready: true, issues: [] }
+  } }));
+  await openDashboardCreation(page);
+  await fillCampaignBasics(page);
+  await expect(page.locator("#startingCastNotice")).toContainText("30 of 30");
+  await expect(page.locator("#startingCastNotice")).toContainText("take up narrator context");
+  await expect(page.getByLabel("Companion 30", { exact: true })).toBeDisabled();
+  await page.locator("#newCampaignCharacter").selectOption("cast-0");
+  await expect(page.locator("#startingCastNotice")).toContainText("selected main character is reserved");
+  await expect(page.getByLabel("Companion 30", { exact: true })).toBeDisabled();
+  await page.locator("#newCampaignCharacter").selectOption("fixture-observer");
+  await expect(page.getByLabel("Companion 0", { exact: true })).toBeChecked();
+  await expect(page.locator("#startingCastNotice")).toContainText("30 of 30");
+  await page.setViewportSize({ width: 390, height: 844 });
+  if (process.env.CAST_SCREENSHOT_ROOT) await page.screenshot({ path: resolve(process.env.CAST_SCREENSHOT_ROOT, "starting-cast-mobile.png") });
+});
+
+test("character loading can be retried without losing the campaign title", async ({ page }) => {
+  await installCreationApi(page);
+  let failed = false;
+  await page.route("**/api/v1/world-versions/*/playable-characters", async route => {
+    if (!failed && await page.locator("#createCampaignDialog").isVisible()) {
+      failed = true;
+      return route.fulfill({ status: 503, json: { message: "Temporary failure" } });
+    }
+    return route.fallback();
+  });
+  await openDashboardCreation(page);
+  await page.locator("#newCampaignTitle").fill("Keep this draft");
+  await expect(page.locator("#retryCampaignCharacters")).toBeVisible();
+  await expect(page.locator("#confirmCreateCampaign")).toBeDisabled();
+  await page.locator("#retryCampaignCharacters").click();
+  await expect(page.locator("#newCampaignCharacter")).toHaveValue("fixture-observer");
+  await expect(page.locator("#newCampaignTitle")).toHaveValue("Keep this draft");
+  await expect(page.locator("#confirmCreateCampaign")).toBeEnabled();
+});
+
+for (const [state, intent, label, section] of [
+  ["installation_disabled", "Create campaign", "Character settings", "characters"],
+  ["capability_insufficient", "Create and start", "Character settings", "characters"],
+  ["enrollment_missing", "Create and start", "Story Memory settings", "campaign"]
+] as const) {
+  test(`shows the actionable narrator notice for ${state} after ${intent}`, async ({ page }) => {
+    const api = await installCreationApi(page);
+    await page.route("**/api/v1/meta", route => route.fulfill({ json: { capabilities: { castPresets: true, castContext: state !== "installation_disabled" } } }));
+    await page.route("**/api/v1/world-versions/*/playable-characters", route => route.fulfill({ json: {
+      characters: [{ id: "fixture-observer", name: "Observer", rpgStatCount: 0, defaultTriggerCount: 0 }],
+      startingCastCandidates: [{ id: "guide", name: "Guide", campaignUse: "supporting", startingCastDefault: true, alwaysInContext: false, role: "", summary: "" }],
+      readiness: { ready: true, issues: [] }
+    } }));
+    await page.route("**/cast/workspace-status", route => route.fulfill({ json: {
+      revision: 1, boundary: { turnNumber: 0, timelineRevision: 0 }, capabilities: { editing: true, discovery: false, autoMatch: false, backfill: false, context: false },
+      counts: { identities: 0, details: 0, conflicts: 0 }, narratorState: state, tracking: null, contextDisabledReason: "Unavailable"
+    } }));
+    await openDashboardCreation(page); await fillCampaignBasics(page);
+    await expect(page.locator("#startingCastNotice")).toContainText(state === "installation_disabled" ? "won't reach the narrator" : "after you create it");
+    await page.locator(intent === "Create and start" ? "#createAndStartCampaign" : "#confirmCreateCampaign").click();
+    const link = page.locator("#createCampaignDialog").getByRole("link", { name: label, exact: true });
+    await expect(link).toHaveAttribute("href", section === "characters" ? "/app/settings?section=characters"
+      : "/app/settings?section=campaign&campaignId=00000000-0000-4000-8000-000000000099");
+    await expect(page.locator("#confirmCreateCampaign")).toBeDisabled();
+    await expect(page.locator("#createAndStartCampaign")).toBeDisabled();
+    expect(api.creates).toHaveLength(1);
+  });
+}

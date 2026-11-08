@@ -39,9 +39,9 @@ export function createApiCampaignCastApplication(pool: DatabasePool, config: Pic
   }, createApiCastBackfillApplication(pool, config, providers));
 }
 
-export function createWorkerCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castDiscoveryEnabled" | "castBackfillEnabled" | "castAutoMatchEnabled" | "castContextEnabled" | "storyMemoryCapability">,
+export function createWorkerCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castPresetsEnabled" | "castDiscoveryEnabled" | "castBackfillEnabled" | "castAutoMatchEnabled" | "castContextEnabled" | "storyMemoryCapability">,
   executor: PreparedAuthoringTextExecutor): CastDiscoveryWorkerApplication {
-  const repository = createCastDiscoveryJobRepository(pool, () => config.castDiscoveryEnabled === true, () => config.castBackfillEnabled === true);
+  const repository = createCastDiscoveryJobRepository(pool, () => config.castDiscoveryEnabled === true, () => config.castBackfillEnabled === true, () => config.castPresetsEnabled === true);
   const extractor = createCastDiscoveryExtractor({ executor });
   const scans = createCastBackfillRepository(pool, () => config.castDiscoveryEnabled === true && config.castBackfillEnabled === true);
   return { async runNext(workerId) {

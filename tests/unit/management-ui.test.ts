@@ -1469,7 +1469,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="playableCharacterRoster"');
     expect(managementHtml).toContain('id="addPlayableCharacter"');
     expect(managementHtml).toContain('id="newCampaignCharacter"');
-    expect(managementHtml).toContain("Playable characters can be authored, imported, or generated.");
+    expect(managementHtml).toContain("A published version requires at least one complete selectable character");
     expect(managementHtml).toContain("World imports retain every playable character.");
     expect(managementHtml).not.toContain('id="worldCharacter"');
     expect(managementHtml).not.toContain("Legacy/default character guidance");
@@ -1486,7 +1486,7 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("lets organization use notes before story fields are completed, while save targets missing fields", () => {
-    const elements = { characterName: { value: "Mira" }, characterGuidance: { value: "" }, characterRole: {}, characterUnclassifiedNotes: {} };
+    const elements = { characterName: { value: "Mira" }, characterGuidance: { value: "" }, characterRole: {}, characterUnclassifiedNotes: {}, characterCampaignUse: { value: "playable" }, characterStartingCastDefault: { checked: true }, characterAlwaysInContext: { checked: false } };
     const profile = { story: { role: "" }, unclassifiedNotes: "A patient guide" };
     const { characterFromForm } = managementFunctions<{ characterFromForm: (options?: { forOrganization: boolean }) => unknown }>(["characterFromForm"], {
       elements, profileFromForm: () => profile, profileHasGuidance: () => false,

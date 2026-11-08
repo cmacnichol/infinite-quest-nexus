@@ -1,4 +1,4 @@
-import { castFromWorldPreviewQuerySchema, castFromWorldPreviewSchema, castFromWorldSchema, editAuthoredCastProfileSchema,
+import { castWorldChoicesSchema, castFromWorldPreviewQuerySchema, castFromWorldPreviewSchema, castFromWorldSchema, editAuthoredCastProfileSchema,
   type CastFromWorld, type CastFromWorldPreviewQuery, type EditAuthoredCastProfile } from "@infinite-quest/contracts";
 import { reviewCastDetailSchema, reviewCastDetailResultSchema, type ReviewCastDetail } from "@infinite-quest/contracts";
 import { detachCastAttachmentSchema, detachCastAttachmentResultSchema, type DetachCastAttachment } from "@infinite-quest/contracts";
@@ -58,7 +58,7 @@ export function createCampaignCastApplication(repository: CampaignCastWritePort,
           : true)
         .filter((person) => [person.name, ...person.aliases]
         .some((name) => name.toLocaleLowerCase("en-US").includes(query.query.toLocaleLowerCase("en-US"))))
-        .sort((a, b) => a.id.localeCompare(b.id));
+        .sort((a, b) => Number(b.origin.kind === "protagonist") - Number(a.origin.kind === "protagonist") || a.id.localeCompare(b.id));
       const offset = query.cursor ? matches.findIndex((person) => person.id === query.cursor) + 1 : 0;
       if (query.cursor && offset === 0) throw new CampaignCastError("cast_revision_conflict");
       const characters = matches.slice(offset, offset + query.limit).map(person => castRosterCharacterSchema.parse(person));
@@ -69,6 +69,10 @@ export function createCampaignCastApplication(repository: CampaignCastWritePort,
     },
     async detail(scope: CastScope, id: string) {
       return castDetailSchema.parse(await repository.detail(castScopeSchema.parse(scope), id));
+    },
+    async worldChoices(scope: CastScope) {
+      if (!repository.worldChoices) throw new CampaignCastError("cast_presets_disabled");
+      return castWorldChoicesSchema.parse(await repository.worldChoices(castScopeSchema.parse(scope)));
     },
     async fromWorldPreview(scope: CastScope, query: CastFromWorldPreviewQuery) {
       if (!repository.fromWorldPreview) throw new CampaignCastError("cast_presets_disabled");

@@ -3,8 +3,12 @@ import type { CastCharacter, CastEvidence, CastScope } from "../../contracts/src
 import { buildCastDiscoverySource, validateCastDiscovery } from "../../domain/src/campaign-cast-discovery.js";
 import { castDiscoveryCharacterHints, castDiscoveryWorldIdentities } from "../../domain/src/campaign-cast-world-identities.js";
 import { projectCastFictionText } from "../../domain/src/character-fiction-authority.js";
+import { normalizeEntityTerm } from "../../domain/src/entity-references.js";
 import { stableStringify } from "../../domain/src/text.js";
-import { applyCastBatchWithClient, initializeCastWithClient } from "./campaign-cast-repository.js";
+import { randomUUID } from "node:crypto";
+import { playableCharacterSchema } from "../../contracts/src/world-library.js";
+import { readFirstAppearanceDecision } from "./campaign-cast-first-appearance.js";
+import { applyCastBatchWithClient, initializeCastWithClient, seedCampaignCastWithClient } from "./campaign-cast-repository.js";
 import { refreshCastChronicleMetadata } from "./campaign-cast-chronicle-metadata.js";
 import type { CastDiscoveryClaim } from "./campaign-cast-job-repository.js";
 import type { DatabaseClient } from "./pool.js";
@@ -44,7 +48,7 @@ export async function captureCastDiscoveryIdentities(client: DatabaseClient, sco
   return castDiscoveryIdentitySnapshotSchema.parse({ revision: cast.revision, ...compactCastDiscoveryCharacters(cast.characters), worldVersionId: world.world_version_id, worldCharacters, representedWorldCharacters });
 }
 
-export async function applyValidatedCastDiscovery(client: DatabaseClient, claim: CastDiscoveryClaim) {
+export async function applyValidatedCastDiscovery(client: DatabaseClient, claim: CastDiscoveryClaim, livePresetsEnabled = false) {
   if (!claim.output) throw new Error("Discovery output is missing.");
   const row = (await client.query("SELECT effective_narration,correction_revision FROM effective_turn_narrations WHERE turn_id=$1 AND campaign_id=$2 AND owner_user_id=$3", [claim.source.turnId, claim.scope.campaignId, claim.scope.ownerUserId])).rows[0];
   if (!row || row.correction_revision !== claim.source.narrationRevision) throw new Error("Discovery source changed.");
@@ -57,6 +61,10 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
   const first = validateCastDiscovery({ source: claim.source, output: claim.output, knownCharacters: captured.characters,
     worldCharacters: validationWorldCharacters, worldVersionId: captured.worldVersionId, identityPolicy, identityHints: captured.identityHints });
   let current = await initializeCastWithClient(client, claim.scope);
+  const pinned = (await client.query(`SELECT c.world_version_id,w.world_id,w.content FROM campaigns c JOIN world_versions w ON w.id=c.world_version_id AND w.owner_user_id=c.owner_user_id WHERE c.id=$1 AND c.owner_user_id=$2`, [claim.scope.campaignId, claim.scope.ownerUserId])).rows[0];
+  const capturedWorld = (await client.query("SELECT world_id FROM world_versions WHERE id=$1 AND owner_user_id=$2", [captured.worldVersionId, claim.scope.ownerUserId])).rows[0];
+  const roster = (Array.isArray(pinned.content?.playableCharacters) ? pinned.content.playableCharacters : []).map((entry: unknown) => playableCharacterSchema.safeParse(entry)).map((entry: ReturnType<typeof playableCharacterSchema.safeParse>) => entry.success ? entry.data : null);
+  const currentWorldIdentities = castDiscoveryWorldIdentities(pinned.content);
   const rejected = [...first.rejected], unresolved = [...first.unresolved];
   const characterIds: string[] = [], observationIds: string[] = [];
   let accepted = 0;
@@ -66,6 +74,15 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
   for (const candidate of first.accepted) {
     const { resolvedOrigin, identityBasis, ...proposal } = candidate;
     const representedId = resolvedOrigin.kind === "world" ? captured.representedWorldCharacters?.find(person => person.entityId === resolvedOrigin.entityId)?.characterId : undefined;
+    if (resolvedOrigin.kind === "world" && captured.worldVersionId !== pinned.world_version_id) {
+      const before = validationWorldCharacters.filter(person => person.entityId === resolvedOrigin.entityId).map(person => ({ entityId: person.entityId, name: person.name, aliases: person.aliases, ...(person.identityHints ? { identityHints: person.identityHints } : {}) }));
+      const after = currentWorldIdentities.filter(person => person.entityId === resolvedOrigin.entityId);
+      const terms = [candidate.name, ...candidate.aliases].map(normalizeEntityTerm);
+      const collisions = currentWorldIdentities.filter(person => [person.name, ...person.aliases].some(name => terms.includes(normalizeEntityTerm(name))));
+      if (capturedWorld?.world_id !== pinned.world_id || before.length !== 1 || after.length !== 1 || collisions.length !== 1 || stableStringify(before[0]) !== stableStringify(after[0])) {
+        unresolved.push({ candidate: proposal, code: "identity_changed" }); continue;
+      }
+    }
     const matchedId = candidate.existingCharacterId ?? representedId;
     const prior = captured.characters.find((person) => person.id === matchedId);
     const now = current.characters.find((person) => person.id === matchedId);
@@ -97,6 +114,36 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
       unresolved.push({ candidate: proposal, code: "identity_changed" }); continue;
     }
     const key = `discovery:${claim.id}:${claim.chunkOrdinal}:${candidate.localKey}`;
+    if (!characterId && resolvedOrigin.kind === "world") {
+      const index = roster.findIndex((entry: ReturnType<typeof playableCharacterSchema.parse> | null) => entry?.id === resolvedOrigin.entityId), entry = roster[index];
+      if (entry) {
+        const old = validationWorldCharacters.filter(person => person.entityId === entry.id);
+        const nowIdentities = currentWorldIdentities.filter(person => person.entityId === entry.id);
+        const detached = Boolean((await client.query(`SELECT 1 FROM campaign_cast_events seed JOIN campaign_cast_events undo ON undo.campaign_id=seed.campaign_id AND undo.owner_user_id=seed.owner_user_id
+          WHERE seed.campaign_id=$1 AND seed.owner_user_id=$2 AND seed.attachment IS NOT NULL
+          AND EXISTS (SELECT 1 FROM jsonb_array_elements(seed.payload) p WHERE p->'command'->>'kind'='seed_profile' AND p->'command'->>'entityId'=$3)
+          AND EXISTS (SELECT 1 FROM jsonb_array_elements(undo.payload) p WHERE p->'command'->>'kind'='detach' AND p->'command'->>'eventId'=seed.id::text) LIMIT 1`, [claim.scope.campaignId, claim.scope.ownerUserId, entry.id])).rowCount);
+        const decision = await readFirstAppearanceDecision(client, claim.scope, { frozenPermission: claim.execution.admission?.castPresetsEnabled === true,
+          livePermission: livePresetsEnabled, sourceWorldId: capturedWorld?.world_id ?? "", rosterCharacterId: entry.id,
+          identityStillSupported: old.length === 1 && nowIdentities.length === 1 && stableStringify(old[0]) === stableStringify(nowIdentities[0]),
+          unique: nowIdentities.length === 1, detached });
+        if (decision === "review") { unresolved.push({ candidate: proposal, code: "identity_changed" }); continue; }
+        if (decision === "protagonist") { characterId = current.characters.find(person => person.origin.kind === "protagonist")?.id ?? null; if (!characterId) { unresolved.push({ candidate: proposal, code: "identity_changed" }); continue; } }
+        if (decision === "seed") {
+          if (sourceRanges.length !== candidate.identityEvidence.length) { unresolved.push({ candidate: proposal, code: "identity_changed" }); continue; }
+          characterId = randomUUID();
+          const receipt = await seedCampaignCastWithClient(client, claim.scope, { characterId, worldVersionId: pinned.world_version_id, entry, index, boundary: current.boundary,
+            idempotencyKey: `${key}:seed`, narrationAlias: candidate.name,
+            attachment: { basis: "unique_world_name", sourceRanges }, evidenceCommands: [
+              { kind: "mention", characterId, evidence: evidence(candidate.identityEvidence[0]!) },
+              ...candidate.observations.map(observation => ({ kind: "observe" as const, characterId: characterId!, field: observation.field, value: observation.value,
+                mode: observation.mode, speakerCharacterId: observation.speakerCharacterId, evidence: evidence(observation), supersedesObservationId: null }))
+            ] });
+          characterIds.push(characterId); observationIds.push(...receipt.observationIds); accepted++;
+          current = await initializeCastWithClient(client, claim.scope); continue;
+        }
+      } else if (livePresetsEnabled && claim.execution.admission?.castPresetsEnabled) { unresolved.push({ candidate: proposal, code: "identity_changed" }); continue; }
+    }
     if (!characterId) {
       const receipt = await applyCastBatchWithClient(client, claim.scope, { boundary: current.boundary, idempotencyKey: `${key}:identity`,
         commands: [{ kind: "create", name: candidate.name, aliases: candidate.aliases, origin: resolvedOrigin, evidence: evidence(candidate.identityEvidence[0]!) }] },
@@ -119,5 +166,7 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
       VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(job_id,chunk_ordinal,local_key) DO NOTHING`,
     [claim.scope.ownerUserId, claim.scope.campaignId, claim.id, claim.chunkOrdinal, item.candidate.localKey, JSON.stringify(claim.source), JSON.stringify(item.candidate), item.code]);
   }
-  return { characterIds, observationIds, validationSummary: { accepted, unresolved: unresolved.length, rejected } };
+  return { characterIds, observationIds, validationSummary: { accepted, unresolved: unresolved.length, rejected,
+    worldIdentitySnapshot: { worldVersionId: captured.worldVersionId, identities: validationWorldCharacters.map(person => ({ entityId: person.entityId,
+      name: person.name, aliases: person.aliases, ...(person.identityHints ? { identityHints: person.identityHints } : {}) })) } } };
 }

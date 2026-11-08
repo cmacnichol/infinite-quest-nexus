@@ -426,6 +426,7 @@ export function testWorldCampaignApplication(
     }),
     getWorldVersionPlayableCharacterSummary: async () => ({
       characters: [{ id: "observer", name: "The Observer", rpgStatCount: 0, defaultTriggerCount: 0 }],
+      startingCastCandidates: [{ id: "observer", name: "The Observer", campaignUse: "playable", startingCastDefault: false, alwaysInContext: false, role: "", summary: "" }],
       readiness: { ready: true, issues: [] }
     }),
     getCampaignSyncStatus: async (scope: { campaignId: string }, request: { since?: string }) => {

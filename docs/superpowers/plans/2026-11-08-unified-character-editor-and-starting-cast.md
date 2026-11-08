@@ -352,9 +352,9 @@ Use the phase 3 reads, transitions, flags and versioned writers. Enable presets 
 
 **Interface.** Keep `characters` selectable-only in the world-version list response and add `startingCastCandidates`. `buildCampaignCreateRequest` reads selected roster IDs and per-entry `alwaysInContext` from the open dialog.
 
-- [ ] **Regression cases.** Open an old world and then one with Playable, Supporting and Both. Switch use twice and compare mechanics byte-for-byte. Check name-only save, hidden Supporting Generate, completeness, duplicate/new ID, reorder and prepublish readiness. Switch protagonists at 30 selections, then back. Verify cap, selections, warning above five pins, empty/retry states and dialog-close reset.
-- [ ] **Implementation.** Expose use/defaults/pin controls in World. Return selectable characters and unfiltered startingCastCandidates in one typed world-version read. Keep local selections and pins keyed by roster ID until the dialog closes. Exclude the selected main character, cap preselection in roster order, drop stale IDs with a notice, and keep disabled presets hidden with their explanation.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Open an old world and then one with Playable, Supporting and Both. Switch use twice and compare mechanics byte-for-byte. Check name-only save, hidden Supporting Generate, completeness, duplicate/new ID, reorder and prepublish readiness. Switch protagonists at 30 selections, then back. Verify cap, selections, warning above five pins, empty/retry states and dialog-close reset.
+- [x] **Implementation.** Expose use/defaults/pin controls in World. Return selectable characters and unfiltered startingCastCandidates in one typed world-version read. Keep local selections and pins keyed by roster ID until the dialog closes. Exclude the selected main character, cap preselection in roster order, drop stale IDs with a notice, and keep disabled presets hidden with their explanation.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/campaign-creation-draft.test.ts tests/unit/legacy-campaign-creation-ui.test.ts
@@ -369,9 +369,9 @@ pnpm exec playwright test tests/e2e/legacy-ui-world-readiness.e2e.test.ts tests/
 
 **Interface.** `POST /api/v1/campaigns` accepts optional `startingCast`. Return `skippedStartingCast` with the successful campaign ID when applicable. A non-empty selection with presets disabled returns the public `cast_presets_disabled` 503.
 
-- [ ] **Regression cases.** Inject failure midway through a multi-seed create and verify rollback. Send invalid/duplicate/main IDs, omit startingCast, disable presets with a non-empty list, and load a Supporting-only roster. Inspect the typed 503 code/reference and safe readiness issue. On Create and Create and start verify that an invalid name/alias is reported, the campaign exists exactly once and the result cannot submit again. Edit the source draft and one of two campaigns copied from the same pin. Assert the other campaign and published version retain their original values.
-- [ ] **Implementation.** Extend native create with the spec’s optional list of at most 30 entries. Resolve all IDs against the locked pin and call seedCampaignCastWithClient at turn/revision zero with preallocated IDs, one event per chosen character and deterministic keys. Use common fiction eligibility and skippedStartingCast reporting. Map only the specified safe HTTP errors. Use the typed create method. Drive notices independently from seeding and effective narrator capability/enrollment, linking to the created campaign.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Inject failure midway through a multi-seed create and verify rollback. Send invalid/duplicate/main IDs, omit startingCast, disable presets with a non-empty list, and load a Supporting-only roster. Inspect the typed 503 code/reference and safe readiness issue. On Create and Create and start verify that an invalid name/alias is reported, the campaign exists exactly once and the result cannot submit again. Edit the source draft and one of two campaigns copied from the same pin. Assert the other campaign and published version retain their original values.
+- [x] **Implementation.** Extend native create with the spec’s optional list of at most 30 entries. Resolve all IDs against the locked pin and call seedCampaignCastWithClient at turn/revision zero with preallocated IDs, one event per chosen character and deterministic keys. Use common fiction eligibility and skippedStartingCast reporting. Map only the specified safe HTTP errors. Use the typed create method. Drive notices independently from seeding and effective narrator capability/enrollment, linking to the created campaign.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/client-web/api-client.test.ts
@@ -387,9 +387,9 @@ pnpm exec playwright test tests/e2e/legacy-ui-campaign-creation.e2e.test.ts
 
 **Interface.** Call the shared internal seed writer with the database client already holding the campaign lock. Attach a suppressible seed only to the attachment that established this automatic match.
 
-- [ ] **Regression cases.** Pause publication across migration, shutdown of presets and restart. Exercise strict and unique matches to a renamed Both protagonist’s old name, held approval and direct Add/Apply. Use the eligible/ineligible empty-campaign copies from 3C. Detach a corroborated first appearance and a later unrelated match separately.
-- [ ] **Implementation.** Under the campaign lock require the frozen permission, live gate and campaign eligibility for automatic seeding. Re-resolve the scoped roster ID against the current pin, route ambiguous or changed identities to review, reserve the protagonist, and use plain discovery where allowed. Use roster identity for create, tie seed suppression only to its establishing attachment, and keep explicit Add available for ineligible campaigns with presets on.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Pause publication across migration, shutdown of presets and restart. Exercise strict and unique matches to a renamed Both protagonist’s old name, held approval and direct Add/Apply. Use the eligible/ineligible empty-campaign copies from 3C. Detach a corroborated first appearance and a later unrelated match separately.
+- [x] **Implementation.** Under the campaign lock require the frozen permission, live gate and campaign eligibility for automatic seeding. Re-resolve the scoped roster ID against the current pin, route ambiguous or changed identities to review, reserve the protagonist, and use plain discovery where allowed. Use roster identity for create, tie seed suppression only to its establishing attachment, and keep explicit Add available for ineligible campaigns with presets on.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run --config vitest.integration.config.ts tests/integration/campaign-cast-discovery.integration.test.ts tests/integration/campaign-cast-lifecycle.integration.test.ts tests/integration/campaign-cast-api.integration.test.ts tests/integration/campaign-cast-portability.integration.test.ts
@@ -403,9 +403,9 @@ pnpm exec vitest run --config vitest.integration.config.ts tests/integration/cam
 
 **Interface.** Use `campaign-preset` for a currently seeded NPC and `campaign-supporting` for a manual or discovered NPC. `open(characterId)` in the Story panel consumes the `character` query parameter.
 
-- [ ] **Regression cases.** Seed Ferryman, hand-edit to Guide, detach the mistaken match, then explicitly reapply the same profile. Require the same cast ID, a fresh activation, effective Ferryman and Guide only in prior history. Rewind before detach and verify Guide. Repeat for a different profile. Also check reset of canonical aliases, restore-goals timing, all badge/action states, stale Apply preview, both form factors and deep-link focus. Assert the exact field badges, reset/clear/restore actions, accessible focus and lock retention on both entry points. Confirm ordinary NPCs still expose their 11 fields.
-- [ ] **Implementation.** Implement Add/Apply using 3E on both surfaces, with full detail on demand. Use shared editors for all campaign characters, including archived campaigns. Lock on pending or recoverable generation via sync-status before open/save and preserve the draft on a live lock. Open in Story targets the specified character. Remove obsolete form maps/panel renderer once imports from both clients are checked. Finish the phase 4 guide and build both clients.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Seed Ferryman, hand-edit to Guide, detach the mistaken match, then explicitly reapply the same profile. Require the same cast ID, a fresh activation, effective Ferryman and Guide only in prior history. Rewind before detach and verify Guide. Repeat for a different profile. Also check reset of canonical aliases, restore-goals timing, all badge/action states, stale Apply preview, both form factors and deep-link focus. Assert the exact field badges, reset/clear/restore actions, accessible focus and lock retention on both entry points. Confirm ordinary NPCs still expose their 11 fields.
+- [x] **Implementation.** Implement Add/Apply using 3E on both surfaces, with full detail on demand. Use shared editors for all campaign characters, including archived campaigns. Lock on pending or recoverable generation via sync-status before open/save and preserve the draft on a live lock. Open in Story targets the specified character. Remove obsolete form maps/panel renderer once imports from both clients are checked. Finish the phase 4 guide and build both clients.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/campaign-cast-panel.test.ts
@@ -414,6 +414,12 @@ pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts tests/e2e/legacy-u
 ```
 
 **Phase 4 exit.** Run the create → Story → edit → migration/rewind → reopen sequence against an isolated database. Exercise both enabled and disabled configurations. Capture the skipped-entry result, Add/Apply preview, reset/restore controls and campaign-to-Story deep link at both widths.
+
+**Phase 4 verification, 2026-11-08.** All 106 tests in the four mapped Chromium suites passed, covering Nexus World, campaign creation, the campaign page and Story. The real PostgreSQL browser proof creates a campaign with a skipped name, follows its character deep link, edits and resets the profile, migrates, rewinds and reopens it. It also applies a second world profile to an existing same-name cast member and verifies the cast ID. Both web clients build. The preset and narrator settings remain opt-in.
+
+- To repeat the real browser proof, start the legacy Vite server, set `PLAYWRIGHT_LEGACY_PORT` to that port and set `NEXUS_CAST_BROWSER_PROOF=1` for the mapped World Library integration command. `CAST_SCREENSHOT_ROOT` selects the evidence directory.
+- The six mapped integration suites passed 154 tests on Windows. The secure-filesystem import case requires POSIX and passed in the supplemental three-suite Linux run (94 tests). Both runs used disposable PostgreSQL databases. The 15 related unit suites passed 482 tests, including a field-badge matrix and a combined identity reset, role reset, goal restore and observed-appearance clear.
+- Desktop and 390px evidence covers the [starting cast picker](../../review/assets/unified-character-editor-phase-4/starting-cast-390.png), [skipped-entry result](../../review/assets/unified-character-editor-phase-4/skipped-result-390.png), [Apply preview](../../review/assets/unified-character-editor-phase-4/apply-preview-1440.png), [reset and restore controls](../../review/assets/unified-character-editor-phase-4/reset-restore-controls-390.png) and [Story deep link](../../review/assets/unified-character-editor-phase-4/story-deep-link-1440.png).
 
 ## Phase 5 · Add reviewed bulk and AI authoring
 

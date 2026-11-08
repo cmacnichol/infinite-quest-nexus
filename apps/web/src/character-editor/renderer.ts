@@ -63,7 +63,7 @@ export function renderCharacterEditor(host: Element, draft: CharacterEditorDraft
         <div>
           <p class="eyebrow">World Library</p>
           <h2 id="characterDialogTitle">Add character</h2>
-          <p id="characterDialogDescription">Playable character · Create a character for this world draft.</p>
+          <p id="characterDialogDescription">Create a character for this world draft.</p>
         </div>
       </div>
       <details id="characterGenerator" class="character-generator hidden">
@@ -78,6 +78,13 @@ export function renderCharacterEditor(host: Element, draft: CharacterEditorDraft
       <div class="character-core-fields">
         <p id="characterPlayableContext" class="field-note character-playable-context">Playable character · This character is part of the world's playable roster.</p>
         <span data-character-profile-group="name"></span>
+        <label id="characterUseLabel">Use in campaigns
+          <select id="characterCampaignUse"><option value="playable">Playable</option><option value="supporting">Supporting</option><option value="both">Both</option></select>
+        </label>
+        <div id="characterSupportingOptions">
+          <label><input id="characterStartingCastDefault" type="checkbox"> Select by default in starting cast</label>
+          <label><input id="characterAlwaysInContext" type="checkbox"> Always include in narrator context</label>
+        </div>
       </div>
       <div id="characterStatus" class="status hidden" role="status" aria-live="polite"></div>
       <fieldset class="character-profile-section">

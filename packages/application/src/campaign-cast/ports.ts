@@ -4,6 +4,7 @@ import type { CreateCastCharacter, EditCastCharacter, CastWriteResult, CastDetai
   CastCandidateList, CastCandidateQuery, ResolveCastCandidate, CastCandidateResolution } from "@infinite-quest/contracts";
 
 export interface CampaignCastWritePort {
+  worldChoices?(scope: CastScope): Promise<import("@infinite-quest/contracts").CastWorldChoices>;
   fromWorldPreview?(scope: CastScope, input: import("@infinite-quest/contracts").CastFromWorldPreviewQuery): Promise<import("@infinite-quest/contracts").CastFromWorldPreview>;
   fromWorld?(scope: CastScope, input: import("@infinite-quest/contracts").CastFromWorld): Promise<CastWriteResult>;
   editAuthoredProfile?(scope: CastScope, id: string, input: import("@infinite-quest/contracts").EditAuthoredCastProfile): Promise<CastWriteResult>;

@@ -114,3 +114,8 @@ describe("campaign creation draft policy", () => {
     expect(request).not.toHaveProperty("startAfterCreate");
   });
 });
+
+it("carries selected starting cast and per-character context into the create request", () => {
+  const value = draft({ startingCast: [{ characterId: "companion", alwaysInContext: true }] });
+  expect(buildCampaignCreateRequest(value).startingCast).toEqual([{ characterId: "companion", alwaysInContext: true }]);
+});

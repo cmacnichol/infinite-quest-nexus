@@ -18,9 +18,11 @@ export async function exportCampaignCast(client: DatabaseClient, scope: CastScop
   const observationIds = new Set((await client.query("SELECT id FROM campaign_cast_observations WHERE campaign_id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows.map((row) => row.id));
   const sources = new Map((await client.query(`SELECT turn_id,correction_revision,effective_narration FROM effective_turn_narrations
     WHERE campaign_id=$1 AND owner_user_id=$2`, [scope.campaignId, scope.ownerUserId])).rows.map((row) => [row.turn_id, row]));
+  const detachedSeeds = new Set(events.flatMap(event => event.commands.flatMap((item: ReturnType<typeof castStoredCommandSchema.parse>) => item.command.kind === "detach" ? [item.command.eventId] : []))
+    .filter(id => events.some(event => event.id === id && event.commands.some((item: ReturnType<typeof castStoredCommandSchema.parse>) => item.command.kind === "seed_profile"))));
   const validAttachments = new Set(events.filter((event) => event.attachment && event.attachment.sourceRanges.every((range: any) => {
     const source: any = sources.get(range.turnId);
-    return source && source.correction_revision === range.narrationRevision && sha256(source.effective_narration) === range.sourceHash;
+    return source && (detachedSeeds.has(event.id) || source.correction_revision === range.narrationRevision && sha256(source.effective_narration) === range.sourceHash);
   }) && event.attachment.observationIds.every((id: string) => observationIds.has(id))).map((event) => event.id));
   const active = (await client.query("SELECT active_turn_number FROM campaigns WHERE id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows[0].active_turn_number;
   const retained = events.map((event) => ({ ...event, attachment: validAttachments.has(event.id) ? event.attachment : undefined, effectiveTurnNumber: Math.min(event.effectiveTurnNumber, active),
@@ -126,12 +128,16 @@ export async function importCampaignCast(client: DatabaseClient, scope: CastScop
   const campaign = (await client.query("SELECT active_turn_number,selected_character_id FROM campaigns WHERE id=$1 AND owner_user_id=$2 FOR UPDATE", [scope.campaignId, scope.ownerUserId])).rows[0];
   if (!campaign) throw new Error("cast_archive_reference_invalid");
   if (people.some((person) => person.firstObservedTurn > campaign.active_turn_number)) throw new Error("cast_archive_boundary_invalid");
+  const suppressedSeedEvents = new Set(events.flatMap(event => event.commands.flatMap(item => item.command.kind === "detach" ? [item.command.eventId] : []))
+    .filter(id => events.some(event => event.id === id && event.commands.some(item => item.command.kind === "seed_profile"))));
   for (const event of events) {
     if (event.effectiveTurnNumber > campaign.active_turn_number) throw new Error("cast_archive_boundary_invalid");
     if (event.attachment) for (const range of event.attachment.sourceRanges) {
       const source = (await client.query(`SELECT turn_number,correction_revision,effective_narration FROM effective_turn_narrations
         WHERE turn_id=$1 AND campaign_id=$2 AND owner_user_id=$3`, [range.turnId, scope.campaignId, scope.ownerUserId])).rows[0];
-      if (!source || source.correction_revision !== range.narrationRevision || sha256(source.effective_narration) !== range.sourceHash)
+      if (!source) throw new Error("cast_archive_reference_invalid");
+      if (suppressedSeedEvents.has(event.id) && (source.correction_revision !== range.narrationRevision || sha256(source.effective_narration) !== range.sourceHash)) continue;
+      if (source.correction_revision !== range.narrationRevision || sha256(source.effective_narration) !== range.sourceHash)
         throw new Error("cast_archive_reference_invalid");
       const parsed = buildCastDiscoverySource({ scope, turnId: range.turnId, turnNumber: source.turn_number,
         narrationRevision: range.narrationRevision, timelineRevision: 0, narration: source.effective_narration });

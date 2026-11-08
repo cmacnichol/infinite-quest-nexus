@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { seedCampaignCastWithClient } from "./campaign-cast-repository.js";
+import { castDiscoveryWorldIdentities } from "../../domain/src/campaign-cast-world-identities.js";
 import type {
   CampaignCreateView,
   CampaignListSource,
@@ -40,7 +43,7 @@ import {
   campaignCharacterSeed,
   campaignProfileFromCharacter,
   characterSnapshot,
-  resolvePlayableCharacters
+  resolvePlayableCharacters, resolveWorldCharacters
 } from "../../domain/src/world-characters.js";
 import type { DatabasePool } from "./pool.js";
 import {
@@ -1170,6 +1173,21 @@ function createPostgresCampaignRepository(
           selectionIssue: resolvePlayableCharacters(content).length > 1 && !request.selectedCharacterId ? "required" : "unknown"
         });
       }
+      const selections = request.startingCast ?? [];
+      if (selections.length && collaborators.castPresetsEnabled !== true) {
+        throw new WorldCampaignApplicationError("unavailable", "cast_presets_disabled");
+      }
+      const selectedIds = new Set<string>();
+      const startingEntries = selections.map((selection) => {
+        const index = content.playableCharacters.findIndex((entry) => entry.id === selection.characterId);
+        const entry = content.playableCharacters[index];
+        if (!entry || !["supporting", "both"].includes(entry.campaignUse) || entry.id === seed.character.id || selectedIds.has(entry.id)) {
+          throw new WorldCampaignApplicationError("invalid_request", "invalid_transition");
+        }
+        selectedIds.add(entry.id);
+        return { entry, index, alwaysInContext: selection.alwaysInContext };
+      });
+      const skippedStartingCast: Array<{ characterId: string; name: string; aliases: string[]; reason: "invalid_name" | "invalid_alias" }> = [];
       const snapshot = characterSnapshot(seed.character);
       const campaignProfile = campaignProfileFromCharacter(seed.character);
       const eventRules = validateCampaignEventTriggers(content.eventTriggers);
@@ -1241,6 +1259,21 @@ function createPostgresCampaignRepository(
         campaignId,
         worldVersionId: request.worldVersionId
       });
+      for (const { entry, index, alwaysInContext } of startingEntries) {
+        const identity = castDiscoveryWorldIdentities({ playableCharacters: [entry] })[0];
+        if (!identity) {
+          skippedStartingCast.push({ characterId: entry.id, name: entry.name, aliases: [], reason: "invalid_name" });
+          continue;
+        }
+        const aliases = entry.profile?.identity.aliases ?? [];
+        const rejectedAliases = aliases.filter((alias) => !identity.aliases.includes(alias));
+        if (rejectedAliases.length) skippedStartingCast.push({ characterId: entry.id, name: entry.name, aliases: rejectedAliases, reason: "invalid_alias" });
+        await seedCampaignCastWithClient(client, { ownerUserId: scope.ownerUserId, campaignId }, {
+          characterId: randomUUID(), worldVersionId: request.worldVersionId, entry, index,
+          boundary: { turnNumber: 0, timelineRevision: 0 },
+          idempotencyKey: `campaign-seed:${campaignId}:${entry.id}`, alwaysInContext
+        });
+      }
       return success<CampaignCreateView>({
         id: campaignId,
         title: request.title,
@@ -1254,6 +1287,7 @@ function createPostgresCampaignRepository(
         worldVersionNumber: source.version_number,
         selectedCharacterId: seed.character.id,
         selectedCharacterName: seed.character.name,
+        ...(skippedStartingCast.length ? { skippedStartingCast } : {}),
         textProviderProfileId: null,
         imageProviderProfileId: null
       });
@@ -1442,6 +1476,11 @@ function createPostgresCampaignRepository(
           name: character.name,
           rpgStatCount: character.rpgStats.length,
           defaultTriggerCount: character.defaultTriggers.length
+        })),
+        startingCastCandidates: resolveWorldCharacters(content).map((character) => ({
+          id: character.id, name: character.name, campaignUse: character.campaignUse,
+          startingCastDefault: character.startingCastDefault, alwaysInContext: character.alwaysInContext,
+          role: String(character.profile?.role || ""), summary: String(character.characterText || character.profile?.background || "").slice(0, 260)
         })),
         readiness: assessWorldCampaignReadiness(content)
       };

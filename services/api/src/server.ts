@@ -581,7 +581,7 @@ function isKnownSafeFiveXX(error: unknown, details: ReturnType<typeof errorDetai
   if (transport || isSanitizedSystemArchiveServerError(error)) return true;
   if (!details.details || typeof details.details !== "object") return false;
   const code = (details.details as { code?: unknown }).code;
-  return code === "incomplete_generated_world" || code === "provider_response_too_large";
+  return code === "incomplete_generated_world" || code === "provider_response_too_large" || (details.name === "WorldCampaignHttpError" && code === "cast_presets_disabled");
 }
 
 function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): string {
@@ -919,7 +919,7 @@ export async function buildServer({
     resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) })
   });
   if (cast) await app.register(registerCampaignCastRoutes, {
-    application: cast, enabled: config.castEditingEnabled === true,
+    application: cast, enabled: config.castEditingEnabled === true, presetsEnabled: config.castPresetsEnabled === true,
     resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) })
   });
   if (authoring) {

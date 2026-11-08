@@ -1,3 +1,4 @@
+import { castWorldChoicesSchema } from "@infinite-quest/contracts";
 import { castFromWorldPreviewQuerySchema, castFromWorldPreviewSchema, castFromWorldSchema, editAuthoredCastProfileSchema,
   type CastFromWorld, type CastFromWorldPreviewQuery, type EditAuthoredCastProfile } from "@infinite-quest/contracts";
 import { castContextPreviewRequestSchema, castContextExplanationSchema, type CastContextPreviewRequest } from "@infinite-quest/contracts";
@@ -16,7 +17,7 @@ import { readerTurnResponseSchema, readerTurnNumberSchema } from "@infinite-ques
 import { castBackfillRequestSchema, castBackfillPreviewSchema, castBackfillProgressSchema, castBackfillRetrySchema,
   type CastBackfillRequest, type CastBackfillRetry } from "@infinite-quest/contracts";
 
-const capabilities = z.object({ castEditing: z.boolean() });
+const capabilities = z.object({ castEditing: z.boolean(), castPresets: z.boolean().optional() });
 export const castListResponseSchema = castSnapshotSchema.extend({ characters: z.array(castRosterCharacterSchema), nextCursor: z.uuid().nullable(), recentWindow: z.number().int().positive().optional(), capabilities,
   attention: z.array(z.object({ characterId: z.uuid(), review: z.boolean(), conflict: z.boolean(), reviewCount: z.number().int().nonnegative().optional(), conflictCount: z.number().int().nonnegative().optional() }).strict()).max(50).optional() });
 export const castDetailResponseSchema = castDetailSchema.extend({ capabilities });
@@ -101,6 +102,7 @@ export function createCampaignCastApi(options: NexusHttpClientOptions = {
       return http.request({ method: "GET", path: `${path}?${search}`, responseSchema: castListResponseSchema, ...(signal ? { signal } : {}) });
     },
     detail: (campaignId: string, id: string, signal?: AbortSignal) => http.request({ method: "GET", path: `${pathFor(campaignId)}/${encodeURIComponent(id)}`, responseSchema: castDetailResponseSchema, ...(signal ? { signal } : {}) }),
+    worldChoices: (campaignId: string) => http.request({ method: "GET", path: `${pathFor(campaignId)}/from-world`, responseSchema: castWorldChoicesSchema }),
     async fromWorldPreview(campaignId: string, input: CastFromWorldPreviewQuery) {
       const path = pathFor(campaignId) + "/from-world-preview";
       const query = validatedRequest(castFromWorldPreviewQuerySchema, input, "GET", path);

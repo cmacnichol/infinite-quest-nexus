@@ -14,7 +14,7 @@ import type { TextExecutionPlanDiscoveryPorts } from "./provider-preset-resoluti
 /** Called before acceptance, never inside its database transaction. Performs discovery but no generation. */
 export async function prepareCastDiscoveryExecution(input: {
   ownerUserId: string; execution: RuntimeTextExecution; ports: TextExecutionPlanDiscoveryPorts;
-  responseFormatCapabilities?: DirectAuthoringTextPlanOptions["responseFormatCapabilities"]; identityPolicy?: "strict" | "unique_name";
+  responseFormatCapabilities?: DirectAuthoringTextPlanOptions["responseFormatCapabilities"]; identityPolicy?: "strict" | "unique_name"; castPresetsEnabled?: boolean;
 }): Promise<CastDiscoveryExecution> {
   if (input.execution.providerRole !== "text" || !["openrouter", "openai_compatible"].includes(input.execution.providerType)) {
     throw new Error("Cast discovery requires a schema-capable text provider.");
@@ -33,7 +33,7 @@ export async function prepareCastDiscoveryExecution(input: {
     capabilityEvidenceHash: admission.capabilityEvidenceHash, ...(admission.eligible === undefined ? {} : { eligible: admission.eligible }) });
   return { providerProfileId: execution.id, plan: prepared.plans.cast_discovery!, admission: {
     routeBasis: prepared.routeBasis, frozenResponseContracts, providerType: execution.providerType as "openrouter" | "openai_compatible",
-    configuration: structuredClone(execution.configuration), ...identity } };
+    configuration: structuredClone(execution.configuration), ...identity, castPresetsEnabled: input.castPresetsEnabled === true } };
 }
 
 export function createCastDiscoveryExtractor(input: { executor: PreparedAuthoringTextExecutor }): CastDiscoveryExtractorPort {

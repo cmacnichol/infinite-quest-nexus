@@ -163,7 +163,9 @@ export const castListQuerySchema = z.object({ limit: z.coerce.number().int().min
 export const castDetailSchema = castWriteResultSchema.extend({ observations: z.array(castObservationSchema),
   overrides: z.array(castOverrideSchema), autoMatches: z.array(castAttachmentSchema.extend({ turnNumber: ordinal, quote: z.string() })).default([]), identityEvents: z.array(z.object({
     eventId: z.uuid(), effectiveTurnNumber: ordinal, name, aliases: z.array(name).max(20), evidence: castEvidenceSchema
-  }).strict()), unresolvedCandidateIds: z.array(z.uuid()), editorDestination: z.string().nullable() });
+  }).strict()), authoredHistory: z.array(z.object({ eventId: z.uuid(), seedEventId: z.uuid(), effectiveTurnNumber: ordinal,
+    set: castAuthoredValuesSchema, reset: z.array(castAuthoredPathSchema).max(30) }).strict()).optional(),
+  unresolvedCandidateIds: z.array(z.uuid()), editorDestination: z.string().nullable() });
 export type CreateCastCharacter = z.infer<typeof createCastCharacterSchema>;
 export type EditCastCharacter = z.infer<typeof editCastCharacterSchema>;
 export type CastWriteResult = z.infer<typeof castWriteResultSchema>;

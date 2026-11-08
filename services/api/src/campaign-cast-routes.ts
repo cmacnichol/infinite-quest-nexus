@@ -4,19 +4,20 @@ import { CampaignCastError, type CampaignCastApplication } from "../../../packag
 import { registerCampaignCastScanRoutes } from "./campaign-cast-scan-routes.js";
 
 export async function registerCampaignCastRoutes(app: FastifyInstance, options: {
-  application: CampaignCastApplication; enabled: boolean; resolveOwner(): Promise<{ ownerUserId: string }>;
+  application: CampaignCastApplication; enabled: boolean; presetsEnabled?: boolean; resolveOwner(): Promise<{ ownerUserId: string }>;
 }) {
   await registerCampaignCastScanRoutes(app, { ...(options.application.scans ? { application: options.application.scans } : {}), resolveOwner: options.resolveOwner });
   const base = "/api/v1/campaigns/:campaignId/cast";
   const params = z.object({ campaignId: z.uuid(), characterId: z.uuid().optional(), candidateId: z.uuid().optional(), jobId: z.uuid().optional(), eventId: z.uuid().optional() });
-  for (const [method, path] of [["GET", base], ["GET", `${base}/from-world-preview`], ["POST", `${base}/from-world`], ["POST", `${base}/:characterId/authored-profile`], ["POST", base], ["GET", `${base}/workspace-status`], ["GET", `${base}/discovery`], ["GET", `${base}/candidates`],
+  for (const [method, path] of [["GET", base], ["GET", `${base}/from-world`], ["GET", `${base}/from-world-preview`], ["POST", `${base}/from-world`], ["POST", `${base}/:characterId/authored-profile`], ["POST", base], ["GET", `${base}/workspace-status`], ["GET", `${base}/discovery`], ["GET", `${base}/candidates`],
     ["POST", `${base}/:characterId/attachments/:eventId/detach`], ["POST", `${base}/discovery/:jobId/retry`], ["POST", `${base}/candidates/:candidateId/details/resolve`], ["POST", `${base}/candidates/:candidateId/resolve`], ["GET", `${base}/:characterId`], ["PATCH", `${base}/:characterId`]] as const) {
     app.route({ method, url: path, bodyLimit: path.endsWith("/authored-profile") ? 8 * 1024 * 1024
       : method === "PATCH" || method === "POST" && path === base ? 320 * 1024 : 64 * 1024, handler: async (request, reply) => {
       try {
         const ids = params.parse(request.params);
         const scope = { ...await options.resolveOwner(), campaignId: ids.campaignId };
-        const capabilities = { castEditing: options.enabled };
+        const capabilities = { castEditing: options.enabled, ...(options.enabled && options.presetsEnabled ? { castPresets: true } : {}) };
+        if (method === "GET" && path === `${base}/from-world`) return await options.application.worldChoices(scope);
         if (path === `${base}/workspace-status`) return await options.application.workspaceStatus(scope);
         if (path === `${base}/discovery`) return await options.application.discoveryStatus(scope);
         if (path === `${base}/candidates`) return await options.application.candidates(scope, request.query as never);

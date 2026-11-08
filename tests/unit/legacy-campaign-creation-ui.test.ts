@@ -53,6 +53,8 @@ function submitHarness(overrides: Record<string, unknown> = {}) {
   const assign = vi.fn();
   const env = {
     elements,
+    castPresetsAvailable: false,
+    renderStartingCast: vi.fn(),
     campaignCreationDialogSession: session,
     campaignCreationSessionIsCurrent: () => true,
     buildCampaignCreateRequest,
@@ -61,6 +63,7 @@ function submitHarness(overrides: Record<string, unknown> = {}) {
     updateCampaignCreationDialogAvailability: vi.fn(),
     refreshModalBaseline: vi.fn(),
     api,
+    characterApi: { campaigns: { create: api } },
     loadCampaigns,
     worldMessage: vi.fn(),
     ownerDevice: { setItem },
@@ -94,7 +97,7 @@ describe("legacy campaign creation dialog", () => {
     expect((harness.elements.newCampaignTurnControlStyle as HTMLSelectElement).value).toBe("flexible_scene");
 
     await harness.create(event);
-    expect(JSON.parse(harness.api.mock.calls[1]![1].body)).toEqual({
+    expect(harness.api.mock.calls[1]![0]).toEqual({
       worldVersionId,
       title: "My Campaign",
       selectedCharacterId: "fixture-character",
@@ -104,6 +107,23 @@ describe("legacy campaign creation dialog", () => {
     });
     expect(harness.loadCampaigns).toHaveBeenCalledWith(campaignId, { explicitPreselect: true });
   });
+
+  for (const intent of ["create", "start"] as const) {
+    it(`keeps the committed result open for skipped cast on ${intent}`, async () => {
+      const harness = submitHarness();
+      harness.api.mockResolvedValueOnce({ id: campaignId, selectedCharacterName: "Hero", skippedStartingCast: [
+        { characterId: "bad", name: "Invalid name", aliases: [], reason: "invalid_name" },
+        { characterId: "ally", name: "Ally", aliases: ["bad alias"], reason: "invalid_alias" }
+      ] });
+      await harness.create(submitEvent(harness.elements, intent));
+      expect(harness.elements.createCampaignStatus?.textContent).toContain("Invalid name: character was skipped");
+      expect(harness.elements.createCampaignStatus?.textContent).toContain("bad alias");
+      expect(harness.elements.openCommittedCampaign!.hidden).toBe(false);
+      expect(harness.dialog.close).not.toHaveBeenCalled();
+      await harness.create(submitEvent(harness.elements, intent));
+      expect(harness.api).toHaveBeenCalledTimes(1);
+    });
+  }
 
   it("records the committed ID before storage and refresh errors and never posts again", async () => {
     const harness = submitHarness({ ownerDevice: { setItem: vi.fn(() => { throw new Error("Storage unavailable."); }) } });

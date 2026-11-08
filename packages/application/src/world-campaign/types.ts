@@ -91,7 +91,8 @@ export type WorldCampaignTransitionFailureReason =
   | "idempotency_mismatch"
   | "deletion_blocked"
   | "invalid_transition"
-  | "generation_collaborator_unavailable";
+  | "generation_collaborator_unavailable"
+  | "cast_presets_disabled";
 
 export type WorldCampaignTransitionFailure = Readonly<{
   reason: WorldCampaignTransitionFailureReason;

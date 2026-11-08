@@ -33,3 +33,6 @@ Generation never persists the candidate automatically. Unsaved premise and canon
 ## World characters and campaign Characters
 
 Published world characters are reusable starting canon. Story's **Characters** workspace manages the campaign's protagonist and supporting cast separately. Campaign corrections and discoveries do not edit the world draft or another campaign. Changing a world draft does not update existing campaign snapshots; publish and explicitly migrate when that is intended.
+
+
+Characters can be Playable, Supporting, or Both. Supporting characters need only a name and retain any mechanics if you later change their use. For Supporting and Both, choose whether they are selected by default in a new campaign and whether they are always included in narrator context. Duplicate a roster entry to create an independent copy, and use the move controls to set roster order. Existing characters remain Playable until changed. A world needs a playable character before a campaign can start.

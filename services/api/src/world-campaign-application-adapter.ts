@@ -49,6 +49,8 @@ function applicationErrorMessage(error: WorldCampaignApplicationError): string {
     if (error.details.selectionIssue === "unknown") return "The selected playable character does not belong to this world version.";
   }
   switch (error.reason) {
+    case "cast_presets_disabled":
+      return "Starting cast presets are currently unavailable.";
     case "world_not_found":
       return "World not found.";
     case "world_version_not_found":
@@ -104,6 +106,7 @@ export function mapWorldCampaignApplicationError(
   return Object.assign(new Error(applicationErrorMessage(error)), {
     name: "WorldCampaignHttpError",
     statusCode,
+    ...(error.reason === "cast_presets_disabled" ? { expose: true, code: error.reason } : {}),
     details: error.reason === "invalid_transition"
       ? { code: error.reason, issues: safeIssues,
         ...(["required", "unknown"].includes(error.details.selectionIssue ?? "") ? { selectionIssue: error.details.selectionIssue } : {}) }

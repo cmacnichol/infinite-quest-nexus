@@ -122,12 +122,12 @@ async function installWorldApi(page: Page, options: ApiOptions = {}) {
       const version = world?.versions?.find((candidate: any) => path.includes(encodeURIComponent(candidate.id)) || path.endsWith(`/${candidate.id}/playable-characters`));
       const chars = version?.content?.playableCharacters || [];
       const assessment = options.assessment || { ready: chars.length > 0, issues: [] };
-      return route.fulfill({ json: { characters: chars.map((character: any) => ({ id: character.id, name: character.name, rpgStatCount: 0, defaultTriggerCount: 0 })), readiness: assessment } });
+      return route.fulfill({ json: { characters: chars.map((character: any) => ({ id: character.id, name: character.name, rpgStatCount: 0, defaultTriggerCount: 0 })), startingCastCandidates: [], readiness: assessment } });
     }
     if (path === "/api/v1/campaigns" && method === "GET") return route.fulfill({ json: { campaigns: existingCampaigns } });
     if (path === "/api/v1/campaigns" && method === "POST") {
       campaignCreates.push(body);
-      return route.fulfill({ status: 201, json: { id: "new-campaign", title: body.title } });
+      return route.fulfill({ status: 201, json: { id: "10000000-0000-4000-8000-000000000099", title: body.title, status: "active", activeTurnNumber: 0, storyLengthProfile: "standard", storyContextBudgetTokens: 32000, worldId, worldVersionId: body.worldVersionId, worldVersionNumber: 2, selectedCharacterId: "fixture-character", selectedCharacterName: "Mira Vale", textProviderProfileId: null, imageProviderProfileId: null } });
     }
     if (path === "/api/v1/dashboard/stats") return route.fulfill({ json: { worlds: { total: world ? 1 : 0 }, campaigns: { total: existingCampaigns.length }, turns: { total: 0 }, costs: { totalUsd: 0, byProvider: [] } } });
     if (path === "/api/v1/providers") return route.fulfill({ json: { providers: [] } });
@@ -297,6 +297,7 @@ test("failed readiness can be retried without losing current draft or character 
   await page.locator("#worldTitle").fill("Unsaved title during readiness retry");
   await page.locator('[data-world-author-step="character"]').click();
   await page.getByRole("button", { name: "Edit Mira Vale" }).click();
+  await page.locator("#characterStoryDetails > summary").click();
   await page.locator("#characterOtherGuidance").fill("Unsaved character guidance during readiness retry.");
   await page.locator("#saveCharacter").click();
   await page.locator('[data-world-author-step="review"]').click();
@@ -403,4 +404,47 @@ test("world author steps remain usable at 200 percent page zoom", async ({ page 
   await page.locator('[data-world-author-step="lore"]').click();
   await expect(page.locator("#world-author-lore")).toBeVisible();
   await page.screenshot({ path: resolve(evidenceDirectory, "world-author-steps-200-percent.png"), fullPage: false });
+});
+
+test("world author can save and duplicate a name-only supporting character", async ({ page }) => {
+  await installWorldApi(page);
+  await openNewWorld(page);
+  await page.locator('[data-tab-target="world-author-mechanics"]').click();
+  await page.locator("#addPlayableCharacter").click();
+  await page.locator("#characterName").fill("Scout");
+  await page.locator("#characterCampaignUse").selectOption("supporting");
+  await expect(page.locator("#characterGenerator")).toBeHidden();
+  await page.locator("#characterStartingCastDefault").check();
+  if (process.env.CAST_SCREENSHOT_ROOT) await page.screenshot({ path: resolve(process.env.CAST_SCREENSHOT_ROOT, "supporting-world-editor.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  if (process.env.CAST_SCREENSHOT_ROOT) await page.screenshot({ path: resolve(process.env.CAST_SCREENSHOT_ROOT, "supporting-world-editor-mobile.png") });
+  await page.locator("#saveCharacter").click();
+  await expect(page.locator("#characterDialog")).toBeHidden();
+  await expect(page.locator("#playableCharacterRoster")).toContainText("Supporting");
+  await expect(page.locator("#worldAuthorCharacterStatus")).toContainText("at least one playable character");
+  await page.locator("#playableCharacterRoster").getByRole("button", { name: "Duplicate Scout" }).click();
+  await expect(page.locator("#playableCharacterRoster")).toContainText("Scout copy");
+  if (process.env.CAST_SCREENSHOT_ROOT) await page.screenshot({ path: resolve(process.env.CAST_SCREENSHOT_ROOT, "supporting-world-roster.png") });
+});
+
+test("switching character use preserves existing mechanics", async ({ page }) => {
+  const fixture = publishedWorld({ draftHasCharacter: true });
+  const originalStats = [{ id: "strength", name: "Strength", value: 57, note: "Original" }];
+  const originalTrackers = [{ id: "trust", name: "Trust", value: "Wary", rules: "Change with choices" }];
+  (fixture.draftContent.playableCharacters as Array<Record<string, unknown>>)[0] = { ...oldCharacter, rpgStats: originalStats, defaultTriggers: originalTrackers };
+  const api = await installWorldApi(page, { initialWorld: fixture });
+  await openExistingWorld(page, fixture);
+  await page.locator('[data-world-author-step="character"]').click();
+  await expect(page.locator("#worldCharacterExistingNote")).toBeVisible();
+  await expect(page.locator("#worldCharacterPresetsUnavailable")).toContainText("New copies of world characters are disabled");
+  await page.getByRole("button", { name: "Edit Mira Vale" }).click();
+  await page.locator("#characterCampaignUse").selectOption("supporting");
+  await expect(page.locator("#characterMechanics")).toBeHidden();
+  await page.locator("#characterCampaignUse").selectOption("both");
+  await page.locator("#characterCampaignUse").selectOption("supporting");
+  await page.locator("#saveCharacter").click();
+  await page.locator("#saveWorldDraft").click();
+  await expect(page.locator("#worldAuthorDialog")).toBeHidden();
+  expect(api.getWorld()?.draftContent.playableCharacters[0].rpgStats).toEqual(originalStats);
+  expect(api.getWorld()?.draftContent.playableCharacters[0].defaultTriggers).toEqual(originalTrackers);
 });

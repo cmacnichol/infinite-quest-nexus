@@ -266,6 +266,7 @@ export const campaignCreateSchema = z.object({
   worldVersionId: z.uuid(),
   title,
   selectedCharacterId: characterId.optional(),
+  startingCast: z.array(z.object({ characterId, alwaysInContext: z.boolean().default(false) }).strict()).max(30).optional(),
   storyLengthProfile: storyLengthProfileSchema.default(DEFAULT_STORY_LENGTH_PROFILE),
   storyContextBudgetTokens: storyContextBudgetTokensSchema.default(DEFAULT_STORY_CONTEXT_BUDGET_TOKENS),
   turnControlStyle: campaignTurnControlStyleSchema.default("flexible_action")

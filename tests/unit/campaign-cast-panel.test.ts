@@ -1,8 +1,38 @@
+import { castDetailSchema, characterProfileSchema } from "../../packages/contracts/src/index.js";
+import { buildPresetRequest, changePresetField, createPresetDraft, presetField } from "../../packages/client-core/src/characters/preset-editor.js";
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
 import { mainProfileSourceLabel, createLegacyCastPanel } from "../../apps/web/src/campaign-cast-panel.js";
 
 describe("legacy cast panel", () => {
+  it("projects each seeded field badge and builds one edit from reset, clear and restore actions", () => {
+    const id = "10000000-0000-4000-8000-000000000001";
+    const world = characterProfileSchema.parse({ story: { role: "Ferryman", goals: "Find the boat" }, appearance: { eyes: "Green" } });
+    const campaign = characterProfileSchema.parse({ ...world, story: { ...world.story, role: "Guide", background: "From the coast" } });
+    const detail = castDetailSchema.parse({ revision: 4, boundary: { turnNumber: 2, timelineRevision: 0 },
+      character: { id, name: "Marin", aliases: ["Captain"], origin: { kind: "world", entityId: "marin", worldVersionId: id },
+        originProfile: { seedEventId: id, worldVersionId: id, entityId: "marin", rosterName: "Marin", rosterAliases: [], legacyCharacterText: "", profile: world,
+          evidence: { kind: "world", worldVersionId: id, sourcePath: "/playableCharacters/0" } },
+        campaignProfile: campaign, profile: { "story.role": "Guide", "story.goals": "Make port", "story.personality": "Patient" },
+        fieldSources: { "appearance.eyes": "authored", "story.role": "campaign_edit", "story.background": "campaign_edit", "story.personality": "observation", "story.goals": "override" },
+        revision: 3, pinned: false, ignored: false, firstObservedTurn: 0, lastObservedTurn: 2 },
+      observations: [], identityEvents: [], overrides: [], unresolvedCandidateIds: [], editorDestination: null });
+    detail.observations = ["Tinker", "Sailor"].map(value => ({ id: crypto.randomUUID(), characterId: id, field: "story.motivations", value,
+      mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "world", worldVersionId: id, sourcePath: "/characters/0" } }));
+    expect(Object.fromEntries(["appearance.eyes", "story.role", "story.background", "story.personality", "state.location", "story.goals", "appearance.description", "story.motivations"]
+      .map(path => [path, presetField(detail, path).badge]))).toEqual({
+      "appearance.eyes": "World canon", "story.role": "Edited for this campaign", "story.background": "Added for this campaign",
+      "story.personality": "From story", "state.location": "Updates with story", "story.goals": "Your edit",
+      "appearance.description": "Observed in story", "story.motivations": "Needs attention"
+    });
+    const state = createPresetDraft(detail);
+    changePresetField(state, "identity.aliases", [], "reset");
+    changePresetField(state, "story.role", "Ferryman", "reset");
+    changePresetField(state, "story.goals", "Find the boat", "restore");
+    changePresetField(state, "appearance.description", "", "hide");
+    expect(buildPresetRequest(state, id)).toEqual({ expectedCastRevision: 4, expectedCharacterRevision: 3, expectedBoundary: detail.boundary,
+      idempotencyKey: id, resetIdentity: true, reset: ["story.role"], restoreAuthoredGoals: true, setOverrides: { "appearance.description": "" } });
+  });
   it("labels main profile provenance from the profile read, with an unknown fallback", () => {
     expect(mainProfileSourceLabel({ inheritedFromSnapshot: true, storedProfile: null })).toBe("World snapshot");
     expect(mainProfileSourceLabel({ inheritedFromSnapshot: false, storedProfile: {} })).toBe("Campaign profile");

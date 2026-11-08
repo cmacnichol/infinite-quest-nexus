@@ -22,7 +22,7 @@ export function readCastDiscoveryExecution(value: unknown): CastDiscoveryExecuti
   const parsed = z.object({ providerProfileId: z.uuid(), plan: z.unknown(), admission: z.object({
     routeBasis: z.unknown(), frozenResponseContracts: z.unknown(), providerType: z.enum(["openrouter", "openai_compatible"]),
     configuration: z.record(z.string(), z.unknown()),
-    identityPolicy: z.unknown().optional(), promptIdentifier: z.unknown().optional() }).strict().optional() }).strict().parse(value);
+    identityPolicy: z.unknown().optional(), promptIdentifier: z.unknown().optional(), castPresetsEnabled: z.boolean().optional() }).strict().optional() }).strict().parse(value);
   const providerProfileId = parsed.providerProfileId;
   const plan = readTextExecutionPlan(parsed.plan);
   if (!plan || plan.protocolVersion !== CAST_DISCOVERY_PROTOCOL || !isCastDiscoveryTimeout(plan.requestTimeoutMs)) throw new Error("Invalid cast discovery execution snapshot.");
@@ -160,7 +160,7 @@ async function lockLiveClaim(client: DatabaseClient, claim: CastDiscoveryClaim) 
   return row ? { row, campaign } : null;
 }
 
-export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: () => boolean, scansEnabled = () => false) {
+export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: () => boolean, scansEnabled = () => false, presetsEnabled = () => false) {
   return {
     /** Explicit user retry. Any replacement admission must be prepared before this transaction. */
     async retryFailed(rawScope: CastScope, rawId: string, rawRequest: RetryCastDiscovery, replacement?: CastDiscoveryExecution, transactionClient?: DatabaseClient) {
@@ -193,6 +193,7 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
         if (!job.chunks.length || job.chunk_ordinal >= job.chunks.length) throw new CampaignCastError("cast_invalid_request");
         if (job.execution_snapshot.unavailable && !replacement) throw new CampaignCastError("cast_discovery_admission_required");
         const execution = readExecution(replacement ?? job.execution_snapshot);
+        if (job.execution_snapshot.unavailable && execution.admission) execution.admission.castPresetsEnabled = false;
         const generation = job.retry_generation + 1;
         await client.query(`UPDATE campaign_cast_discovery_jobs SET status='queued',attempt=0,retry_generation=$2,
           execution_snapshot=$3,identity_snapshot=CASE WHEN checkpoint IS NULL THEN NULL ELSE identity_snapshot END,
@@ -302,7 +303,7 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
         return true;
       });
     },
-    async publish(claim: CastDiscoveryClaim, apply: (client: DatabaseClient, current: CastDiscoveryClaim) => Promise<AppliedDiscovery> = applyValidatedCastDiscovery) {
+    async publish(claim: CastDiscoveryClaim, apply: (client: DatabaseClient, current: CastDiscoveryClaim) => Promise<AppliedDiscovery> = (client, current) => applyValidatedCastDiscovery(client, current, presetsEnabled())) {
       if (!enabled()) return "disabled" as const;
       return withTransaction(pool, async (client) => {
         const live = await lockLiveClaim(client, claim);

@@ -79,12 +79,12 @@ await runRuntimeLifecycle(config, abortController, {
     createApiProviders: (pool, credentialSecret, transport, config) => createApiProviderApplicationComposition(
       pool,
       { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest,
-        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, castAutoMatchEnabled: config.castAutoMatchEnabled === true, castContextEnabled: config.castContextEnabled === true, textProviderConcurrency: config.textProviderConcurrency ?? 2 }
+        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, castAutoMatchEnabled: config.castAutoMatchEnabled === true, castPresetsEnabled: config.castPresetsEnabled === true, castContextEnabled: config.castContextEnabled === true, textProviderConcurrency: config.textProviderConcurrency ?? 2 }
     ),
     createWorkerProviders: (pool, credentialSecret, transport, config) => createWorkerProviderApplicationComposition(
       pool,
       { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest,
-        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, castAutoMatchEnabled: config.castAutoMatchEnabled === true, castContextEnabled: config.castContextEnabled === true, textProviderConcurrency: config.textProviderConcurrency ?? 2 }
+        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, castAutoMatchEnabled: config.castAutoMatchEnabled === true, castPresetsEnabled: config.castPresetsEnabled === true, castContextEnabled: config.castContextEnabled === true, textProviderConcurrency: config.textProviderConcurrency ?? 2 }
     ),
     createProviderApiAdapter: createProviderApplicationAdapter,
     createApiGeneration: (pool, providers, operatorConfig) => createApiGenerationApplication(

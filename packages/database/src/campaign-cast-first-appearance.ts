@@ -1,6 +1,6 @@
 import type { CastScope } from "../../contracts/src/campaign-cast.js";
 import { firstAppearanceDecision } from "../../domain/src/campaign-cast-first-appearance.js";
-import { worldContentSchema } from "../../contracts/src/world-library.js";
+import { playableCharacterSchema } from "../../contracts/src/world-library.js";
 import type { DatabaseClient } from "./pool.js";
 
 /** Read under the campaign lock in the transaction which will publish a seed. */
@@ -14,7 +14,8 @@ export async function readFirstAppearanceDecision(client: DatabaseClient, scope:
       WHERE c.id=$1 AND c.owner_user_id=$2 FOR UPDATE OF c`, [scope.campaignId, scope.ownerUserId]
   )).rows[0];
   if (!row) throw new Error("Campaign not found.");
-  const roster = worldContentSchema.parse(row.content).playableCharacters.find((character) => character.id === input.rosterCharacterId);
+  const content = row.content as { playableCharacters?: unknown } | null;
+  const roster = (Array.isArray(content?.playableCharacters) ? content.playableCharacters : []).map(entry => playableCharacterSchema.safeParse(entry)).flatMap(entry => entry.success ? [entry.data] : []).find(character => character.id === input.rosterCharacterId);
   if (!roster) return "review" as const;
   return firstAppearanceDecision({ ...input, firstAppearanceEligible: row.first_appearance_eligible,
     pinnedWorldId: row.world_id, selectedCharacterId: row.selected_character_id, selectedCharacterWorldId: row.selected_character_world_id, campaignUse: roster.campaignUse });

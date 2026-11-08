@@ -19,6 +19,10 @@ export const editAuthoredCastProfileSchema = z.object({ ...castWriteBase, expect
     && value.pinned === undefined && value.ignored === undefined) issue("An edit must change at least one field.");
 });
 export type EditAuthoredCastProfile = z.infer<typeof editAuthoredCastProfileSchema>;
+export const castWorldChoicesSchema = z.object({ characters: z.array(z.object({
+  characterId: z.string(), name: z.string(), alwaysInContext: z.boolean()
+}).strict()) }).strict();
+export type CastWorldChoices = z.infer<typeof castWorldChoicesSchema>;
 export const castFromWorldPreviewQuerySchema = z.object({ characterId: z.string().trim().min(1).max(200), targetCastCharacterId: z.uuid().optional() }).strict();
 export const castFromWorldSchema = z.object({ ...castWriteBase, characterId: z.string().trim().min(1).max(200), expectedWorldVersionId: z.uuid(),
   previewFingerprint: z.string().regex(/^[a-f0-9]{64}$/u), targetCastCharacterId: z.uuid().optional(), expectedCharacterRevision: z.number().int().nonnegative().optional(), alwaysInContext: z.boolean().optional()

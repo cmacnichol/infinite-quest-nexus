@@ -1040,6 +1040,22 @@ describe("client API route contracts without PostgreSQL", () => {
     }
   });
 
+  it("exposes only the safe cast presets 503 code and correlation reference", async () => {
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(),
+      worldCampaign: testWorldCampaignApplication({ createCampaign: async () => {
+        throw new WorldCampaignApplicationError("unavailable", "cast_presets_disabled");
+      } }) }));
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/v1/campaigns", payload: {
+        worldVersionId: WORLD_VERSION_ID, title: "Campaign", selectedCharacterId: "observer",
+        startingCast: [{ characterId: "ally", alwaysInContext: true }]
+      } });
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({ code: "cast_presets_disabled", details: { code: "cast_presets_disabled" }, correlationId: expect.any(String) });
+      expect(response.json().message).toContain("Starting cast presets are currently unavailable.");
+    } finally { await app.close(); }
+  });
+
   it("returns actionable campaign validation through the HTTP route without authored rule text", async () => {
     const rawMarker = "PRIVATE_RULE_CONTENT";
     const app = await buildServer(serverOptions({

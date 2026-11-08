@@ -151,6 +151,10 @@ const readerHistoryApi = composition.readerHistory;
 const readerPositionStore = composition.readerPositions;
 const castPanel = composition.cast ? createLegacyCastPanel({ api: composition.cast,
   campaignId: () => state.campaignId, generationActive: () => characterProfileGenerationLocked(),
+  checkLock: async campaign => {
+    const status = await apiClient.generation.syncStatus(campaign);
+    return Boolean(status.pendingGeneration || status.generationRecovery?.status === "recoverable");
+  },
   getProfile: (campaign) => apiClient.campaigns.getCharacterProfile(campaign),
   openProtagonist: (onClose) => { void openEditCharacterProfile(onClose); },
   navigateToTurn: async (turn) => { await ensureCompleteTurnHistory(); navigateToTurn(turn); }
@@ -6238,6 +6242,8 @@ async function init() {
     const settings = $("storyCampaignSettings");
     if (settings) settings.href = "/app/settings?" + new URLSearchParams({section:"campaign",campaignId,returnTo:location.pathname + location.search});
     await reconcileCampaignStartup(campaignId);
+    const character = new URLSearchParams(window.location.search).get("character");
+    if (character && state.campaignId === campaignId) await castPanel?.open(character, $("btnOpenCast"));
   } else {
     await checkOnboarding();
     updateStatusBar();

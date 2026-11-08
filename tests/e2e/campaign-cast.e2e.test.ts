@@ -271,12 +271,20 @@ test("replacement cast recovers a new character draft after a revision conflict"
   expect(api.characters.filter(person => person.name === "New guide")).toHaveLength(1);
 });
 
-async function fixture(page: Page, deferredDetails = false, conflictFixture = false) {
+async function fixture(page: Page, deferredDetails = false, conflictFixture = false, presetFixture = false, applyFixture = false, seededFixture = false, deepLink = false) {
+  let stalePreset = presetFixture;
+  let liveLock = false;
   let revision = 0, enabled = true, conflict = false, trackingComplete = false, trackingUnavailable = false, pendingMatch = true;
   let resolvedCharacterId: string | undefined;
   const characters: any[] = [{ id: protagonistId, name: "Iven", aliases: [], origin: { kind: "protagonist", selectedCharacterId: null },
     profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 0, lastObservedTurn: 1 }];
   if (conflictFixture) characters.push({ id: candidateId, name: "Mara", aliases: [], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 1, lastObservedTurn: 1 });
+  if (seededFixture) {
+    const person = characters.find(item => item.id === candidateId)!;
+    person.originProfile = { seedEventId: protagonistId, worldVersionId: versionId, entityId: "world-scout", rosterName: "Mara", rosterAliases: [], legacyCharacterText: "", profile: { story: { role: "Guide", goals: "Find home" } }, evidence: { kind: "world", worldVersionId: versionId, sourcePath: "/playableCharacters/0" } };
+    person.campaignProfile = { story: { role: "Captain", personality: "Patient", goals: "Find home" } };
+    person.fieldSources = { "story.role": "campaign_edit", "story.personality": "campaign_edit", "story.goals": "authored" };
+  }
   const overrides = new Map<string, Record<string, string>>();
   const writes: any[] = [], profileWrites: any[] = [];
   const campaign = { id: campaignId, title: "Cast fixture", status: "active", activeTurnNumber: 1, createdAt: "2026-09-16T12:00:00.000Z", updatedAt: "2026-09-16T12:00:00.000Z", worldId, worldTitle: "Fixture world",
@@ -293,6 +301,19 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
     const request = route.request(), url = new URL(request.url()), path = url.pathname;
     if (path.includes("/cast")) {
       const id = path.split("/cast/")[1];
+      if (seededFixture && id === `${candidateId}/authored-profile` && request.method() === "POST") {
+        const input = request.postDataJSON(); writes.push(input);
+        if (conflict) { conflict = false; revision++; return send(route, { code: "cast_revision_conflict" }, 409); }
+        const person = characters.find(item => item.id === candidateId)!; revision++; person.revision++;
+        return send(route, { character: person, revision, boundary });
+      }
+      if (presetFixture && id === "from-world" && request.method() === "GET") return send(route, { characters: [{ characterId: "world-scout", name: "Scout", alwaysInContext: true }] });
+      if (presetFixture && id === "from-world-preview") return send(route, { worldVersionId: versionId, characterId: "world-scout", eligibleTargets: applyFixture ? [{ id: candidateId, name: "Mara", revision: 0 }] : [], ...(applyFixture && url.searchParams.has("targetCastCharacterId") ? { targetCastCharacterId: candidateId, characterRevision: 0 } : {}), castRevision: revision, boundary, choices: [], changes: [{ path: "identity", old: null, proposed: { name: "Scout", aliases: [] }, effect: "create" }], previewFingerprint: "a".repeat(64) });
+      if (presetFixture && id === "from-world" && request.method() === "POST") {
+        if (stalePreset) { stalePreset = false; return send(route, { code: "cast_revision_conflict", message: "Changed" }, 409); }
+        const person = applyFixture ? characters.find((item) => item.id === candidateId) : { id: candidateId, name: "Scout", aliases: [], profile: {}, origin: { kind: "manual" }, pinned: true, ignored: false, revision: 1, firstObservedTurn: 1, lastObservedTurn: 1 };
+        if (!applyFixture) characters.push(person); revision++; return send(route, { character: person, revision, boundary });
+      }
       if (id === "context-preview") return send(route, { mode: "estimate", boundary, castRevision: revision, budgetTokens: 500, usedTokens: 25, coverage: { fromTurn: 1, throughTurn: 1, baseTurn: 1, current: true }, selected: [{ characterId: protagonistId, name: "Iven", reason: "pinned" }], omitted: [{ characterId: candidateId, reason: "budget" }], disabledReason: null });
       if (id === "workspace-status") return send(route, { revision, boundary, capabilities: { editing: enabled, discovery: true, autoMatch: true, backfill: true, context: true }, contextDisabledReason: null, counts: { identities: pendingMatch ? 1 : 0, details: 0, conflicts: 1 }, tracking: { enabled: true, state: trackingComplete ? "complete" : "catching_up", activeTurnNumber: 1, coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: pendingMatch ? 1 : 0, firstGap: trackingComplete ? null : { turnNumber: 1, jobId: null, status: "missing", diagnosticCode: null } } });
       if (id === "discovery") return trackingUnavailable ? send(route, {}, 503) : send(route, {
@@ -351,13 +372,13 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
       const cursor = url.searchParams.get("cursor"), offset = cursor ? matches.findIndex((person) => person.id === cursor) + 1 : 0;
       const page = matches.slice(offset, offset + 2);
       return send(route, { revision, boundary, characters: page, attention: page.filter((person) => person.id === protagonistId).map((person) => ({ characterId: person.id, review: true, conflict: true, reviewCount: 2, conflictCount: 1 })),
-        nextCursor: offset + page.length < matches.length ? page.at(-1).id : null, capabilities: { castEditing: enabled } });
+        nextCursor: offset + page.length < matches.length ? page.at(-1).id : null, capabilities: { castEditing: enabled, castPresets: presetFixture } });
     }
     if (path === "/api/v1/session") return send(route, { user: { id: worldId, displayName: "Fixture owner", settings: { autoSubmitTurnChoices: true, continuousReading: false, defaultTurnControlStyle: "flexible_action" } }, authentication: "deferred" });
     if (path === "/api/v1/meta") return send(route, { application: { name: "Nexus", version: "test", commit: null, builtAt: null }, capabilities: { castEditing: enabled, systemArchive: false } });
     if (path === "/api/v1/providers") return send(route, { providers: [{ id: versionId, name: "Fixture text", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: true }] });
     if (path === "/api/v1/campaigns") return send(route, { campaigns: [campaign] });
-    if (path.endsWith("/sync-status")) return send(route, { ...campaign, campaign, world: { id: worldId, title: "Fixture world", versionNumber: 1, genre: "test", tone: "quiet", premise: "Fixture premise", backgroundStory: "", character: "Iven", firstAction: "Look around.", rules: "", playableCharacters: [] }, playerConfig: { selectedCharacterId: null, selectedCharacterName: "", characterSnapshot: null, characterProfile: null, characterProfileRevision: 0, rpgStats: [], trackers: [], eventTriggers: [], useRpgStats: false, suppressEventTriggers: false }, pendingGeneration: null, generationRecovery: null, syncToken: "fixture-1", turnWindowMode: "replace", turns: { campaignId, turns: [turn], nextCursor: null } });
+    if (path.endsWith("/sync-status")) return send(route, { ...campaign, campaign, world: { id: worldId, title: "Fixture world", versionNumber: 1, genre: "test", tone: "quiet", premise: "Fixture premise", backgroundStory: "", character: "Iven", firstAction: "Look around.", rules: "", playableCharacters: [] }, playerConfig: { selectedCharacterId: null, selectedCharacterName: "", characterSnapshot: null, characterProfile: null, characterProfileRevision: 0, rpgStats: [], trackers: [], eventTriggers: [], useRpgStats: false, suppressEventTriggers: false }, pendingGeneration: liveLock ? { id: candidateId, status: "generating", action: "Look", expectedTurnNumber: 2, createdAt: "2026-09-16T12:00:00.000Z", updatedAt: "2026-09-16T12:00:00.000Z", operationKind: "append", replacementTurnId: null } : null, generationRecovery: null, syncToken: "fixture-1", turnWindowMode: "replace", turns: { campaignId, turns: [turn], nextCursor: null } });
     if (path.endsWith("/turns")) return send(route, { campaignId, turns: [turn], nextCursor: null });
     if (path.endsWith("/state")) return send(route, { campaignId, activeTurnNumber: 1, revision: 1, viewedTurnNumber: 1, isCurrent: true, updatedAt: "2026-09-16T12:00:00.000Z", canonicalFacts: [], openThreads: [], continuitySummary: "", scratchpad: "", rpgStats: [], trackers: [], eventTriggers: [], pendingEventTriggers: [], recordedResolution: null });
     if (path.endsWith("/story-memory")) return send(route, { level: "standard", reviewMode: "observe", availableLevels: ["off", "standard", "enhanced", "max"] });
@@ -373,10 +394,10 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
     return send(route, {});
   });
   const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
-  await page.route(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/story/${campaignId}`, (route) => route.fulfill({ contentType: "text/html", body: html }));
-  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/story/${campaignId}`);
+  await page.route(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/story/${campaignId}*`, (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/story/${campaignId}${deepLink ? `?character=${candidateId}` : ""}`);
   await expect(page.locator("#storyTitle")).toHaveText("Cast fixture");
-  return { characters, writes, profileWrites, conflict: () => { conflict = true; }, disable: () => { enabled = false; },
+  return { characters, writes, profileWrites, setLock: (value: boolean) => { liveLock = value; }, conflict: () => { conflict = true; }, disable: () => { enabled = false; },
     publishDiscovery: () => {
       revision++; trackingComplete = true; pendingMatch = false;
       let person = characters.find((character) => character.origin.kind === "discovered");
@@ -959,4 +980,88 @@ test("supporting character warns on a roster alias without blocking save", async
   await expect.poll(() => api.writes.length).toBe(1);
   expect(api.writes[0]).toMatchObject({ name: "the watcher" });
   await expect(dialog.getByRole("button", { name: "Edit character", exact: true })).toBeVisible();
+});
+
+for (const width of [1440, 390]) test(`Add from world refreshes a stale preview at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 1000 });
+  await fixture(page, false, false, true); await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Add from world" }).click();
+  await dialog.getByLabel("World character").selectOption("world-scout");
+  await expect(dialog).toContainText("Campaign identity: Scout");
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/world-add-preview-${width}.png` });
+  await dialog.getByRole("button", { name: "Add to campaign" }).click();
+  await expect(dialog).toContainText("Review a fresh preview");
+  await dialog.getByRole("button", { name: "Refresh preview" }).click();
+  await dialog.getByRole("button", { name: "Add to campaign" }).click();
+  await expect(dialog).toContainText("Scout");
+});
+
+test("Apply world profile requires a fresh preview after a conflict", async ({ page }) => {
+  await fixture(page, false, true, true, true); await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Add from world" }).click();
+  await dialog.getByLabel("World character").selectOption("world-scout");
+  await dialog.getByRole("button", { name: `Mara · ${candidateId}` }).click();
+  await dialog.getByRole("button", { name: "Apply world profile to Mara" }).click();
+  await expect(dialog).toContainText("Review a fresh preview");
+  await dialog.getByRole("button", { name: "Refresh preview" }).click();
+  await dialog.getByRole("button", { name: `Mara · ${candidateId}` }).click();
+  await dialog.getByRole("button", { name: "Apply world profile to Mara" }).click();
+  await expect(dialog).toContainText("Mara");
+});
+
+test("live generation locks character editing and preserves the unsaved draft", async ({ page }) => {
+  const api = await fixture(page); await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Add character", exact: true }).click();
+  await dialog.getByLabel("Name", { exact: true }).fill("Draft companion");
+  api.setLock(true);
+  await expect(dialog.getByLabel("Name", { exact: true })).toBeDisabled({ timeout: 7000 });
+  await expect(dialog).toContainText("Finish or resolve");
+  api.setLock(false);
+  await expect(dialog.getByLabel("Name", { exact: true })).toBeEnabled({ timeout: 7000 });
+  await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("Draft companion");
+});
+
+test("world profile badges and reset, clear and restore focus", async ({ page }) => {
+  await fixture(page, false, true, false, false, true); await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Mara", exact: true }).click();
+  await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
+  await expect(dialog).toContainText("Edited for this campaign");
+  await expect(dialog).toContainText("Added for this campaign");
+  const role = dialog.locator("#cast-story-role");
+  await role.locator("..").getByRole("button", { name: "Reset to world value" }).click();
+  await expect(role).toHaveValue("Guide"); await expect(role).toBeFocused();
+  const personality = dialog.locator("#cast-story-personality");
+  await personality.locator("..").getByRole("button", { name: "Clear", exact: true }).click();
+  await expect(personality).toHaveValue(""); await expect(personality).toBeFocused();
+  const goals = dialog.locator("#cast-story-goals");
+  await goals.locator("..").getByRole("button", { name: "Restore authored goals" }).click();
+  await expect(goals).toHaveValue("Find home"); await expect(goals).toBeFocused();
+});
+
+test("Story opens the character named by the deep link", async ({ page }) => {
+  await fixture(page, false, true, false, false, false, true);
+  const dialog = page.locator("#campaignCastDialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Mara");
+  await expect(dialog.getByRole("button", { name: "Edit character", exact: true })).toBeVisible();
+});
+
+test("world profile conflict preserves and reapplies the draft", async ({ page }) => {
+  const api = await fixture(page, false, true, false, false, true); await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Mara", exact: true }).click();
+  await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
+  await dialog.locator("#cast-story-role").fill("Navigator");
+  api.conflict();
+  await dialog.locator("#cast-save").click();
+  await expect(dialog.locator("#cast-story-role")).toHaveValue("Navigator");
+  await dialog.getByRole("button", { name: "Compare latest" }).click();
+  await dialog.getByRole("button", { name: "Reapply my changes" }).click();
+  await expect(dialog.locator("#cast-story-role")).toHaveValue("Navigator");
+  await dialog.locator("#cast-save").click();
+  expect(api.writes.at(-1).set["story.role"]).toBe("Navigator");
 });

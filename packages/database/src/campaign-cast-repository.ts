@@ -19,7 +19,7 @@ import {
 import { createCastCharacterSchema, editCastCharacterSchema, type CreateCastCharacter, type EditCastCharacter, type CastWriteResult } from "../../contracts/src/campaign-cast.js";
 import { CampaignCastError, type CampaignCastRepositoryPort, type CampaignCastWritePort } from "../../application/src/campaign-cast/index.js";
 import { castEvidenceOrder, isSeededFixedCandidateHidden, projectCastProfile, resolveSeededCastProfile, validateCastFiction } from "../../domain/src/campaign-cast.js";
-import { characterProfileSchema, worldContentSchema } from "../../contracts/src/world-library.js";
+import { characterProfileSchema, worldContentSchema, type PlayableCharacter } from "../../contracts/src/world-library.js";
 import { characterFictionAuthority, projectCastFictionText } from "../../domain/src/character-fiction-authority.js";
 import { normalizeEntityTerm } from "../../domain/src/entity-references.js";
 import { buildScopedEntityCatalog } from "../../domain/src/entity-references.js";
@@ -502,6 +502,42 @@ export async function applyCastBatchWithClient(client: DatabaseClient, rawScope:
   return persistBatch(client, scope, campaign, state, batch, requestHash, undefined, options.deferMetadataRefresh, options.attachment);
 }
 
+/** Seed a roster entry in the caller's campaign transaction with one preallocated identity. */
+export async function seedCampaignCastWithClient(client: DatabaseClient, rawScope: CastScope, input: {
+  characterId: string; worldVersionId: string; entry: PlayableCharacter; index: number; boundary: CastBoundary;
+  idempotencyKey: string; alwaysInContext?: boolean; narrationAlias?: string;
+  attachment?: { basis: "unique_name" | "unique_world_name"; sourceRanges: import("../../contracts/src/campaign-cast.js").CastSourceRange[] };
+  evidenceCommands?: CastCommand[];
+}): Promise<CastBatchReceipt> {
+  const scope = castScopeSchema.parse(rawScope), campaign = await lockCampaign(client, scope), state = await initialize(client, scope, campaign);
+  if (campaign.world_version_id !== input.worldVersionId) throw new CampaignCastError("cast_world_preview_changed");
+  validateCastFiction(input.entry.name);
+  const profile = structuredClone(input.entry.profile ?? characterProfileSchema.parse({ unclassifiedNotes: input.entry.characterText }));
+  const identity = castDiscoveryWorldIdentities({ playableCharacters: [input.entry] })[0];
+  if (!identity || identity.name !== input.entry.name) throw new CampaignCastError("cast_world_character_unavailable");
+  const aliases = identity.aliases;
+  profile.identity.aliases = aliases;
+  const identityAliases = [...aliases];
+  if (input.narrationAlias && identityAliases.length < 20 && ![input.entry.name, ...identityAliases].some((name) => normalizeEntityTerm(name) === normalizeEntityTerm(input.narrationAlias!))) {
+    try { validateCastFiction(input.narrationAlias); identityAliases.push(input.narrationAlias); } catch { /* Invalid narrated aliases are omitted. */ }
+  }
+  const evidence = { kind: "world" as const, worldVersionId: input.worldVersionId, sourcePath: `/playableCharacters/${input.index}` };
+  const commands: CastCommand[] = [
+    { kind: "create", name: input.entry.name, aliases: identityAliases, origin: { kind: "world", worldVersionId: input.worldVersionId, entityId: input.entry.id }, evidence },
+    { kind: "seed_profile", characterId: input.characterId, worldVersionId: input.worldVersionId, entityId: input.entry.id,
+      rosterName: input.entry.name, rosterAliases: aliases, legacyCharacterText: input.entry.characterText, profile, evidence },
+    ...(input.alwaysInContext ? [{ kind: "pin" as const, characterId: input.characterId, value: true }] : []),
+    ...(input.evidenceCommands ?? [])
+  ];
+  const batch = castBatchSchema.parse({ boundary: input.boundary, idempotencyKey: input.idempotencyKey, commands });
+  const attachment = input.attachment ? { characterId: input.characterId, ...input.attachment } : undefined;
+  const hash = sha256(stableStringify({ batch, characterId: input.characterId, attachment }));
+  const prior = (await client.query("SELECT request_hash,receipt FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND idempotency_key=$3", [scope.campaignId, scope.ownerUserId, batch.idempotencyKey])).rows[0];
+  if (prior) { if (prior.request_hash !== hash) throw new CampaignCastError("cast_idempotency_conflict"); return castBatchReceiptSchema.parse(prior.receipt); }
+  assertBoundary(campaign, state, batch.boundary, true);
+  return persistBatch(client, scope, campaign, state, batch, hash, input.characterId, false, attachment, true);
+}
+
 export function createPostgresCampaignCastRepository(pool: DatabasePool, options: { castPresetsEnabled?: boolean; editingEnabled?: boolean; discoveryEnabled?: boolean; backfillEnabled?: boolean; castAutoMatchEnabled?: boolean; castContextEnabled?: boolean; storyMemoryCapability?: "r1" | "r2" | "r3" | null } = {}): CampaignCastRepositoryPort & CampaignCastWritePort {
   async function write(rawScope: CastScope, characterId: string | null, raw: CreateCastCharacter | EditCastCharacter): Promise<CastWriteResult> {
     const scope = castScopeSchema.parse(rawScope);
@@ -631,13 +667,24 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
     if (seededVersions.length && (await client.query(
       "SELECT 1 FROM world_versions WHERE owner_user_id=$1 AND world_id=$2 AND id=ANY($3::uuid[]) LIMIT 1",
       [scope.ownerUserId, row.world_id, seededVersions])).rowCount) throw new CampaignCastError("cast_world_character_unavailable");
+    const retained = (await client.query("SELECT id,effective_turn_number,payload,receipt,attachment FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND effective_turn_number <= $3 ORDER BY sequence", [scope.campaignId, scope.ownerUserId, boundary.turnNumber])).rows.map(event => eventSchema.parse(event));
+    const detached = projectCastAttachments(retained, boundary.turnNumber).detachedEventIds;
+    const detachedSeeds = retained.filter(event => detached.has(event.id)).flatMap(event => event.payload.flatMap(({ command }) =>
+      command.kind === "seed_profile" && command.entityId === entry.id ? [{ characterId: command.characterId, worldVersionId: command.worldVersionId }] : []));
+    const representedOrigins = projected.snapshot.characters.flatMap(person => !person.originProfile && person.origin.kind === "world" && person.origin.entityId === entry.id
+      ? [{ characterId: person.id, worldVersionId: person.origin.worldVersionId }] : []);
+    const priorIdentities = [...detachedSeeds, ...representedOrigins];
+    const sourceVersions = priorIdentities.length ? (await client.query<{ id: string }>("SELECT id FROM world_versions WHERE owner_user_id=$1 AND world_id=$2 AND id=ANY($3::uuid[])",
+      [scope.ownerUserId, row.world_id, priorIdentities.map(seed => seed.worldVersionId)])).rows : [];
+    const rosterTargets = new Set(priorIdentities.filter(seed => sourceVersions.some(version => version.id === seed.worldVersionId)).map(seed => seed.characterId));
     const matches = projected.snapshot.characters.filter((person) => person.origin.kind !== "protagonist" && !person.originProfile &&
-      [person.name, ...person.aliases].some((name) => normalizeEntityTerm(name) === normalizeEntityTerm(entry.name)));
+      (rosterTargets.has(person.id) || [person.name, ...person.aliases].some((name) => normalizeEntityTerm(name) === normalizeEntityTerm(entry.name))));
     const target = input.targetCastCharacterId ? projected.snapshot.characters.find((person) => person.id === input.targetCastCharacterId) : undefined;
     if (input.targetCastCharacterId && (!target || !matches.some((person) => person.id === target.id))) throw new CampaignCastError("cast_world_character_unavailable");
     const profile = structuredClone(entry.profile ?? characterProfileSchema.parse({ unclassifiedNotes: entry.characterText }));
-    try { validateCastFiction(entry.name); } catch { throw new CampaignCastError("cast_world_character_unavailable"); }
-    profile.identity.aliases = profile.identity.aliases.filter((alias) => { try { validateCastFiction(alias); return true; } catch { return false; } });
+    const identity = castDiscoveryWorldIdentities({ playableCharacters: [entry] })[0];
+    if (!identity || identity.name !== entry.name) throw new CampaignCastError("cast_invalid_request", [{ path: "name", code: "invalid_fiction" }]);
+    if (profile.identity.aliases.some(alias => !identity.aliases.includes(alias))) throw new CampaignCastError("cast_invalid_request", [{ path: "identity.aliases", code: "invalid_fiction" }]);
     const overrides = target ? projected.details.find((detail) => detail.characterId === target.id)?.overrides ?? [] : [];
     const handEdits: Record<string, string> = {};
     const changes: CastFromWorldPreview["changes"] = [];
@@ -649,7 +696,8 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
       changes.push({ path: field, old: target?.profile[field] ?? null, proposed: proposed.trim() ? proposed : override ?? "", effect: proposed.trim() ? "world" : override?.trim() ? "preserve_edit" : "discoverable" });
     }
     changes.push({ path: "authoredProfile", old: target?.campaignProfile ?? null, proposed: profile, effect: "apply" });
-    changes.push({ path: "overrides", old: overrides, proposed: overrides, effect: "preserve" });
+    const updating = overrides.filter(item => ["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(item.field));
+    changes.push({ path: "overrides", old: overrides, proposed: updating, effect: "preserve" });
     changes.push({ path: "identity", old: target ? { name: target.name, aliases: target.aliases } : null, proposed: { name: target?.name ?? entry.name, aliases: target?.aliases ?? profile.identity.aliases }, effect: target ? "preserve" : "create" });
     const core = { worldVersionId: campaign.world_version_id, characterId: entry.id, ...(target ? { targetCastCharacterId: target.id, characterRevision: target.revision } : {}),
       eligibleTargets: matches.map(({ id, name, revision }) => ({ id, name, revision })), castRevision: state.revision, boundary, choices: [], changes };
@@ -672,7 +720,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
       if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`, [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
       let recomputed: Awaited<ReturnType<typeof worldPreviewWithClient>>;
       try { recomputed = await worldPreviewWithClient(client, scope, campaign, state, { characterId: request.characterId, ...(request.targetCastCharacterId ? { targetCastCharacterId: request.targetCastCharacterId } : {}) }); }
-      catch (error) { if (error instanceof CampaignCastError && error.code === "cast_world_character_unavailable") throw new CampaignCastError("cast_world_preview_changed"); throw error; }
+      catch (error) { if (error instanceof CampaignCastError && (error.code === "cast_world_character_unavailable" || error.code === "cast_invalid_request")) throw new CampaignCastError("cast_world_preview_changed"); throw error; }
       const { preview, entry, index, profile, target, handEdits } = recomputed;
       if (preview.previewFingerprint !== request.previewFingerprint || target?.revision !== request.expectedCharacterRevision || !target && preview.eligibleTargets.length) throw new CampaignCastError("cast_world_preview_changed");
       const id = target?.id ?? randomUUID(), eventId = randomUUID();
@@ -691,6 +739,24 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
   const statusCache = new Map<string, { fingerprint: string; value: Awaited<ReturnType<NonNullable<CampaignCastWritePort["workspaceRead"]>>> }>();
   return {
     editAuthoredProfile, fromWorldPreview, fromWorld,
+    async worldChoices(rawScope) {
+      if (!options.castPresetsEnabled) throw new CampaignCastError("cast_presets_disabled");
+      const scope = castScopeSchema.parse(rawScope);
+      return withTransaction(pool, async client => {
+        const campaign = await lockCampaign(client, scope), state = await initialize(client, scope, campaign);
+        const row = (await client.query("SELECT world_id,content FROM world_versions WHERE id=$1 AND owner_user_id=$2", [campaign.world_version_id, scope.ownerUserId])).rows[0];
+        if (!row) throw new CampaignCastError("cast_not_found");
+        const pin = worldContentSchema.parse(row.content);
+        const { snapshot } = await snapshotProjection(client, scope, campaign, state, { turnNumber: campaign.active_turn_number, timelineRevision: state.timeline_revision });
+        const seeds = snapshot.characters.flatMap(person => person.originProfile?.evidence.kind === "world" ? [person.originProfile] : []);
+        const versions = await client.query("SELECT id FROM world_versions WHERE owner_user_id=$1 AND world_id=$2 AND id=ANY($3::uuid[])", [scope.ownerUserId, row.world_id, seeds.map(seed => seed.worldVersionId)]);
+        const sameWorld = new Set(versions.rows.map(version => version.id));
+        const represented = new Set(seeds.filter(seed => sameWorld.has(seed.worldVersionId)).map(seed => seed.entityId));
+        if (campaign.selected_character_id && (!campaign.selected_character_world_id || campaign.selected_character_world_id === row.world_id)) represented.add(campaign.selected_character_id);
+        return { characters: pin.playableCharacters.filter(entry => entry.campaignUse !== "playable" && !represented.has(entry.id))
+          .map(entry => ({ characterId: entry.id, name: entry.name, alwaysInContext: entry.alwaysInContext })) };
+      });
+    },
     async detachAttachment(rawScope, rawCharacterId, rawEventId, rawRequest) {
       const scope = castScopeSchema.parse(rawScope), characterId = z.uuid().parse(rawCharacterId), eventId = z.uuid().parse(rawEventId);
       const request = detachCastAttachmentSchema.parse(rawRequest);
@@ -751,7 +817,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
     create: (scope, request) => write(scope, null, request),
     edit: (scope, id, request) => write(scope, z.uuid().parse(id), request),
     discoveryStatus: (scope) => readCastDiscoveryStatus(pool, scope, options.discoveryEnabled === true),
-    ...createCastCandidateRepository(pool, options.editingEnabled === true),
+    ...createCastCandidateRepository(pool, options.editingEnabled === true, options.castPresetsEnabled === true),
     async workspaceRead(rawScope, statusOnly = false) {
       const scope = castScopeSchema.parse(rawScope);
       return withTransaction(pool, async (client) => {
@@ -844,12 +910,14 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
           }
         }
         const levels = ["r1", "r2", "r3"];
-        const context = options.castContextEnabled === true && !!enrollment && !!options.storyMemoryCapability
-          && levels.indexOf(options.storyMemoryCapability) >= levels.indexOf(enrollment.capability);
+        const narratorState: import("@infinite-quest/contracts").CastNarratorState = !options.castContextEnabled || !options.storyMemoryCapability ? "installation_disabled"
+          : !enrollment ? "enrollment_missing" : levels.indexOf(options.storyMemoryCapability) < levels.indexOf(enrollment.capability) ? "capability_insufficient"
+          : options.discoveryEnabled ? "ready" : "discovery_off";
+        const context = narratorState === "ready" || narratorState === "discovery_off";
         const value = { snapshot: projected.snapshot, reviewIds: [...reviewIds], conflictIds: [...conflictIds], attentionCounts, status: {
           revision: state.revision, boundary, capabilities: { editing: options.editingEnabled === true,
             discovery: options.discoveryEnabled === true, autoMatch: options.castAutoMatchEnabled === true && options.discoveryEnabled === true && options.editingEnabled === true, backfill: options.backfillEnabled === true,
-            context }, contextDisabledReason: context ? null : "Story Memory or character context is unavailable.",
+            context }, narratorState, contextDisabledReason: context ? null : "Story Memory or character context is unavailable.",
           counts: { identities, details, conflicts }, reviewDecisions: decisionCounts, changeToken: sha256(fingerprint), tracking, recovery } };
         statusCache.delete(cacheKey);
         statusCache.set(cacheKey, { fingerprint, value });
@@ -875,8 +943,9 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         const projected = await snapshotProjection(client, scope, campaign, state, boundary);
         const observations = projected.details.find((item) => item.characterId === id)?.observations ?? [];
         /* Retained events provide identity and attachment provenance. */
-        const overrides = new Map<string, CastOverride>();
+        const activeOverrides = projected.details.find(item => item.characterId === id)?.overrides ?? [];
         const identityEvents: CastDetail["identityEvents"] = [];
+        const authoredHistory: NonNullable<CastDetail["authoredHistory"]> = [];
         const events = (await client.query("SELECT id,effective_turn_number,payload,receipt,attachment FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND effective_turn_number <= $3 ORDER BY sequence", [scope.campaignId, scope.ownerUserId, boundary.turnNumber])).rows.map((row) => eventSchema.parse(row));
         const attachmentProjection = projectCastAttachments(events, boundary.turnNumber);
         const autoMatches: CastDetail["autoMatches"] = [];
@@ -907,12 +976,12 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
               evidence: command.kind === "create" && command.evidence ? command.evidence
                 : { kind: "user", editId: event.id, effectiveTurnNumber: event.effective_turn_number } });
           }
-          if (command.kind === "override" && command.characterId === id) overrides.set(command.field, { field: command.field, value: command.value, evidence: { kind: "user", editId: event.id, effectiveTurnNumber: event.effective_turn_number } });
-          if (command.kind === "clear_override" && command.characterId === id) overrides.delete(command.field);
-          if (command.kind === "edit_authored_profile" && command.characterId === id && command.restoreAuthoredGoals
-            && character.originProfile?.seedEventId === command.seedEventId) overrides.delete("story.goals");
+          if (command.kind === "edit_authored_profile" && command.characterId === id) {
+            authoredHistory.push({ eventId: event.id, seedEventId: command.seedEventId, effectiveTurnNumber: event.effective_turn_number,
+              set: command.set, reset: command.reset });
+          }
         }
-        return { character, revision: value.revision, boundary, observations, overrides: [...overrides.values()], autoMatches, identityEvents, unresolvedCandidateIds: [],
+        return { character, revision: value.revision, boundary, observations, overrides: activeOverrides, autoMatches, identityEvents, authoredHistory, unresolvedCandidateIds: [],
           editorDestination: character.origin.kind === "protagonist" ? `/api/v1/campaigns/${scope.campaignId}/character-profile` : null };
       });
     },

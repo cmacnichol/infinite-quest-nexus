@@ -572,6 +572,17 @@ describe("playable character campaign readiness", () => {
       expect.objectContaining({ code: "supporting-character-invalid-fiction-name" })
     ]) });
   });
+  it("uses the cast seed fiction rules for supporting and Both readiness warnings", () => {
+    const content = worldContentSchema.parse({ world: { title: "Fiction eligibility" }, playableCharacters: [
+      { id: "hero", name: "Hero", characterText: "Guidance" },
+      { id: "npc", name: "Score: 12", characterText: "Guide", campaignUse: "supporting" },
+      { id: "both", name: "Keeper", characterText: "Guide", campaignUse: "both", profile: { identity: { aliases: ["Difficulty: 15"] } } }
+    ] });
+    expect(assessWorldCampaignReadiness(content)).toMatchObject({ ready: true, warnings: expect.arrayContaining([
+      expect.objectContaining({ code: "supporting-character-invalid-fiction-name", characterId: "npc" }),
+      expect.objectContaining({ code: "supporting-character-invalid-fiction-alias", characterId: "both" })
+    ]) });
+  });
   it("reports an empty draft as valid content but not campaign-ready", () => {
     const content = worldContentSchema.parse({ world: { title: "Incomplete Test World" } });
     expect(assessWorldCampaignReadiness(content)).toEqual({

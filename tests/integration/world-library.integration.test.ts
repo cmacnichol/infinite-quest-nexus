@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
 import { buildEditorPayload, createEditorDraft, discardEditorOrganize, reapplyEditorDraft, setEditorDraftField, stageEditorOrganize } from "../../packages/client-core/src/characters/editor-model.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { runtimeConfigFixture } from "../fixtures/instance-settings.js";
@@ -56,6 +57,7 @@ import {
   getCampaignCharacterProfile,
   importLegacyStory,
   previewCampaignWorldTransfer,
+  rewindCampaign,
   transferCampaignWorld,
   updateCampaignCharacterProfile
 } from "../helpers/memory-aware-services.js";
@@ -113,6 +115,221 @@ integration("World Library and campaign version integration", () => {
       releaseNotes: `Synthetic version ${marker}`
     }));
   }
+
+  it("creates starting cast atomically and rejects invalid selections", async () => {
+    const title = `Starting cast ${crypto.randomUUID()}`;
+    const draft = content(title, "One");
+    draft.playableCharacters.push(
+      { ...draft.playableCharacters[0]!, id: "support-a", name: "Ally", campaignUse: "supporting", profile: characterProfileSchema.parse({ identity: { aliases: ["Score 9"] }, story: { role: "Original role" } }) },
+      { ...draft.playableCharacters[0]!, id: "support-b", name: "Friend", campaignUse: "both" }
+    );
+    const world = await createWorld(pool, worldCreateSchema.parse({ title, content: draft }));
+    const version = await publishWorld(pool, world.id, worldPublishSchema.parse({ expectedRevision: world.draftRevision }));
+    const enabled = createApiWorldCampaignApplication(pool, { credentialSecret: "integration-test-credential-secret", castPresetsEnabled: true });
+    const disabled = createApiWorldCampaignApplication(pool, { credentialSecret: "integration-test-credential-secret" });
+    const request = campaignCreateSchema.parse({ worldVersionId: version.worldVersionId, title: "Cast", selectedCharacterId: draft.playableCharacters[0]!.id,
+      startingCast: [{ characterId: "support-a" }, { characterId: "support-b", alwaysInContext: true }] });
+    const scope = { ownerUserId: await initialOwnerId(pool) };
+    await expect(disabled.createCampaign(scope, request)).rejects.toMatchObject({ reason: "cast_presets_disabled" });
+    for (const startingCast of [[{ characterId: "missing", alwaysInContext: false }], [{ characterId: "support-a", alwaysInContext: false }, { characterId: "support-a", alwaysInContext: false }], [{ characterId: draft.playableCharacters[0]!.id, alwaysInContext: false }]]) {
+      await expect(enabled.createCampaign(scope, { ...request, startingCast })).rejects.toMatchObject({ kind: "invalid_request" });
+    }
+    // A failure on the second seed must roll back the campaign and first seed too.
+    const functionName = `test_fail_cast_${crypto.randomUUID().replaceAll("-", "")}`;
+    await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.idempotency_key LIKE '%:support-b' THEN RAISE EXCEPTION 'injected seed failure'; END IF; RETURN NEW; END $$`);
+    await pool.query(`CREATE TRIGGER ${functionName} BEFORE INSERT ON campaign_cast_events FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
+    try {
+      await expect(enabled.createCampaign(scope, request)).rejects.toThrow();
+      expect((await pool.query("SELECT id FROM campaigns WHERE world_version_id=$1 AND title=$2", [version.worldVersionId, request.title])).rows).toHaveLength(0);
+    } finally {
+      await pool.query(`DROP TRIGGER ${functionName} ON campaign_cast_events`);
+      await pool.query(`DROP FUNCTION ${functionName}()`);
+    }
+    const campaign = await enabled.createCampaign(scope, request);
+    expect(campaign.skippedStartingCast).toEqual([{ characterId: "support-a", name: "Ally", aliases: ["Score 9"], reason: "invalid_alias" }]);
+    const events = await pool.query("SELECT idempotency_key, payload FROM campaign_cast_events WHERE campaign_id=$1 ORDER BY sequence", [campaign.id]);
+    expect(events.rows).toHaveLength(2);
+    expect(events.rows.map((row) => row.idempotency_key)).toEqual([`campaign-seed:${campaign.id}:support-a`, `campaign-seed:${campaign.id}:support-b`]);
+    expect(events.rows[1].payload.some((item: { command: { kind: string } }) => item.command.kind === "pin")).toBe(true);
+    const second = await enabled.createCampaign(scope, { ...request, title: "Second cast" });
+    const storedSeed = async (id: string) => (await pool.query("SELECT payload FROM campaign_cast_events WHERE campaign_id=$1 AND idempotency_key=$2", [id, `campaign-seed:${id}:support-a`])).rows[0].payload;
+    const firstSeed = await storedSeed(campaign.id), secondSeed = await storedSeed(second.id);
+    expect(firstSeed.find((item: { command: { kind: string } }) => item.command.kind === "seed_profile").command.profile.story.role).toBe("Original role");
+    expect(firstSeed.find((item: { command: { kind: string } }) => item.command.kind === "seed_profile").command.rosterAliases).toEqual([]);
+    expect(secondSeed.find((item: { command: { kind: string } }) => item.command.kind === "seed_profile").command.profile.story.role).toBe("Original role");
+    const updated = structuredClone(draft);
+    updated.playableCharacters[1]!.profile!.story.role = "New draft role";
+    await updateWorldDraft(pool, world.id, worldDraftUpdateSchema.parse({ expectedRevision: (await getWorld(pool, world.id)).draftRevision, content: updated }));
+    expect(await storedSeed(campaign.id)).toEqual(firstSeed);
+    expect(await storedSeed(second.id)).toEqual(secondSeed);
+    const pinned = (await pool.query("SELECT content FROM world_versions WHERE id=$1", [version.worldVersionId])).rows[0].content;
+    expect(pinned.playableCharacters[1].profile.story.role).toBe("Original role");
+    const editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+    const firstScope = { ...scope, campaignId: campaign.id }, secondScope = { ...scope, campaignId: second.id };
+    const first = await editor.current(firstScope), ally = first.characters.find(person => person.name === "Ally")!;
+    await editor.editAuthoredProfile!(firstScope, ally.id, { expectedCastRevision: first.revision, expectedBoundary: first.boundary,
+      expectedCharacterRevision: ally.revision, idempotencyKey: "edit-first-only", set: { "story.background": "First campaign edit" }, reset: [] });
+    const otherAlly = (await editor.current(secondScope)).characters.find(person => person.name === "Ally")!;
+    expect(otherAlly.campaignProfile?.story.background).not.toBe("First campaign edit");
+    expect(otherAlly.originProfile?.legacyCharacterText).toBe(draft.playableCharacters[0]!.characterText);
+    expect((await getWorldVersionPlayableCharacterSummary(pool, version.worldVersionId)).startingCastCandidates.find(person => person.id === "support-a")?.name).toBe("Ally");
+    const publishedContent = (await pool.query("SELECT content FROM world_versions WHERE id=$1", [version.worldVersionId])).rows[0].content;
+    expect(publishedContent.playableCharacters.find((person: { id: string }) => person.id === "support-a").characterText).toBe(draft.playableCharacters[0]!.characterText);
+  });
+
+  it("uses the roster entry rather than a same-ID generic entity when reporting starting-cast aliases", async () => {
+    const title = `Roster identity ${crypto.randomUUID()}`, draft = content(title, "One");
+    draft.playableCharacters.push({ ...draft.playableCharacters[0]!, id: "ally", name: "Ally", campaignUse: "supporting",
+      profile: characterProfileSchema.parse({ identity: { aliases: ["Guide", "Score: 12"] } }) });
+    draft.entities.push({ id: "ally", name: "Ally", kind: "character", aliases: ["Other"] });
+    const world = await createWorld(pool, worldCreateSchema.parse({ title, content: draft }));
+    const version = await publishWorld(pool, world.id, worldPublishSchema.parse({ expectedRevision: world.draftRevision }));
+    const app = createApiWorldCampaignApplication(pool, { credentialSecret: "integration-test-credential-secret", castPresetsEnabled: true });
+    const created = await app.createCampaign({ ownerUserId: await initialOwnerId(pool) }, campaignCreateSchema.parse({ worldVersionId: version.worldVersionId,
+      title: "Roster identity", selectedCharacterId: draft.playableCharacters[0]!.id, startingCast: [{ characterId: "ally" }] }));
+    expect(created.skippedStartingCast).toEqual([{ characterId: "ally", name: "Ally", aliases: ["Score: 12"], reason: "invalid_alias" }]);
+    const events = await pool.query("SELECT payload FROM campaign_cast_events WHERE campaign_id=$1", [created.id]);
+    expect(events.rows[0].payload[0].command.aliases).toEqual(["Guide"]);
+  });
+
+  it.runIf(process.env.NEXUS_CAST_BROWSER_PROOF === "1")("edits a real seeded cast from the campaign page", async ({ onTestFinished }) => {
+    const { chromium, expect: browserExpect } = await import("@playwright/test");
+    const { createCampaignCastApplication } = await import("../../packages/application/src/campaign-cast/use-cases.js");
+    const { createPostgresCampaignCastRepository } = await import("../../packages/database/src/campaign-cast-repository.js");
+    const title = `Browser cast ${crypto.randomUUID()}`;
+    const authored = content(title, "One");
+    authored.playableCharacters.push({ ...authored.playableCharacters[0]!, id: "browser-ally", name: "Browser Ally", campaignUse: "supporting",
+      profile: characterProfileSchema.parse({ story: { role: "World guide", goals: "World goal" } }) },
+      { ...authored.playableCharacters[0]!, id: "browser-invalid", name: "Score 9", campaignUse: "supporting" },
+      { ...authored.playableCharacters[0]!, id: "browser-keeper", name: "Browser Keeper", campaignUse: "supporting", startingCastDefault: false,
+        profile: characterProfileSchema.parse({ story: { role: "World keeper" } }) });
+    const world = await createWorld(pool, worldCreateSchema.parse({ title, content: authored }));
+    const published = await publishWorld(pool, world.id, worldPublishSchema.parse({ expectedRevision: world.draftRevision }));
+    const config = { ...runtimeConfigFixture(), databaseUrl: databaseUrl!, role: "api" as const,
+      castEditingEnabled: true, castPresetsEnabled: true, castContextEnabled: true, storyMemoryCapability: "r3" as const,
+      legacyWebRoot: resolve("apps/web/dist"), nextWebRoot: resolve("apps/web-next/dist") };
+    const cast = createCampaignCastApplication(createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true, castContextEnabled: true, storyMemoryCapability: "r3" }));
+    const server = await buildServer({ ...inertStorageServerOptions({ pool, config,
+      worldCampaign: createApiWorldCampaignApplication(pool, { credentialSecret: config.credentialEncryptionKey, castPresetsEnabled: true }) }), cast });
+    const origin = await server.listen({ host: "127.0.0.1", port: 0 });
+    onTestFinished(() => server.close());
+    const browser = await chromium.launch();
+    onTestFinished(() => browser.close());
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const webOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
+    const screenshotRoot = resolve(process.env.CAST_SCREENSHOT_ROOT ?? "docs/review/assets/unified-character-editor-phase-4");
+    await page.route("**/api/v1/**", async route => {
+      const requestUrl = new URL(route.request().url());
+      const response = await route.fetch({ url: `${origin}${requestUrl.pathname}${requestUrl.search}`, headers: { ...route.request().headers(), origin } });
+      await route.fulfill({ response });
+    });
+    await page.route("**/story/**", async route => {
+      const html = await (await import("node:fs/promises")).readFile(resolve("apps/web/public/story.html"), "utf8");
+      await route.fulfill({ contentType: "text/html", body: html.replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts") });
+    });
+    await page.goto(`${webOrigin}/nexus/index.html#world-library`);
+    await page.locator("#worldManagementCarousel").getByRole("button", { name: `Select ${title}` }).click();
+    await page.locator("#createCampaignModalBtn").click();
+    await page.locator("#newCampaignTitle").fill("Browser cast campaign");
+    await browserExpect(page.locator("#startingCastNotice")).toContainText("of 30");
+    await browserExpect(page.locator("#startingCastList label").filter({ hasText: "Browser Ally" }).locator("input[type=checkbox]").first()).toBeChecked();
+    const createdResponse = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/v1/campaigns");
+    await page.locator("#confirmCreateCampaign").click();
+    expect((await createdResponse).status()).toBe(201);
+    await browserExpect(page.locator("#createCampaignStatus")).toContainText("Score 9: character was skipped");
+    await browserExpect(page.locator("#openCommittedCampaign")).toBeVisible();
+    await (await import("node:fs/promises")).mkdir(screenshotRoot, { recursive: true });
+    await page.locator("#createCampaignStatus").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: resolve(screenshotRoot, "skipped-result-1440.png") });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator("#createCampaignStatus").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: resolve(screenshotRoot, "skipped-result-390.png") });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const row = await pool.query<{ id: string }>("SELECT id FROM campaigns WHERE world_version_id=$1 AND title=$2", [published.worldVersionId, "Browser cast campaign"]);
+    const campaignId = row.rows[0]!.id;
+    await page.goto(`${webOrigin}/nexus/index.html?proof=cast#campaigns?campaignId=${campaignId}`);
+    await browserExpect(page.locator(`#campaignList [data-campaign-id="${campaignId}"]`)).toBeVisible();
+    await page.locator("#editCampaignCharacter").click();
+    await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Ally", exact: true }).first().click();
+    await page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true }).click();
+    await page.locator("#cast-story-role").fill("Campaign guide");
+    await page.locator("#cast-save").click();
+    await browserExpect(page.locator("#campaignCastDialog")).toContainText("Campaign guide");
+    const storyLink = page.locator("#campaignCastDialog").getByRole("link", { name: "Open in Story" });
+    const href = await storyLink.getAttribute("href");
+    expect(href).toMatch(new RegExp(`^/story/${campaignId}\\?character=[0-9a-f-]+$`));
+    const ownerUserId = await initialOwnerId(pool);
+    await pool.query("INSERT INTO turns (owner_user_id,campaign_id,turn_number,action,narration) VALUES ($1,$2,1,'Continue','A quiet moment passes.')", [ownerUserId, campaignId]);
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [campaignId]);
+    await storyLink.click();
+    await browserExpect(page.locator("#campaignCastDialog")).toContainText("Browser Ally");
+    await (await import("node:fs/promises")).mkdir(screenshotRoot, { recursive: true });
+    await page.screenshot({ path: resolve(screenshotRoot, "story-deep-link-1440.png") });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: resolve(screenshotRoot, "story-deep-link-390.png") });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${webOrigin}/nexus/index.html?proof=return#campaigns?campaignId=${campaignId}`);
+    await page.locator("#editCampaignCharacter").click();
+    await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Ally", exact: true }).first().click();
+    await page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true }).click();
+    await page.screenshot({ path: resolve(screenshotRoot, "reset-restore-controls-1440.png") });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: resolve(screenshotRoot, "reset-restore-controls-390.png") });
+    await page.locator("#cast-story-goals").locator("..").getByRole("button", { name: "Restore authored goals" }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: resolve(screenshotRoot, "restore-goals-390.png") });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const roleRow = page.locator("#cast-story-role").locator("..");
+    await roleRow.getByRole("button", { name: "Reset to world value" }).click();
+    await browserExpect(page.locator("#cast-story-role")).toHaveValue("World guide");
+    await page.locator("#cast-story-goals").fill("Campaign goal");
+    await page.locator("#cast-save").click();
+    await browserExpect(page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true })).toBeVisible();
+    await browserExpect(page.locator("#campaignCastDialog")).toContainText("World guide");
+    await page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true }).click();
+    await page.locator("#cast-story-goals").locator("..").getByRole("button", { name: "Restore authored goals" }).click();
+    await browserExpect(page.locator("#cast-story-goals")).toHaveValue("World goal");
+    await page.locator("#cast-save").click();
+    await browserExpect(page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true })).toBeVisible();
+    await browserExpect(page.locator("#campaignCastDialog")).toContainText("World goal");
+    const draft = await getWorld(pool, world.id);
+    const nextDraft = await updateWorldDraft(pool, world.id, worldDraftUpdateSchema.parse({ expectedRevision: draft.draftRevision, content: { ...authored, world: { ...authored.world, premise: "Updated world premise" } } }));
+    const nextVersion = await publishWorld(pool, world.id, worldPublishSchema.parse({ expectedRevision: nextDraft.revision }));
+    await migrateCampaignWorld(pool, campaignId, campaignWorldMigrationSchema.parse({ worldVersionId: nextVersion.worldVersionId }));
+    await rewindCampaign(pool, campaignId, { targetTurnNumber: 0 });
+    await page.goto(`${webOrigin}/nexus/index.html?proof=migrated#campaigns?campaignId=${campaignId}`);
+    await page.locator("#editCampaignCharacter").click();
+    await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Ally", exact: true }).first().click();
+    await browserExpect(page.locator("#campaignCastDialog")).toContainText("World goal");
+    await (await import("node:fs/promises")).mkdir(screenshotRoot, { recursive: true });
+    await page.screenshot({ path: resolve(screenshotRoot, "campaign-cast-1440.png") });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: resolve(screenshotRoot, "campaign-cast-390.png") });
+    // Apply an unselected world profile to an existing same-name campaign record.
+    const editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+    const scope = { ownerUserId, campaignId };
+    const beforeManual = await editor.current(scope);
+    const manual = await editor.create(scope, { name: "Browser Keeper", aliases: [], profile: {},
+      expectedCastRevision: beforeManual.revision, expectedBoundary: beforeManual.boundary, idempotencyKey: crypto.randomUUID() });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.locator("#campaignCastDialog").getByRole("button", { name: "Back to characters", exact: true }).click();
+    await page.locator("#campaignCastDialog").getByRole("button", { name: "Add from world", exact: true }).click();
+    await page.getByLabel("World character").selectOption("browser-keeper");
+    await page.locator("#campaignCastDialog").getByRole("button", { name: `Browser Keeper · ${manual.character.id}` }).click();
+    await browserExpect(page.locator("#campaignCastDialog")).toContainText("World keeper");
+    await page.screenshot({ path: resolve(screenshotRoot, "apply-preview-1440.png") });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: resolve(screenshotRoot, "apply-preview-390.png") });
+    const applyResponse = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === `/api/v1/campaigns/${campaignId}/cast/from-world`);
+    await page.locator("#campaignCastDialog").getByRole("button", { name: "Apply world profile to Browser Keeper" }).click();
+    expect((await applyResponse).status()).toBe(200);
+    await browserExpect(page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true })).toBeVisible();
+    await browserExpect(page.locator("#campaignCastDialog")).toContainText("World keeper");
+    const after = await editor.detail(scope, manual.character.id);
+    expect(after.character.id).toBe(manual.character.id);
+    expect(after.character.campaignProfile?.story.role).toBe("World keeper");
+    expect((await editor.current(scope)).characters.filter(person => person.name === "Browser Keeper")).toHaveLength(1);
+    await page.unrouteAll({ behavior: "wait" });
+  }, 60_000);
 
   it("keeps published versions immutable while drafts advance by revision", async () => {
     const first = await publishedWorld("Immutable");

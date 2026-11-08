@@ -149,6 +149,7 @@ export const campaignCreateResponseSchema = z.object({
   worldVersionNumber: z.number().int().positive(),
   selectedCharacterId: z.string().trim().min(1),
   selectedCharacterName: z.string().trim().min(1),
+  skippedStartingCast: z.array(z.object({ characterId: z.string(), name: z.string(), aliases: z.array(z.string()).default([]), reason: z.enum(["invalid_name", "invalid_alias"]) })).optional(),
   textProviderProfileId: z.uuid().nullable(),
   imageProviderProfileId: z.uuid().nullable()
 }).passthrough();
@@ -171,6 +172,12 @@ export const playableCharacterListResponseSchema = z.object({
     name: z.string().trim().min(1),
     rpgStatCount: z.number().int().min(0),
     defaultTriggerCount: z.number().int().min(0)
+  })),
+  startingCastCandidates: z.array(z.object({
+    id: z.string().trim().min(1), name: z.string().trim().min(1),
+    campaignUse: z.enum(["playable", "supporting", "both"]),
+    startingCastDefault: z.boolean(), alwaysInContext: z.boolean(),
+    role: z.string(), summary: z.string()
   })),
   readiness: z.object({
     ready: z.boolean(),

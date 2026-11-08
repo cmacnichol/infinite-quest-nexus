@@ -289,7 +289,7 @@ export async function installLegacyUiFixture(
       const id = path.split("/").at(-1) ?? "";
       result = await fulfill(route, fixture.worldDetails.get(id) ?? {});
     } else if (path === `/api/v1/world-versions/${fixture.worldVersionId}/playable-characters`) {
-      result = await fulfill(route, { characters: [{ id: "fixture-observer", name: "The Observer", rpgStatCount: 0, defaultTriggerCount: 0 }], readiness: { ready: true, issues: [] } });
+      result = await fulfill(route, { characters: [{ id: "fixture-observer", name: "The Observer", rpgStatCount: 0, defaultTriggerCount: 0 }], startingCastCandidates: [], readiness: { ready: true, issues: [] } });
     } else if (path === `/api/v1/campaigns/${fixture.campaignId}/character-profile` && method === "PUT") {
       const { name, profile } = campaignCharacterProfileUpdateSchema.parse(request.postDataJSON());
       campaignProfile = { ...campaignProfile, name, profile, revision: campaignProfile.revision + 1 };

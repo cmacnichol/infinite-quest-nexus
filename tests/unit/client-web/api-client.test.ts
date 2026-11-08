@@ -443,6 +443,18 @@ describe("createNexusApiClient", () => {
     });
   });
 
+  it("preserves the public starting-cast 503 code and request reference", async () => {
+    const client = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: async () => new Response(JSON.stringify({
+      error: "WorldCampaignHttpError", message: "Starting cast presets are currently unavailable.",
+      code: "cast_presets_disabled", correlationId: "request-123", details: { code: "cast_presets_disabled" }
+    }), { status: 503, headers: { "content-type": "application/json" } }) });
+    await expect(client.campaigns.create({ worldVersionId, title: "Campaign", selectedCharacterId: "hero",
+      startingCast: [{ characterId: "ally", alwaysInContext: true }], storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32000, turnControlStyle: "flexible_action" })).rejects.toMatchObject({
+      statusCode: 503, domainCode: "cast_presets_disabled", correlationId: "request-123"
+    });
+  });
+
   it("strips caller-supplied identity fields and never invents identity headers", async () => {
     const queue = invalidResponseFetch();
     const client = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: queue.fetchImpl });
