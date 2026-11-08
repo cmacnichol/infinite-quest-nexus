@@ -149,7 +149,7 @@ export const campaignCreateResponseSchema = z.object({
   worldVersionNumber: z.number().int().positive(),
   selectedCharacterId: z.string().trim().min(1),
   selectedCharacterName: z.string().trim().min(1),
-  skippedStartingCast: z.array(z.object({ characterId: z.string(), name: z.string(), aliases: z.array(z.string()).default([]), reason: z.enum(["invalid_name", "invalid_alias"]) })).optional(),
+  skippedStartingCast: z.array(z.object({ characterId: z.string(), name: z.string(), aliases: z.array(z.string()).default([]), reason: z.enum(["invalid_name", "invalid_alias"]) })).max(2000).default([]),
   textProviderProfileId: z.uuid().nullable(),
   imageProviderProfileId: z.uuid().nullable()
 }).passthrough();

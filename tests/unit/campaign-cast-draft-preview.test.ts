@@ -11,8 +11,8 @@ const result = (content: unknown) => ({ content: JSON.stringify(content), respon
 describe("cast draft preview", () => {
   it("makes no provider request without eligible accepted evidence", async () => {
     const execute = vi.fn();
-    const repo = { draftPreviewContext: vi.fn().mockResolvedValue({ character, boundary, evidence: [], observedPaths: [] }) };
-    const preview = createCastDraftPreview({} as never, repo as never, { execution: { text: execute } } as never);
+    const repo = { draftPreviewContext: vi.fn().mockResolvedValue({ character, boundary, evidence: [], observedPaths: [], textProviderProfileId: id, worldContent: { world: {} } }) };
+    const preview = createCastDraftPreview(repo as never, { execution: { text: execute } } as never);
     expect(await preview(scope, id, request)).toMatchObject({ proposals: [], evidence: [] });
     expect(execute).not.toHaveBeenCalled();
   });
@@ -21,10 +21,10 @@ describe("cast draft preview", () => {
       { path: "appearance.description", value: "blue eyes", evidenceIds: [evidenceId] },
       { path: "story.role", value: "guard", evidenceIds: ["66666666-6666-4666-8666-666666666666"] }
     ] }));
-    const repo = { draftPreviewContext: vi.fn().mockResolvedValue({ character, boundary, evidence: [evidence], observedPaths: [] }) };
+    const repo = { draftPreviewContext: vi.fn().mockResolvedValue({ character, boundary, evidence: [evidence], observedPaths: [], textProviderProfileId: id, worldContent: { world: {} } }) };
     const pool = { query: vi.fn().mockResolvedValue({ rows: [{ text_provider_profile_id: id, content: { world: {} } }] }) };
     const providers = { resolution: { resolveDirect: vi.fn().mockResolvedValue({ status: "resolved", providerProfileId: id, model: "m" }) }, execution: { text: vi.fn().mockResolvedValue({ execute, model: "m" }) } };
-    const preview = createCastDraftPreview(pool as never, repo as never, providers as never);
+    const preview = createCastDraftPreview(repo as never, providers as never);
     const value = await preview(scope, id, request);
     expect(value.proposals).toEqual([{ path: "appearance.description", value: "blue eyes", evidenceIds: [evidenceId], draftEvidenceFence: { path: "appearance.description", value: "blue eyes", evidence: [evidence] } }]);
     expect(value.omitted).toEqual([{ path: "story.role", reason: "unsupported_or_unavailable" }]);
@@ -35,10 +35,10 @@ describe("cast draft preview", () => {
   });
   it("rejects an entire malformed response without returning partial proposals", async () => {
     const execute = vi.fn().mockResolvedValue(result({ proposals: [{ path: "appearance.description", value: 12, evidenceIds: [evidenceId] }] }));
-    const repo = { draftPreviewContext: vi.fn().mockResolvedValue({ character, boundary, evidence: [evidence], observedPaths: [] }) };
+    const repo = { draftPreviewContext: vi.fn().mockResolvedValue({ character, boundary, evidence: [evidence], observedPaths: [], textProviderProfileId: id, worldContent: { world: {} } }) };
     const pool = { query: vi.fn().mockResolvedValue({ rows: [{ content: { world: {} } }] }) };
     const providers = { resolution: { resolveDirect: vi.fn().mockResolvedValue({ status: "resolved", providerProfileId: id, model: "m" }) }, execution: { text: vi.fn().mockResolvedValue({ execute, model: "m" }) } };
-    await expect(createCastDraftPreview(pool as never, repo as never, providers as never)(scope, id, request)).rejects.toMatchObject({ code: "cast_discovery_unavailable" });
+    await expect(createCastDraftPreview(repo as never, providers as never)(scope, id, request)).rejects.toMatchObject({ code: "cast_discovery_unavailable" });
   });
   it("withholds observed blank fields and creative guidance with citations", async () => {
     const execute = vi.fn().mockResolvedValue(result({ proposals: [
@@ -46,30 +46,30 @@ describe("cast draft preview", () => {
       { path: "story.otherGuidance", value: "a mystery", evidenceIds: [evidenceId] }
     ] }));
     const subject = { ...character, campaignProfile: { story: {} } };
-    const repo = { draftPreviewContext: vi.fn().mockResolvedValue({ character: subject, boundary, evidence: [evidence], observedPaths: ["story.role"] }) };
+    const repo = { draftPreviewContext: vi.fn().mockResolvedValue({ character: subject, boundary, evidence: [evidence], observedPaths: ["story.role"], textProviderProfileId: id, worldContent: { world: {} } }) };
     const pool = { query: vi.fn().mockResolvedValue({ rows: [{ content: { world: {} } }] }) };
     const providers = { resolution: { resolveDirect: vi.fn().mockResolvedValue({ status: "resolved", providerProfileId: id, model: "m" }) }, execution: { text: vi.fn().mockResolvedValue({ execute, model: "m" }) } };
-    const value = await createCastDraftPreview(pool as never, repo as never, providers as never)(scope, id, request);
+    const value = await createCastDraftPreview(repo as never, providers as never)(scope, id, request);
     expect(value.proposals).toEqual([]);
     expect(value.omitted).toHaveLength(2);
   });
   it("does not retransmit rejected private model output during repair", async () => {
     const execute = vi.fn().mockResolvedValueOnce(result({ proposals: [], secret: "<think>private canary</think>" }))
       .mockResolvedValueOnce(result({ proposals: [] }));
-    const repo = { draftPreviewContext: vi.fn().mockResolvedValue({ character, boundary, evidence: [evidence], observedPaths: [] }) };
+    const repo = { draftPreviewContext: vi.fn().mockResolvedValue({ character, boundary, evidence: [evidence], observedPaths: [], textProviderProfileId: id, worldContent: { world: {} } }) };
     const pool = { query: vi.fn().mockResolvedValue({ rows: [{ content: { world: {} } }] }) };
     const providers = { resolution: { resolveDirect: vi.fn().mockResolvedValue({ status: "resolved", providerProfileId: id, model: "m" }) }, execution: { text: vi.fn().mockResolvedValue({ execute, model: "m" }) } };
-    await createCastDraftPreview(pool as never, repo as never, providers as never)(scope, id, request);
+    await createCastDraftPreview(repo as never, providers as never)(scope, id, request);
     expect(execute).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(execute.mock.calls[1])).not.toContain("private canary");
   });
   it("projects bounded effective authored fiction and excludes private extensions and reasoning", async () => {
     const execute = vi.fn().mockResolvedValue(result({ proposals: [] }));
     const subject = { ...character, profile: { "story.role": "Campaign guide" }, campaignProfile: { story: { role: "Old guide", background: "A sailor. <think>hidden canary</think>" }, secretExtension: "private extension canary" } };
-    const repo = { draftPreviewContext: vi.fn().mockResolvedValue({ character: subject, boundary, evidence: [evidence], observedPaths: [] }) };
+    const repo = { draftPreviewContext: vi.fn().mockResolvedValue({ character: subject, boundary, evidence: [evidence], observedPaths: [], textProviderProfileId: id, worldContent: { world: {} } }) };
     const pool = { query: vi.fn().mockResolvedValue({ rows: [{ content: { world: { premise: "An island. <analysis>world canary</analysis>" }, secret: "private world canary" } }] }) };
     const providers = { resolution: { resolveDirect: vi.fn().mockResolvedValue({ status: "resolved", providerProfileId: id, model: "m" }) }, execution: { text: vi.fn().mockResolvedValue({ execute, model: "m" }) } };
-    await createCastDraftPreview(pool as never, repo as never, providers as never)(scope, id, request);
+    await createCastDraftPreview(repo as never, providers as never)(scope, id, request);
     const sent = JSON.stringify(execute.mock.calls[0]);
     expect(sent).toContain("Campaign guide");
     expect(sent).toContain("A sailor.");

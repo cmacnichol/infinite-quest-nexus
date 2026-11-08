@@ -52,8 +52,10 @@ export const castDetailProfileSchema = z.partialRecord(castFieldSchema, z.string
     context.addIssue({ code: "custom", path: [field], message: "Field exceeds 2,000 characters." });
 });
 export const castOverrideProfileSchema = z.partialRecord(castFieldSchema, z.string().max(20_000)).superRefine((profile, context) => {
-  for (const [field, value] of Object.entries(profile)) if (field !== "story.goals" && value.length > 2_000)
-    context.addIssue({ code: "custom", path: [field], message: "Override exceeds field limit." });
+  for (const [field, value] of Object.entries(profile)) {
+    if (field !== "story.goals" && value.length > 2_000) context.addIssue({ code: "custom", path: [field], message: "Override exceeds field limit." });
+    if (!value.trim() && (field === "story.goals" || field.startsWith("state."))) context.addIssue({ code: "custom", path: [field], message: "Clear this override instead of saving it empty." });
+  }
 });
 export const castRosterSummaryProfileSchema = z.partialRecord(castFieldSchema, z.string().max(200));
 export const castObservationSchema = z.object({

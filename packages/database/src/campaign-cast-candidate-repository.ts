@@ -127,8 +127,8 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
         const result = reviewCastDetailResultSchema.parse({ character: cast.characters.find(item => item.id === character.id), revision: cast.revision,
           boundary: cast.boundary, candidateId: id, observationIndex: request.observationIndex, disposition: request.action, ...(observationId ? { observationId } : {}) });
         decisions.push({ observationIndex: request.observationIndex, idempotencyKey: request.idempotencyKey, requestHash, result });
-        await client.query("UPDATE campaign_cast_discovery_candidates SET detail_decisions=$2,status=$3 WHERE id=$1", [id, JSON.stringify(decisions),
-          decisions.length >= resolution.pendingObservations.length ? "resolved" : "pending"]);
+        await client.query("UPDATE campaign_cast_discovery_candidates SET detail_decisions=$2,status=$3 WHERE id=$1 AND campaign_id=$4 AND owner_user_id=$5", [id, JSON.stringify(decisions),
+          decisions.length >= resolution.pendingObservations.length ? "resolved" : "pending", scope.campaignId, scope.ownerUserId]);
         return result;
       });
     },
@@ -184,7 +184,7 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
           if (matches.length > 1 && castPresetsEnabled) throw new CampaignCastError("cast_invalid_request");
           const match = matches[0], index = match ? roster.findIndex((entry: ReturnType<typeof playableCharacterSchema.parse> | null) => entry?.id === match.entityId) : -1, entry = roster[index];
           if (entry) {
-            const captured = row.job_id ? (await client.query("SELECT validation_summary->'worldIdentitySnapshot' AS snapshot FROM campaign_cast_discovery_receipts WHERE job_id=$1 AND chunk_ordinal=$2", [row.job_id, row.chunk_ordinal])).rows[0]?.snapshot : null;
+            const captured = row.job_id ? (await client.query("SELECT validation_summary->'worldIdentitySnapshot' AS snapshot FROM campaign_cast_discovery_receipts WHERE job_id=$1 AND chunk_ordinal=$2 AND campaign_id=$3 AND owner_user_id=$4", [row.job_id, row.chunk_ordinal, scope.campaignId, scope.ownerUserId])).rows[0]?.snapshot : null;
             const oldIdentities = Array.isArray(captured?.identities) ? captured.identities.filter((person: { entityId?: unknown }) => person.entityId === entry.id) : [];
             const sourceWorld = captured?.worldVersionId ? (await client.query("SELECT world_id FROM world_versions WHERE id=$1 AND owner_user_id=$2", [captured.worldVersionId, scope.ownerUserId])).rows[0]?.world_id : undefined;
             const decision = await readFirstAppearanceDecision(client, scope, { frozenPermission: true, livePermission: castPresetsEnabled,
@@ -213,8 +213,8 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
               cast = await initializeCastWithClient(client, scope);
               const result = castCandidateResolutionSchema.parse({ candidateId: id, character: cast.characters.find(person => person.id === characterId),
                 revision: cast.revision, boundary: cast.boundary, observationIds: receipt.observationIds, pendingObservations: validated.pendingObservations });
-              await client.query("UPDATE campaign_cast_discovery_candidates SET status=$3,resolution_receipt=$2 WHERE id=$1",
-                [id, JSON.stringify({ idempotencyKey: request.idempotencyKey, requestHash, result }), validated.pendingObservations.length ? "pending" : "resolved"]);
+              await client.query("UPDATE campaign_cast_discovery_candidates SET status=$3,resolution_receipt=$2 WHERE id=$1 AND campaign_id=$4 AND owner_user_id=$5",
+                [id, JSON.stringify({ idempotencyKey: request.idempotencyKey, requestHash, result }), validated.pendingObservations.length ? "pending" : "resolved", scope.campaignId, scope.ownerUserId]);
               return result;
             }
           }
@@ -233,8 +233,8 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
         cast = await initializeCastWithClient(client, scope);
         const result = castCandidateResolutionSchema.parse({ candidateId: id, character: cast.characters.find((person) => person.id === characterId),
           revision: cast.revision, boundary: cast.boundary, observationIds: receipt.observationIds, pendingObservations: validated.pendingObservations });
-        await client.query("UPDATE campaign_cast_discovery_candidates SET status=$3,resolution_receipt=$2 WHERE id=$1",
-          [id, JSON.stringify({ idempotencyKey: request.idempotencyKey, requestHash, result }), validated.pendingObservations.length ? "pending" : "resolved"]);
+        await client.query("UPDATE campaign_cast_discovery_candidates SET status=$3,resolution_receipt=$2 WHERE id=$1 AND campaign_id=$4 AND owner_user_id=$5",
+          [id, JSON.stringify({ idempotencyKey: request.idempotencyKey, requestHash, result }), validated.pendingObservations.length ? "pending" : "resolved", scope.campaignId, scope.ownerUserId]);
         return result;
       });
     }

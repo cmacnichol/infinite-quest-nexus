@@ -11,7 +11,7 @@ export interface CampaignCastWritePort {
   merge?(scope: CastScope, targetId: string, request: import("@infinite-quest/contracts").CastMergeRequest): Promise<CastWriteResult>;
   unmerge?(scope: CastScope, targetId: string, request: import("@infinite-quest/contracts").CastUnmergeRequest): Promise<CastWriteResult>;
   changeRemoval?(scope: CastScope, id: string, action: "remove" | "restore", request: import("@infinite-quest/contracts").CastLifecycleChange): Promise<CastWriteResult>;
-  draftPreviewContext?(scope: CastScope, id: string, input: import("@infinite-quest/contracts").CastDraftPreviewRequest): Promise<{ character: import("@infinite-quest/contracts").CastCharacter; boundary: CastBoundary; evidence: import("@infinite-quest/contracts").CastDraftPreviewResponse["evidence"]; observedPaths: string[] }>;
+  draftPreviewContext?(scope: CastScope, id: string, input: import("@infinite-quest/contracts").CastDraftPreviewRequest): Promise<{ character: import("@infinite-quest/contracts").CastCharacter; boundary: CastBoundary; evidence: import("@infinite-quest/contracts").CastDraftPreviewResponse["evidence"]; observedPaths: string[]; textProviderProfileId: string | null; worldContent: unknown }>;
   worldChoices?(scope: CastScope): Promise<import("@infinite-quest/contracts").CastWorldChoices>;
   fromWorldPreview?(scope: CastScope, input: import("@infinite-quest/contracts").CastFromWorldPreviewQuery): Promise<import("@infinite-quest/contracts").CastFromWorldPreview>;
   fromWorld?(scope: CastScope, input: import("@infinite-quest/contracts").CastFromWorld): Promise<CastWriteResult>;

@@ -267,7 +267,7 @@ test("character organization busy state freezes disclosure navigation and restor
   await page.route("**/api/v1/worlds/*/draft/playable-characters/organize", async (route) => {
     started();
     await held;
-    await route.fulfill({ status: 503, json: { message: "Synthetic organization failure." } });
+    await route.fulfill({ status: 503, json: { error: "ServiceUnavailable", message: "Synthetic organization failure." } });
   });
   await page.goto(`${origin}/nexus/index.html#world-library`);
   await page.locator(`#worldManagementCarousel [data-world-id="${fixture.worldId}"]`).click();

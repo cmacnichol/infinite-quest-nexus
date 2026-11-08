@@ -9,14 +9,13 @@ import { extractJsonObject } from "../../../packages/story-engine/src/output.js"
 import { prepareDirectAuthoringTextExecution } from "./authoring-text-execution-preparation.js";
 import { runAuthoringResponse } from "./authoring-response-adapter.js";
 import type { ApiGenerationProviderCollaborators } from "./provider-application-composition.js";
-import type { DatabasePool } from "../../../packages/database/src/pool.js";
 
 const outputSchema = z.object({ proposals: z.array(z.object({ path: z.string().min(1).max(200), value: z.string().min(1).max(20000), evidenceIds: z.array(z.uuid()).max(40) }).strict()).max(30) }).strict();
 
 const draftWorldSchema = z.object({ world: z.object({ premise: z.string().optional(), tone: z.string().optional() }).loose().optional() }).loose();
 
 /** An ephemeral preview: only the scoped, projected evidence leaves this service. */
-export function createCastDraftPreview(pool: DatabasePool, repository: CampaignCastWritePort, providers?: Pick<ApiGenerationProviderCollaborators, "execution" | "resolution" | "authoringTextPlans">) {
+export function createCastDraftPreview(repository: CampaignCastWritePort, providers?: Pick<ApiGenerationProviderCollaborators, "execution" | "resolution" | "authoringTextPlans">) {
   return async (scope: CastScope, id: string, request: CastDraftPreviewRequest): Promise<CastDraftPreviewResponse> => {
     if (!repository.draftPreviewContext) throw new CampaignCastError("cast_discovery_unavailable");
     const context = await repository.draftPreviewContext(scope, id, request);
@@ -24,14 +23,12 @@ export function createCastDraftPreview(pool: DatabasePool, repository: CampaignC
     if (!context.evidence.length) return empty;
     if (!providers) throw new CampaignCastError("cast_discovery_unavailable");
     try {
-      const row = (await pool.query(`SELECT c.text_provider_profile_id,w.content FROM campaigns c JOIN world_versions w ON w.id=c.world_version_id AND w.owner_user_id=c.owner_user_id WHERE c.id=$1 AND c.owner_user_id=$2`, [scope.campaignId, scope.ownerUserId])).rows[0];
-      if (!row) throw new Error("missing campaign");
-      const resolution = await providers.resolution.resolveDirect({ ownerUserId: scope.ownerUserId, providerRole: "text", ...(row.text_provider_profile_id ? { selectedProviderProfileId: row.text_provider_profile_id } : {}) });
+      const resolution = await providers.resolution.resolveDirect({ ownerUserId: scope.ownerUserId, providerRole: "text", ...(context.textProviderProfileId ? { selectedProviderProfileId: context.textProviderProfileId } : {}) });
       if (resolution.status !== "resolved") throw new Error("provider unavailable");
       const provider = await providers.execution.text({ ownerUserId: scope.ownerUserId }, resolution.providerProfileId, "text", resolution.model);
       const prepared = await prepareDirectAuthoringTextExecution({ ownerUserId: scope.ownerUserId, execution: provider, ...(providers.authoringTextPlans ? { options: providers.authoringTextPlans } : {}), operationPrompts: { castDraft: CAST_DRAFT_SYSTEM_PROMPT_V1, castDraftRepair: CAST_DRAFT_SYSTEM_PROMPT_V1 } });
       const person = context.character;
-      const world = draftWorldSchema.parse(row.content).world ?? {};
+      const world = draftWorldSchema.parse(context.worldContent).world ?? {};
       const authored: Record<string, string | string[]> = {};
       let authoredSize = 0;
       for (const path of castAuthoredPathSchema.options) {

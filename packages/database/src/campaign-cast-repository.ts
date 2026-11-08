@@ -808,6 +808,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         } catch { throw new CampaignCastError("cast_invalid_request", [{ path, code: "invalid_value" }]); }
       }
       try { characterProfileSchema.parse(updated); } catch { throw new CampaignCastError("cast_invalid_request"); }
+      if (request.restoreAuthoredGoals && !person.campaignProfile?.story.goals?.trim()) throw new CampaignCastError("cast_invalid_request", [{ path: "story.goals", code: "no_authored_goal" }]);
       for (const [path, value] of Object.entries(request.setOverrides ?? {})) {
         try { validateCastFiction(value); } catch { throw new CampaignCastError("cast_invalid_request", [{ path, code: "invalid_fiction" }]); }
       }
@@ -887,6 +888,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
     return { preview: { ...core, previewFingerprint: sha256(stableStringify(core)) } satisfies CastFromWorldPreview, entry, index, profile, target, handEdits };
   }
   async function fromWorldPreview(rawScope: CastScope, rawInput: CastFromWorldPreviewQuery): Promise<CastFromWorldPreview> {
+    if (!options.castPresetsEnabled) throw new CampaignCastError("cast_presets_disabled");
     const scope = castScopeSchema.parse(rawScope), input = castFromWorldPreviewQuerySchema.parse(rawInput);
     return withTransaction(pool, async (client) => { const campaign = await lockCampaign(client, scope), state = await initialize(client, scope, campaign); return (await worldPreviewWithClient(client, scope, campaign, state, input)).preview; });
   }
@@ -932,14 +934,15 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
     if (person.origin.kind === "protagonist") throw new CampaignCastError("cast_protagonist_read_only");
     if (person.removed || person.mergedIntoCharacterId) throw new CampaignCastError("cast_character_removed");
     const content = worldContentSchema.parse(draft.content);
-    const candidates = new Map<string, { sourcePath: string; value: string | string[] }[]>();
+    const candidates = new Map<string, { sourcePath: string; value: string | string[]; unselectableReason?: "mechanics_language" }[]>();
     const add = (destination: string, sourcePath: string, value: unknown) => {
       if (destination !== "name" && destination !== "identity.aliases" && destination !== "story.goals" && !castAuthoredPathSchema.safeParse(destination).success) return;
       if (!(typeof value === "string" && value.trim()) && !(Array.isArray(value) && value.length && value.every(item => typeof item === "string"))) return;
-      try { (Array.isArray(value) ? value : [value]).forEach(item => validateCastFiction(item)); } catch { return; }
+      let unselectable = false;
+      try { (Array.isArray(value) ? value : [value]).forEach(item => validateCastFiction(item)); } catch { unselectable = true; }
       const entries = candidates.get(destination) ?? [];
       if (entries.some(entry => stableStringify(entry.value) === stableStringify(value))) return;
-      entries.push({ sourcePath, value: value as string | string[] }); candidates.set(destination, entries);
+      entries.push({ sourcePath, value: value as string | string[], ...(unselectable ? { unselectableReason: "mechanics_language" as const } : {}) }); candidates.set(destination, entries);
     };
     add("name", "name", person.name); add("identity.aliases", "identity.aliases", person.aliases);
     if (person.campaignProfile) for (const [section, value] of Object.entries(person.campaignProfile)) {
@@ -957,7 +960,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
       }
     }
     const destinations = [...candidates].map(([path, values]) => ({ path, candidates: values,
-      tickedByDefault: path !== "story.goals" && values.length === 1, requiredOnAdd: path === "name" }));
+      tickedByDefault: path !== "story.goals" && values.length === 1 && !values[0]!.unselectableReason, requiredOnAdd: path === "name" }));
     const preview: CastPromotionPreview = { worldId, draftRevision: draft.revision, characterRevision: person.revision,
       castRevision: state.revision, boundary, destinations, matches: content.playableCharacters.filter(item => normalizeEntityTerm(item.name) === normalizeEntityTerm(person.name)).map(item => ({ characterId: item.id, name: item.name })) };
     return { campaign, state, draft, person, content, preview };
@@ -1000,13 +1003,13 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         for (const selection of request.selections) {
           const field = context.preview.destinations.find(item => item.path === selection.destinationPath);
           const choice = field?.candidates.find(item => item.sourcePath === selection.sourcePath);
-          if (!choice) throw new CampaignCastError("cast_invalid_request");
+          if (!choice || choice.unselectableReason) throw new CampaignCastError("cast_invalid_request");
           if (selection.destinationPath === "name") character.name = String(choice.value);
           else if (selection.destinationPath === "unclassifiedNotes") profile.unclassifiedNotes = choice.value;
           else { const [section, key] = selection.destinationPath.split("."); if (!section || !key || !profile[section] || !(key in profile[section])) throw new CampaignCastError("cast_invalid_request"); profile[section][key] = choice.value; }
         }
         character.profile = characterProfileSchema.parse(profile);
-        character.source = { type: "campaign-promotion" };
+        if (!target) character.source = { type: "campaign-promotion" };
         const characters = target ? context.content.playableCharacters.map(item => item.id === target.id ? character : item) : [...context.content.playableCharacters, character];
         const content = worldContentSchema.parse({ ...context.content, playableCharacters: characters });
         const result = { worldId: request.worldId, draftRevision: context.draft.revision + 1, characterId: character.id };
@@ -1057,7 +1060,8 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         if (character.revision !== request.expectedCharacterRevision) throw new CampaignCastError("cast_revision_conflict");
         const observations = projected.details.find(item => item.characterId === id)?.observations ?? [];
         const evidence = await collectDraftEvidence(client, scope, request.expectedBoundary, character, observations);
-        return { character, boundary: request.expectedBoundary, evidence, observedPaths: [...new Set(observations.map(item => item.field))] };
+        const source = (await client.query("SELECT c.text_provider_profile_id,w.content FROM campaigns c JOIN world_versions w ON w.id=c.world_version_id AND w.owner_user_id=c.owner_user_id WHERE c.id=$1 AND c.owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows[0];
+        return { character, boundary: request.expectedBoundary, evidence, observedPaths: [...new Set(observations.map(item => item.field))], textProviderProfileId: source?.text_provider_profile_id ?? null, worldContent: source?.content ?? null };
       });
     },
     editAuthoredProfile, fromWorldPreview, fromWorld,

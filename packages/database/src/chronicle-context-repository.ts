@@ -343,7 +343,7 @@ function selectWorldItems(items: unknown, query: string, limit: number): unknown
     .filter((item) => item !== undefined);
 }
 
-function worldFictionCanon(
+export function worldFictionCanon(
   content: Record<string, unknown>,
   characterProfile: unknown,
   characterSnapshot: unknown,

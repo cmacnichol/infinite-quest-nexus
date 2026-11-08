@@ -98,4 +98,65 @@ integration("cast lifecycle merge", () => {
     expect(undone.character.aliases).toEqual(["M", "Mary"]);
     expect((await repo.current(scope)).characters.find(person => person.id === source.character.id)?.mergedIntoCharacterId).toBeNull();
   });
+
+  async function seededCampaign(entries: unknown[]) {
+    const world = randomUUID(), version = randomUUID(), campaignId = randomUUID(), scope = { ownerUserId, campaignId };
+    const content = { world: { title: "Seeds" }, playableCharacters: entries };
+    await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Seeds')", [world, ownerUserId]);
+    await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) VALUES($1,$2,$3,1,$4)", [version, world, ownerUserId, JSON.stringify(content)]);
+    await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title) VALUES($1,$2,$3,'Seeds')", [campaignId, ownerUserId, version]);
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true, castPresetsEnabled: true });
+    const boundary = { turnNumber: 0, timelineRevision: 0 };
+    const add = async (characterId: string) => { const preview = await repo.fromWorldPreview!(scope, { characterId }); return repo.fromWorld!(scope, { characterId, expectedWorldVersionId: version, expectedCastRevision: preview.castRevision, expectedBoundary: boundary, previewFingerprint: preview.previewFingerprint, idempotencyKey: randomUUID() }); };
+    return { world, version, scope, repo, boundary, add, content };
+  }
+  const npc = (id: string, name: string, story: Record<string, string> = {}) => ({ id, name, campaignUse: "supporting", characterText: "", profile: { story } });
+  async function mergedPair() {
+    const f = await seededCampaign([npc("a", "Mara"), npc("b", "Mary")]);
+    const target = await f.add("a"), source = await f.add("b");
+    const detail = await f.repo.detail(f.scope, target.character.id), other = await f.repo.detail(f.scope, source.character.id);
+    const merged = await f.repo.merge!(f.scope, detail.character.id, { expectedCastRevision: detail.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID(), sourceCharacterId: other.character.id, expectedCharacterRevision: detail.character.revision, expectedSourceCharacterRevision: other.character.revision, reviewedAliases: ["Mary"], choices: {} });
+    return { ...f, merged, sourceId: other.character.id };
+  }
+  it("blocks Not this character on a seed while a merge depends on it (D18)", async () => {
+    const f = await mergedPair();
+    await expect(f.repo.detachAttachment(f.scope, f.merged.character.id, f.merged.character.originProfile!.seedEventId, { expectedBoundary: f.boundary, expectedCastRevision: f.merged.revision, expectedCharacterRevision: f.merged.character.revision, idempotencyKey: randomUUID() })).rejects.toMatchObject({ code: "cast_merge_invalid" });
+  });
+  it("blocks Undo on a removed target and Promote of a removed character (D19)", async () => {
+    const f = await mergedPair();
+    const removed = await f.repo.changeRemoval!(f.scope, f.merged.character.id, "remove", { expectedCastRevision: f.merged.revision, expectedBoundary: f.boundary, expectedCharacterRevision: f.merged.character.revision, idempotencyKey: randomUUID() });
+    const hidden = (await f.repo.current(f.scope)).characters.find(person => person.id === f.sourceId)!;
+    await expect(f.repo.unmerge!(f.scope, removed.character.id, { expectedCastRevision: removed.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID(), expectedCharacterRevision: removed.character.revision, expectedSourceCharacterRevision: hidden.revision, mergeEventId: f.merged.character.activeMerges![0]!.mergeEventId })).rejects.toMatchObject({ code: "cast_character_removed" });
+    await pool.query("INSERT INTO world_drafts(world_id,owner_user_id,revision,content) VALUES($1,$2,1,$3::jsonb)", [f.world, ownerUserId, JSON.stringify(f.content)]);
+    await expect(f.repo.promotionPreview!(f.scope, removed.character.id, f.world)).rejects.toMatchObject({ code: "cast_character_removed" });
+  });
+  it("keeps editing and context when presets are turned off, and closes from-world (A12)", async () => {
+    const f = await seededCampaign([npc("a", "Mara", { role: "Warden" }), npc("b", "Mary")]);
+    const seeded = await f.add("a");
+    const off = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true, castPresetsEnabled: false });
+    const saved = await off.editAuthoredProfile!(f.scope, seeded.character.id, { expectedCastRevision: seeded.revision, expectedCharacterRevision: seeded.character.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID(), set: { "story.role": "Captain" } });
+    expect(saved.character.campaignProfile?.story.role).toBe("Captain");
+    expect((await off.current(f.scope)).characters.find(person => person.id === seeded.character.id)?.profile["story.role"]).toBe("Captain");
+    await expect(off.fromWorldPreview!(f.scope, { characterId: "b" })).rejects.toMatchObject({ code: "cast_presets_disabled" });
+  });
+  it("rejects Restore authored goals without an authored goal", async () => {
+    const f = await seededCampaign([npc("a", "Mara")]);
+    const seeded = await f.add("a");
+    await expect(f.repo.editAuthoredProfile!(f.scope, seeded.character.id, { expectedCastRevision: seeded.revision, expectedCharacterRevision: seeded.character.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID(), restoreAuthoredGoals: true })).rejects.toMatchObject({ code: "cast_invalid_request" });
+  });
+  it("marks mechanics text unselectable and keeps source on Replace", async () => {
+    const f = await seededCampaign([npc("a", "Mara", { role: "Rolls 2d6 for hits", personality: "Stoic" })]);
+    const seeded = await f.add("a");
+    const draftEntry = { id: "w", name: "Mara", characterText: "", campaignUse: "supporting", source: { type: "manual" } };
+    await pool.query("INSERT INTO world_drafts(world_id,owner_user_id,revision,content) VALUES($1,$2,1,$3::jsonb)", [f.world, ownerUserId, JSON.stringify({ ...f.content, playableCharacters: [draftEntry] })]);
+    const preview = await f.repo.promotionPreview!(f.scope, seeded.character.id, f.world);
+    const role = preview.destinations.find(item => item.path === "story.role")!;
+    expect(role.candidates[0]).toMatchObject({ unselectableReason: "mechanics_language" });
+    expect(role.tickedByDefault).toBe(false);
+    const base = { worldId: f.world, expectedDraftRevision: preview.draftRevision, expectedCastRevision: preview.castRevision, expectedBoundary: preview.boundary, expectedCharacterRevision: preview.characterRevision, mode: "replace" as const, targetCharacterId: "w" };
+    await expect(f.repo.promote!(f.scope, seeded.character.id, { ...base, idempotencyKey: randomUUID(), selections: [{ destinationPath: "story.role", sourcePath: role.candidates[0]!.sourcePath }] })).rejects.toMatchObject({ code: "cast_invalid_request" });
+    await f.repo.promote!(f.scope, seeded.character.id, { ...base, idempotencyKey: randomUUID(), selections: [{ destinationPath: "story.personality", sourcePath: "authored.story.personality" }] });
+    const stored = (await pool.query("SELECT content FROM world_drafts WHERE world_id=$1", [f.world])).rows[0]!.content;
+    expect(stored.playableCharacters[0]).toMatchObject({ source: { type: "manual" }, profile: { story: { personality: "Stoic" } } });
+  });
 });

@@ -2,7 +2,7 @@ import { MAX_PLAYABLE_CHARACTERS } from "@infinite-quest/contracts";
 import { openCastSuggestions } from "./character-editor/suggest-cast.js";
 import { createLegacyCastPanel } from "./campaign-cast-panel.js";
 import { renderCharacterEditor } from "./character-editor/renderer.js";
-import { buildCampaignProfileUpdate, createCampaignMainController } from "./character-profile-form.js";
+import { buildCampaignProfileUpdate, createCampaignMainController } from "./character-editor/campaign-main-form.js";
 import { settingsBookmarkDestination } from "./settings-bookmark.js";
 import { createCampaignCastApi, createStoryMemoryApi, createNexusApiClient, createNoopSessionPort, writeCampaignSettings, browserDeviceStorage } from "@infinite-quest/client-web";
 import { mountLegacyDeviceProfile } from "../../shared-ui/profile/legacy-device-profile.js";
@@ -590,9 +590,6 @@ function clearCampaignEditorSelection({ focus = false } = {}) {
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
-const CHARACTER_PROFILE_FIELDS = Object.freeze(Object.fromEntries(
-  WORLD_PROFILE_FIELDS.map((field) => [field.path, field.world.id])
-));
 const SOGNI_DEFAULT_CONFIGURATION = Object.freeze({
   defaultWidth: 1280,
   defaultHeight: 720,
@@ -2980,7 +2977,7 @@ function profileValue(profile, path) {
 }
 
 function profileFromForm() {
-  for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+  for (const { path, world: { id } } of WORLD_PROFILE_FIELDS) {
     const raw = elements[id].value.trim();
     const value = path === "identity.aliases" || path === "appearance.distinguishingFeatures"
       ? raw.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean)
@@ -2993,7 +2990,7 @@ function profileFromForm() {
 }
 
 function profileHasGuidance(profile) {
-  return Object.keys(CHARACTER_PROFILE_FIELDS).filter((path) => path.startsWith("story.")).some((path) => {
+  return WORLD_PROFILE_FIELDS.map((field) => field.path).filter((path) => path.startsWith("story.")).some((path) => {
     const value = profileValue(profile, path);
     return Array.isArray(value) ? value.length > 0 : Boolean(String(value || "").trim());
   });
@@ -3007,7 +3004,7 @@ function populateCharacterForm(character, readOnly = false) {
   elements.characterGuidance.value = String(character.characterText || "");
   elements.characterGuidanceSource.classList.toggle("hidden", !elements.characterGuidance.value.trim());
   const profile = character.profile || emptyCharacterProfile();
-  for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+  for (const { path, world: { id } } of WORLD_PROFILE_FIELDS) {
     const value = profileValue(profile, path);
     elements[id].value = Array.isArray(value)
       ? value.join("\n")
@@ -4151,7 +4148,7 @@ async function generateCharacterFromPrompt() {
     // Fields are populated only after a complete response has passed the client boundary checks.
     elements.characterName.value = previousName;
     elements.characterGuidance.value = previousGuidance;
-    for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+    for (const { path, world: { id } } of WORLD_PROFILE_FIELDS) {
       const value = profileValue(previousProfile, path);
       elements[id].value = Array.isArray(value) ? value.join("\n") : String(value || "");
     }
@@ -4165,7 +4162,7 @@ function renderCharacterProfileReview(result) {
   characterProfileOrganizationResult = result;
   elements.characterProfileReviewList.replaceChildren();
   const existingProfile = profileFromForm();
-  for (const [path] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+  for (const { path } of WORLD_PROFILE_FIELDS) {
     const value = profileValue(result.candidate, path);
     const existingValue = profileValue(existingProfile, path);
     const hasProposed = Array.isArray(value) ? value.length > 0 : Boolean(String(value || "").trim());
@@ -4274,7 +4271,7 @@ async function applyCharacterProfileReview() {
     return;
   }
   for (const [path, value] of Object.entries(stagedValues)) {
-    elements[CHARACTER_PROFILE_FIELDS[path]].value = Array.isArray(value) ? value.join("\n") : String(value || "");
+    elements[WORLD_PROFILE_FIELDS.find((field) => field.path === path).world.id].value = Array.isArray(value) ? value.join("\n") : String(value || "");
   }
   elements.characterProfileReviewDialog.close();
   setCharacterStatus("Selected proposals applied to the unsaved form. Save the character to persist them.", "success");
@@ -4286,7 +4283,7 @@ function campaignProfileEditorRecord(result) {
 
 function syncCampaignCharacterDraft() {
   elements.characterName.value = characterEditorDraft.values.name || "";
-  for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+  for (const { path, world: { id } } of WORLD_PROFILE_FIELDS) {
     const value = characterEditorDraft.values[path];
     elements[id].value = Array.isArray(value) ? value.join("\n") : String(value || "");
   }
@@ -4374,7 +4371,7 @@ async function openCampaignCharacterDialog() {
       setLocked(locked) { setCharacterModalControls(locked); },
       focus() { elements.characterName.focus(); },
       fieldControl(path) {
-        return elements[CHARACTER_PROFILE_FIELDS[path]] ?? elements.characterName;
+        return elements[WORLD_PROFILE_FIELDS.find((field) => field.path === path)?.world.id] ?? elements.characterName;
       }
     };
     const controller = createCampaignMainController(form, {
@@ -4944,10 +4941,11 @@ function renderStartingCast(session) {
   }
   const candidates = session.castCandidates.filter((item) => item.campaignUse !== "playable" && item.id !== elements.newCampaignCharacter.value);
   const selected = candidates.filter((item) => session.castSelections.get(item.id)?.selected);
-  const totalSelected = [...session.castSelections.values()].filter((item) => item.selected).length;
+  for (const extra of selected.splice(30)) { session.castSelections.get(extra.id).selected = false; session.castOverCap = true; }
+  const totalSelected = selected.length;
   const pins = selected.filter((item) => session.castSelections.get(item.id)?.alwaysInContext).length;
   const contextNotice = castContextAvailable ? "Story Memory is set on the campaign after you create it." : castNarratorNotice("installation_disabled", "").text;
-  elements.startingCastNotice.textContent = `${selected.length} of 30 selected.${totalSelected >= 30 ? (selected.length < totalSelected ? " A selected main character is reserved; remove another selection to choose someone else." : " Remove a selection to choose another.") : ""}${pins > 5 ? " Always-included characters take up narrator context in every turn." : ""}${session.staleCast ? " Some unavailable selections were removed." : ""} ${contextNotice}`;
+  elements.startingCastNotice.textContent = `${selected.length} of 30 selected.${totalSelected >= 30 ? " Remove a selection to choose another." : ""}${session.castOverCap ? " Some characters were left unticked at the 30 limit." : ""}${pins > 5 ? " Always-included characters take up narrator context in every turn." : ""}${session.staleCast ? " Some unavailable selections were removed." : ""} ${contextNotice}`;
   if (!candidates.length) {
     const empty = document.createElement("p"); empty.textContent = "No Supporting characters available. Add NPCs in the world editor."; list.append(empty); return;
   }
@@ -4995,6 +4993,7 @@ async function loadCampaignCreationCharacters(session) {
     for (const item of candidates) if (!session.castSelections.has(item.id)) {
       const selected = item.campaignUse !== "playable" && item.id !== (session.initialDraft?.selectedCharacterId || (characters.length === 1 ? characters[0].id : "")) && item.startingCastDefault && selectedCount < 30;
       if (selected) selectedCount++;
+      else if (item.startingCastDefault && item.campaignUse !== "playable" && selectedCount >= 30) session.castOverCap = true;
       session.castSelections.set(item.id, { selected, alwaysInContext: item.alwaysInContext === true });
     }
     session.castCandidates = candidates;
@@ -7791,8 +7790,8 @@ const campaignCastPanel = createLegacyCastPanel({
   generationActive: () => false,
   checkLock: async id => campaignCharacterGenerationLocked(await characterApi.generation.syncStatus(id)),
   getProfile: id => characterApi.campaigns.getCharacterProfile(id),
-  openProtagonist: onClose => {
-    elements.characterDialog.addEventListener("close", () => onClose?.(elements.characterDialog.returnValue === "saved"), { once: true });
+  openProtagonist: afterClose => {
+    elements.characterDialog.addEventListener("close", () => afterClose?.(elements.characterDialog.returnValue === "saved"), { once: true });
     void openCampaignCharacterDialog();
   },
   navigateToTurn: async turn => { if (selectedCampaign) window.location.assign("/story/" + encodeURIComponent(selectedCampaign.id) + "?turn=" + encodeURIComponent(turn)); }

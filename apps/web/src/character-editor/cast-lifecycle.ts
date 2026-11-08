@@ -188,11 +188,16 @@ export function showLifecycle(action: Action, options: {
       const group = el("fieldset"), check = el("input"), caption = el("label",fieldName(d.path)), select = el("select");
       check.type = "checkbox"; caption.className = "cast-choice"; caption.prepend(check);
       select.setAttribute("aria-label", "Source for " + fieldName(d.path)); group.append(caption,select); body.append(group);
-      if (d.candidates.length > 1) select.append(new Option("Choose one source",""));
-      for (const c of d.candidates) select.append(new Option(promotionSource(c.sourcePath) + " · " + display(c.value),c.sourcePath));
-      return { d, check, select };
+      const selectable = d.candidates.filter(c => !c.unselectableReason);
+      if (selectable.length > 1) select.append(new Option("Choose one source",""));
+      for (const c of d.candidates) {
+        const option = new Option(promotionSource(c.sourcePath) + " · " + display(c.value) + (c.unselectableReason ? " (contains game mechanics, cannot be copied)" : ""),c.sourcePath);
+        option.disabled = Boolean(c.unselectableReason); select.append(option);
+      }
+      if (!selectable.length) { check.disabled = true; select.disabled = true; group.append(el("small","This text contains game mechanics, so it cannot be copied to the world.")); }
+      return { d, check, select, blocked: !selectable.length };
     });
-    function defaults() { for (const row of rows) { const required = !mode.value && row.d.requiredOnAdd; row.check.checked = required || row.d.tickedByDefault && !(mode.value && row.d.path === "name"); row.check.disabled = required; } }
+    function defaults() { for (const row of rows) { const required = !mode.value && row.d.requiredOnAdd; row.check.checked = !row.blocked && (required || row.d.tickedByDefault && !(mode.value && row.d.path === "name")); row.check.disabled = required || row.blocked; } }
     mode.onchange = defaults; defaults();
     footer.prepend(button("Confirm draft change", () => {
       const selections = [];

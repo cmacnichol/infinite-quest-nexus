@@ -8,7 +8,7 @@ import {
   setEditorDraftField
 } from "@infinite-quest/client-core";
 import { campaignCharacterProfileUpdateSchema, type CampaignCharacterProfile } from "@infinite-quest/contracts";
-import { characterFieldsForGroup, createCharacterField } from "./character-editor/renderer.js";
+import { characterFieldsForGroup, createCharacterField } from "./renderer.js";
 
 type Profile = CampaignCharacterProfile & { revision: number };
 const groups = [

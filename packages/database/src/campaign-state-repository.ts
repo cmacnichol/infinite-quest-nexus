@@ -1717,7 +1717,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
         character: characterLegacyText(row.characterProfile, row.characterSnapshot) || "",
         firstAction: String(overview.firstAction || ""),
         rules: String(overview.rules || ""),
-        playableCharacters: Array.isArray(content.playableCharacters) ? content.playableCharacters : []
+        playableCharacters: Array.isArray(content.playableCharacters) ? content.playableCharacters.filter((character: { campaignUse?: string }) => character?.campaignUse !== "supporting") : []
       };
       const settings = objectValue(row.legacySettings);
       const playerConfig = {

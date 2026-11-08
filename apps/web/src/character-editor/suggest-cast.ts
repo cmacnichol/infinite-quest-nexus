@@ -40,7 +40,8 @@ export function openCastSuggestions(options: Options) {
   dialog.addEventListener("close", () => dialog.remove(), { once: true });
   const updateCost = () => {
     const n = rows.length ? rows.filter(row => row.selected).length : count.valueAsNumber;
-    cost.textContent = `Up to one provider call for seeds and ${Number.isFinite(n) ? n : 8} for selected characters, plus any repair calls. Results are lost on refresh.`;
+    const expansions = Number.isFinite(n) ? n : 8;
+    cost.textContent = `One response for seeds and ${expansions} for selected characters. Retries and repairs can use up to ${(1 + expansions) * 4} provider calls in total. Results are lost on refresh.`;
   };
   count.oninput = updateCost;
   function draw() {
@@ -107,8 +108,13 @@ export function openCastSuggestions(options: Options) {
   async function expand(selected: Row[]) {
     if (busy) return;
     busy = true; stopped = false;
+    const normalizedName = (name: string) => name.normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").trim();
+    const taken = new Set([...worldCharacterNames(options.content()), ...rows.filter(row => row.character && !selected.includes(row)).map(row => row.character!.name)].map(normalizedName));
     for (const [index, row] of selected.entries()) {
       if (stopped || !dialog.open) { if (!row.character) row.status = "Not generated"; continue; }
+      const seedName = normalizedName(row.seed.name);
+      if (taken.has(seedName)) { row.status = "Failed: another character already uses this name. Rename it before retrying."; continue; }
+      taken.add(seedName);
       if (![row.seed.name, row.seed.role, row.seed.concept].every(value => value.trim())) {
         row.status = "Failed: enter a name, role and concept before retrying."; continue;
       }

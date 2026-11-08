@@ -24,7 +24,7 @@ async function installCreationApi(page: Page, worldCount = 1) {
       creates.push(route.request().postDataJSON() as Record<string, unknown>);
       if (failNextCreate) {
         failNextCreate = false;
-        return route.fulfill({ status: 503, json: { message: "Campaign create failed." } });
+        return route.fulfill({ status: 503, json: { error: "ServiceUnavailable", message: "Campaign create failed." } });
       }
       await holdCreate;
       return route.fulfill({ status: 201, json: { id: "00000000-0000-4000-8000-000000000099", title: "A campaign", status: "active", activeTurnNumber: 0, storyLengthProfile: "standard", storyContextBudgetTokens: 32000, worldId: fixture.worlds[0]!.id, worldVersionId: "00000000-0000-4000-8000-000000000098", worldVersionNumber: 1, selectedCharacterId: "fixture-observer", selectedCharacterName: "The Observer", textProviderProfileId: null, imageProviderProfileId: null } });
@@ -328,8 +328,8 @@ test("starting cast caps defaults and keeps ticks across protagonist switches", 
   await expect(page.locator("#startingCastNotice")).toContainText("take up narrator context");
   await expect(page.getByLabel("Companion 30", { exact: true })).toBeDisabled();
   await page.locator("#newCampaignCharacter").selectOption("cast-0");
-  await expect(page.locator("#startingCastNotice")).toContainText("selected main character is reserved");
-  await expect(page.getByLabel("Companion 30", { exact: true })).toBeDisabled();
+  await expect(page.locator("#startingCastNotice")).toContainText("29 of 30");
+  await expect(page.getByLabel("Companion 30", { exact: true })).toBeEnabled();
   await page.locator("#newCampaignCharacter").selectOption("fixture-observer");
   await expect(page.getByLabel("Companion 0", { exact: true })).toBeChecked();
   await expect(page.locator("#startingCastNotice")).toContainText("30 of 30");

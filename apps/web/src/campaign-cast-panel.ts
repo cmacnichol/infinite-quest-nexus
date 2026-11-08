@@ -3,7 +3,7 @@ import { createStoryDraftReview } from "./character-editor/story-draft.js";
 import { renderPresetFields } from "./character-editor/preset-fields.js";
 import { renderWorldCastPicker } from "./character-editor/world-cast-picker.js";
 import { castNarratorNotice, buildPresetRequest, changePresetField, createPresetDraft, presetField, presetFields, SUPPORTING_FIELDS, type PresetDraft } from "@infinite-quest/client-core";
-import { renderSupportingEditorFields } from "./character-editor/renderer.js";
+import { createCastTextField, listTextareaLimit, renderSupportingEditorFields } from "./character-editor/renderer.js";
 import { renderCastReview } from "./cast-review-queue.js";
 import { buildCharacterSheet, canSaveCastEditor, createCastEditor, changeCastEditor, setCastEditorField, prepareCastSubmission,
   failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, characterProvenanceLabel, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
@@ -564,10 +564,8 @@ export function createLegacyCastPanel(options: {
     const save = node("button", editor.saving ? "Saving…" : "Save character"); save.type = "submit"; save.className = "primary"; save.id = "cast-save";
     const syncSave = () => { save.disabled = Boolean(locked) || !canSaveCastEditor(editor!) || heldMatches().length > 0; };
     function textInput(label: string, id: string, value: string, max: number, changed: (value: string) => void, multiline = false) {
-      const wrap = node("div"), caption = node("label", label); caption.htmlFor = id;
-      const input = multiline ? node("textarea") : node("input"); input.id = id; input.value = value; input.maxLength = max;
-      input.disabled = Boolean(locked); input.addEventListener("input", () => { changed(input.value); syncSave(); });
-      wrap.append(caption, input); form.append(wrap); return wrap;
+      const wrap = createCastTextField(document, { label, id, value, maxLength: max, multiline, disabled: Boolean(locked), onInput(text) { changed(text); syncSave(); } });
+      form.append(wrap); return wrap;
     }
     const nameWrap = textInput("Name", "cast-name", editor.draft.name, 200, (name) => { editor = changeCastEditor(editor!, { name }); updateDuplicateWarning(); });
     const duplicateWarning = node("p"); duplicateWarning.setAttribute("role", "status"); nameWrap.append(duplicateWarning);
@@ -608,7 +606,7 @@ export function createLegacyCastPanel(options: {
       syncSave();
     }
     updateDuplicateWarning();
-    textInput("Aliases (one per line)", "cast-aliases", editor.draft.aliases.join("\n"), 4020,
+    textInput("Aliases (one per line)", "cast-aliases", editor.draft.aliases.join("\n"), listTextareaLimit(200, 20),
       (value) => { editor = changeCastEditor(editor!, { aliases: value.split("\n").map((v) => v.trim()).filter(Boolean) }); updateDuplicateWarning(); }, true);
     renderSupportingEditorFields(form, { expanded, existing: Boolean(editor.characterId), field(path, label) {
       const field = path as CastField;

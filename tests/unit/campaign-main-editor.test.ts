@@ -1,7 +1,7 @@
 import { parseHTML } from "linkedom";
 import { afterEach, expect, it, vi } from "vitest";
 import { characterProfileSchema } from "../../packages/contracts/src/world-library.js";
-import { createCampaignMainController, createCharacterProfileForm } from "../../apps/web/src/character-profile-form.js";
+import { createCampaignMainController, createCharacterProfileForm } from "../../apps/web/src/character-editor/campaign-main-form.js";
 
 afterEach(() => vi.unstubAllGlobals());
 it("keeps the campaign draft through conflict, compares concurrent fields and reapplies it", async () => {

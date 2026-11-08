@@ -20,7 +20,7 @@ const IMPORT_POST = new Set([
   "/api/v1/imports/infinite-worlds/preview", "/api/v1/imports/infinite-worlds",
   "/api/v1/imports/campaign-archive/preview", "/api/v1/imports/campaign-archive"
 ]);
-const generationRouteIds = z.object({ worldId: z.uuid().optional(), campaignId: z.uuid().optional(), jobId: z.uuid().optional() });
+const generationRouteIds = z.object({ worldId: z.uuid().optional(), campaignId: z.uuid().optional(), jobId: z.uuid().optional(), characterId: z.uuid().optional() });
 const GENERATION_POST = new Set([
   "/api/v1/campaigns/:campaignId/cast/:characterId/draft-preview",
   "/api/v1/worlds/playable-characters/suggest-cast-preview", "/api/v1/worlds/generate-preview", "/api/v1/worlds/playable-characters/generate-preview",

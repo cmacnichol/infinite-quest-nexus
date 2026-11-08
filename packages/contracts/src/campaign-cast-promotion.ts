@@ -2,7 +2,7 @@ import { z } from "zod";
 import { castBoundarySchema } from "./campaign-cast.js";
 const revision = z.number().int().nonnegative();
 const path = z.string().min(1).max(200);
-const candidate = z.object({ sourcePath: path, value: z.union([z.string(), z.array(z.string())]) }).strict();
+const candidate = z.object({ sourcePath: path, value: z.union([z.string(), z.array(z.string())]), unselectableReason: z.literal("mechanics_language").optional() }).strict();
 export const castPromotionPreviewSchema = z.object({ worldId: z.uuid(), draftRevision: revision, characterRevision: revision,
   castRevision: revision, boundary: castBoundarySchema, destinations: z.array(z.object({ path, candidates: z.array(candidate),
     tickedByDefault: z.boolean(), requiredOnAdd: z.boolean() }).strict()), matches: z.array(z.object({ characterId: path, name: z.string() }).strict()) }).strict();

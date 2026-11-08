@@ -1538,7 +1538,7 @@ describe("Nexus management UI contracts", () => {
     let requested = false;
     const { generateCharacterFromPrompt } = managementFunctions<{ generateCharacterFromPrompt: () => Promise<void> }>(["generateCharacterFromPrompt"], {
       elements, worldAuthorBusy: false, characterModalScope: "world", worldAuthorWorkingContent: {}, characterModalBusy: false,
-      configuredDefaultTextProvider: () => ({}), window: { confirm: () => false }, CHARACTER_PROFILE_FIELDS: {},
+      configuredDefaultTextProvider: () => ({}), window: { confirm: () => false }, WORLD_PROFILE_FIELDS: [],
       profileFromForm: () => ({}), setCharacterModalControls: () => {}, setCharacterStatus: () => {},
       worldContentFromForm: () => ({}), editingCharacterId: "", api: async () => { requested = true; return {}; }
     });
@@ -2818,7 +2818,7 @@ it("preserves comma-containing aliases and untouched profile extensions when rea
   const elements = { characterAliases: { value: "Vale, Mira\nThe Fox" }, characterRole: { value: "Guide" } };
   const { profileFromForm } = managementFunctions<{ profileFromForm: () => any }>(["profileFromForm"], {
     characterModalWorkingCharacter: character, characterEditorDraft: createEditorDraft("world-draft", character),
-    CHARACTER_PROFILE_FIELDS: { "identity.aliases": "characterAliases", "story.role": "characterRole" }, elements,
+    WORLD_PROFILE_FIELDS: [{ path: "identity.aliases", world: { id: "characterAliases" } }, { path: "story.role", world: { id: "characterRole" } }], elements,
     setEditorDraftField, projectEditorProfile
   });
   expect(profileFromForm()).toMatchObject({ identity: { aliases: ["Vale, Mira", "The Fox"], custom: "retained" }, story: { role: "Guide" } });
@@ -2834,7 +2834,7 @@ it("shows the admission message and reference for Generate and Organize", async 
   const status = document.createElement("div");
   const common = {
     elements, worldAuthorBusy: false, characterModalScope: "world", worldAuthorWorkingContent: {}, characterModalBusy: false,
-    configuredDefaultTextProvider: () => ({}), window: { confirm: () => true }, CHARACTER_PROFILE_FIELDS: {},
+    configuredDefaultTextProvider: () => ({}), window: { confirm: () => true }, WORLD_PROFILE_FIELDS: [],
     profileFromForm: () => ({}), setCharacterModalControls: () => {}, setCharacterStatus: (message: string) => { status.textContent = message; },
     worldContentFromForm: () => ({}), editingCharacterId: "", characterApi: { worlds: {
       generateCharacterPreview: async () => { throw error; }, organizeCharacter: async () => { throw error; }

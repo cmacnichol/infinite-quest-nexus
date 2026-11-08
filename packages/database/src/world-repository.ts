@@ -1292,7 +1292,7 @@ function createPostgresCampaignRepository(
         worldVersionNumber: source.version_number,
         selectedCharacterId: seed.character.id,
         selectedCharacterName: seed.character.name,
-        ...(skippedStartingCast.length ? { skippedStartingCast } : {}),
+        skippedStartingCast,
         textProviderProfileId: null,
         imageProviderProfileId: null
       });

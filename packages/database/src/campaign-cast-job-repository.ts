@@ -179,8 +179,8 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
           || job.turn_number > cast.boundary.turnNumber || turn.turn_number !== job.turn_number || turn.correction_revision !== job.narration_revision
           || sha256(turn.effective_narration) !== job.source_hash) throw new CampaignCastError("cast_revision_conflict");
         const requestHash = sha256(stableStringify({ id, request }));
-        const receipt = (await client.query("SELECT request_hash,retry_generation FROM campaign_cast_discovery_retries WHERE job_id=$1 AND idempotency_key=$2",
-          [id, request.idempotencyKey])).rows[0];
+        const receipt = (await client.query("SELECT request_hash,retry_generation FROM campaign_cast_discovery_retries WHERE job_id=$1 AND idempotency_key=$2 AND campaign_id=$3 AND owner_user_id=$4",
+          [id, request.idempotencyKey, scope.campaignId, scope.ownerUserId])).rows[0];
         if (receipt) {
           if (receipt.request_hash !== requestHash) throw new CampaignCastError("cast_idempotency_conflict");
           return castDiscoveryRetryResultSchema.parse({ jobId: id, retryGeneration: receipt.retry_generation });

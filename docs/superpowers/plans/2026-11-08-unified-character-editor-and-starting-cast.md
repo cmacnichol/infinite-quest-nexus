@@ -618,11 +618,81 @@ Applies the [round-2 amendments](../specs/2026-11-08-unified-character-editor-an
 
 ### 7E · Legacy cleanup
 
-- [ ] **4.28** Remove the panel's `renderEditor`, Story's `character-profile-form.ts` use and `CHARACTER_PROFILE_FIELDS`.
+- See [8G](#8g--legacy-cleanup-428) for **4.28**: remove the panel's `renderEditor`, Story's `character-profile-form.ts` use and `CHARACTER_PROFILE_FIELDS`.
 
-**Not done.** The panel renderer and the form module still serve live editing paths, so 4.28 needs its own change with full browser coverage.
+**Moved.** 4.28 is broken into ordered steps in [8G](#8g--legacy-cleanup-428).
 
-**Known failures.** Six unit tests fail on the phase-6 commit before this remediation: `csp-ui`, `legacy-provider-modal`, `client-web/api-client` and three in `probe-structured-output`.
+**Known failures.** Six unit tests fail on the phase-6 commit before this remediation. They are closed in [8A](#8a--restore-a-green-unit-suite).
+
+## Phase 8 · Close remaining open items
+
+Every item left open after phase 7. Tick an item only after its check has passed.
+
+### 8A · Restore a green unit suite
+
+- [x] **8.1** `csp-ui`: the inline-handler guard matches the `onClose =>` parameter in `nexus.js`. Rename the parameter and leave the guard as it is.
+- [x] **8.2** `legacy-provider-modal`: update the assertion to the current `Apply to suggestion` or `Apply to world draft` label.
+- [x] **8.3** `client-web/api-client`: update the `client.worlds` key list to include the added method.
+- [x] **8.4** `probe-structured-output` (3 tests): align the probe's call budget and expected plan with the operations added in phase 5, and fix the synthetic response behind `invalid_json` at call 8.
+
+### 8B · Server rules and contracts
+
+- [x] **8.5** `parseHttpError` keeps a server `message` only for recognized error shapes. Any other JSON body gets the generic message.
+- [x] **8.6** `restoreAuthoredGoals` is rejected with no authored goal (repository), and with any goal override operation (contract).
+- [x] **8.7** An empty `""` on an updating field is rejected by the shared override schema on both the PATCH and the authored-edit routes. Clients send a clear instead. Observed appearance keeps its intentional empty override.
+- [x] **8.8** `generationRouteIds` validates `characterId` as a UUID.
+- [x] **8.9** `skippedStartingCast` is always present and bounded in the campaign response.
+- [x] **8.10** Promote with Replace keeps the replaced character's `source`.
+- [x] **8.11** Promote marks mechanics-like text unselectable and gives the reason.
+- [x] **8.12** The legacy `playableCharacters` reader in `campaign-state-repository.ts` returns selectable characters only.
+- [x] **8.13** Seeded observed appearance: no change. The spec makes it latest-wins and never a conflict (criterion 3.16), which `resolveSeededCastProfile` and the repository's conflict count already do.
+
+### 8C · Client behavior
+
+- [x] **8.14** The "Left blank, this can be filled from the story" text appears only on paths with a discoverable cast field.
+- [x] **8.15** Suggest cast blocks duplicate names within a batch and after a seed is edited, and its cost text states the true provider-call bound.
+
+### 8D · Audit items to confirm or fix
+
+Each item is either confirmed with a pointer to the code or test, or fixed.
+
+- [x] **8.16** The alias textarea has one limit, from one helper.
+- [x] **8.17** The async leave guard covers every exit: Back, Cancel, Close, Escape, story links and page unload all pass through `requestNavigation` or `beforeunload` (`campaign-cast-panel.ts`). No change.
+- [x] **8.18** Story deep links open after the campaign and startup checks. The `character` parameter is now removed before opening, so a reload does not reopen the editor. A failed load shows the panel's own error.
+- [x] **8.19** The main-character list uses `worlds.playableCharacters`, not the cast API. No change.
+- [x] **8.20** Both error branches in `campaign-cast-routes.ts` send `details.fields` and a named code. The panel and world picker read them. No change.
+- [x] **8.21** Restoring a tick above the 30 cap leaves it unticked with a notice (A10).
+- [x] **8.22** Displaced values are returned by the from-world preview as `changes` with an `effect`, and manual overrides are kept. No change.
+- [x] **8.23** The spec has no `activeSeed` field. `originProfile.seedEventId` carries the active seed and the contract validates it. No change.
+- [x] **8.24** `allowedActions` and per-field data are served by the candidate repository and honored by `cast-review-queue.ts`. No change.
+- [x] **8.25** Every error code named in the spec exists in the server code. No change.
+- [x] **8.26** `previewEntityConversions` joins notes and keeps over-limit originals as unconverted data. No change.
+- [x] **8.27** Add from world candidates: `GET cast/from-world` (`worldChoices`) already covers this, under a different route name than the review expected. No change needed.
+
+### 8E · Regression tests
+
+- [x] **8.28** D18: Not this character is blocked while a merge depends on the seed.
+- [x] **8.29** D19: Undo on a removed target and Promote of a removed character are both blocked.
+- [x] **8.30** D6: a seeded NPC's linked entity prose is dropped and the relationship endpoint is kept.
+- [x] **8.31** A12: seed, turn presets off, confirm edit and context still work and from-world routes return 503.
+
+### 8F · Standards
+
+- [x] **8.32** Scope the id-only `UPDATE` in `campaign-cast-candidate-repository.ts` to the owning campaign.
+- [x] **8.33** Key receipt lookups by owner or campaign as well as `job_id`.
+- [x] **8.34** Move the SQL in `cast-draft-preview.ts` into a repository.
+
+### 8G · Legacy cleanup (4.28)
+
+Do these in order, because each step leaves the app working. Web-Next has its own `character-profile-form` and is unaffected.
+
+- [x] **8.35** Moved the module to `apps/web/src/character-editor/campaign-main-form.ts` and repointed `nexus.js`, `story.js` and `campaign-main-editor.test.ts`.
+- [x] **8.36** `createCharacterProfileForm` already built its controls with the shared renderer, so it moved unchanged. `apps/web/src/character-profile-form.ts` no longer exists.
+- [x] **8.37** The panel's field markup now comes from the shared renderer (`createCastTextField`, `renderSupportingEditorFields`). `renderEditor` remains only as the panel's orchestration of duplicate warnings, pin and ignore, conflict recovery and focus.
+- [x] **8.38** Removed `CHARACTER_PROFILE_FIELDS`. `nexus.js` reads `WORLD_PROFILE_FIELDS` directly.
+- [x] **8.39** `index.html` has no static character fields. `#characterDialog` is an empty host that the renderer fills. No change.
+- [x] **8.40** Run client boundaries, both web builds, unit tests, and the campaign-cast, legacy-ui-campaign-edits, authoring-disclosures and unified-character-editor browser suites.
+- [x] **4.28** Tick once 8.35 to 8.40 pass.
 
 ## Release evidence and rollback
 
