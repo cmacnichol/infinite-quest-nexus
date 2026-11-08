@@ -337,3 +337,51 @@ test("existing imported advanced character round-trips source, unknown fields, a
   expect(save.content?.playableCharacters?.[0]).toEqual(character);
   await page.screenshot({ path: resolve(evidenceDirectory, "imported-advanced-character-roundtrip.png") });
 });
+test("campaign Organize review survives generation lock and profile conflict", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
+  const path = `/api/v1/campaigns/${fixture.campaignId}/character-profile`;
+  const api = await installLegacyUiFixture(page, fixture);
+  const saves = () => api.writes.filter(write => write.path === path && write.method === "PUT");
+  let generationActive = false, conflict = true;
+  await page.route(`**/api/v1/campaigns/${fixture.campaignId}/sync-status`, route => route.fulfill({ json: {
+    ...fixture.syncStatus,
+    pendingGeneration: generationActive ? { id: "88888888-8888-4888-8888-888888888888", status: "generating", action: "Look", expectedTurnNumber: 2,
+      createdAt: "2026-09-16T12:00:00.000Z", updatedAt: "2026-09-16T12:00:00.000Z", operationKind: "append", replacementTurnId: null } : null
+  } }));
+  await page.route(`**${path}/organize`, route => route.fulfill({ json: {
+    candidate: characterProfileSchema.parse({ appearance: { clothing: "blue cloak" } }),
+    evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "blue cloak" }], conflicts: [], warnings: [], unassignedText: [], protocolVersion: "fixture-organizer-v1"
+  } }));
+  await page.route(`**${path}`, route => {
+    if (route.request().method() === "PUT" && conflict) {
+      conflict = false;
+      return route.fulfill({ status: 409, json: { message: "Profile changed", details: { code: "state_revision_changed" } } });
+    }
+    return route.fallback();
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await page.locator(`#campaignList [data-campaign-id="${fixture.campaignId}"]`).click();
+  await page.locator("#editCampaignCharacter").click();
+  await page.locator("#organizeCharacterProfile").click();
+  const review = page.locator("#characterProfileReviewDialog"), apply = page.locator("#applyCharacterProfileReview");
+  await expect(review).toContainText("blue cloak"); await expect(apply).toBeEnabled();
+  generationActive = true;
+  await expect(apply).toBeDisabled({ timeout: 6000 });
+  await expect(review).toContainText("Proposals are retained");
+  await expect(page.locator("#saveCharacter")).toBeDisabled();
+  generationActive = false;
+  await expect(apply).toBeEnabled({ timeout: 6000 });
+  await apply.click(); await expect(review).toBeHidden();
+  await page.locator("#saveCharacter").click();
+  const editor = page.locator("#characterDialog");
+  await expect(editor).toContainText("Compare the latest");
+  await expect(page.locator("#saveCharacter")).toBeDisabled();
+  await editor.getByRole("button", { name: "Compare latest", exact: true }).click();
+  await editor.getByRole("button", { name: "Reapply my changes", exact: true }).click();
+  await expect(page.locator("#saveCharacter")).toBeEnabled();
+  await page.locator("#saveCharacter").click();
+  await expect(editor).toBeHidden();
+  expect(saves()).toHaveLength(1);
+  expect(saves()[0]!.body).toMatchObject({ editSource: "ai_organized", organizerProtocolVersion: "fixture-organizer-v1", profile: { appearance: { clothing: "blue cloak" } } });
+});

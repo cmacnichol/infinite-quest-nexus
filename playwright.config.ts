@@ -20,6 +20,7 @@ export default defineConfig({
   webServer: [
     {
       command: `corepack pnpm --filter @infinite-quest/web-legacy exec vite --host 127.0.0.1 --port ${legacyPort} --strictPort`,
+      env: { PLAYWRIGHT_WEB_NEXT_PORT: String(webNextPort) },
       url: `http://127.0.0.1:${legacyPort}/nexus/index.html`,
       reuseExistingServer,
       timeout: 30_000

@@ -1221,8 +1221,12 @@ integration("World Library and campaign version integration", () => {
     }, campaignProposal.protocolVersion);
     const profileSave = campaignCharacterProfileUpdateSchema.parse(buildEditorPayload(staged, { expectedRevision: profileRevision }));
     // With a built Nexus client, send the stale PUT from the rendered editor to this same database.
-    // The explicit conflict controls arrive in phase 2. Reapply below uses their shared model.
     let submitStale = async () => (await save(profileSave)).statusCode;
+    let submitReapplied = async (payload: Record<string, unknown>) => {
+      const response = await save(payload);
+      expect(response.statusCode).toBe(200);
+      return response.json();
+    };
     if (process.env.NEXUS_EDITOR_BROWSER_PROOF === "1") {
       const { chromium } = await import("@playwright/test");
       const { installLegacyUiFixture, legacyUiFixture } = await import("../e2e/helpers/legacy-ui-fixtures.js");
@@ -1247,6 +1251,17 @@ integration("World Library and campaign version integration", () => {
         expect(result.request().postDataJSON()).toEqual(profileSave);
         return result.status();
       };
+      submitReapplied = async (expected) => {
+        const dialog = page.locator("#characterDialog");
+        await dialog.getByRole("button", { name: "Compare latest", exact: true }).click();
+        await dialog.getByRole("button", { name: "Reapply my changes", exact: true }).click();
+        const pending = page.waitForResponse(res => res.request().method() === "PUT" && new URL(res.url()).pathname === url);
+        await page.locator("#saveCharacter").click();
+        const response = await pending;
+        expect(response.request().postDataJSON()).toEqual(expected);
+        expect(response.status()).toBe(200);
+        return response.json();
+      };
     }
     // A concurrent manual save follows a discarded review.
     const manual = setEditorDraftField(discardEditorOrganize(staged), "name", "Renamed guide");
@@ -1255,9 +1270,7 @@ integration("World Library and campaign version integration", () => {
     const latest = (await server.inject(url)).json();
     expect(latest).toMatchObject({ revision: profileRevision + 1, name: "Renamed guide", profile: { appearance: { clothing: "" } } });
     const reapplied = reapplyEditorDraft(staged, latest);
-    const response = await save(buildEditorPayload(reapplied, { expectedRevision: latest.revision }));
-    expect(response.statusCode).toBe(200);
-    const savedProfile = response.json();
+    const savedProfile = await submitReapplied(buildEditorPayload(reapplied, { expectedRevision: latest.revision }));
     expect(savedProfile).toMatchObject({ revision: profileRevision + 2, name: latest.name, profile: candidate });
     expect((await server.inject(url)).json()).toMatchObject(savedProfile);
     const afterSaves = await snapshot();

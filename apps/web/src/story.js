@@ -36,7 +36,7 @@ import {
 } from "./story-generation-monitor.js";
 import { handleStoryEscape } from "./story-keyboard.js";
 import { bindLegacyTabGroup } from "./legacy-tabs.js";
-import { createCharacterProfileForm } from "./character-profile-form.js";
+import { createCharacterProfileForm, createCampaignMainController } from "./character-profile-form.js";
 import { createLegacyCastPanel } from "./campaign-cast-panel.js";
 import { createStoryStreamRenderer } from "./story-stream-renderer.js";
 import {
@@ -150,9 +150,9 @@ const illustrationApi = composition.illustrations;
 const readerHistoryApi = composition.readerHistory;
 const readerPositionStore = composition.readerPositions;
 const castPanel = composition.cast ? createLegacyCastPanel({ api: composition.cast,
-  campaignId: () => state.campaignId, generationActive: () => responseGenerationIsActive(),
+  campaignId: () => state.campaignId, generationActive: () => characterProfileGenerationLocked(),
   getProfile: (campaign) => apiClient.campaigns.getCharacterProfile(campaign),
-  openProtagonist: () => { void openEditCharacterProfile(); },
+  openProtagonist: (onClose) => { void openEditCharacterProfile(onClose); },
   navigateToTurn: async (turn) => { await ensureCompleteTurnHistory(); navigateToTurn(turn); }
 }) : null;
 // ── DOM Helpers ────────────────────────────────────────────────
@@ -924,6 +924,7 @@ function clickedDialogBackdrop(dialog, event) {
 
 function requestModalDismissal(dialog) {
   if (dialog.id === "campaignCastDialog") { castPanel?.requestClose(); return; }
+  if (dialog.id === "editCharacterProfileDialog" && state.characterProfileEditSession?.controller) { state.characterProfileEditSession.controller.requestClose(); return; }
   if (dialog.id === "userProfileDialog") {
     if (!userProfileSaving) dialog.close();
     return;
@@ -1087,7 +1088,7 @@ function syncInputState() {
   const editStateLocked = generationLocked || recoveryVisible || Boolean(state.editStateSession?.saving);
   const editStateButton = $("btnOpenEditState");
   if (editStateButton) editStateButton.disabled = editStateLocked;
-  const editCharacterProfileLocked = generationLocked || recoveryVisible || Boolean(state.characterProfileEditSession?.saving);
+  const editCharacterProfileLocked = characterProfileGenerationLocked();
   const editCharacterProfileButton = $("btnOpenEditCharacterProfile");
   if (editCharacterProfileButton) editCharacterProfileButton.disabled = editCharacterProfileLocked;
   const editResponseButton = $("btnOpenEditResponse");
@@ -1102,9 +1103,7 @@ function syncInputState() {
     });
   }
   if (state.characterProfileEditSession) {
-    document.querySelectorAll("#editCharacterProfileDialog input, #editCharacterProfileDialog textarea, #editCharacterProfileDialog button").forEach(control => {
-      control.disabled = editCharacterProfileLocked;
-    });
+    state.characterProfileEditSession.controller?.setLocked(editCharacterProfileLocked);
   }
   const turnCount = state.turns ? state.turns.length : 0;
   const curr = viewedTurnIndex();
@@ -1642,6 +1641,12 @@ function latestCompletedResponseTurn() {
   if (!turn?.id || !Number.isInteger(Number(turn.turnNumber))) return null;
   if (Number(turn.turnNumber) !== Number(state.campaign?.activeTurnNumber)) return null;
   return turn;
+}
+
+function characterProfileGenerationLocked() {
+  return state.busy || !state.campaignLoaded || Boolean(state.pendingGeneration)
+    || state.generationDisplayActive || state.generationRecovery?.status === "recoverable"
+    || Boolean(state.characterProfileEditSession?.externalLock);
 }
 
 function responseGenerationIsActive() {
@@ -3524,6 +3529,7 @@ function resetGenerationStateForCampaignLoad() {
   state.generationDisplayAction = "";
   state.generationJobId = null;
   state.cancellationConfirmed = false;
+  if (state.characterProfileEditSession?.lockTimer) window.clearInterval(state.characterProfileEditSession.lockTimer);
   state.characterProfileEditSession = null;
   characterProfileEditRequestToken += 1;
   $("generationProgress")?.classList.add("hidden");
@@ -3575,6 +3581,7 @@ async function discardRecoveryJob() {
     if (!activityScopeCurrent(observationScope)) return;
     clearPendingSubmission();
     state.pendingGeneration = null;
+    state.generationRecovery = null;
     hideGenerationRecovery();
     restoreGenerationDisplay();
     restoreRetainedAppendDraft();
@@ -5883,17 +5890,38 @@ async function saveEditState() {
 }
 
 // ── Character Profile Dialog ───────────────────────────────────
-async function openEditCharacterProfile() {
+async function refreshStoryCharacterLock(session) {
+  if (state.characterProfileEditSession !== session || state.campaignId !== session.campaignId || session.controller?.saving || session.lockCheckPending) return;
+  session.lockCheckPending = true;
+  try {
+    const status = await apiClient.generation.syncStatus(session.campaignId);
+    if (state.characterProfileEditSession !== session || state.campaignId !== session.campaignId || session.controller?.saving) return;
+    session.externalLock = Boolean(status.pendingGeneration || status.generationRecovery?.status === "recoverable");
+    const message = $("editCharacterProfileStatus");
+    if (message) message.textContent = session.externalLock
+      ? "Finish or resolve generation before saving the character profile."
+      : `Editing character profile revision ${session.form.draft.loaded.revision}.`;
+  } catch (error) {
+    if (state.characterProfileEditSession !== session || state.campaignId !== session.campaignId) return;
+    session.externalLock = true;
+    const message = $("editCharacterProfileStatus");
+    if (message) message.textContent = `Generation status could not be checked: ${error.message}`;
+  } finally {
+    session.lockCheckPending = false;
+    if (state.characterProfileEditSession === session) syncInputState();
+  }
+}
+
+async function openEditCharacterProfile(onClose = null) {
   const dialog = $("editCharacterProfileDialog");
   if (!dialog || !state.campaignId) return;
-  const recoveryPanel = $("generationRecoveryPanel");
-  const recoveryVisible = Boolean(recoveryPanel && !recoveryPanel.classList.contains("hidden"));
-  if (state.busy || state.pendingGeneration || recoveryVisible) {
+  if (characterProfileGenerationLocked()) {
     toast("Finish or resolve the active generation before editing the character profile.");
     return;
   }
 
   const campaignId = state.campaignId;
+  const opener = document.activeElement;
   const requestToken = ++characterProfileEditRequestToken;
   try {
     showBusy("Loading campaign character profile…");
@@ -5902,62 +5930,64 @@ async function openEditCharacterProfile() {
     const fields = $("editCharacterProfileFields");
     const status = $("editCharacterProfileStatus");
     if (!fields) return;
-    state.characterProfileEditSession = {
-      id: `edit-character-profile:${++nextCharacterProfileEditSessionId}`,
-      campaignId,
-      revision: profile.revision,
-      saving: false,
-      form: null
+    const restoreFocus = (saved = false) => {
+      if (onClose) { onClose(saved); return; }
+      if (opener instanceof HTMLElement && opener.isConnected && opener.getClientRects().length) opener.focus();
+      else document.querySelector('[aria-controls="storySetupMenu"]')?.focus();
     };
-    fields.replaceChildren();
-    state.characterProfileEditSession.form = createCharacterProfileForm(fields, profile);
+    const session = { id: `edit-character-profile:${++nextCharacterProfileEditSessionId}`, campaignId, saving: false };
+    state.characterProfileEditSession = session;
+    const form = createCharacterProfileForm(fields, profile);
+    session.form = form;
+    const current = () => state.campaignId === campaignId && state.characterProfileEditSession?.id === session.id;
+    session.controller = createCampaignMainController(form, {
+      host: fields,
+      saveButton: $("btnSaveEditCharacterProfile"),
+      load: () => apiClient.campaigns.getCharacterProfile(campaignId),
+      save: async (payload) => {
+        let latestStatus;
+        try { latestStatus = await apiClient.generation.syncStatus(campaignId); }
+        catch (error) {
+          if (current()) { session.externalLock = true; syncInputState(); }
+          throw error;
+        }
+        if (!current()) throw new Error("The editor is no longer current.");
+        if (latestStatus.pendingGeneration || latestStatus.generationRecovery?.status === "recoverable") {
+          session.externalLock = true;
+          syncInputState();
+          throw new Error("Finish or resolve generation before saving the character profile.");
+        }
+        return apiClient.campaigns.updateCharacterProfile(campaignId, payload);
+      },
+      isCurrent: current,
+      isLocked: characterProfileGenerationLocked,
+      onDiscard: () => { dialog.close(); restoreFocus(); },
+      onSaved: (saved) => {
+        state.playerConfig = { ...(state.playerConfig || {}), selectedCharacterName: saved.name,
+          characterProfile: { name: saved.name, profile: saved.profile }, characterProfileRevision: saved.revision };
+        dialog.close();
+        restoreFocus(true);
+        toast("Campaign character profile saved. The next story turn will use these changes.");
+      }
+    });
     if (status) status.textContent = `Editing character profile revision ${profile.revision}.`;
     openManagedModal(dialog);
+    session.lockTimer = window.setInterval(() => { void refreshStoryCharacterLock(session); }, 2000);
     syncInputState();
   } catch (error) {
     if (requestToken === characterProfileEditRequestToken && state.campaignId === campaignId && !dialog.open) {
       toast(`Character profile could not be loaded: ${error.message}`);
     }
   } finally {
-    if (requestToken === characterProfileEditRequestToken && state.campaignId === campaignId) hideBusy();
+    if (requestToken === characterProfileEditRequestToken && state.campaignId === campaignId) {
+      hideBusy();
+      if (dialog.open) state.characterProfileEditSession?.form?.focus();
+    }
   }
 }
 
 async function saveEditCharacterProfile() {
-  const session = state.characterProfileEditSession;
-  const status = $("editCharacterProfileStatus");
-  if (!session || session.saving || !session.form) return;
-  let update;
-  try { update = session.form.update(); }
-  catch (error) { if (status) status.textContent = `Check the profile fields: ${error.message}`; return; }
-
-  session.saving = true;
-  try {
-    showBusy("Saving character profile…");
-    const saved = await apiClient.campaigns.updateCharacterProfile(session.campaignId, {
-      ...update
-    });
-    if (state.campaignId !== session.campaignId || state.characterProfileEditSession?.id !== session.id) return;
-    state.playerConfig = {
-      ...(state.playerConfig || {}),
-      selectedCharacterName: saved.name,
-      characterProfile: { name: saved.name, profile: saved.profile },
-      characterProfileRevision: saved.revision
-    };
-    state.characterProfileEditSession = null;
-    const dialog = $("editCharacterProfileDialog");
-    if (dialog?.close) dialog.close();
-    toast("Campaign character profile saved. The next story turn will use these changes.");
-  } catch (error) {
-    if (status) {
-      status.textContent = (error?.status === 409 || error?.statusCode === 409)
-        ? "The character profile changed. Reopen it to load the latest revision."
-        : `Profile could not be saved: ${error.message}`;
-    }
-  } finally {
-    if (state.characterProfileEditSession?.id === session.id) state.characterProfileEditSession.saving = false;
-    hideBusy();
-  }
+  await state.characterProfileEditSession?.controller?.save();
 }
 
 // ── World Setup Dialog ────────────────────────────────────────
@@ -6458,9 +6488,14 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
   const editCharacterProfileDialog = $("editCharacterProfileDialog");
+  if (editCharacterProfileDialog) editCharacterProfileDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    requestModalDismissal(editCharacterProfileDialog);
+  });
   if (editCharacterProfileDialog) editCharacterProfileDialog.addEventListener("close", () => {
     characterProfileEditRequestToken += 1;
-    if (!state.characterProfileEditSession?.saving) state.characterProfileEditSession = null;
+    if (state.characterProfileEditSession?.lockTimer) window.clearInterval(state.characterProfileEditSession.lockTimer);
+    state.characterProfileEditSession = null;
   });
 
   // Turn History / Navigation dialog and pills

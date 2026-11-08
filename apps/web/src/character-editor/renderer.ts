@@ -1,4 +1,48 @@
-import { WORLD_EDITOR_FIELDS, type CharacterEditorDraft } from "@infinite-quest/client-core";
+import { SUPPORTING_FIELDS, WORLD_EDITOR_FIELDS, type CharacterEditorDraft } from "@infinite-quest/client-core";
+
+export function characterFieldsForGroup(group: string | undefined) {
+  return WORLD_EDITOR_FIELDS.filter(field => field.world?.group === group)
+    .sort((a, b) => a.world!.order - b.world!.order);
+}
+
+/** Construct one profile control consistently in every character editor. */
+export function createCharacterField(document: Document, field: typeof WORLD_EDITOR_FIELDS[number]) {
+  const world = field.world!;
+  const label = document.createElement("label");
+  label.title = world.title;
+  label.append(world.label);
+  const control = document.createElement(world.input === "text" ? "input" : "textarea");
+  control.id = world.id;
+  if (field.path === "name") {
+    control.setAttribute("required", "");
+    control.setAttribute("autocomplete", "off");
+  }
+  control.dataset.characterProfilePath = field.path;
+  control.dataset.characterProfileInput = field.input;
+  control.setAttribute("placeholder", world.placeholder);
+  control.setAttribute("maxlength", String(field.maxItems ? field.maxLength * field.maxItems + field.maxItems - 1 : field.maxLength));
+  label.append(control);
+  return { label, control };
+}
+
+/** Mount the supporting profile using the same field registry as the other editors. */
+export function renderSupportingEditorFields(host: HTMLElement, options: {
+  expanded: Map<string, boolean>; existing: boolean;
+  field(path: string, label: string): HTMLElement;
+}): void {
+  const sections = new Map<string, HTMLDetailsElement>();
+  for (const field of SUPPORTING_FIELDS) {
+    let section = sections.get(field.section);
+    if (!section) {
+      section = host.ownerDocument.createElement("details"); section.className = "cast-field-group";
+      section.dataset.castGroup = field.section;
+      section.open = options.expanded.get(field.section) ?? (field.section === "Identity" || options.existing && field.section === "Appearance");
+      const summary = host.ownerDocument.createElement("summary"); summary.textContent = field.section; section.append(summary);
+      sections.set(field.section, section); host.append(section);
+    }
+    section.append(options.field(field.path, field.label));
+  }
+}
 
 /** Mount the shared character controls inside the stable dialog host. */
 export type CharacterEditorActions = {
@@ -38,7 +82,7 @@ export function renderCharacterEditor(host: Element, draft: CharacterEditorDraft
       <div id="characterStatus" class="status hidden" role="status" aria-live="polite"></div>
       <fieldset class="character-profile-section">
         <legend>Story essentials</legend>
-        <p class="field-note">Start with a name and at least one story detail. Everything else is optional.</p>
+        <p id="characterWorldGuidanceHint" class="field-note">Start with a name and at least one story detail. Everything else is optional.</p>
         <div class="character-profile-grid">
           <span data-character-profile-group="core"></span>
         </div>
@@ -99,6 +143,7 @@ export function renderCharacterEditor(host: Element, draft: CharacterEditorDraft
           <span class="organize-profile-spinner" aria-hidden="true"></span>Organizing…
         </span>
       </section>
+      <div id="campaignCharacterFeedback"></div>
       <div class="button-row character-dialog-actions">
         <button id="deleteCharacter" class="button danger" type="button">Delete character</button>
         <span class="character-action-spacer"></span>
@@ -108,25 +153,10 @@ export function renderCharacterEditor(host: Element, draft: CharacterEditorDraft
     </form>
   `;
   for (const group of host.querySelectorAll<HTMLElement>("[data-character-profile-group]")) {
-    const fields = WORLD_EDITOR_FIELDS.filter((field) => field.world!.group === group.dataset.characterProfileGroup).sort((a, b) => a.world!.order - b.world!.order);
-    for (const field of fields) {
-      const world = field.world!;
-      const label = host.ownerDocument.createElement("label");
-      label.title = world.title;
-      label.append(world.label);
-      const control = host.ownerDocument.createElement(world.input === "text" ? "input" : "textarea");
-      control.id = world.id;
-      if (field.path === "name") {
-        control.setAttribute("required", "");
-        control.setAttribute("autocomplete", "off");
-      }
-      control.dataset.characterProfilePath = field.path;
-      control.dataset.characterProfileInput = field.input;
-      control.setAttribute("placeholder", world.placeholder);
-      control.setAttribute("maxlength", String(field.maxItems ? field.maxLength * field.maxItems + field.maxItems - 1 : field.maxLength));
+    for (const field of characterFieldsForGroup(group.dataset.characterProfileGroup)) {
+      const { label, control } = createCharacterField(host.ownerDocument, field);
       const value = draft?.values[field.path];
       if (value !== undefined) control.value = Array.isArray(value) ? value.join("\n") : value;
-      label.append(control);
       group.before(label);
     }
     group.remove();

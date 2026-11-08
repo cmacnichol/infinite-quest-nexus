@@ -741,3 +741,13 @@ it("projects a World character and emits a changed-only local preset delta", asy
   preset = setEditorDraftField(preset, "story.goals", "Travel");
   expect(buildEditorPayload(preset)).toEqual({ changes: { "state.location": "Road", "story.goals": "Travel" } });
 });
+
+it("clears the campaign draft dirty state when an edit returns to its loaded value", async () => {
+  const { createEditorDraft, setEditorDraftField, markEditorConflict, reapplyEditorDraft, buildEditorPayload } = await import("../../packages/client-core/src/characters/editor-model.js");
+  const original = { name: "Mira", profile: characterProfileSchema.parse({ story: { role: "Scout" } }) };
+  let draft = setEditorDraftField(createEditorDraft("campaign-main", original), "story.role", "Captain");
+  draft = setEditorDraftField(draft, "story.role", "Scout");
+  expect(draft.changedPaths).toEqual([]);
+  draft = reapplyEditorDraft(markEditorConflict(draft), { ...original, profile: characterProfileSchema.parse({ story: { role: "Guide" } }) });
+  expect(buildEditorPayload(draft, { expectedRevision: 2 })).toMatchObject({ expectedRevision: 2, profile: { story: { role: "Guide" } } });
+});

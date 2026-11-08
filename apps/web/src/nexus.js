@@ -1,4 +1,5 @@
 import { renderCharacterEditor } from "./character-editor/renderer.js";
+import { buildCampaignProfileUpdate, createCampaignMainController } from "./character-profile-form.js";
 import { settingsBookmarkDestination } from "./settings-bookmark.js";
 import { createStoryMemoryApi, createNexusApiClient, createNoopSessionPort, writeCampaignSettings, browserDeviceStorage } from "@infinite-quest/client-web";
 import { mountLegacyDeviceProfile } from "../../shared-ui/profile/legacy-device-profile.js";
@@ -7,9 +8,10 @@ import {
   WORLD_PROFILE_FIELDS,
   createEditorDraft,
   setEditorDraftField,
-  buildEditorPayload,
   projectEditorProfile,
   stageEditorOrganize,
+  reapplyEditorDraft,
+  markEditorConflict,
   buildCampaignCreateRequest,
   createCampaignCreationDraft,
   createEditSession,
@@ -213,6 +215,11 @@ let characterEditorDraft = null;
 let characterModalBusy = false;
 let characterModalScope = "world";
 let campaignCharacterProfileRevision = 0;
+let campaignCharacterController = null;
+let campaignCharacterPoll = null;
+let campaignCharacterLocked = false;
+let campaignCharacterOpenEpoch = 0;
+let campaignCharacterLockEpoch = 0;
 let characterProfileOrganizationResult = null;
 const characterRowOriginals = new WeakMap();
 const legacyStorageKey = "infiniteQuestNexusClientState.v1";
@@ -633,10 +640,16 @@ function beginEditDialogSession(dialog, returnFocusTo) {
   };
   editDialogSessions.set(dialog, state);
   const dispose = bindEditDialogDismissal(dialog, () => ({
-    isDirty: () => state.editSession.isDirty(modalFormSnapshot(dialog)),
+    isDirty: () => dialog === elements.characterDialog && characterModalScope === "campaign" && campaignCharacterController ? campaignCharacterController.draft.changedPaths.length > 0 : state.editSession.isDirty(modalFormSnapshot(dialog)),
     isBusy: () => (dialog === elements.worldAuthorDialog && worldAuthorBusy)
       || (dialog === elements.characterDialog && characterModalBusy),
-    confirm: () => requestStagedEditDecision(dialog === elements.characterDialog && characterModalScope === "campaign"),
+    confirm: () => {
+      if (dialog === elements.characterDialog && characterModalScope === "campaign" && campaignCharacterController) {
+        campaignCharacterController.requestClose();
+        return Promise.resolve("stay");
+      }
+      return requestStagedEditDecision(false);
+    },
     ...(dialog === elements.characterDialog && characterModalScope === "campaign"
       ? { save: () => saveCharacterFromModal({ preventDefault() {} }) }
       : {}),
@@ -677,6 +690,10 @@ function setCampaignSaveDecisionVisible(visible) {
 }
 
 function dismissEditDialog(dialog) {
+  if (dialog === elements.characterDialog && characterModalScope === "campaign" && campaignCharacterController) {
+    campaignCharacterController.requestClose();
+    return Promise.resolve("pending");
+  }
   const state = editDialogSessions.get(dialog);
   if (!state) {
     dialog.close();
@@ -3013,6 +3030,20 @@ function setCharacterModalControls(readOnly, busy = false) {
   updateCharacterGeneratorAvailability();
 }
 
+function updateWorldCharacterDuplicateWarning() {
+  const warning = elements.characterDuplicateWarning;
+  if (!warning) return;
+  const name = elements.characterName.value.trim().toLocaleLowerCase();
+  const duplicate = characterModalScope === "world" && name && worldAuthorWorkingContent
+    && playableCharactersFromContent(worldAuthorWorkingContent).some((character) => {
+      if (character.id === editingCharacterId) return false;
+      return [character.name, ...(character.profile?.identity?.aliases || [])]
+        .some((candidate) => typeof candidate === "string" && candidate.trim().toLocaleLowerCase() === name);
+    });
+  warning.textContent = duplicate ? "Another character uses this name or alias. Matching by name may be less reliable." : "";
+  warning.classList.toggle("hidden", !duplicate);
+}
+
 function updateWorldAuthorCharacters(characters) {
   worldAuthorWorkingContent = {
     ...(worldAuthorWorkingContent || {}),
@@ -3034,10 +3065,13 @@ function openCharacterDialog(characterId = "") {
   }
   editingCharacterId = character?.id || "";
   characterModalScope = "world";
-  elements.characterPlayableContext.textContent = "Playable character · This character is part of the world's playable roster.";
+  setCampaignCharacterReviewLock();
+  elements.characterPlayableContext.hidden = false;
+  elements.characterWorldGuidanceHint.hidden = false;
   characterProfileOrganizationResult = null;
   const initial = character || { id: "", name: "", characterText: "", rpgStats: [], defaultTriggers: [], source: { type: "world-library-editor" } };
   populateCharacterForm(initial, readOnly);
+  updateWorldCharacterDuplicateWarning();
   elements.characterGeneratorPrompt.value = "";
   elements.characterGenerator.open = false;
   elements.characterDialogTitle.textContent = character ? "Edit character" : "Add character";
@@ -4118,6 +4152,9 @@ async function organizeCharacterProfile() {
   const campaignScope = characterModalScope === "campaign";
   if (campaignScope ? !selectedCampaign : !selectedWorld) return;
   const expectedRevision = campaignScope ? campaignCharacterProfileRevision : selectedWorld.draftRevision;
+  const campaignId = campaignScope ? selectedCampaign.id : null;
+  const controller = campaignScope ? campaignCharacterController : null;
+  if (campaignScope) setCampaignCharacterReviewLock(true);
   setCharacterModalControls(false, true);
   setCharacterProfileOrganizationProgress(true);
   setCharacterStatus("Organizing supplied facts into targeted profile fields…");
@@ -4131,12 +4168,32 @@ async function organizeCharacterProfile() {
     setCharacterStatus(characterAdmissionError(error), "error");
   } finally {
     setCharacterProfileOrganizationProgress(false);
-    setCharacterModalControls(false, false);
+    if (campaignScope && controller && campaignCharacterController === controller && selectedCampaign?.id === campaignId && elements.characterDialog.open) {
+      characterModalBusy = false;
+      campaignCharacterLocked = true;
+      controller.setLocked(true);
+      setCampaignCharacterReviewLock();
+      await refreshCampaignCharacterLock(campaignId, controller);
+    } else if (!campaignScope) {
+      setCharacterModalControls(false, false);
+    }
   }
 }
 
-function applyCharacterProfileReview() {
-  if ((worldAuthorBusy && characterModalScope === "world") || !characterProfileOrganizationResult) return;
+async function applyCharacterProfileReview() {
+  if ((worldAuthorBusy && characterModalScope === "world") || !characterProfileOrganizationResult
+    || (characterModalScope === "campaign" && (campaignCharacterLocked || characterModalBusy || campaignCharacterController?.draft.conflict))) return;
+  if (characterModalScope === "campaign") {
+    const controller = campaignCharacterController;
+    const campaignId = selectedCampaign?.id;
+    const proposal = characterProfileOrganizationResult;
+    if (!controller || !campaignId) return;
+    setCampaignCharacterReviewLock(true);
+    const checked = await refreshCampaignCharacterLock(campaignId, controller);
+    if (!checked || controller !== campaignCharacterController || campaignId !== selectedCampaign?.id
+      || !elements.characterProfileReviewDialog.open || proposal !== characterProfileOrganizationResult
+      || campaignCharacterLocked || controller.draft.conflict) return;
+  }
   const stagedValues = {};
   for (const checkbox of elements.characterProfileReviewList.querySelectorAll("[data-profile-path]:checked")) {
     const path = checkbox.dataset.profilePath;
@@ -4157,27 +4214,76 @@ function applyCharacterProfileReview() {
   setCharacterStatus("Selected proposals applied to the unsaved form. Save the character to persist them.", "success");
 }
 
+function campaignProfileEditorRecord(result) {
+  return { ...result, id: result.characterId || "", characterText: result.legacyCharacterText || "", profile: result.profile || emptyCharacterProfile() };
+}
+
+function syncCampaignCharacterDraft() {
+  elements.characterName.value = characterEditorDraft.values.name || "";
+  for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+    const value = characterEditorDraft.values[path];
+    elements[id].value = Array.isArray(value) ? value.join("\n") : String(value || "");
+  }
+}
+
+function campaignCharacterGenerationLocked(status) {
+  return Boolean(status.pendingGeneration || status.generationRecovery?.status === "recoverable");
+}
+
+function setCampaignCharacterReviewLock(force = false) {
+  if (!elements.applyCharacterProfileReview) return;
+  const locked = force || (characterModalScope === "campaign" && (campaignCharacterLocked || Boolean(campaignCharacterController?.draft.conflict)));
+  elements.applyCharacterProfileReview.disabled = locked;
+  elements.applyCharacterProfileReview.title = locked ? "Finish or resolve generation and profile conflicts before applying proposals." : "";
+  if (elements.characterReviewLockNotice) elements.characterReviewLockNotice.textContent = locked
+    ? "Proposals are retained. Finish or resolve generation and profile conflicts before applying them."
+    : "";
+}
+
+async function refreshCampaignCharacterLock(campaignId, controller) {
+  if (characterModalBusy || controller.saving) return;
+  const epoch = ++campaignCharacterLockEpoch;
+  try {
+    const status = await characterApi.generation.syncStatus(campaignId);
+    if (epoch !== campaignCharacterLockEpoch || campaignCharacterController !== controller || selectedCampaign?.id !== campaignId || !elements.characterDialog.open || characterModalBusy || controller.saving) return;
+    const wasLocked = campaignCharacterLocked;
+    campaignCharacterLocked = campaignCharacterGenerationLocked(status);
+    controller.setLocked(campaignCharacterLocked);
+    setCampaignCharacterReviewLock();
+    if (campaignCharacterLocked) setCharacterStatus("Finish or resolve generation before saving the character profile.");
+    else if (wasLocked) setCharacterStatus();
+    return true;
+  } catch (error) {
+    if (epoch !== campaignCharacterLockEpoch || campaignCharacterController !== controller || selectedCampaign?.id !== campaignId || !elements.characterDialog.open) return;
+    campaignCharacterLocked = true;
+    controller.setLocked(true);
+    setCampaignCharacterReviewLock();
+    setCharacterStatus(`Generation status could not be checked: ${error.message || String(error)}`, "error");
+  }
+}
+
 async function openCampaignCharacterDialog() {
   if (!selectedCampaign) return;
+  const campaignId = selectedCampaign.id;
+  const openEpoch = ++campaignCharacterOpenEpoch;
+  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   try {
-    const result = await characterApi.campaigns.getCharacterProfile(selectedCampaign.id);
+    const [result, status] = await Promise.all([
+      characterApi.campaigns.getCharacterProfile(campaignId),
+      characterApi.generation.syncStatus(campaignId)
+    ]);
+    if (openEpoch !== campaignCharacterOpenEpoch || selectedCampaign?.id !== campaignId || elements.characterDialog.open) return;
     characterModalScope = "campaign";
     campaignCharacterProfileRevision = result.revision;
     editingCharacterId = result.characterId || "";
     characterProfileOrganizationResult = null;
-      populateCharacterForm({
-      id: result.characterId || "",
-      name: result.name || "Player Character",
-      characterText: result.legacyCharacterText || "",
-      profile: result.profile || emptyCharacterProfile(),
-      rpgStats: result.rpgStats || [],
-      defaultTriggers: result.defaultTriggers || [],
-      source: { type: "campaign-character-profile" }
-    });
-    elements.characterPlayableContext.textContent = "Campaign character profile · This editable campaign copy does not change its immutable world version.";
+    populateCharacterForm(campaignProfileEditorRecord(result));
+    elements.characterPlayableContext.hidden = true;
+    elements.characterWorldGuidanceHint.hidden = true;
+    elements.characterDuplicateWarning?.classList.add("hidden");
     elements.characterDialog.querySelector(".eyebrow").textContent = "Campaign";
     elements.characterDialogTitle.textContent = "Edit campaign character profile";
-    elements.characterDialogDescription.textContent = "This editable campaign copy can diverge without changing its immutable world-version snapshot.";
+    elements.characterDialogDescription.textContent = "Changes apply to this campaign.";
     elements.characterGenerator.classList.add("hidden");
     elements.characterMechanicsFields.classList.add("hidden");
     elements.characterMechanics.classList.add("hidden");
@@ -4188,15 +4294,73 @@ async function openCampaignCharacterDialog() {
     setCharacterStatus();
     setCharacterModalControls(false);
     openEditDialog(elements.characterDialog);
+    const form = {
+      update() {
+        return buildCampaignProfileUpdate(characterEditorDraft, campaignCharacterProfileRevision);
+      },
+      get dirty() { return characterEditorDraft.changedPaths.length > 0; },
+      get draft() { return characterEditorDraft; },
+      reapply(latest) { characterEditorDraft = reapplyEditorDraft(characterEditorDraft, campaignProfileEditorRecord(latest)); campaignCharacterProfileRevision = latest.revision; syncCampaignCharacterDraft(); },
+      load(latest) { characterEditorDraft = createEditorDraft("campaign-main", campaignProfileEditorRecord(latest)); campaignCharacterProfileRevision = latest.revision; syncCampaignCharacterDraft(); },
+      markConflict() { characterEditorDraft = markEditorConflict(characterEditorDraft); },
+      setLocked(locked) { setCharacterModalControls(locked); },
+      focus() { elements.characterName.focus(); },
+      fieldControl(path) {
+        return elements[CHARACTER_PROFILE_FIELDS[path]] ?? elements.characterName;
+      }
+    };
+    const controller = createCampaignMainController(form, {
+      host: elements.campaignCharacterFeedback,
+      saveButton: elements.saveCharacter,
+      load: () => characterApi.campaigns.getCharacterProfile(campaignId),
+      save: async (payload) => {
+        ++campaignCharacterLockEpoch;
+        let currentStatus;
+        try {
+          currentStatus = await characterApi.generation.syncStatus(campaignId);
+        } catch (error) {
+          campaignCharacterLocked = true;
+          controller.setLocked(true);
+          throw new Error(`Generation status could not be checked: ${error.message || String(error)}`);
+        }
+        if (campaignCharacterGenerationLocked(currentStatus)) {
+          campaignCharacterLocked = true;
+          controller.setLocked(true);
+          throw new Error("Finish or resolve generation before saving the character profile.");
+        }
+        return characterApi.campaigns.updateCharacterProfile(campaignId, payload);
+      },
+      isCurrent: () => campaignCharacterController === controller && elements.characterDialog.open && selectedCampaign?.id === campaignId,
+      isLocked: () => campaignCharacterLocked,
+      onSaved: (saved) => {
+        elements.characterDialog.close("saved");
+        void loadCampaigns(campaignId).then(() => {
+          (elements.editCampaignCharacter || opener)?.focus();
+          campaignMessage(`Campaign character profile saved at revision ${saved.revision}.`, "success");
+        }, (error) => {
+          (elements.editCampaignCharacter || opener)?.focus();
+          campaignMessage(`Profile saved, but campaigns could not be refreshed: ${error.message || String(error)}`, "error");
+        });
+      },
+      onDiscard: () => { elements.characterDialog.close(); opener?.focus(); }
+    });
+    campaignCharacterController = controller;
+    campaignCharacterLocked = campaignCharacterGenerationLocked(status);
+    controller.setLocked(campaignCharacterLocked);
+    setCampaignCharacterReviewLock();
+    if (campaignCharacterLocked) setCharacterStatus("Finish or resolve generation before saving the character profile.");
+    campaignCharacterPoll = window.setInterval(() => void refreshCampaignCharacterLock(campaignId, controller), 2000);
     elements.characterName.focus();
   } catch (error) {
-    campaignMessage(error.message || String(error), "error");
+    if (openEpoch !== campaignCharacterOpenEpoch || selectedCampaign?.id !== campaignId) return;
+    campaignMessage(`Character profile could not be opened: ${error.message || String(error)}`, "error");
   }
 }
 
 async function saveCharacterFromModal(event) {
   event.preventDefault();
   if ((worldAuthorBusy && characterModalScope === "world") || characterModalBusy) return;
+  if (characterModalScope === "campaign") { await campaignCharacterController?.save(); return; }
   let character;
   try {
     character = characterFromForm();
@@ -4208,25 +4372,6 @@ async function saveCharacterFromModal(event) {
       if (disclosure) disclosure.open = true;
       control.focus();
       if (control.willValidate && !control.validity.valid) control.reportValidity();
-    }
-    return;
-  }
-  if (characterModalScope === "campaign") {
-    if (!selectedCampaign) return;
-    setCharacterModalControls(false, true);
-    setCharacterStatus("Saving campaign character profile…");
-    try {
-      characterEditorDraft = setEditorDraftField(characterEditorDraft, "name", character.name);
-      const saved = await characterApi.campaigns.updateCharacterProfile(
-        selectedCampaign.id, buildEditorPayload(characterEditorDraft, { expectedRevision: campaignCharacterProfileRevision })
-      );
-      campaignCharacterProfileRevision = saved.revision;
-      elements.characterDialog.close();
-      await loadCampaigns(selectedCampaign.id);
-      campaignMessage(`Campaign character profile saved at revision ${saved.revision}.`, "success");
-    } catch (error) {
-      setCharacterStatus(error.message || String(error), "error");
-      setCharacterModalControls(false, false);
     }
     return;
   }
@@ -7319,7 +7464,19 @@ for (const control of [elements.worldTitle, elements.worldGenre, elements.worldT
 elements.worldForm.addEventListener("click", (event) => {
   if (worldAuthorBusy && event.target instanceof Element && event.target.closest("summary")) event.preventDefault();
 }, true);
+const characterDuplicateWarning = document.createElement("p");
+characterDuplicateWarning.id = "characterDuplicateWarning";
+characterDuplicateWarning.className = "field-note hidden";
+characterDuplicateWarning.setAttribute("role", "status");
+elements.characterName.closest("label").after(characterDuplicateWarning);
+elements.characterDuplicateWarning = characterDuplicateWarning;
+elements.characterName.addEventListener("input", updateWorldCharacterDuplicateWarning);
 elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());
+const characterReviewLockNotice = document.createElement("p");
+characterReviewLockNotice.setAttribute("role", "status");
+characterReviewLockNotice.className = "field-note";
+elements.applyCharacterProfileReview.parentElement.before(characterReviewLockNotice);
+elements.characterReviewLockNotice = characterReviewLockNotice;
 elements.cancelCharacterProfileReview.addEventListener("click", () => {
   characterProfileOrganizationResult = null;
   elements.characterProfileReviewDialog.close();
@@ -7327,6 +7484,13 @@ elements.cancelCharacterProfileReview.addEventListener("click", () => {
 elements.applyCharacterProfileReview.addEventListener("click", applyCharacterProfileReview);
 elements.editCampaignCharacter.addEventListener("click", openCampaignCharacterDialog);
 elements.characterDialog.addEventListener("close", () => {
+  ++campaignCharacterOpenEpoch;
+  ++campaignCharacterLockEpoch;
+  if (campaignCharacterPoll) window.clearInterval(campaignCharacterPoll);
+  campaignCharacterPoll = null;
+  campaignCharacterController?.dispose();
+  campaignCharacterController = null;
+  campaignCharacterLocked = false;
   editingCharacterId = "";
   characterModalWorkingCharacter = null;
   characterEditorDraft = null;

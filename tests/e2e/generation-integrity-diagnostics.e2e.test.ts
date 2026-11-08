@@ -116,8 +116,10 @@ async function installRecoveryApi(page: Page, options: { failureDiagnostic?: { c
         const body = request.postDataJSON() as Record<string, unknown>;
         writes.push({ path, body });
         profileSaveAttempts += 1;
-        if (!discarded || body.expectedRevision !== characterProfile.revision || (options.profileConflict && profileSaveAttempts === 1)) {
-          return respond({ error: "Character profile is locked or changed.", code: "invalid_transition" }, 409);
+        if (!discarded) return respond({ error: "Conflict", message: "Generation is active.", code: "invalid_transition", details: { code: "invalid_transition" }, correlationId: "fixture-lock" }, 409);
+        if (options.profileConflict && profileSaveAttempts === 1) characterProfile.revision += 1;
+        if (body.expectedRevision !== characterProfile.revision) {
+          return respond({ error: "Conflict", message: "Character profile revision changed.", code: "state_revision_changed", details: { code: "state_revision_changed" }, correlationId: "fixture-revision" }, 409);
         }
         characterProfile.revision += 1;
         characterProfile.name = String(body.name);
@@ -577,8 +579,7 @@ for (const surface of ["legacy", "web-next"] as const) for (const operation of [
       else await page.locator("[data-campaign-tools] summary").click();
     }
     await edit.click();
-    const name = page.locator(surface === "legacy" ? "#editCharacterProfileName" : "[data-story-tool-dialog] [data-character-profile-name]");
-    const profile = page.locator(surface === "legacy" ? "#editCharacterProfileJson" : "[data-story-tool-dialog] [data-character-profile-json]");
+    const name = page.locator(surface === "legacy" ? "#characterName" : '[data-story-tool-dialog] [data-character-profile-field="name"]');
     await expect(name).toHaveValue("Mira Vale");
     if (operation === "append") {
       for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
@@ -588,7 +589,14 @@ for (const surface of ["legacy", "web-next"] as const) for (const operation of [
     }
     await expect(draft).toHaveValue("Keep this harbor profile repair with the new turn.");
     await name.fill("Mira Vale, Harbor Warden");
-    await profile.fill(JSON.stringify({ story: { role: "Harbor warden", keyRelationships: "Trusts the lighthouse keeper with the signal key." } }));
+    if (surface === "legacy") {
+      await page.locator("#characterRole").fill("Harbor warden");
+      await page.locator("#characterStoryDetails").evaluate((element: HTMLDetailsElement) => { element.open = true; });
+      await page.locator('[data-character-profile-path="story.keyRelationships"]').fill("Trusts the lighthouse keeper with the signal key.");
+    } else {
+      await page.locator('[data-story-tool-dialog] [data-character-profile-field="story.role"]').fill("Harbor warden");
+      await page.locator('[data-story-tool-dialog] [data-character-profile-field="story.keyRelationships"]').fill("Trusts the lighthouse keeper with the signal key.");
+    }
     await page.locator(surface === "legacy" ? "#btnSaveEditCharacterProfile" : "[data-action=save-character-profile]").click();
     await expect.poll(() => api.writes.filter(write => write.path.endsWith("/character-profile")).length).toBe(1);
     expect(api.writes.find(write => write.path.endsWith("/character-profile"))!.body).toMatchObject({
@@ -623,26 +631,48 @@ for (const surface of ["legacy", "web-next"] as const) {
     if (surface === "legacy") await page.getByRole("button", { name: "Setup", exact: true }).click();
     else await page.getByText("Campaign Tools", { exact: true }).click();
     await page.locator(surface === "legacy" ? "#btnOpenEditCharacterProfile" : "[data-tool-action=edit-character-profile]").click();
-    const name = page.locator(surface === "legacy" ? "#editCharacterProfileName" : "[data-story-tool-dialog] [data-character-profile-name]");
-    const profile = page.locator(surface === "legacy" ? "#editCharacterProfileJson" : "[data-story-tool-dialog] [data-character-profile-json]");
+    const name = page.locator(surface === "legacy" ? "#characterName" : '[data-story-tool-dialog] [data-character-profile-field="name"]');
     await expect(name).toHaveValue("Mira Vale");
     await name.fill("Mira Vale, Signal Keeper");
     const revisedProfile = { story: { role: "Signal keeper", keyRelationships: "Keeps the beacon ledger with Nia." } };
-    await profile.fill(JSON.stringify(revisedProfile));
+    if (surface === "legacy") {
+      await page.locator("#characterRole").fill("Signal keeper");
+      await page.locator("#characterStoryDetails").evaluate((element: HTMLDetailsElement) => { element.open = true; });
+      await page.locator('[data-character-profile-path="story.keyRelationships"]').fill("Keeps the beacon ledger with Nia.");
+    } else {
+      await page.locator('[data-story-tool-dialog] [data-character-profile-field="story.role"]').fill("Signal keeper");
+      await page.locator('[data-story-tool-dialog] [data-character-profile-field="story.keyRelationships"]').fill("Keeps the beacon ledger with Nia.");
+    }
     const save = page.locator(surface === "legacy" ? "#btnSaveEditCharacterProfile" : "[data-action=save-character-profile]");
     await save.click();
     await expect.poll(() => api.writes.filter(write => write.path.endsWith("/character-profile")).length).toBe(1);
-    const status = page.locator(surface === "legacy" ? "#editCharacterProfileStatus" : "[data-story-tool-dialog] p.story-status[data-story-status]:not([role])");
+    const status = page.locator(surface === "legacy" ? "#campaign-character-editor-message" : "[data-story-tool-dialog] p.story-status[data-story-status]:not([role])");
     await expect(status).toContainText(surface === "legacy" ? "changed" : "changed elsewhere");
     await expect(name).toHaveValue("Mira Vale, Signal Keeper");
-    await expect(profile).toHaveValue(JSON.stringify(revisedProfile));
+    if (surface === "legacy") await expect(page.locator("#characterRole")).toHaveValue("Signal keeper");
+    else await expect(page.locator('[data-story-tool-dialog] [data-character-profile-field="story.role"]')).toHaveValue("Signal keeper");
     await expect(draft).toHaveValue("Keep this draft while the profile conflict is repaired.");
+    if (surface === "legacy") {
+      await page.getByRole("button", { name: "Compare latest" }).click();
+      await page.getByRole("button", { name: "Reapply my changes" }).click();
+    } else {
+      await page.locator('[data-action="close-story-tool-dialog"]').click();
+      await page.getByText("Campaign Tools", { exact: true }).click();
+      await page.locator('[data-tool-action="edit-character-profile"]').click();
+      await expect(name).toHaveValue("Mira Vale");
+      await name.fill("Mira Vale, Signal Keeper");
+      await page.locator('[data-story-tool-dialog] [data-character-profile-field="story.role"]').fill("Signal keeper");
+      await page.locator('[data-story-tool-dialog] [data-character-profile-field="story.keyRelationships"]').fill("Keeps the beacon ledger with Nia.");
+    }
     await save.click();
     await expect.poll(() => api.writes.filter(write => write.path.endsWith("/character-profile")).length).toBe(2);
-    for (const write of api.writes.filter(write => write.path.endsWith("/character-profile"))) {
-      expect(write.body).toMatchObject({ expectedRevision: 4, name: "Mira Vale, Signal Keeper", profile: revisedProfile, editSource: "manual" });
-    }
+    const profileWrites = api.writes.filter(write => write.path.endsWith("/character-profile"));
+    expect(profileWrites[0]!.body).toMatchObject({ expectedRevision: 4, name: "Mira Vale, Signal Keeper", profile: revisedProfile, editSource: "manual" });
+    expect(profileWrites[1]!.body).toMatchObject({ expectedRevision: 5, name: "Mira Vale, Signal Keeper", profile: revisedProfile, editSource: "manual" });
     await expect(draft).toHaveValue("Keep this draft while the profile conflict is repaired.");
+    await page.locator(surface === "legacy" ? "#btnTakeAction" : "[data-action=continue-story]").click();
+    await expect.poll(() => api.writes.filter(write => write.path.endsWith("/generations")).length).toBe(1);
+    expect(api.writes.at(-1)!.body).toMatchObject({ action: "Keep this draft while the profile conflict is repaired." });
   });
 }
 

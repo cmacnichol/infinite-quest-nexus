@@ -1,5 +1,6 @@
+import { tabTo } from "./helpers/keyboard.js";
 import { readFile } from "node:fs/promises";
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Page, type Route, type Locator } from "@playwright/test";
 
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const worldId = "33333333-3333-4333-8333-333333333333";
@@ -7,6 +8,14 @@ const versionId = "44444444-4444-4444-8444-444444444444";
 const protagonistId = "66666666-6666-4666-8666-666666666666";
 const candidateId = "88888888-8888-4888-8888-888888888888";
 const screenshotRoot = process.env.CAST_SCREENSHOT_ROOT;
+
+async function openReview(dialog: Locator) {
+  if (await dialog.getAttribute("id") === "campaignCastDialog") {
+    await dialog.getByRole("button", { name: "Needs attention", exact: true }).click();
+    await expect(dialog.getByText("Loading identity questions…")).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Review identity questions and details", exact: true }).click();
+  } else await dialog.getByRole("button", { name: "Review character changes", exact: true }).click();
+}
 
 async function recoveryWorkspace(page: Page, kind: "forward" | "scan") {
   await page.route("**/cast/workspace-status", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({
@@ -191,7 +200,7 @@ for (const width of [1280, 390]) test(`legacy filters handled identities from ma
   const api = await fixture(page, true);
   await open(page);
   const dialog = page.locator("#campaignCastDialog");
-  await dialog.getByRole("button", { name: "Review character changes", exact: true }).click();
+  await openReview(dialog);
   if (width === 390) {
     await dialog.getByLabel("Existing character", { exact: true }).selectOption(protagonistId);
     await dialog.getByRole("button", { name: "Attach to selected character", exact: true }).click();
@@ -209,7 +218,7 @@ test("legacy match targets are independent of the roster search", async ({ page 
   await dialog.getByLabel("Find a character", { exact: true }).fill("No such character");
   await dialog.getByRole("button", { name: "Search", exact: true }).click();
   await expect(dialog).toContainText("No characters match this search.");
-  await dialog.getByRole("button", { name: "Review character changes", exact: true }).click();
+  await openReview(dialog);
   const select = dialog.getByLabel("Existing character", { exact: true });
   await expect(select.locator(`option[value="${protagonistId}"]`)).toHaveCount(1);
   await select.selectOption(protagonistId);
@@ -431,19 +440,22 @@ for (const width of [1440, 390]) test(`legacy cast add, edit, reset, conflict an
   await dialog.getByRole("button", { name: "Add character", exact: true }).click();
   await dialog.getByLabel("Name", { exact: true }).fill("Mara");
   await dialog.getByLabel("Aliases (one per line)").fill("The Watcher");
-  await dialog.getByText("Appearance details", { exact: true }).click();
+  await dialog.locator("summary").filter({ hasText: /^Appearance$/ }).click();
   await dialog.getByLabel("Appearance", { exact: true }).fill("green eyes");
   await dialog.getByRole("button", { name: "Save character", exact: true }).click();
-  await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("Mara");
   await expect.poll(() => api.characters.length).toBe(2);
+  await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
+  await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("Mara");
   await dialog.getByLabel("Appearance", { exact: true }).fill("");
   await dialog.getByLabel("Pin character", { exact: true }).check();
   await dialog.getByLabel("Ignore character", { exact: true }).check();
   await dialog.getByRole("button", { name: "Save character", exact: true }).click();
   await expect.poll(() => api.characters[1].pinned).toBe(true);
+  await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
   await expect(dialog.getByLabel("Appearance", { exact: true })).toHaveValue("");
   await dialog.getByRole("button", { name: "Use discovered value for appearance", exact: true }).click();
   await dialog.getByRole("button", { name: "Save character", exact: true }).click();
+  await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
   await expect(dialog.getByLabel("Appearance", { exact: true })).toHaveValue("blue eyes");
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/detail-${width}.png` });
   api.conflict();
@@ -477,7 +489,7 @@ for (const action of ["create", "attach"] as const) test(`legacy cast reviews a 
   await page.setViewportSize({ width: action === "create" ? 1440 : 390, height: 1000 });
   const api = await fixture(page); await open(page);
   const dialog = page.locator("#campaignCastDialog");
-  await dialog.getByRole("button", { name: "Review character changes", exact: true }).click();
+  await openReview(dialog);
   await expect(dialog).toContainText("Mara waits at the gate.");
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/review-${action}.png` });
   if (action === "attach") {
@@ -498,7 +510,7 @@ test("legacy candidate review distinguishes same-name targets and previews their
   await open(page);
   const dialog = page.locator("#campaignCastDialog");
   await dialog.getByRole("button", { name: "Load more characters", exact: true }).click();
-  await dialog.getByRole("button", { name: "Review character changes", exact: true }).click();
+  await openReview(dialog);
   const options = await dialog.getByLabel("Existing character", { exact: true }).locator("option").allTextContents();
   expect(new Set(options).size).toBe(options.length);
   await dialog.getByLabel("Existing character", { exact: true }).selectOption("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
@@ -521,11 +533,13 @@ test("legacy cast protects unsaved drafts and restores keyboard focus", async ({
   await open(page);
   await dialog.getByRole("button", { name: "Add character", exact: true }).click();
   await dialog.getByLabel("Name", { exact: true }).fill("Unfinished");
-  page.once("dialog", (confirmation) => confirmation.dismiss());
   await page.keyboard.press("Escape");
+  const decision = dialog.getByRole("alertdialog", { name: "Unsaved character changes" });
+  await expect(decision.getByRole("button", { name: "Keep editing" })).toBeFocused();
+  await decision.getByRole("button", { name: "Keep editing" }).click();
   await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("Unfinished");
-  page.once("dialog", (confirmation) => confirmation.accept());
   await page.keyboard.press("Escape");
+  await decision.getByRole("button", { name: "Discard changes" }).click();
   await expect(dialog).not.toBeVisible();
   await expect(page.getByRole("button", { name: "Setup", exact: true })).toBeFocused();
 });
@@ -537,7 +551,8 @@ test("legacy cast creates separate same-name people after a conflict and links t
   await dialog.getByRole("button", { name: "Edit main character", exact: true }).click();
   await expect(page.locator("#editCharacterProfileDialog")).toBeVisible();
   await page.locator("#btnCancelEditCharacterProfile").click();
-  await open(page);
+  await expect(dialog.getByRole("button", { name: "Edit main character", exact: true })).toBeFocused();
+  await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
   for (let index = 0; index < 2; index++) {
     await dialog.getByRole("button", { name: "Add character", exact: true }).click();
     await dialog.getByLabel("Name", { exact: true }).fill("Mara");
@@ -550,7 +565,7 @@ test("legacy cast creates separate same-name people after a conflict and links t
       await dialog.getByRole("button", { name: "Reapply my changes", exact: true }).click();
       await dialog.getByRole("button", { name: "Save character", exact: true }).click();
     }
-    await expect(dialog.getByLabel("Pin character", { exact: true })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Edit character", exact: true })).toBeVisible();
     await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
   }
   await dialog.getByRole("button", { name: "Load more characters", exact: true }).click();
@@ -562,7 +577,7 @@ test("legacy cast creates separate same-name people after a conflict and links t
   await expect(dialog.getByRole("button", { name: "Mara", exact: true })).toHaveCount(2);
   await dialog.getByRole("button", { name: "Mara", exact: true }).first().click();
   await dialog.getByText("Sources and edit history", { exact: true }).click();
-  await expect(dialog).toContainText("Claim: story.role");
+  await expect(dialog).toContainText("Claim: Role — gatekeeper");
   await dialog.getByRole("button", { name: "Turn 1", exact: true }).click();
   await expect(dialog).not.toBeVisible();
   await expect(page.locator("#storyArea")).toContainText("Mara waits at the gate");
@@ -579,7 +594,7 @@ for (const surface of ["legacy", "next"] as const) for (const width of [1440, 39
   const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("conflicts: 1");
-  await dialog.getByRole("button", { name: "Review conflicts", exact: true }).click();
+  if (surface === "next") await dialog.getByRole("button", { name: "Review conflicts", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toBeVisible();
   if (surface === "next") await expect(dialog).toContainText("Needs review (2)");
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/roster-${surface}-${width}.png` });
@@ -591,12 +606,18 @@ for (const surface of ["legacy", "next"] as const) for (const width of [1440, 39
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/context-${surface}-${width}.png` });
   await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
   await dialog.getByRole("button", { name: "Iven", exact: true }).click();
+  if (surface === "legacy") {
+    await expect(dialog).toContainText("Source unavailable");
+    await dialog.getByRole("button", { name: "Show empty fields", exact: true }).click();
+  }
   await expect(dialog).toContainText("Unknown");
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/sheet-${surface}-${width}.png` });
   await dialog.getByRole("button", { name: "Edit main character", exact: true }).click();
   // The replacement client edits the main character inside the Characters sheet.
   const profile = surface === "legacy" ? page.locator("#editCharacterProfileDialog") : dialog;
-  await expect(profile).toBeVisible(); await expect(profile.getByText("Pronouns", { exact: true })).toBeVisible();
+  await expect(profile).toBeVisible();
+  if (surface === "legacy") await profile.getByText("Names and pronouns (optional)", { exact: true }).click();
+  await expect(profile.getByText("Pronouns", { exact: true })).toBeVisible();
   await expect(profile.getByText("Profile JSON", { exact: true })).toHaveCount(0);
   if (screenshotRoot) await profile.screenshot({ path: `${screenshotRoot}/profile-${surface}-${width}.png` });
   await profile.getByLabel("Pronouns", { exact: true }).fill("they/them");
@@ -641,13 +662,14 @@ for (const surface of ["legacy", "next"] as const) for (const width of [1440, 39
   await page.route(`**/cast/candidates/${candidateId}/details/resolve`, route => { const input = route.request().postDataJSON(); decisions.push(input); remainingDetails--; return send(route, { revision: 0, boundary, character: supporting, candidateId, observationIndex: input.observationIndex, disposition: input.action }); });
   if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
   const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
-  await dialog.getByRole("button", { name: "Review character changes", exact: true }).click();
+  await openReview(dialog);
   await expect(dialog).toContainText("gatekeeper");
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/review-${surface}-${width}.png` });
   await dialog.getByRole("button", { name: "Apply and next", exact: true }).click();
   await expect.poll(() => decisions.length).toBe(1); await dialog.getByRole("button", { name: "Dismiss detail", exact: true }).click();
   await expect.poll(() => decisions.length).toBe(2); expect(decisions.map(item => item.action)).toEqual(["accept", "dismiss"]); expect(decisions[0]).not.toHaveProperty("confirmedValue");
   await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
+  if (surface === "legacy") await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
   await dialog.getByRole("button", { name: "Iven", exact: true }).first().click();
   if (surface === "next") { const sources = dialog.locator("details").first(); await sources.locator("summary").click(); await expect(sources).toHaveAttribute("open", ""); await page.waitForTimeout(5500); await expect(sources).toHaveAttribute("open", ""); }
   await dialog.getByRole("button", { name: "Not this character", exact: true }).click();
@@ -670,8 +692,14 @@ for (const surface of ["legacy", "next"] as const) test(`conflict field can be c
   await fixture(page, false, true);
   if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
   const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
-  await dialog.getByRole("button", { name: "Review conflicts", exact: true }).click(); await expect(dialog.getByRole("button", { name: "Mara", exact: true })).toBeVisible(); await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toHaveCount(0);
-  await dialog.getByRole("button", { name: "Mara", exact: true }).click(); await expect(dialog).toContainText("Conflicting observations"); await dialog.getByRole("button", { name: "Edit character", exact: true }).click(); await dialog.getByLabel("Role", { exact: true }).fill("guide"); await dialog.getByRole("button", { name: "Save character", exact: true }).click();
+  if (surface === "legacy") {
+    await dialog.getByRole("button", { name: "Needs attention", exact: true }).click();
+    await dialog.getByRole("button", { name: "Mara · Role", exact: true }).click();
+    await expect(dialog.getByLabel("Role", { exact: true })).toBeFocused();
+  } else {
+    await dialog.getByRole("button", { name: "Review conflicts", exact: true }).click(); await expect(dialog.getByRole("button", { name: "Mara", exact: true })).toBeVisible(); await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Mara", exact: true }).click(); await expect(dialog).toContainText("Conflicting observations"); await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
+  } await dialog.getByLabel("Role", { exact: true }).fill("guide"); await dialog.getByRole("button", { name: "Save character", exact: true }).click();
 });
 
 test("legacy exposes recovery for a failed tracking gap", async ({ page }) => {
@@ -784,10 +812,11 @@ for (const surface of ["legacy", "next"] as const) test(`review paginates and gr
   await page.route("**/cast/candidates/**/details/resolve", route => { writes.push(route.request().postDataJSON()); return send(route, {}, 500); });
   if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
   const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
-  await dialog.getByRole("button", { name: "Review character changes", exact: true }).click();
+  await openReview(dialog);
   await expect(dialog).toContainText("1 item remaining"); await expect(dialog).toContainText("Current: watcher");
   const evidence = dialog.locator("section blockquote"); await expect(evidence).toHaveText(["Earlier evidence.", "Later evidence."]);
-  expect(requests).toHaveLength(2); expect(requests.every(query => new URLSearchParams(query).get("view") === "review")).toBe(true);
+  const expectedRequests = surface === "legacy" ? 4 : 2;
+  expect(requests).toHaveLength(expectedRequests); expect(requests.every(query => new URLSearchParams(query).get("view") === "review")).toBe(true);
   await dialog.getByRole("button", { name: "Source turn 1", exact: true }).click();
   await expect(dialog.locator("mark")).toHaveText("Earlier evidence."); await expect(dialog).toContainText("Before. Earlier evidence. After.");
   await expect(dialog).toContainText("1 item remaining"); await expect(dialog.getByRole("button", { name: "Open full turn in story" })).toBeVisible();
@@ -801,9 +830,9 @@ for (const mode of ["stale", "fallback"] as const) test(`review handles ${mode =
     if (mode === "fallback" && view === "review") return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ code: "invalid_request" }) });
     const cursor = url.searchParams.get("cursor"); return route.fulfill({ contentType: "application/json", body: JSON.stringify({ revision: mode === "stale" && cursor ? 1 : 0, boundary, candidates: [], nextCursor: mode === "stale" && !cursor ? candidateId : null }) }); });
   await page.route("**/cast/candidates/**/resolve", route => { writes.push(route.request().url()); return route.abort(); });
-  await open(page); const dialog = page.locator("#campaignCastDialog"); await dialog.getByRole("button", { name: "Review character changes", exact: true }).click();
-  if (mode === "stale") { await expect(dialog).toContainText("The story or cast changed. Reload review."); expect(calls).toEqual(["review", "review"]); }
-  else { await expect(dialog).toContainText("Nothing needs review."); expect(calls).toEqual(["review", "matches", "details"]); }
+  await open(page); const dialog = page.locator("#campaignCastDialog"); await openReview(dialog);
+  if (mode === "stale") { await expect(dialog).toContainText("The story or cast changed. Reload review."); expect(calls.slice(-2)).toEqual(["review", "review"]); }
+  else { await expect(dialog).toContainText("Nothing needs review."); expect(calls.slice(-3)).toEqual(["review", "matches", "details"]); }
   expect(writes).toHaveLength(0);
 });
 
@@ -829,8 +858,100 @@ for (const surface of ["legacy", "next"] as const) for (const suggested of [true
   await page.route("**/cast/candidates?**", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ revision: 0, boundary, nextCursor: null, candidates: [{ id: candidateId, reason: "identity_needs_review", ...(suggested ? { suggestedCharacterId: targetId } : {}), proposal: { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote: "Mara waits at the gate." }], observations: [] }, source: { turnId: "55555555-5555-4555-8555-555555555555", turnNumber: 1, narrationRevision: 0 } }] }) }));
   if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
   const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
-  await dialog.getByRole("button", { name: "Review character changes", exact: true }).click();
+  await openReview(dialog);
   await expect(dialog.getByLabel("Existing character", { exact: true })).toHaveValue(suggested ? targetId : "");
   if (suggested) await expect(dialog.getByRole("button", { name: "Attach to selected character", exact: true })).toBeEnabled();
   else await expect(dialog.getByRole("button", { name: "Attach to selected character", exact: true })).toBeDisabled();
+});
+for (const width of [1440, 390]) test(`legacy needs attention routes individual items by keyboard at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
+  await fixture(page, false, true);
+  const boundary = { turnNumber: 1, timelineRevision: 0 };
+  const source = { turnId: "55555555-5555-4555-8555-555555555555", turnNumber: 1, narrationRevision: 0 };
+  const proposal = { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote: "Mara waits at the gate." }], observations: [] };
+  const views: string[] = [];
+  await page.route("**/cast/workspace-status", route => route.fulfill({ json: {
+    revision: 0, boundary, capabilities: { editing: true, discovery: true, autoMatch: true, backfill: true, context: true },
+    contextDisabledReason: null, counts: { identities: 1, details: 1, conflicts: 1 },
+    tracking: { enabled: true, state: "complete", activeTurnNumber: 1, coverageStartTurn: 1, trackedThroughTurn: 1, unresolvedCount: 2, firstGap: null }
+  } }));
+  await page.route("**/cast/candidates?**", route => {
+    const view = new URL(route.request().url()).searchParams.get("view") || ""; views.push(view);
+    return route.fulfill({ json: { revision: 0, boundary, nextCursor: null, candidates: [
+      { id: candidateId, reason: "identity_needs_review", proposal, source },
+      { id: "99999999-9999-4999-8999-999999999999", reason: "detail_needs_review", resolvedCharacterId: protagonistId, proposal: { ...proposal, name: "Iven" }, source,
+        details: [{ observationIndex: 0, field: "story.role", value: "guide", quote: "Mara waits at the gate.", reason: "unverified", sourceHash: "a".repeat(64), canAcceptObservation: true }] }
+    ] } });
+  });
+  await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  const attention = dialog.getByRole("button", { name: "Needs attention", exact: true });
+  await attention.focus(); await page.keyboard.press("Enter");
+  await expect(dialog.getByRole("heading", { name: "Identity questions (1)" })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Withheld details (1)" })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Conflicts (1)" })).toBeVisible();
+  const identity = dialog.getByRole("button", { name: "Mara · turn 1", exact: true });
+  const detail = dialog.getByRole("button", { name: "Iven · Role · turn 1", exact: true });
+  const conflict = dialog.getByRole("button", { name: "Mara · Role", exact: true });
+  await expect(identity).toBeVisible(); await expect(detail).toBeVisible(); await expect(conflict).toBeVisible();
+  expect(await identity.evaluate((element, later) => Boolean(element.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING), await detail.elementHandle())).toBe(true);
+  expect(await detail.evaluate((element, later) => Boolean(element.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING), await conflict.elementHandle())).toBe(true);
+  await conflict.focus();
+  await dialog.screenshot({ path: `docs/review/assets/unified-character-editor-phase-2/cast-inbox-${width}.png` });
+  await identity.focus(); await page.keyboard.press("Enter");
+  await expect(dialog).toContainText("Mara waits at the gate.");
+  await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
+  await dialog.getByRole("button", { name: "Iven · Role · turn 1", exact: true }).focus(); await page.keyboard.press("Enter");
+  await expect(dialog).toContainText("Proposed: guide");
+  await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
+  await dialog.getByRole("button", { name: "Mara · Role", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await expect(dialog.getByLabel("Role", { exact: true })).toBeFocused();
+  await expect(dialog.getByRole("button", { name: "Save character", exact: true })).toBeVisible();
+  // Three inbox reads plus two targeted review reads, each within its own revision fence.
+  expect(views.filter(view => view === "review").length).toBe(5);
+});
+
+for (const width of [1440, 390]) for (const [source, expected] of [["snapshot", "World snapshot"], ["initial", "Campaign profile"], ["edited", "Campaign profile"], ["unknown", "Source unavailable"]] as const) test(`legacy main profile identifies ${source} provenance by keyboard at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
+  await fixture(page);
+  await page.route("**/character-profile", route => route.fulfill({ json: {
+    campaignId, name: "Iven", profile: {}, revision: source === "edited" ? 2 : 0, characterId: null,
+    storedProfile: source === "edited" || source === "initial" ? { name: "Iven", profile: {} } : null, inheritedFromSnapshot: source === "snapshot", legacyCharacterText: "Iven", rpgStats: [], defaultTriggers: []
+  } }));
+  await page.getByRole("button", { name: "Setup", exact: true }).press("Enter");
+  await tabTo(page, page.locator("#btnOpenCast"));
+  await page.keyboard.press("Enter");
+  const dialog = page.locator("#campaignCastDialog");
+  await tabTo(page, dialog.getByRole("button", { name: "Iven", exact: true }));
+  await page.keyboard.press("Enter");
+  await expect(dialog).toContainText(expected);
+  const roster = dialog.getByRole("navigation", { name: "Characters" });
+  if (width === 390) {
+    await tabTo(page, roster.locator("summary"));
+    await page.keyboard.press("Enter");
+  }
+  await expect(roster.getByRole("button", { name: "Iven" })).toHaveAttribute("aria-current", "true");
+  const toggle = dialog.getByRole("button", { name: "Show empty fields", exact: true });
+  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await expect(dialog.getByText("Pronouns:", { exact: false })).toHaveCount(0);
+  await tabTo(page, toggle);
+  await page.keyboard.press("Enter");
+  await expect(dialog.getByRole("button", { name: "Hide empty fields" })).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.getByText("Pronouns:", { exact: false })).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(dialog.getByText("Pronouns:", { exact: false })).toHaveCount(0);
+});
+
+test("supporting character warns on a roster alias without blocking save", async ({ page }) => {
+  const api = await fixture(page); api.publishDiscovery(); await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Add character", exact: true }).click();
+  await dialog.locator("#cast-name").fill("the watcher");
+  await expect(dialog).toContainText("A character with this name already exists");
+  await expect(dialog.locator("#cast-save")).toBeEnabled();
+  await dialog.locator("#cast-save").click();
+  await expect.poll(() => api.writes.length).toBe(1);
+  expect(api.writes[0]).toMatchObject({ name: "the watcher" });
+  await expect(dialog.getByRole("button", { name: "Edit character", exact: true })).toBeVisible();
 });

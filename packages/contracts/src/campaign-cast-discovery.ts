@@ -69,7 +69,7 @@ export const castCandidateQuerySchema = z.object({ cursor: z.uuid().optional(), 
 export const castPendingCandidateSchema = z.object({ id: z.uuid(), reason: z.string().min(1).max(100), proposal: castDiscoveryCandidateSchema,
   resolvedCharacterId: z.uuid().optional(), suggestedCharacterId: z.uuid().optional(),
   details: z.array(z.object({ observationIndex: z.number().int().min(0).max(19), field: castFieldSchema,
-    value: z.string().max(2000), quote: z.string().max(1000), reason: z.string(), canAcceptObservation: z.boolean().optional(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict()).optional(),
+    value: z.string().max(2000), quote: z.string().max(1000), reason: z.string(), canAcceptObservation: z.boolean().optional(), allowedActions: z.array(z.enum(["accept", "confirm", "dismiss"])).optional(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict()).optional(),
   source: z.object({ turnId: z.uuid(), turnNumber: z.number().int().positive(), narrationRevision: z.number().int().nonnegative(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u).optional() }).strict() }).strict();
 export const castCandidateListSchema = z.object({ revision: z.number().int().nonnegative(), boundary: castBoundarySchema,
   candidates: z.array(castPendingCandidateSchema).max(50), nextCursor: z.uuid().nullable() }).strict();

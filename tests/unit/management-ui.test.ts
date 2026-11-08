@@ -1552,7 +1552,11 @@ describe("Nexus management UI contracts", () => {
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, HTMLInputElement & HTMLDetailsElement>;
     elements.characterName!.focus = () => {};
     const { openCampaignCharacterDialog } = managementFunctions<{ openCampaignCharacterDialog: () => Promise<void> }>(["openCampaignCharacterDialog"], {
-      elements, selectedCampaign: { id: "campaign" }, characterApi: { campaigns: { getCharacterProfile: async () => ({ name: "Mira", profile: {} }) } },
+      elements, document, HTMLElement: document.defaultView!.HTMLElement, selectedCampaign: { id: "campaign" }, characterApi: { campaigns: { getCharacterProfile: async () => ({ name: "Mira", profile: {} }) }, generation: { syncStatus: async () => ({ pendingGeneration: null, generationRecovery: null }) } },
+      campaignProfileEditorRecord: (profile: unknown) => profile, setCampaignCharacterReviewLock: () => {},
+      createCampaignMainController: () => ({ setLocked: () => {} }),
+      campaignCharacterController: null, campaignCharacterLocked: false, campaignCharacterPoll: null, campaignCharacterOpenEpoch: 0, campaignCharacterGenerationLocked: () => false,
+      window: { setInterval: () => 1 },
       characterModalScope: "world", campaignCharacterProfileRevision: 0, editingCharacterId: "",
       characterProfileOrganizationResult: null,
       populateCharacterForm: () => {}, setCharacterStatus: () => {}, setCharacterModalControls: () => {}, openEditDialog: () => {},
@@ -2858,4 +2862,146 @@ it("renders descriptor groups in World order and remounts without duplicate inpu
     "characterAncestryOrSpecies", "characterApparentAge", "characterGenderPresentation", "characterBuild", "characterSkinOrComplexion", "characterFace", "characterEyes", "characterHair", "characterDistinguishingFeatures", "characterClothing", "characterEquipmentAndAccessories", "characterOtherVisualDetails"
   ]);
   expect(host.querySelector("#characterAncestryOrSpecies")?.tagName).toBe("INPUT");
+});
+  it("warns about world roster names and aliases without blocking editing", () => {
+    const { document } = parseHTML('<input id="characterName"><p id="characterDuplicateWarning" class="hidden"></p>');
+    const elements = Object.fromEntries([...document.querySelectorAll('[id]')].map((element) => [element.id, element])) as Record<string, HTMLElement>;
+    const { updateWorldCharacterDuplicateWarning } = managementFunctions<{ updateWorldCharacterDuplicateWarning: () => void }>(["updateWorldCharacterDuplicateWarning"], {
+      elements, characterModalScope: "world", editingCharacterId: "one", worldAuthorWorkingContent: {},
+      playableCharactersFromContent: () => [{ id: "one", name: "Mira" }, { id: "two", name: "Other", profile: { identity: { aliases: ["MIRA"] } } }]
+    });
+    (elements.characterName as HTMLInputElement).value = " mira ";
+    updateWorldCharacterDuplicateWarning();
+    expect(elements.characterDuplicateWarning!.classList.contains("hidden")).toBe(false);
+    (elements.characterName as HTMLInputElement).value = "Unique";
+    updateWorldCharacterDuplicateWarning();
+    expect(elements.characterDuplicateWarning!.classList.contains("hidden")).toBe(true);
+  });
+it("locks an open campaign editor when generation begins or status cannot be read", async () => {
+  const locks: boolean[] = [];
+  const notices: string[] = [];
+  const controller = { setLocked: (locked: boolean) => locks.push(locked) };
+  const bindings = {
+    characterModalBusy: false, characterApi: { generation: { syncStatus: async () => ({ pendingGeneration: { id: "job" }, generationRecovery: null }) } },
+    campaignCharacterController: controller, selectedCampaign: { id: "campaign" }, campaignCharacterLockEpoch: 0, campaignCharacterGenerationLocked: (status: { pendingGeneration: unknown; generationRecovery: unknown }) => Boolean(status.pendingGeneration || status.generationRecovery), elements: { characterDialog: { open: true } }, campaignCharacterLocked: false,
+    setCharacterStatus: (message: string) => notices.push(message), setCampaignCharacterReviewLock: () => {}
+  };
+  const { refreshCampaignCharacterLock } = managementFunctions<{ refreshCampaignCharacterLock: (id: string, controller: object) => Promise<void> }>(["refreshCampaignCharacterLock"], bindings);
+  await refreshCampaignCharacterLock("campaign", controller);
+  expect(locks).toEqual([true]);
+  expect(notices[0]).toMatch(/resolve generation/i);
+  bindings.characterApi.generation.syncStatus = async () => { throw new Error("offline"); };
+  await refreshCampaignCharacterLock("campaign", controller);
+  expect(locks).toEqual([true, true]);
+  expect(notices[1]).toMatch(/offline/);
+});
+it("ignores stale generation responses and unlocks after recovery resolves", async () => {
+  const locks: boolean[] = [];
+  const pending: Array<(status: object) => void> = [];
+  const controller = { setLocked: (locked: boolean) => locks.push(locked) };
+  const bindings = {
+    characterModalBusy: false, characterApi: { generation: { syncStatus: () => new Promise<object>((resolve) => pending.push(resolve)) } },
+    campaignCharacterController: controller, selectedCampaign: { id: "campaign" }, campaignCharacterLockEpoch: 0,
+    campaignCharacterGenerationLocked: (status: { pendingGeneration?: unknown; generationRecovery?: { status: string } }) => Boolean(status.pendingGeneration || status.generationRecovery?.status === "recoverable"),
+    elements: { characterDialog: { open: true } }, campaignCharacterLocked: true, setCharacterStatus: () => {}, setCampaignCharacterReviewLock: () => {}
+  };
+  const { refreshCampaignCharacterLock } = managementFunctions<{ refreshCampaignCharacterLock: (id: string, controller: object) => Promise<void> }>(["refreshCampaignCharacterLock"], bindings);
+  const first = refreshCampaignCharacterLock("campaign", controller);
+  const second = refreshCampaignCharacterLock("campaign", controller);
+  pending[1]!({ pendingGeneration: null, generationRecovery: { status: "failed" } });
+  await second;
+  pending[0]!({ pendingGeneration: { id: "old" }, generationRecovery: null });
+  await first;
+  expect(locks).toEqual([false]);
+  const staleCampaign = refreshCampaignCharacterLock("campaign", controller);
+  bindings.selectedCampaign.id = "other";
+  pending[2]!({ pendingGeneration: { id: "job" }, generationRecovery: null });
+  await staleCampaign;
+  expect(locks).toEqual([false]);
+});
+it("locks only pending or recoverable generation", () => {
+  const { campaignCharacterGenerationLocked } = managementFunctions<{ campaignCharacterGenerationLocked: (status: object) => boolean }>(["campaignCharacterGenerationLocked"], {});
+  expect(campaignCharacterGenerationLocked({ pendingGeneration: {}, generationRecovery: null })).toBe(true);
+  expect(campaignCharacterGenerationLocked({ pendingGeneration: null, generationRecovery: { status: "recoverable" } })).toBe(true);
+  expect(campaignCharacterGenerationLocked({ pendingGeneration: null, generationRecovery: { status: "failed" } })).toBe(false);
+  expect(campaignCharacterGenerationLocked({ pendingGeneration: null, generationRecovery: null })).toBe(false);
+});
+it("keeps organized campaign proposals unavailable while generation is locked or status fails", async () => {
+  const apply = { disabled: false, title: "" };
+  const controller = { saving: false, draft: { conflict: false }, setLocked: vi.fn() };
+  const bindings = {
+    characterModalBusy: false, characterModalScope: "campaign", campaignCharacterLocked: false, campaignCharacterLockEpoch: 0,
+    campaignCharacterController: controller, selectedCampaign: { id: "campaign" },
+    characterApi: { generation: { syncStatus: async () => ({ pendingGeneration: { id: "job" }, generationRecovery: null }) } },
+    campaignCharacterGenerationLocked: (status: { pendingGeneration: unknown }) => Boolean(status.pendingGeneration),
+    elements: { characterDialog: { open: true }, applyCharacterProfileReview: apply }, setCharacterStatus: vi.fn()
+  };
+  const { setCampaignCharacterReviewLock, refreshCampaignCharacterLock } = managementFunctions<{
+    setCampaignCharacterReviewLock: () => void; refreshCampaignCharacterLock: (id: string, controller: object) => Promise<void>
+  }>(["setCampaignCharacterReviewLock", "refreshCampaignCharacterLock"], bindings);
+  // The extraction harness binds helper names separately, as production does through module scope.
+  Object.assign(bindings, { setCampaignCharacterReviewLock });
+  await refreshCampaignCharacterLock("campaign", controller);
+  expect(apply.disabled).toBe(true);
+  expect(controller.setLocked).toHaveBeenCalledWith(true);
+});
+it("refreshes campaign lock after organizing and retains an open review through conflict", async () => {
+  const controller = { draft: { conflict: true }, setLocked: vi.fn() };
+  const refresh = vi.fn(async () => {});
+  const controls = vi.fn();
+  const review = vi.fn();
+  const { organizeCharacterProfile } = managementFunctions<{ organizeCharacterProfile: () => Promise<void> }>(["organizeCharacterProfile"], {
+    worldAuthorBusy: false, characterModalScope: "campaign", characterModalBusy: false,
+    characterFromForm: () => ({ name: "Mira" }), selectedCampaign: { id: "campaign" }, selectedWorld: null,
+    campaignCharacterProfileRevision: 2, campaignCharacterController: controller, campaignCharacterLocked: false,
+    elements: { characterDialog: { open: true } }, setCampaignCharacterReviewLock: review,
+    setCharacterModalControls: controls, setCharacterProfileOrganizationProgress: vi.fn(), setCharacterStatus: vi.fn(),
+    characterApi: { campaigns: { organizeCharacter: async () => ({ candidate: {} }) } }, renderCharacterProfileReview: vi.fn(),
+    refreshCampaignCharacterLock: refresh, characterAdmissionError: (error: Error) => error.message
+  });
+  await organizeCharacterProfile();
+  expect(controls).toHaveBeenCalledWith(false, true);
+  expect(controls).not.toHaveBeenCalledWith(false, false);
+  expect(controller.setLocked).toHaveBeenCalledWith(true);
+  expect(review).toHaveBeenCalled();
+  expect(refresh).toHaveBeenCalledWith("campaign", controller);
+});
+
+it("retains proposed fields instead of applying them under a generation lock or conflict", () => {
+  const close = vi.fn(), stage = vi.fn();
+  for (const [locked, conflict] of [[true, false], [false, true]]) {
+    const { applyCharacterProfileReview } = managementFunctions<{ applyCharacterProfileReview: () => void }>(["applyCharacterProfileReview"], {
+      worldAuthorBusy: false, characterModalScope: "campaign", characterModalBusy: false, campaignCharacterLocked: locked,
+      campaignCharacterController: { draft: { conflict } }, characterProfileOrganizationResult: { candidate: {} },
+      elements: { characterProfileReviewDialog: { close } }, stageEditorOrganize: stage
+    });
+    applyCharacterProfileReview();
+  }
+  expect(stage).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled();
+});
+it("rechecks generation before applying a campaign proposal", async () => {
+  const controller = { draft: { conflict: false } }, close = vi.fn(), stage = vi.fn(), lockReview = vi.fn();
+  const { applyCharacterProfileReview } = managementFunctions<{ applyCharacterProfileReview: () => Promise<void> }>(["applyCharacterProfileReview"], {
+    worldAuthorBusy: false, characterModalScope: "campaign", characterModalBusy: false, campaignCharacterLocked: false,
+    campaignCharacterController: controller, selectedCampaign: { id: "campaign" }, characterProfileOrganizationResult: { candidate: {} },
+    elements: { characterProfileReviewDialog: { open: true, close } }, setCampaignCharacterReviewLock: lockReview,
+    refreshCampaignCharacterLock: async () => { controller.draft.conflict = true; }, stageEditorOrganize: stage
+  });
+  await applyCharacterProfileReview();
+  expect(lockReview).toHaveBeenCalledWith(true);
+  expect(stage).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled();
+});
+it("does not apply proposals after a stale status check", async () => {
+  const controller = { draft: { conflict: false } }, close = vi.fn(), stage = vi.fn();
+  const { applyCharacterProfileReview } = managementFunctions<{ applyCharacterProfileReview: () => Promise<void> }>(["applyCharacterProfileReview"], {
+    worldAuthorBusy: false, characterModalScope: "campaign", characterModalBusy: false, campaignCharacterLocked: false,
+    campaignCharacterController: controller, selectedCampaign: { id: "campaign" }, characterProfileOrganizationResult: { candidate: {} },
+    elements: { characterProfileReviewDialog: { open: true, close } }, setCampaignCharacterReviewLock: vi.fn(),
+    refreshCampaignCharacterLock: async () => undefined, stageEditorOrganize: stage
+  });
+  await applyCharacterProfileReview();
+  expect(stage).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled();
 });

@@ -740,3 +740,12 @@ legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 80
 .management-boot-status button:not([hidden]) { margin-top: 12px; }
 
 .retired-campaign-settings { display: none !important; }
+
+@media (max-width: 600px) {
+  .character-dialog-modal button, .character-dialog-modal summary, .character-profile-review-dialog button { min-height: 44px; }
+}
+
+.character-field-error { color: var(--danger, #ffa8a8); margin: .25rem 0 .75rem; }
+.campaign-character-feedback button { margin: .25rem .5rem .25rem 0; }
+
+#campaignCharacterFeedback:empty, #campaignCharacterFeedback:has(.campaign-character-feedback:empty) { display: none; }

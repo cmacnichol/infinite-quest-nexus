@@ -1,0 +1,36 @@
+import { parseHTML } from "linkedom";
+import { afterEach, expect, it, vi } from "vitest";
+import { characterProfileSchema } from "../../packages/contracts/src/world-library.js";
+import { createCampaignMainController, createCharacterProfileForm } from "../../apps/web/src/character-profile-form.js";
+
+afterEach(() => vi.unstubAllGlobals());
+it("keeps the campaign draft through conflict, compares concurrent fields and reapplies it", async () => {
+  const { document, Event } = parseHTML("<html><body><div id='editor'></div></body></html>");
+  vi.stubGlobal("document", document);
+  const host = document.querySelector("#editor")! as unknown as HTMLElement;
+  const profile = { name: "Mira", profile: characterProfileSchema.parse({ story: { role: "Scout" } }), revision: 1 };
+  const latest = { ...profile, name: "Mira Vale", revision: 2 };
+  const form = createCharacterProfileForm(host, profile);
+  const role = host.querySelector('[data-character-profile-path="story.role"]')! as HTMLTextAreaElement;
+  role.value = "Guide"; role.dispatchEvent(new Event("input") as unknown as globalThis.Event);
+  const save = vi.fn().mockRejectedValueOnce({ status: 409 }).mockResolvedValue(latest);
+  const controller = createCampaignMainController(form, { host, load: async () => latest, save, isCurrent: () => true, isLocked: () => false, onSaved: vi.fn(), onDiscard: vi.fn() });
+  await controller.save();
+  expect(form.draft.conflict).toBe(true);
+  await controller.save(); expect(save).toHaveBeenCalledTimes(1);
+  const click = (text: string) => [...host.querySelectorAll("button")].find((button) => button.textContent === text)!.click();
+  click("Compare latest"); await vi.waitFor(() => expect(host.textContent).toContain("Mira Vale"));
+  expect(host.textContent).toContain("Character name");
+  controller.requestClose();
+  click("Keep editing");
+  expect(host.textContent).toContain("Mira Vale");
+  expect(host.textContent).toContain("Reapply my changes");
+  controller.setLocked(true);
+  expect(role.disabled).toBe(true);
+  controller.setLocked(false);
+  expect(role.disabled).toBe(false);
+  click("Reapply my changes");
+  expect(form.update()).toMatchObject({ name: "Mira Vale", expectedRevision: 2, profile: { story: { role: "Guide" } } });
+  controller.requestClose(); expect(host.textContent).toContain("Keep editing");
+  expect(host.textContent).toContain("Save changes"); expect(host.textContent).toContain("Discard changes");
+});

@@ -123,13 +123,13 @@ Use phase 1’s draft model, renderer and typed HTTP error adapter. Existing cam
 
 **Interface.** Adapt `getCharacterProfile` and `updateCharacterProfile` to the shared editor. Reapply overlays only changed fields on the newest revision and carries the accepted Organize version.
 
-- [ ] **Regression cases.** Open the same protagonist from the campaign page and Story. Verify grouped fields, typed GET/PUT, a generation/recovery lock beginning while dirty, one close prompt with three outcomes, and Compare latest/Reapply or Discard after 409. Assert focus and field values after each outcome.
-- [ ] **Implementation.** Wire campaign-main to getCharacterProfile and updateCharacterProfile. Preserve changed paths during reapply to the latest revision. Keep campaign Organize on the campaign page and restore focus to the opener after Save.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Open the same protagonist from the campaign page and Story. Verify grouped fields, typed GET/PUT, a generation/recovery lock beginning while dirty, one close prompt with three outcomes, and Compare latest/Reapply or Discard after 409. Assert focus and field values after each outcome.
+- [x] **Implementation.** Wire campaign-main to getCharacterProfile and updateCharacterProfile. Preserve changed paths during reapply to the latest revision. Keep campaign Organize on the campaign page and restore focus to the opener after Save.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
-pnpm exec vitest run tests/unit/character-profiles.test.ts
-pnpm exec playwright test tests/e2e/legacy-ui-campaign-edits.e2e.test.ts tests/e2e/legacy-ui-dialog-dismissal.e2e.test.ts
+pnpm exec vitest run tests/unit/character-profiles.test.ts tests/unit/campaign-main-editor.test.ts tests/unit/management-ui.test.ts tests/unit/client-web/api-client.test.ts tests/unit/client-web/http-client.test.ts
+pnpm exec playwright test tests/e2e/legacy-ui-campaign-edits.e2e.test.ts tests/e2e/legacy-ui-dialog-dismissal.e2e.test.ts tests/e2e/unified-character-editor.e2e.test.ts tests/e2e/editor-draft-recovery.e2e.test.ts tests/e2e/legacy-ui-authoring-disclosures.e2e.test.ts
 ```
 
 ### 2B · Consolidate the cast inbox and make sheet states accessible
@@ -140,16 +140,38 @@ pnpm exec playwright test tests/e2e/legacy-ui-campaign-edits.e2e.test.ts tests/e
 
 **Interface.** Use the existing workspace counts and sheet field descriptors. A conflict selects the character and focuses the field, while candidate actions still identify a specific candidate.
 
-- [ ] **Regression cases.** Exercise duplicate names in both editors without blocking Save. Verify counts and order of identity questions, details and conflicts, focus on the conflict field, aria-current, Show empty fields, and readable source labels. Cover a newly seeded, subsequently edited and imported main profile at 1440px and 390px using only the keyboard.
-- [ ] **Implementation.** Keep one panel-level inbox, scans and sources. Label protagonist provenance at profile level using stored-profile versus snapshot information, with an unknown fallback. Delegate editing to the shared renderer. Make reset/validation announcements and large touch targets follow the spec interaction matrix.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Exercise duplicate names in both editors without blocking Save. Verify counts and order of identity questions, details and conflicts, focus on the conflict field, aria-current, Show empty fields, and readable source labels. Cover a newly seeded, subsequently edited and imported main profile at 1440px and 390px using only the keyboard.
+- [x] **Implementation.** Keep one panel-level inbox, scans and sources. Label protagonist provenance at profile level using stored-profile versus snapshot information, with an unknown fallback. Delegate editing to the shared renderer. Make reset/validation announcements and large touch targets follow the spec interaction matrix.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
-pnpm exec vitest run tests/unit/campaign-cast-panel.test.ts tests/unit/cast-review-queue.test.ts
-pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts tests/e2e/legacy-ui-accessibility.e2e.test.ts
+pnpm exec vitest run tests/unit/campaign-cast-panel.test.ts tests/unit/cast-review-queue.test.ts tests/unit/campaign-cast-editor.test.ts tests/unit/character-review-decisions.test.ts
+pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts tests/e2e/legacy-ui-accessibility.e2e.test.ts tests/e2e/character-duplicate-warning.e2e.test.ts
 ```
 
 **Phase 2 exit.** Run a complete keyboard edit in Story and on the campaign page. Attach 1440px and 390px screenshots for the editor, inbox, conflict, and focused validation message. Record database provenance separately from browser behavior.
+
+**Phase 2 verification, 2026-11-08**
+
+231 unit tests, 115 Chromium tests across the eight suites above, six additional Story generation-recovery browser cases and 30 World Library PostgreSQL integration tests passed. Both clients built, and the repository, TypeScript and client-boundary checks passed.
+
+To rerun the six recovery cases on Windows, set `$env:NODE_OPTIONS = "--import=tsx"` for the Playwright process so its database fixture resolves workspace TypeScript sources. Run `pnpm exec playwright test tests/e2e/generation-integrity-diagnostics.e2e.test.ts --grep "revision-checked character profile|character profile form and story draft"`.
+
+| Criteria | Evidence |
+|---|---|
+| 2.1, 2.2, 2.6–2.8 | Chromium exercised both editor entry points by keyboard, inline validation, all three dirty-close actions, generation and recovery locks, and both ways to resolve a revision conflict. A concurrent rename survived reapplying a local role edit. Save restored focus to the opener. |
+| 2.3–2.5 | Browser fixtures covered case-insensitive duplicate aliases without blocking a save, selected cast state, empty fields, sources and direct inbox actions. Four provenance cases covered snapshot fallback, the initial stored copy, a subsequent edit and an unknown imported source. |
+| Organize provenance | With both web clients built and `NEXUS_EDITOR_BROWSER_PROOF=1`, the World Library integration suite drove the campaign editor through a real PostgreSQL revision conflict. After Compare, Reapply and Save, the API reload and audit row retained the accepted proposal version. Organize used a deterministic provider fixture. |
+
+| Screenshot | 1440px | 390px |
+|---|---|---|
+| Story editor | [Desktop](../../review/assets/unified-character-editor-phase-2/Story-editor-1440.png) | [Mobile](../../review/assets/unified-character-editor-phase-2/Story-editor-390.png) |
+| Campaign editor | [Desktop](../../review/assets/unified-character-editor-phase-2/campaign-editor-1440.png) | [Mobile](../../review/assets/unified-character-editor-phase-2/campaign-editor-390.png) |
+| Needs attention inbox | [Desktop](../../review/assets/unified-character-editor-phase-2/cast-inbox-1440.png) | [Mobile](../../review/assets/unified-character-editor-phase-2/cast-inbox-390.png) |
+| Story conflict | [Desktop](../../review/assets/unified-character-editor-phase-2/Story-conflict-1440.png) | [Mobile](../../review/assets/unified-character-editor-phase-2/Story-conflict-390.png) |
+| Campaign conflict | [Desktop](../../review/assets/unified-character-editor-phase-2/campaign-conflict-1440.png) | [Mobile](../../review/assets/unified-character-editor-phase-2/campaign-conflict-390.png) |
+| Story validation focus | [Desktop](../../review/assets/unified-character-editor-phase-2/Story-validation-1440.png) | [Mobile](../../review/assets/unified-character-editor-phase-2/Story-validation-390.png) |
+| Campaign validation focus | [Desktop](../../review/assets/unified-character-editor-phase-2/campaign-validation-1440.png) | [Mobile](../../review/assets/unified-character-editor-phase-2/campaign-validation-390.png) |
 
 ## Phase 3 · Introduce campaign authority and compatible readers
 
