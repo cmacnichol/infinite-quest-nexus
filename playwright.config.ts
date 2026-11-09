@@ -13,7 +13,7 @@ export default defineConfig({
   workers: process.env.CI ? 2 : 4,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
-  reporter: process.env.CI ? "github" : "line",
+  reporter: process.env.CI ? [["list"], ["github"]] : "line",
   timeout: 30_000,
   expect: { timeout: 8_000 },
   use: {
