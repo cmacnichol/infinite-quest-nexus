@@ -1,21 +1,16 @@
+import { createNexusApiClient, createNoopSessionPort, NexusApiError, ApiContractError } from "@infinite-quest/client-web";
 import {
   WORLD_CONTENT_SCHEMA_VERSION,
   canonicalizeWorldContent,
-  playableCharacterGenerationPreviewResponseSchema,
-  playableCharacterSchema
+  type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
 import { parseEditableWorldDraft, type EditableWorldDraft } from "./world-editor-model.js";
 import { sanitizeCharacterWorkspaceValue } from "./character-workspace-sanitizer.js";
 import { parseAuthoringFailure } from "./authoring-errors.js";
 import type { AuthoringFailure } from "../../../packages/contracts/src/authoring.js";
 
-export interface WorldGenerationProgressResponse {
-  status: "processing" | "completed" | "failed" | "unknown";
-  phase: string;
-  progressPercent: number;
-  message: string;
-  errorMessage?: string;
-}
+import type { WorldGenerationProgressResponse } from "../../../packages/contracts/src/client-api.js";
+export type { WorldGenerationProgressResponse } from "../../../packages/contracts/src/client-api.js";
 
 export type CharacterWorkspaceApiErrorKind =
   | "network"
@@ -45,17 +40,14 @@ export class CharacterWorkspaceApiError extends Error {
 }
 
 export interface CharacterGenerationPreviewRequest {
+  campaignUse?: "playable" | "supporting" | "both";
   content: EditableWorldDraft;
   prompt: string;
   characterId?: string;
-  progressKey: string;
+  progressKey?: string;
 }
 
 const PROHIBITED_ROOT_KEYS = new Set(["user_id", "userId", "owner_user_id", "ownerUserId"]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function stripProhibitedRootKeys(value: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).filter(([key]) => !PROHIBITED_ROOT_KEYS.has(key)));
@@ -67,130 +59,43 @@ function clone<T>(value: T): T {
     : JSON.parse(JSON.stringify(value)) as T;
 }
 
-export function sanitizeCharacterGenerationContent(draft: EditableWorldDraft): EditableWorldDraft {
+export function sanitizeCharacterGenerationContent(draft: EditableWorldDraft): WorldContent {
   const parsed = clone(parseEditableWorldDraft(draft));
   const content = sanitizeCharacterWorkspaceValue(parsed) as Record<string, unknown>;
   content.schemaVersion = WORLD_CONTENT_SCHEMA_VERSION;
-  return parseEditableWorldDraft(canonicalizeWorldContent(content));
+  return canonicalizeWorldContent(content);
 }
 
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
+function client() {
+  return createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort() });
 }
 
-async function fetchJson(url: string, init: RequestInit): Promise<{ response: Response; value: unknown }> {
-  let response: Response;
+function translateError(error: unknown): never {
+  if (error instanceof Error && error.name === "AbortError") throw error;
+  if (error instanceof NexusApiError) {
+    const unavailable = error.statusCode === 503 || error.domainCode === "default_text_provider_unavailable";
+    throw new CharacterWorkspaceApiError(unavailable ? "unavailable" : "request_failed", error.message, error.statusCode, error.details);
+  }
+  if (error instanceof ApiContractError) {
+    throw new CharacterWorkspaceApiError(error.phase === "request" ? "request_failed" : "invalid_response", error.message, error.statusCode);
+  }
+  throw new CharacterWorkspaceApiError("network", error instanceof Error ? error.message : "The character preview request failed.", null);
+}
+
+export async function generateCharacterPreview(request: CharacterGenerationPreviewRequest, signal?: AbortSignal) {
+  const content = sanitizeCharacterGenerationContent(request.content);
   try {
-    response = await fetch(url, init);
-  } catch (error) {
-    if (init.signal?.aborted) throw error;
-    throw new CharacterWorkspaceApiError(
-      "network",
-      error instanceof Error ? error.message : "The character preview request failed.",
-      null
-    );
-  }
-
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch (error) {
-    if (init.signal?.aborted || isAbortError(error)) throw error;
-    if (response.ok) {
-      throw new CharacterWorkspaceApiError(
-        "invalid_response",
-        "Character preview returned an unexpected response.",
-        response.status
-      );
-    }
-    value = null;
-  }
-
-  if (!response.ok) {
-    const body = isRecord(value) ? value : {};
-    const details = body.details;
-    const unavailable = response.status === 503 || (
-      isRecord(details) && details.code === "default_text_provider_unavailable"
-    );
-    throw new CharacterWorkspaceApiError(
-      unavailable ? "unavailable" : "request_failed",
-      typeof body.message === "string" ? body.message : `Request failed with status ${response.status}.`,
-      response.status,
-      details
-    );
-  }
-
-  return { response, value };
+    const result = await client().worlds.generateCharacterPreview({
+      content, prompt: request.prompt,
+      ...(request.campaignUse === "supporting" ? { campaignUse: request.campaignUse } : {}),
+      ...(request.characterId === undefined ? {} : { characterId: request.characterId }),
+      ...(request.progressKey === undefined ? {} : { progressKey: request.progressKey })
+    }, signal);
+    return { character: stripProhibitedRootKeys(result.character as Record<string, unknown>) as typeof result.character };
+  } catch (error) { return translateError(error); }
 }
 
-function invalidSuccessResponse(response: Response, error?: unknown): never {
-  throw new CharacterWorkspaceApiError(
-    "invalid_response",
-    error instanceof Error ? error.message : "Character preview returned an unexpected response.",
-    response.status
-  );
-}
-
-function parsePreview(value: unknown) {
-  const parsed = playableCharacterGenerationPreviewResponseSchema.parse(value);
-  const character = stripProhibitedRootKeys(clone(parsed.character) as Record<string, unknown>);
-  return { character: playableCharacterSchema.parse(character) };
-}
-
-function parseProgress(value: unknown): WorldGenerationProgressResponse {
-  if (!isRecord(value) || Object.keys(value).some((key) => ![
-    "status", "phase", "progressPercent", "message", "errorMessage"
-  ].includes(key)) || typeof value.status !== "string" ||
-      !["processing", "completed", "failed", "unknown"].includes(value.status) ||
-      typeof value.phase !== "string" || typeof value.progressPercent !== "number" ||
-      !Number.isFinite(value.progressPercent) || value.progressPercent < 0 || value.progressPercent > 100 ||
-      typeof value.message !== "string" ||
-      !(value.errorMessage === undefined || typeof value.errorMessage === "string")) {
-    throw new Error("Character generation returned unexpected progress.");
-  }
-  return {
-    status: value.status as WorldGenerationProgressResponse["status"],
-    phase: value.phase,
-    progressPercent: value.progressPercent,
-    message: value.message,
-    ...(typeof value.errorMessage === "string" ? { errorMessage: value.errorMessage } : {})
-  };
-}
-
-export async function generateCharacterPreview(
-  request: CharacterGenerationPreviewRequest,
-  signal?: AbortSignal
-) {
-  const body = {
-    content: sanitizeCharacterGenerationContent(request.content),
-    prompt: request.prompt,
-    ...(request.characterId === undefined ? {} : { characterId: request.characterId }),
-    progressKey: request.progressKey
-  };
-  const { response, value } = await fetchJson("/api/v1/worlds/playable-characters/generate-preview", {
-    method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal
-  } as RequestInit);
-  try {
-    return parsePreview(value);
-  } catch (error) {
-    return invalidSuccessResponse(response, error);
-  }
-}
-
-export async function loadCharacterGenerationProgress(
-  progressKey: string,
-  signal?: AbortSignal
-): Promise<WorldGenerationProgressResponse> {
-  const { response, value } = await fetchJson(
-    `/api/v1/worlds/generate-progress?key=${encodeURIComponent(progressKey)}`,
-    { headers: { Accept: "application/json" }, signal } as RequestInit
-  );
-  try {
-    return parseProgress(value);
-  } catch (error) {
-    return invalidSuccessResponse(response, error);
-  }
+export async function loadCharacterGenerationProgress(progressKey: string, signal?: AbortSignal): Promise<WorldGenerationProgressResponse> {
+  try { return await client().worlds.loadCharacterGenerationProgress(progressKey, signal); }
+  catch (error) { return translateError(error); }
 }

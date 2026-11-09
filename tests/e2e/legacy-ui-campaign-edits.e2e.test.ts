@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T03");
+const evidenceDirectory = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T03");
 const campaignA = { id: "campaign-a", title: "Campaign Alpha", status: "active", worldId: "world-a", worldVersionId: "version-a", worldTitle: "World Alpha", worldVersionNumber: 1, activeTurnNumber: 3, stateRevision: 5, turnControlStyle: "flexible_action", storyLengthProfile: "standard", storyContextBudgetTokens: 32000 };
 const campaignB = { ...campaignA, id: "campaign-b", title: "Campaign Beta" };
 type ApiLogEntry = { method: string; path: string; status: number; requestBody: string | null; response: unknown };

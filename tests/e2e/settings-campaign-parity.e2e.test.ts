@@ -61,7 +61,7 @@ for (const [size,width] of [["desktop",1440],["mobile",390]] as const) {
     await expect(page.getByRole("link",{name:"Characters",exact:true}).last()).toBeVisible();
     await expect(page.locator('button[data-action="rebuild-images"],#narration-correction-form,input[name=displayName]')).toHaveCount(0);
     expect(await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({path:`docs/review/assets/settings-panel/${mode}-campaign-${size}.png`,fullPage:true});
+    await page.screenshot({path:`test-results/review-assets/settings-panel/${mode}-campaign-${size}.png`,fullPage:true});
   });
 }
 test("switching during a load or save ignores delayed old responses and preserves the new campaign", async ({page}) => {

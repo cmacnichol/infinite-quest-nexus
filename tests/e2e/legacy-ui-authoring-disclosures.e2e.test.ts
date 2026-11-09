@@ -1,11 +1,12 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { characterProfileSchema } from "../../packages/contracts/src/world-library.js";
 import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(process.env.PLAYWRIGHT_EVIDENCE_DIRECTORY ?? ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T18");
+const evidenceDirectory = resolve(process.env.PLAYWRIGHT_EVIDENCE_DIRECTORY ?? "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T18");
 const base = quietLeafApiPayloads();
 
 async function installAuthoringApi(page: Page, options: {
@@ -24,7 +25,7 @@ async function installAuthoringApi(page: Page, options: {
     if (path === "/api/v1/worlds" && method === "POST") {
       if (options.holdWorldSave) {
         await options.holdWorldSave();
-        return route.fulfill({ status: 503, json: { message: "Synthetic retryable draft save failure." } });
+        return route.fulfill({ status: 503, json: { error: "fixture_error", message: "Synthetic retryable draft save failure." } });
       }
       return route.fulfill({ status: 201, json: { id: "synthetic-world" } });
     }
@@ -92,9 +93,15 @@ test("closed character disclosures preserve appearance, mechanics, and imported 
   await page.locator("#characterUnclassifiedNotes").fill("Unsorted imported-era note");
   await page.locator("#characterName").fill("Mira Vale");
   await page.locator("#characterRole").fill("Guide");
+  await page.locator("#characterIdentityDetails > summary").click();
+  await page.locator("#characterAliases").fill("Wren, the Keeper\nNorth Star");
   for (const selector of ["#characterAppearance > summary", "#characterMechanics > summary"]) await page.locator(selector).click();
   await page.locator("#saveCharacter").click();
   await expect(page.locator("#playableCharacterRoster")).toContainText("Mira Vale");
+  await page.getByRole("button", { name: "Edit Mira Vale" }).click();
+  await page.locator("#characterIdentityDetails > summary").click();
+  await expect(page.locator("#characterAliases")).toHaveValue("Wren, the Keeper\nNorth Star");
+  await page.locator("#cancelCharacter").click();
   expect(writes).toEqual([]);
   await page.locator("#saveWorldDraft").click();
   await expect(page.locator("#worldAuthorDialog")).toBeHidden();
@@ -103,7 +110,68 @@ test("closed character disclosures preserve appearance, mechanics, and imported 
   const character = posted.content?.playableCharacters?.[0];
   expect(character).toMatchObject({ name: "Mira Vale", profile: { story: { role: "Guide" }, appearance: { clothing: "Blue travel coat" }, unclassifiedNotes: "Unsorted imported-era note" } });
   expect(character?.rpgStats).toEqual([expect.objectContaining({ name: "Resolve", value: 17 })]);
+  expect(character?.profile.identity.aliases).toEqual(["Wren, the Keeper", "North Star"]);
   await page.screenshot({ path: resolve(evidenceDirectory, "closed-character-fields-saved.png") });
+});
+
+test("deleting an existing character edits only the open World draft", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 0, worldCount: 1, campaignCount: 0 });
+  const api = await installLegacyUiFixture(page, fixture);
+  await page.goto(`${origin}/nexus/index.html#world-library`);
+  await page.locator(`#worldManagementCarousel [data-world-id="${fixture.worldId}"]`).click();
+  await page.locator("#editWorldDraft").click();
+  await page.locator('[data-world-author-step="character"]').click();
+  await page.getByRole("button", { name: "Edit The Observer" }).click();
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.locator("#deleteCharacter").click();
+  await expect(page.locator("#characterDialog")).toBeVisible();
+  page.once("dialog", dialog => dialog.accept());
+  await page.locator("#deleteCharacter").click();
+  await expect(page.locator("#playableCharacterRoster")).toContainText("No playable characters");
+  expect(api.writes).toHaveLength(0);
+});
+
+for (const width of [1440, 390]) test(`campaign aliases and reviewed Organize provenance survive Save at ${width}px`, async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
+  const path = `/api/v1/campaigns/${fixture.campaignId}/character-profile`;
+  const api = await installLegacyUiFixture(page, fixture);
+  const saves = () => api.writes.filter(write => write.path === path && write.method === "PUT").map(write => write.body);
+  const protocolVersion = "fixture-organizer-reviewed-v3";
+  await page.route(`**${path}/organize`, route => route.fulfill({ json: {
+    candidate: characterProfileSchema.parse({ appearance: { clothing: "blue cloak" } }),
+    evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "blue cloak" }],
+    conflicts: [], warnings: [], unassignedText: [], protocolVersion
+  } }));
+  await page.setViewportSize({ width, height: 900 });
+  await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await page.locator(`#campaignList [data-campaign-id="${fixture.campaignId}"]`).click();
+  await page.locator("#editCampaignCharacter").click();
+  await page.locator("#characterIdentityDetails > summary").click();
+  await page.locator("#characterAliases").fill("Wren, the Keeper\nNorth Star");
+  await page.locator("#organizeCharacterProfile").click();
+  await expect(page.locator("#characterProfileReviewList")).toContainText("blue cloak");
+  expect(await page.locator("#characterProfileReviewDialog").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: resolve(evidenceDirectory, `campaign-organize-review-${width}.png`) });
+  await page.locator("#applyCharacterProfileReview").click();
+  expect(saves()).toHaveLength(0);
+  await page.locator("#saveCharacter").click();
+  await expect(page.locator("#characterDialog")).toBeHidden();
+  expect(saves()).toHaveLength(1);
+  expect(saves()[0]).toMatchObject({
+    expectedRevision: 3, editSource: "ai_organized", organizerProtocolVersion: protocolVersion,
+    profile: { identity: { aliases: ["Wren, the Keeper", "North Star"] }, appearance: { clothing: "blue cloak" } }
+  });
+  await page.locator("#editCampaignCharacter").click();
+  await page.locator("#characterIdentityDetails > summary").click();
+  await expect(page.locator("#characterAliases")).toHaveValue("Wren, the Keeper\nNorth Star");
+  await page.locator("#organizeCharacterProfile").click();
+  await page.locator("#cancelCharacterProfileReview").click();
+  await page.locator("#characterRole").fill("Archivist");
+  await page.locator("#saveCharacter").click();
+  await expect(page.locator("#characterDialog")).toBeHidden();
+  expect(saves()).toHaveLength(2);
+  expect(saves()[1]).toMatchObject({ expectedRevision: 4, editSource: "manual" });
+  expect(saves()[1]).not.toHaveProperty("organizerProtocolVersion");
 });
 
 test("invalid hidden mechanics field opens its disclosure before focus", async ({ page }) => {
@@ -199,7 +267,7 @@ test("character organization busy state freezes disclosure navigation and restor
   await page.route("**/api/v1/worlds/*/draft/playable-characters/organize", async (route) => {
     started();
     await held;
-    await route.fulfill({ status: 503, json: { message: "Synthetic organization failure." } });
+    await route.fulfill({ status: 503, json: { error: "ServiceUnavailable", message: "Synthetic organization failure." } });
   });
   await page.goto(`${origin}/nexus/index.html#world-library`);
   await page.locator(`#worldManagementCarousel [data-world-id="${fixture.worldId}"]`).click();
@@ -268,4 +336,54 @@ test("existing imported advanced character round-trips source, unknown fields, a
   const save = api.writes.find((write) => write.method === "PUT" && write.path.endsWith("/draft"))?.body as { content?: { playableCharacters?: unknown[] } };
   expect(save.content?.playableCharacters?.[0]).toEqual(character);
   await page.screenshot({ path: resolve(evidenceDirectory, "imported-advanced-character-roundtrip.png") });
+});
+test("campaign Organize review survives generation lock and profile conflict", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
+  const path = `/api/v1/campaigns/${fixture.campaignId}/character-profile`;
+  const api = await installLegacyUiFixture(page, fixture);
+  const saves = () => api.writes.filter(write => write.path === path && write.method === "PUT");
+  let generationActive = false, conflict = true;
+  await page.route(`**/api/v1/campaigns/${fixture.campaignId}/sync-status`, route => route.fulfill({ json: {
+    ...fixture.syncStatus,
+    pendingGeneration: generationActive ? { id: "88888888-8888-4888-8888-888888888888", status: "generating", action: "Look", expectedTurnNumber: 2,
+      createdAt: "2026-09-16T12:00:00.000Z", updatedAt: "2026-09-16T12:00:00.000Z", operationKind: "append", replacementTurnId: null } : null
+  } }));
+  await page.route(`**${path}/organize`, route => route.fulfill({ json: {
+    candidate: characterProfileSchema.parse({ appearance: { clothing: "blue cloak" } }),
+    evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "blue cloak" }], conflicts: [], warnings: [], unassignedText: [], protocolVersion: "fixture-organizer-v1"
+  } }));
+  await page.route(`**${path}`, route => {
+    if (route.request().method() === "PUT" && conflict) {
+      conflict = false;
+      return route.fulfill({ status: 409, json: { error: "fixture_error", message: "Profile changed", details: { code: "state_revision_changed" } } });
+    }
+    return route.fallback();
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await page.locator(`#campaignList [data-campaign-id="${fixture.campaignId}"]`).click();
+  await page.locator("#editCampaignCharacter").click();
+  await page.locator("#organizeCharacterProfile").click();
+  const review = page.locator("#characterProfileReviewDialog"), apply = page.locator("#applyCharacterProfileReview");
+  await expect(review).toContainText("blue cloak"); await expect(apply).toBeEnabled();
+  generationActive = true;
+  await apply.click();
+  await expect(apply).toBeDisabled();
+  await expect(review).toContainText("Proposals are retained");
+  await expect(page.locator("#saveCharacter")).toBeDisabled();
+  generationActive = false;
+  await review.getByRole("button", { name: "Check generation status" }).click();
+  await expect(apply).toBeEnabled();
+  await apply.click(); await expect(review).toBeHidden();
+  await page.locator("#saveCharacter").click();
+  const editor = page.locator("#characterDialog");
+  await expect(editor).toContainText("Compare the latest");
+  await expect(page.locator("#saveCharacter")).toBeDisabled();
+  await editor.getByRole("button", { name: "Compare latest", exact: true }).click();
+  await editor.getByRole("button", { name: "Reapply my changes", exact: true }).click();
+  await expect(page.locator("#saveCharacter")).toBeEnabled();
+  await page.locator("#saveCharacter").click();
+  await expect(editor).toBeHidden();
+  expect(saves()).toHaveLength(1);
+  expect(saves()[0]!.body).toMatchObject({ editSource: "ai_organized", organizerProtocolVersion: "fixture-organizer-v1", profile: { appearance: { clothing: "blue cloak" } } });
 });

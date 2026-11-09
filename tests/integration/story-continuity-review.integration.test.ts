@@ -80,7 +80,7 @@ function reply(narration: string, trackerUpdates: Record<string, unknown>[] = []
   return JSON.stringify({ narration, choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: trackerUpdates, image_prompt: "Fixture relay.", continuity_summary: narration, canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
 }
 
-integration("T17 durable continuity review", () => {
+integration("durable continuity review", () => {
   let pool: DatabasePool;
   let server: Server;
   let ownerUserId = "";
@@ -278,8 +278,8 @@ integration("T17 durable continuity review", () => {
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: mode }, { installedCapability: "r3", enforceEnabled: true });
     if (storyOnly) await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
     await prepareCampaign?.(imported.campaignId);
-    // This shared fixture covers historical v3/v4 jobs. Dedicated v5 fixtures
-    // below exercise history coverage and its frozen checkpoint semantics.
+    // This shared fixture captures the v3 and current v6 protocols with history coverage off.
+    // Dedicated historical fixtures below pin genuine v4/v5 jobs.
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined,
       { installedCapability: "r3", enforceEnabled: true, castContextEnabled, historyCoverageEnabled: false });
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action, requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit", providerProfileId: textProviderProfileId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
@@ -302,6 +302,29 @@ integration("T17 durable continuity review", () => {
     return { job, application, campaignId: imported.campaignId };
   }
 
+  /** Enqueue a job exactly as a v4 worker froze it: v17 prompt, cast-context-v1 authority, no recent window. */
+  async function enqueueHistoricalV4(mode: "observe" | "enforce") {
+    const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    story.world.title = `Historical v4 ${randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "historical-v4.story", story }));
+    await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: mode }, { installedCapability: "r3", enforceEnabled: true });
+    const commands = createPostgresGenerationCommandRepository(pool, {
+      resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId, snapshot) => snapshot
+        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId: scopeOwnerUserId, scope: "campaign", campaignId }, snapshot.policy.continuityReview, snapshot.castContext === true, "v1")
+        : loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
+      promptProtocolVersion: providerPromptProtocolVersion,
+      readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) => readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds]),
+      resolveStoryMemoryPolicySnapshot: async (client, scope) => {
+        const resolved = await resolveStoryMemoryPolicySnapshot(client, scope, { installedCapability: "r3", enforceEnabled: true, castContextEnabled: true, historyCoverageEnabled: false });
+        if (!resolved) throw new Error("Expected real provider policy fingerprint."); const { castDiscoveryEnabled: _notFrozenByOldJobs, ...historical } = resolved;
+        return { ...historical, contextProtocol: "current-continuity-v4" as const, castContext: true, promptProtocol: "story-v17-campaign-cast" as const };
+      }
+    });
+    const job = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Wait at the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true, castContextEnabled: true });
+    return { job, application, campaignId: imported.campaignId };
+  }
+
   async function enqueueRealV5ReviewCheckpoint() {
     const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
     story.world.title = `Real v5 checkpoint ${randomUUID()}`;
@@ -312,14 +335,14 @@ integration("T17 durable continuity review", () => {
     const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
     const commands = createPostgresGenerationCommandRepository(pool, {
       resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId, snapshot) => snapshot
-        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId: scopeOwnerUserId, scope: "campaign", campaignId }, snapshot.policy.continuityReview, snapshot.castContext === true)
+        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId: scopeOwnerUserId, scope: "campaign", campaignId }, snapshot.policy.continuityReview, snapshot.castContext === true, "v1")
         : loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
       promptProtocolVersion: providerPromptProtocolVersion,
       readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) => readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds]),
       resolveStoryMemoryPolicySnapshot: async (client, scope) => {
         const resolved = await resolveStoryMemoryPolicySnapshot(client, scope, { installedCapability: "r3", enforceEnabled: true, castContextEnabled: true });
-        if (!resolved) throw new Error("Expected real provider policy fingerprint.");
-        return { ...resolved, policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: "current-continuity-v5" as const,
+        if (!resolved) throw new Error("Expected real provider policy fingerprint."); const { castDiscoveryEnabled: _notFrozenByOldJobs, ...historical } = resolved;
+        return { ...historical, policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: "current-continuity-v5" as const,
           castContext: true, promptProtocol: "story-v17-campaign-cast" as const };
       }
     });
@@ -2401,8 +2424,8 @@ integration("T17 durable continuity review", () => {
     const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
     await pool.query(
       "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3,generation_base_identity=generation_base_identity || '{\"recentWindowTurns\":11}'::jsonb WHERE id=$1",
-      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
-        captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
+      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v7" } }),
+        captured.prompt_protocol_version.replace("current-continuity-v6", "current-continuity-v7")]
     );
     requests.length = 0;
     plannerCalls.length = 0;
@@ -2410,7 +2433,7 @@ integration("T17 durable continuity review", () => {
     const plannerCall = plannerCalls.at(-1);
     expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "context_budget_exceeded" });
     expect(plannerCall?.[14]).toBe(904);
-    expect(plannerCall?.[15]).toBe("current-continuity-v5");
+    expect(plannerCall?.[15]).toBe("current-continuity-v7");
     expect(requests.filter((body) => !body.includes("story-continuity-review-v1"))).toHaveLength(0);
     expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(0);
   });
@@ -2764,8 +2787,8 @@ integration("T17 durable continuity review", () => {
     const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
     await pool.query(
       "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3,generation_base_identity=generation_base_identity || '{\"recentWindowTurns\":11}'::jsonb WHERE id=$1",
-      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
-        captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
+      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v7" } }),
+        captured.prompt_protocol_version.replace("current-continuity-v6", "current-continuity-v7")]
     );
     reviewVerdict = "pass"; reviewSequence = ["conflict", "pass"]; repairSupersedesFactId = factId; requests.length = 0;
     try {
@@ -2799,8 +2822,8 @@ integration("T17 durable continuity review", () => {
     const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
     await pool.query(
       "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3,generation_base_identity=generation_base_identity || '{\"recentWindowTurns\":11}'::jsonb WHERE id=$1",
-      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
-        captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
+      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v7" } }),
+        captured.prompt_protocol_version.replace("current-continuity-v6", "current-continuity-v7")]
     );
     reviewVerdict = "pass"; reviewSequence = ["conflict", "pass"]; repairSupersedesFactId = factId; requests.length = 0;
     try {
@@ -2962,7 +2985,7 @@ integration("T17 durable continuity review", () => {
   });
 
   it("keeps a genuine historical v4 review candidate whose frozen recent-window field is absent", async () => {
-    const { job, application } = await enqueue("enforce", false, undefined, "Wait at the observatory.", false, providerId, true);
+    const { job, application } = await enqueueHistoricalV4("enforce");
     reviewVerdict = "conflict"; requests.length = 0;
     const before = (await pool.query<{ generation_base_identity: Record<string, unknown>; context_options: Record<string, unknown> }>("SELECT generation_base_identity,context_options FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!;
     expect(before.context_options.storyMemoryPolicy).toMatchObject({ contextProtocol: "current-continuity-v4" });
@@ -2986,8 +3009,8 @@ integration("T17 durable continuity review", () => {
     const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
     await pool.query(
       "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3,generation_base_identity=generation_base_identity || '{\"recentWindowTurns\":11}'::jsonb WHERE id=$1",
-      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
-        captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
+      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v7" } }),
+        captured.prompt_protocol_version.replace("current-continuity-v6", "current-continuity-v7")]
     );
     reviewVerdict = "pass";
     const repository = createPostgresGenerationExecutionRepository(pool);
@@ -3021,10 +3044,13 @@ integration("T17 durable continuity review", () => {
   });
 
   it.each([
-    { protocol: "current-continuity-v3", castContextEnabled: false },
-    { protocol: "current-continuity-v4", castContextEnabled: true }
-  ] as const)("dispatches one primary request from a queued frozen $protocol job after live enrollment changes", async ({ protocol, castContextEnabled }) => {
-    const { job, application, campaignId } = await enqueue("enforce", false, undefined, "Wait at the observatory.", false, providerId, castContextEnabled);
+    { protocol: "current-continuity-v3", castContextEnabled: false, historical: false },
+    { protocol: "current-continuity-v4", castContextEnabled: true, historical: true },
+    { protocol: "current-continuity-v6", castContextEnabled: true, historical: false }
+  ] as const)("dispatches one primary request from a queued frozen $protocol job after live enrollment changes", async ({ protocol, castContextEnabled, historical }) => {
+    const { job, application, campaignId } = historical
+      ? await enqueueHistoricalV4("enforce")
+      : await enqueue("enforce", false, undefined, "Wait at the observatory.", false, providerId, castContextEnabled);
     const queued = (await pool.query<{ context_options: Record<string, unknown>; orchestration_private: Record<string, unknown>; prompt_protocol_version: string }>(
       "SELECT context_options,orchestration_private,prompt_protocol_version FROM generation_jobs WHERE id=$1", [job.id]
     )).rows[0]!;

@@ -554,6 +554,35 @@ describe("playable character preview progress", () => {
 });
 
 describe("playable character campaign readiness", () => {
+  it("defaults legacy characters and excludes supporting entries from selection", () => {
+    const content = worldContentSchema.parse({ world: { title: "Mixed roster" }, playableCharacters: [
+      { id: "hero", name: "Hero", characterText: "Guidance" },
+      { id: "npc", name: "NPC", characterText: "", campaignUse: "supporting" }
+    ] });
+    expect(content.playableCharacters[0]).toMatchObject({ campaignUse: "playable", startingCastDefault: true, alwaysInContext: false });
+    expect(resolvePlayableCharacters(content).map((character) => character.id)).toEqual(["hero"]);
+    expect(selectPlayableCharacter(content).id).toBe("hero");
+    expect(() => selectPlayableCharacter(content, "npc")).toThrow();
+    expect(assessWorldCampaignReadiness(content).ready).toBe(true);
+    expect(assessWorldCampaignReadiness(content).warnings).toContainEqual(expect.objectContaining({ code: "supporting-character-missing-guidance", characterId: "npc" }));
+    const supportingOnly = worldContentSchema.parse({ ...content, playableCharacters: [content.playableCharacters[1]] });
+    expect(assessWorldCampaignReadiness(supportingOnly).issues).toContainEqual(expect.objectContaining({ code: "no-selectable-characters" }));
+    const unsafe = worldContentSchema.parse({ ...content, playableCharacters: [content.playableCharacters[0], { ...content.playableCharacters[1], name: "Roll 2d6" }] });
+    expect(assessWorldCampaignReadiness(unsafe)).toMatchObject({ ready: true, warnings: expect.arrayContaining([
+      expect.objectContaining({ code: "supporting-character-invalid-fiction-name" })
+    ]) });
+  });
+  it("uses the cast seed fiction rules for supporting and Both readiness warnings", () => {
+    const content = worldContentSchema.parse({ world: { title: "Fiction eligibility" }, playableCharacters: [
+      { id: "hero", name: "Hero", characterText: "Guidance" },
+      { id: "npc", name: "Score: 12", characterText: "Guide", campaignUse: "supporting" },
+      { id: "both", name: "Keeper", characterText: "Guide", campaignUse: "both", profile: { identity: { aliases: ["Difficulty: 15"] } } }
+    ] });
+    expect(assessWorldCampaignReadiness(content)).toMatchObject({ ready: true, warnings: expect.arrayContaining([
+      expect.objectContaining({ code: "supporting-character-invalid-fiction-name", characterId: "npc" }),
+      expect.objectContaining({ code: "supporting-character-invalid-fiction-alias", characterId: "both" })
+    ]) });
+  });
   it("reports an empty draft as valid content but not campaign-ready", () => {
     const content = worldContentSchema.parse({ world: { title: "Incomplete Test World" } });
     expect(assessWorldCampaignReadiness(content)).toEqual({
@@ -620,7 +649,6 @@ describe("playable character selection", () => {
       schemaVersion: 2,
       world: { title: "Historical Test World", character: "Historical Hero" }
     });
-    expect(resolvePlayableCharacters(content)).toBe(content.playableCharacters);
     expect(resolvePlayableCharacters(content)).toEqual([]);
     expect(() => selectPlayableCharacter(content)).toThrow("This world version has no playable characters.");
   });
@@ -700,6 +728,9 @@ describe("playable character selection", () => {
       id: "hero",
       name: "Hero",
       characterText: "Hero guidance",
+      campaignUse: "playable",
+      startingCastDefault: true,
+      alwaysInContext: false,
       rpgStats: [],
       defaultTriggers: [],
       source: { type: "campaign-import" }

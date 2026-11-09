@@ -78,6 +78,13 @@ describe("cast discovery runtime execution", () => {
     expect(frozen.admission).toMatchObject({ identityPolicy: "unique_name", promptIdentifier: "cast-discovery-prompt-v2" });
     expect(execute).toHaveBeenCalledTimes(1);
   });
+  it("freezes the first-appearance permission at admission", async () => {
+    const f = fixture();
+    const enabled = await prepareCastDiscoveryExecution({ ownerUserId: id, ...f, castPresetsEnabled: true });
+    const disabled = await prepareCastDiscoveryExecution({ ownerUserId: id, ...f });
+    expect(enabled.admission?.castPresetsEnabled).toBe(true);
+    expect(disabled.admission?.castPresetsEnabled).toBe(false);
+  });
   it("freezes matching guidance and rejects policy changes before dispatch", async () => {
     const f = fixture(), saved = await prepareCastDiscoveryExecution({ ownerUserId: id, ...f, identityPolicy: "unique_name" });
     expect(saved.admission).toMatchObject({ identityPolicy: "unique_name", promptIdentifier: "cast-discovery-prompt-v2" });

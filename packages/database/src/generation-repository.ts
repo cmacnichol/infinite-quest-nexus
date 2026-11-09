@@ -35,7 +35,7 @@ import { extractPartialNarration, formatNarrationParagraphs, generationExecution
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
-import { HISTORY_COVERAGE_POLICY, isHistoryCoverageContextProtocol, storyMemoryPolicySnapshotSchema, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
+import { HISTORY_COVERAGE_POLICY, isHistoryCoverageContextProtocol, isCastV2ContextProtocol, storyMemoryPolicySnapshotSchema, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
 import { continuityReviewTechnicalDiagnosticProjection, generationReviewSummaryProjection, projectBoundedGenerationReviewSummary } from "./generation-review-summary-projection.js";
 import { generationReviewTechnicalDiagnosticSchema } from "../../contracts/src/generation-review.js";
 import { generationResponseFormatProjection } from "./generation-response-format-projection.js";
@@ -546,6 +546,8 @@ export function createPostgresGenerationCommandRepository(
           expectedTurnNumber: campaign.active_turn_number + 1,
           ...(storyMemoryPolicy ? {
             baseIdentityVersion: storyMemoryPolicy.castContext ? "generation-base-v4" as const : "generation-base-v3" as const,
+            castContextVersion: isCastV2ContextProtocol(storyMemoryPolicy.contextProtocol) ? "cast-context-v2" as const : "cast-context-v1" as const,
+            ...(storyMemoryPolicy.castDiscoveryEnabled === undefined ? {} : { castDiscoveryEnabled: storyMemoryPolicy.castDiscoveryEnabled }),
             captureRecentWindow: isHistoryCoverageContextProtocol(storyMemoryPolicy.contextProtocol)
               ? storyMemoryPolicy.policy.capability !== "r1"
               : storyMemoryPolicy.policy.recentTurnTarget > 1,
@@ -748,6 +750,8 @@ export function createPostgresGenerationCommandRepository(
           expectedTurnNumber: campaign.active_turn_number,
           ...(storyMemoryPolicy ? {
             baseIdentityVersion: storyMemoryPolicy.castContext ? "generation-base-v4" as const : "generation-base-v3" as const,
+            castContextVersion: isCastV2ContextProtocol(storyMemoryPolicy.contextProtocol) ? "cast-context-v2" as const : "cast-context-v1" as const,
+            ...(storyMemoryPolicy.castDiscoveryEnabled === undefined ? {} : { castDiscoveryEnabled: storyMemoryPolicy.castDiscoveryEnabled }),
             captureRecentWindow: isHistoryCoverageContextProtocol(storyMemoryPolicy.contextProtocol)
               ? storyMemoryPolicy.policy.capability !== "r1"
               : storyMemoryPolicy.policy.recentTurnTarget > 1,

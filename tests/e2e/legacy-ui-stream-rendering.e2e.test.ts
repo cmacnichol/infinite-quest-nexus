@@ -368,13 +368,17 @@ async function attachStreamScreenshot(page: Page, testInfo: TestInfo, name: stri
 
 test("rapid cumulative snapshots batch narration DOM writes to one scheduled render", async ({ page }, testInfo) => {
   const harness = await installStreamHarness(page);
-  await page.evaluate(() => window.__storyStreamFixture?.resetWriteCount());
+  const initialNarration = "Synthetic opening.";
+  await emitSnapshot(page, streamSnapshot(harness, initialNarration));
+  await expect(page.locator(".streaming-narration")).toContainText(initialNarration);
   const snapshots = Array.from({ length: 100 }, (_, index) => streamSnapshot(
     harness,
-    Array.from({ length: index + 1 }, (_, sentence) => `Synthetic sentence ${sentence + 1}.`).join(" ")
+    [initialNarration, ...Array.from({ length: index + 1 }, (_, sentence) => `Synthetic sentence ${sentence + 1}.`)].join(" ")
   ));
   await page.evaluate(frames => {
-    for (const frame of frames) window.__storyStreamFixture?.emit(frame);
+    const stream = window.__storyStreamFixture!;
+    stream.resetWriteCount();
+    for (const frame of frames) stream.emit(frame);
   }, snapshots);
   await waitTwoFrames(page);
 
@@ -509,10 +513,16 @@ test("an unrecoverable stream keeps the prior accepted scene and explicit recove
 
 test("a late campaign A stream callback cannot paint over same-document campaign B", async ({ page }, testInfo) => {
   const harness = await installStreamHarness(page);
-  const queuedA = streamSnapshot(harness, "A-only late synthetic narration.");
-  await page.evaluate(() => window.__storyStreamFixture?.resetWriteCount());
-  await page.evaluate(() => window.__storyStreamFixture?.holdNextAnimationFrame());
-  await emitSnapshot(page, queuedA);
+  const initialA = "Campaign A is visible before switching.";
+  await emitSnapshot(page, streamSnapshot(harness, initialA));
+  await expect(page.locator(".streaming-narration")).toContainText(initialA);
+  const queuedA = streamSnapshot(harness, `${initialA} A-only late synthetic narration.`);
+  await page.evaluate(frame => {
+    const fixture = window.__storyStreamFixture!;
+    fixture.resetWriteCount();
+    fixture.holdNextAnimationFrame();
+    fixture.emit(frame);
+  }, queuedA);
   const frameWasPendingForA = await page.evaluate(() => window.__storyStreamFixture?.hasHeldAnimationFrame() ?? false);
   const narrationBeforeCampaignChange = await page.locator(".streaming-narration").textContent();
   const narrationWritesBeforeCampaignChange = await page.evaluate(() => window.__storyStreamFixture?.writeCount() ?? -1);

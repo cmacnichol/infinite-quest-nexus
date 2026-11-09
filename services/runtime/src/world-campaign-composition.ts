@@ -30,6 +30,7 @@ import {
 import {
   generatePlayableCharacterForOwner,
   generatePlayableCharacterPreviewForOwner,
+  suggestCastPreviewForOwner,
   generateWorldPreviewForOwner
 } from "./provider-world-generation-adapter.js";
 import { createChroniclePlatformBindings } from "./chronicle-platform-bindings.js";
@@ -110,6 +111,7 @@ export function createProviderWorldGenerationCollaborator(
       providers,
       providerDependencies
     ),
+    suggestCastPreview: (scope, request) => suggestCastPreviewForOwner(scope.ownerUserId, request, providers),
     generatePlayableCharacterPreview: (scope, request) => generatePlayableCharacterPreviewForOwner(
       pool,
       scope.ownerUserId,
@@ -132,6 +134,7 @@ export function createProviderWorldGenerationCollaborator(
 export function createApiWorldCampaignApplication(
   pool: DatabasePool,
   dependencies: WorldCampaignCompositionDependencies,
+  castPresetsEnabled = false,
 ): WorldCampaignApplication {
   const memory = createPostgresChronicleGenerationTransactionPort({
     embeddings: createChroniclePlatformBindings(dependencies.chronicle).embeddings
@@ -140,7 +143,7 @@ export function createApiWorldCampaignApplication(
     turnReportedCosts: async (_database, ownerUserId, campaignId, turnIds) =>
       new Map(await dependencies.generation.reads.getTurnCosts({ ownerUserId, campaignId, turnIds }))
   });
-  const worldAdapters = createPostgresWorldRepositoryAdapters(pool, { memory });
+  const worldAdapters = createPostgresWorldRepositoryAdapters(pool, { memory, castPresetsEnabled });
   const authorityAdapters = createPostgresCampaignAuthorityAdapters(pool, { memory, turnPages });
   const progress = createPostgresWorldGenerationProgressRepository();
   return createWorldCampaignApplication({

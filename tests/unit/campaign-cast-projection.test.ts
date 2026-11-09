@@ -85,3 +85,46 @@ it("projects attachment detach only at and after its boundary", async () => {
   expect(castRangesOverlap(range, { ...range, start: 6, end: 8 })).toBe(false);
   expect(projectCastProfile({ observations: [], overrides: [override("")] })).toEqual({ "appearance.description": "" });
 });
+
+it("projects seeded field authority and restored goals after supersession", async () => {
+  const { resolveSeededCastProfile } = await import("../../packages/domain/src/campaign-cast.js");
+  const { characterProfileSchema } = await import("../../packages/contracts/src/world-library.js");
+  const profile = characterProfileSchema.parse({ story: { role: "Keeper", background: "x".repeat(3000), goals: "Old goal" } });
+  const facts = [observation(1, "Rival", { field: "story.role" }), observation(2, "New goal", { field: "story.goals" }), observation(3, "blue coat")];
+  const result = resolveSeededCastProfile({ profile, observations: facts, overrides: [override("")], restoreGoalsAfterTurn: 2 });
+  expect(result.profile["story.role"]).toBe("Keeper");
+  expect(result.profile["story.background"]).toHaveLength(3000);
+  expect(result.profile["story.goals"]).toBe("Old goal");
+  expect(result.profile["appearance.description"]).toBe("");
+  expect(result.sources["story.role"]).toBe("authored");
+  expect(resolveSeededCastProfile({ profile, observations: [...facts, observation(4, "Later", { field: "story.goals" })], overrides: [], restoreGoalsAfterTurn: 2 }).profile["story.goals"]).toBe("Later");
+});
+
+it("keeps editor and server seeded field policy aligned", async () => {
+  const { seededCastFieldPolicy } = await import("../../packages/domain/src/campaign-cast.js");
+  const { CHARACTER_FIELD_DESCRIPTORS, seededCharacterFieldPolicy } = await import("../../packages/client-core/src/characters/profile-fields.js");
+  for (const path of [...CHARACTER_FIELD_DESCRIPTORS.map((field) => field.path), "appearance.description", "state.location", "unknown"]) {
+    expect(seededCharacterFieldPolicy(path)).toBe(seededCastFieldPolicy(path));
+  }
+});
+
+it("hides only populated seeded fixed detail candidates", async () => {
+  const { isSeededFixedCandidateHidden } = await import("../../packages/domain/src/campaign-cast.js");
+  const { characterProfileSchema } = await import("../../packages/contracts/src/world-library.js");
+  const profile = characterProfileSchema.parse({ story: { role: "Keeper", personality: "" } });
+  expect(isSeededFixedCandidateHidden(profile, "story.role")).toBe(true);
+  expect(isSeededFixedCandidateHidden(profile, "story.personality")).toBe(false);
+  expect(isSeededFixedCandidateHidden(profile, "story.goals")).toBe(false);
+  expect(isSeededFixedCandidateHidden(profile, "appearance.description")).toBe(false);
+});
+
+it("applies restored goals cutoff after resolving supersession, including same-turn evidence", async () => {
+  const { resolveSeededCastProfile } = await import("../../packages/domain/src/campaign-cast.js");
+  const { characterProfileSchema } = await import("../../packages/contracts/src/world-library.js");
+  const profile = characterProfileSchema.parse({ story: { goals: "Authored" } });
+  const first = observation(1, "Past", { field: "story.goals" });
+  const atRestore = observation(2, "At restore", { field: "story.goals", supersedesObservationId: first.id });
+  expect(resolveSeededCastProfile({ profile, observations: [first, atRestore], overrides: [], restoreGoalsAfterTurn: 2 }).profile["story.goals"]).toBe("Authored");
+  const later = observation(3, "Later", { field: "story.goals", supersedesObservationId: atRestore.id });
+  expect(resolveSeededCastProfile({ profile, observations: [first, atRestore, later], overrides: [], restoreGoalsAfterTurn: 2 }).profile["story.goals"]).toBe("Later");
+});

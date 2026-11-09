@@ -271,7 +271,7 @@ function recoveryFor(page: Page, surface: "legacy" | "web-next") {
 }
 
 async function captureRepairScenario(page: Page, surface: "legacy" | "web-next", scenario: string, width: number): Promise<void> {
-  await page.screenshot({ path: `docs/review/assets/turn-validation-success/${surface}-${scenario}-${width}.png`, fullPage: true });
+  await page.screenshot({ path: `test-results/review-assets/turn-validation-success/${surface}-${scenario}-${width}.png`, fullPage: true });
 }
 
 async function installStagedReviewStream(page: Page, snapshots: { readonly generatingSnapshot: unknown; readonly snapshot: unknown; readonly queuedSnapshot: unknown; readonly completedSnapshot: unknown; readonly reofferedSnapshot: unknown; readonly reofferedQueuedSnapshot: unknown; readonly reofferedCompletedSnapshot: unknown }) {
@@ -380,7 +380,7 @@ for (const surface of ["legacy", "web-next"] as const) {
       await expect(keep).toBeVisible();
       await expect(retry).toBeVisible();
       await expect(recovery).not.toContainText("story itself failed validation");
-      await page.screenshot({ path: `docs/review/assets/generation-format-recovery/${surface}-continuity-output-limit-${viewport.width}.png`, fullPage: true });
+      await page.screenshot({ path: `test-results/review-assets/generation-format-recovery/${surface}-continuity-output-limit-${viewport.width}.png`, fullPage: true });
       await retry.click();
       await expect.poll(() => api.decisions).toEqual([{ reviewId, revision: 1, decision: "retry" }]);
       expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
@@ -426,9 +426,9 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(preview).toBeHidden();
     expect(await streamedNarration(page, surface)).toBe("");
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.screenshot({ path: `docs/review/assets/generation-format-recovery/${surface}-structure-review-1440.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/generation-format-recovery/${surface}-structure-review-1440.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: `docs/review/assets/generation-format-recovery/${surface}-structure-review-390.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/generation-format-recovery/${surface}-structure-review-390.png`, fullPage: true });
     const retry = surface === "legacy" ? page.locator("#btnRetryGenerationReview") : recovery.getByRole("button", { name: "Continue with retry", exact: true });
     await retry.click();
     await expect.poll(() => api.decisions).toEqual([{ reviewId, revision: 1, decision: "retry" }]);
@@ -509,9 +509,9 @@ for (const surface of ["legacy", "web-next"] as const) {
     expect(api.decisions).toEqual([]);
     expect(api.writePaths).toEqual([]);
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.screenshot({ path: `docs/review/assets/generation-rejection-review/${surface}-eligible-1440.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/generation-rejection-review/${surface}-eligible-1440.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: `docs/review/assets/generation-rejection-review/${surface}-eligible-390.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/generation-rejection-review/${surface}-eligible-390.png`, fullPage: true });
     await keep.click();
     await expect.poll(() => api.decisions).toEqual([{ reviewId, revision: 1, decision: "keep" }]);
     await expect.poll(() => api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
@@ -531,9 +531,9 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeHidden();
     await expect(recovery.getByRole("button", { name: "Discard generation job", exact: true })).toBeVisible();
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.screenshot({ path: `docs/review/assets/generation-rejection-review/${surface}-blocked-1440.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/generation-rejection-review/${surface}-blocked-1440.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: `docs/review/assets/generation-rejection-review/${surface}-blocked-390.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/generation-rejection-review/${surface}-blocked-390.png`, fullPage: true });
     expect(api.consoleErrors).toEqual([]);
   });
 
@@ -545,9 +545,12 @@ for (const surface of ["legacy", "web-next"] as const) {
       await page.route(`**/story/${api.fixture.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
     }
     await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${api.fixture.campaignId}` : `${webNextOrigin}/app/story/${api.fixture.campaignId}`);
-    await page.reload();
     const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
-    await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeVisible();
+    const keepTurn = recovery.getByRole("button", { name: "Keep this turn", exact: true });
+    await expect(keepTurn).toBeEnabled();
+    await expect(recovery).toContainText("The lighthouse bell answered across the harbor.");
+    await page.reload();
+    await expect(keepTurn).toBeVisible();
     await expect(recovery).toContainText("The lighthouse bell answered across the harbor.");
     expect(api.decisions).toEqual([]);
     expect(api.writePaths).toEqual([]);
@@ -570,9 +573,9 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(recovery).toBeHidden();
     expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.screenshot({ path: `docs/review/assets/generation-rejection-review/${surface}-accepted-1440.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/generation-rejection-review/${surface}-accepted-1440.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: `docs/review/assets/generation-rejection-review/${surface}-accepted-390.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/generation-rejection-review/${surface}-accepted-390.png`, fullPage: true });
     expect(api.consoleErrors).toEqual([]);
   });
 
@@ -659,9 +662,9 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(keep).toBeVisible();
     await expect(recovery).toContainText("The lighthouse bell answered across the harbor.");
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.screenshot({ path: `docs/review/assets/generation-rejection-review/${surface}-retry-reoffered-1440.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/generation-rejection-review/${surface}-retry-reoffered-1440.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: `docs/review/assets/generation-rejection-review/${surface}-retry-reoffered-390.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/generation-rejection-review/${surface}-retry-reoffered-390.png`, fullPage: true });
     await keep.click();
     await expect.poll(() => api.decisions).toEqual([
       { reviewId, revision: 1, decision: "retry" },
@@ -694,9 +697,9 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(retry).toBeEnabled();
     expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.screenshot({ path: `docs/review/assets/generation-rejection-review/${surface}-decision-save-failure-1440.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/generation-rejection-review/${surface}-decision-save-failure-1440.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: `docs/review/assets/generation-rejection-review/${surface}-decision-save-failure-390.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/generation-rejection-review/${surface}-decision-save-failure-390.png`, fullPage: true });
     expect(api.consoleErrors).toEqual(["Failed to load resource: the server responded with a status of 503 (Service Unavailable)"]);
   });
 
@@ -709,6 +712,7 @@ for (const surface of ["legacy", "web-next"] as const) {
     }
     await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${api.fixture.campaignId}` : `${webNextOrigin}/app/story/${api.fixture.campaignId}`);
     const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
+    if (surface === "web-next") await expect(page.locator("[data-page=story-player]")).toHaveAttribute("aria-busy", "false");
     const keep = surface === "legacy" ? page.locator("#btnKeepGenerationReview") : recovery.getByRole("button", { name: "Keep this turn", exact: true });
     await keep.click();
     await expect.poll(() => api.decisions).toEqual([{ reviewId, revision: 1, decision: "keep" }]);

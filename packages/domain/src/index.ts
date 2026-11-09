@@ -1,6 +1,7 @@
 export * from "./text.js";
 export * from "./campaign-generation-policy.js";
 export * from "./world-characters.js";
+export * from "./campaign-cast-first-appearance.js";
 export * from "./infinite-worlds.js";
 export * from "./world-template.js";
 export * from "./legacy-story-world.js";

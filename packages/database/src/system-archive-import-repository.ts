@@ -25,7 +25,7 @@ import type {
 import { SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS } from "../../application/src/system-archives/portability-registry.js";
 import { enqueuePostgresChronicleChunkIndex } from "./chronicle-chunk-repository.js";
 import { validateWorldSourceMaterialForContent } from "../../domain/src/source-authoring.js";
-import { worldContentSchema } from "../../contracts/src/world-library.js";
+import { validateWorldCharacterLinks, worldContentSchema } from "../../contracts/src/world-library.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { importCampaignCast } from "./campaign-cast-portability.js";
 import { portableCastReferences, type PortableCampaignCast } from "../../contracts/src/campaign-cast.js";
@@ -812,9 +812,9 @@ async function insertLogicalRecord(
              id,owner_user_id,world_version_id,title,status,active_turn_number,
              legacy_settings,text_provider_profile_id,image_provider_profile_id,
              story_length_profile,turn_control_style,selected_character_id,character_snapshot,
-             character_profile,character_profile_revision,created_at,updated_at
+             character_profile,character_profile_revision,created_at,updated_at,first_appearance_eligible,selected_character_world_id
            ) VALUES (
-             $1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15,$16,$17
+             $1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19
            )`,
           [
             record.sourceId,
@@ -833,7 +833,9 @@ async function insertLogicalRecord(
             record.characterProfile === null ? null : json(record.characterProfile),
             record.characterProfileRevision,
             record.createdAt,
-            record.updatedAt
+            record.updatedAt,
+            "firstAppearanceEligible" in record && record.firstAppearanceEligible === true,
+            "selectedCharacterWorldId" in record ? record.selectedCharacterWorldId : null
           ]
         ), envelope.domain);
         return true;
@@ -2572,9 +2574,13 @@ export function createPostgresSystemArchiveImportRepository(
             }
             for await (const candidate of asyncRecords(records)) {
               const envelope = systemRecordEnvelopeSchema.parse(candidate);
-              if ((envelope.domain === "world-versions" || envelope.domain === "world-drafts") && envelope.record.content.sourceMaterial !== undefined) {
-                try { validateWorldSourceMaterialForContent(worldContentSchema.parse(envelope.record.content)); }
-                catch { throw repositoryError("System Archive source material is invalid.", 400); }
+              if (envelope.domain === "world-versions" || envelope.domain === "world-drafts") {
+                try { validateWorldCharacterLinks(envelope.record.content); }
+                catch { throw repositoryError("System Archive world character link is invalid.", 400); }
+                if (envelope.record.content.sourceMaterial !== undefined) {
+                  try { validateWorldSourceMaterialForContent(worldContentSchema.parse(envelope.record.content)); }
+                  catch { throw repositoryError("System Archive source material is invalid.", 400); }
+                }
               }
               if (isV2Envelope(envelope)) sawV2Authority = true;
               const domainIndex = SYSTEM_ARCHIVE_DOMAINS.indexOf(envelope.domain);

@@ -343,12 +343,13 @@ function selectWorldItems(items: unknown, query: string, limit: number): unknown
     .filter((item) => item !== undefined);
 }
 
-function worldFictionCanon(
+export function worldFictionCanon(
   content: Record<string, unknown>,
   characterProfile: unknown,
   characterSnapshot: unknown,
   query: string,
   maximumTokens: number,
+  seededRosterIds: ReadonlySet<string> = new Set(),
 ): Record<string, unknown> {
   const sourceWorld = typeof content.world === "object" && content.world !== null
     ? content.world as Record<string, unknown>
@@ -373,7 +374,13 @@ function worldFictionCanon(
     && budgetTokenEstimate(stableStringify({ ...result, playerCharacter })) <= maximumTokens) {
     result.playerCharacter = playerCharacter;
   }
-  for (const [key, items] of [["entities", content.entities], ["relationships", content.relationships]] as const) {
+  // A seeded NPC's portrayal comes from cast context; its entity stays only as a relationship endpoint.
+  const entities = Array.isArray(content.entities) ? content.entities.map((entity) => {
+    const row = entity as Record<string, unknown> | null;
+    return row && typeof row.linkedCharacterId === "string" && seededRosterIds.has(row.linkedCharacterId)
+      ? { id: row.id, name: row.name, kind: row.kind } : entity;
+  }) : content.entities;
+  for (const [key, items] of [["entities", entities], ["relationships", content.relationships]] as const) {
     const accepted: unknown[] = [];
     for (const item of selectWorldItems(items, query, 16)) {
       if (budgetTokenEstimate(stableStringify({ ...result, [key]: [...accepted, item] })) > maximumTokens) break;
@@ -2851,6 +2858,8 @@ export async function buildPostgresChronicleContextPreview(
     ? budgetTokenEstimate(stableStringify({ currentContinuity }))
     : 0;
   const contextBudgetWithoutContinuity = Math.max(0, scope.request.budgetTokens - currentContinuityTokens);
+  const seededRosterIds = new Set((scope.castSnapshot?.characters ?? []).flatMap((person) => person.origin.kind === "world"
+    && scope.castSnapshot?.fiction?.find((item) => item.characterId === person.id)?.fields.some((field) => field.source === "authored" || field.source === "campaign_edit") ? [person.origin.entityId] : []));
   const buildFixedScopes = (scale: number) => {
     const authoritativeRules = sanitizeChronicleFictionString(
       sourceWorld.rules,
@@ -2861,7 +2870,8 @@ export async function buildPostgresChronicleContextPreview(
       campaign.character_profile,
       campaign.character_snapshot,
       expandedQuery,
-      Math.max(64, Math.floor(scope.request.budgetTokens * 0.30 * scale))
+      Math.max(64, Math.floor(scope.request.budgetTokens * 0.30 * scale)),
+      seededRosterIds
     );
     const campaignCanon = campaignFictionCanon(
       currentContinuity ? { ...campaign, scratchpad_safe_for_prompt: false } : campaign,

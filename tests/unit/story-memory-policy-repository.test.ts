@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { resolveStoryMemoryPolicySnapshot, type StoryMemoryOperatorConfig } from "../../packages/database/src/story-memory-policy-repository.js";
 
 describe("Story Memory new-job enrollment", () => {
-  it("captures v5 only for a newly eligible cast-enabled snapshot", async () => {
+  it("captures v7 only for a newly eligible cast-enabled snapshot", async () => {
     const client = {
       query: async () => ({ rows: [{
         capability: "r2", review_mode: "off", model: "writer", provider_type: "openai_compatible",
@@ -17,10 +17,10 @@ describe("Story Memory new-job enrollment", () => {
       providerProfileId: "00000000-0000-4000-8000-000000000003",
       requestedModel: ""
     }, { installedCapability: "r3", enforceEnabled: false, castContextEnabled: true }))
-      .resolves.toMatchObject({ castContext: true, contextProtocol: "current-continuity-v5", promptProtocol: "story-v17-campaign-cast" });
+      .resolves.toMatchObject({ castContext: true, contextProtocol: "current-continuity-v7", promptProtocol: "story-v18-fiction-cast" });
   });
 
-  it("rolls new enrollment back to v4 without rewriting an already captured v5 snapshot", async () => {
+  it("uses v6 when history coverage is disabled without rewriting a captured v7 snapshot", async () => {
     const client = {
       query: async () => ({ rows: [{
         capability: "r2", review_mode: "off", model: "writer", provider_type: "openai_compatible",
@@ -40,8 +40,8 @@ describe("Story Memory new-job enrollment", () => {
     const v5 = await resolveStoryMemoryPolicySnapshot(client as never, scope, v5Config);
     const v4 = await resolveStoryMemoryPolicySnapshot(client as never, scope, v4DefaultConfig);
 
-    expect(v5).toMatchObject({ contextProtocol: "current-continuity-v5" });
-    expect(v4).toMatchObject({ castContext: true, contextProtocol: "current-continuity-v4", promptProtocol: "story-v17-campaign-cast" });
-    expect(v5).toMatchObject({ contextProtocol: "current-continuity-v5" });
+    expect(v5).toMatchObject({ contextProtocol: "current-continuity-v7" });
+    expect(v4).toMatchObject({ castContext: true, contextProtocol: "current-continuity-v6", promptProtocol: "story-v18-fiction-cast" });
+    expect(v5).toMatchObject({ contextProtocol: "current-continuity-v7" });
   });
 });

@@ -54,7 +54,11 @@ export type CastDiscoverySource = z.infer<typeof castDiscoverySourceSchema>;
 
 export const castDiscoveryIdentitySnapshotSchema = z.object({
   revision: z.number().int().nonnegative(), characters: z.array(castCharacterSchema), worldVersionId: z.uuid(),
-  worldCharacters: z.array(z.object({ entityId: z.string().min(1).max(200), name: z.string().min(1).max(200),
+  identityHints: z.array(z.object({ characterId: z.uuid(), hints: z.array(z.string().min(1).max(2000)).max(20) }).strict()).optional(),
+  seedActivations: z.array(z.object({ characterId: z.uuid(), seedEventId: z.uuid(), worldVersionId: z.uuid(), entityId: z.string().min(1).max(200) }).strict()).optional(),
+  representedWorldCharacters: z.array(z.object({ characterId: z.uuid(), entityId: z.string().min(1).max(200), equivalentEntityIds: z.array(z.string().min(1).max(200)).max(20).optional(), name: z.string().min(1).max(200),
+    aliases: z.array(z.string().min(1).max(200)).max(20), identityHints: z.array(z.string().min(1).max(2000)).max(20).optional() }).strict()).optional(),
+  worldCharacters: z.array(z.object({ entityId: z.string().min(1).max(200), equivalentEntityIds: z.array(z.string().min(1).max(200)).max(20).optional(), name: z.string().min(1).max(200),
     aliases: z.array(z.string().min(1).max(200)).max(20), identityHints: z.array(z.string().min(1).max(2000)).max(20).optional() }).strict())
 }).strict();
 export type CastDiscoveryIdentitySnapshot = z.infer<typeof castDiscoveryIdentitySnapshotSchema>;
@@ -69,7 +73,7 @@ export const castCandidateQuerySchema = z.object({ cursor: z.uuid().optional(), 
 export const castPendingCandidateSchema = z.object({ id: z.uuid(), reason: z.string().min(1).max(100), proposal: castDiscoveryCandidateSchema,
   resolvedCharacterId: z.uuid().optional(), suggestedCharacterId: z.uuid().optional(),
   details: z.array(z.object({ observationIndex: z.number().int().min(0).max(19), field: castFieldSchema,
-    value: z.string().max(2000), quote: z.string().max(1000), reason: z.string(), canAcceptObservation: z.boolean().optional(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict()).optional(),
+    value: z.string().max(2000), quote: z.string().max(1000), reason: z.string(), canAcceptObservation: z.boolean().optional(), allowedActions: z.array(z.enum(["accept", "confirm", "dismiss"])).optional(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict()).optional(),
   source: z.object({ turnId: z.uuid(), turnNumber: z.number().int().positive(), narrationRevision: z.number().int().nonnegative(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u).optional() }).strict() }).strict();
 export const castCandidateListSchema = z.object({ revision: z.number().int().nonnegative(), boundary: castBoundarySchema,
   candidates: z.array(castPendingCandidateSchema).max(50), nextCursor: z.uuid().nullable() }).strict();

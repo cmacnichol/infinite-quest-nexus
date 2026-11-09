@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDir = process.env.LEGACY_UI_T24_EVIDENCE_DIR ?? ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T24";
+const evidenceDir = process.env.LEGACY_UI_T24_EVIDENCE_DIR ?? "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T24";
 
 test("startup_error_visible_on_dashboard while successful siblings stay available", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
@@ -12,7 +12,7 @@ test("startup_error_visible_on_dashboard while successful siblings stay availabl
   await page.route("**/api/v1/worlds", async route => {
     worldAttempts += 1;
     if (worldAttempts === 1) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "World list unavailable", correlationId: "safe-world-correlation" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "World list unavailable", correlationId: "safe-world-correlation" }) });
       return;
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ worlds: fixture.worlds }) });
@@ -45,7 +45,7 @@ test("campaign_and_provider_startup_errors_have_independent_dashboard_retries", 
   await page.route("**/api/v1/campaigns", async route => {
     campaignAttempts += 1;
     if (campaignAttempts === 1) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Campaign details must stay private" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Campaign details must stay private" }) });
       return;
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ campaigns: fixture.campaigns }) });
@@ -53,7 +53,7 @@ test("campaign_and_provider_startup_errors_have_independent_dashboard_retries", 
   await page.route("**/api/v1/providers", async route => {
     providerAttempts += 1;
     if (providerAttempts === 1) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Provider details must stay private" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Provider details must stay private" }) });
       return;
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ providers: [] }) });
@@ -85,7 +85,7 @@ test("worlds_startup_failure_reaches_workspace_before_dashboard_retry", async ({
   await page.route("**/api/v1/worlds", async route => {
     worldAttempts += 1;
     if (worldAttempts === 1) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private world read diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private world read diagnostics" }) });
       return;
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ worlds: fixture.worlds }) });
@@ -117,7 +117,7 @@ test("campaign_startup_failure_reaches_workspace_before_dashboard_retry", async 
   await page.route("**/api/v1/campaigns", async route => {
     campaignAttempts += 1;
     if (campaignAttempts === 1) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private campaign read diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private campaign read diagnostics" }) });
       return;
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ campaigns: fixture.campaigns }) });
@@ -149,7 +149,7 @@ test("provider_startup_failure_reaches_workspace_before_dashboard_retry", async 
   await page.route("**/api/v1/providers", async route => {
     providerAttempts += 1;
     if (providerAttempts <= 2) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private provider read diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private provider read diagnostics" }) });
       return;
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ providers: [] }) });
@@ -187,7 +187,7 @@ test("workspace_read_retry_coexists_with_newer_world_action_error", async ({ pag
   await page.route("**/api/v1/worlds", async route => {
     worldReads += 1;
     if (worldReads === 2) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private world list diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private world list diagnostics" }) });
       return;
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ worlds: fixture.worlds }) });
@@ -195,7 +195,7 @@ test("workspace_read_retry_coexists_with_newer_world_action_error", async ({ pag
   await page.route(`**/api/v1/worlds/${fixture.worldId}`, async route => {
     if (route.request().method() === "PATCH") {
       archiveWrites += 1;
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private archive diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private archive diagnostics" }) });
       return;
     }
     await route.fallback();
@@ -281,13 +281,13 @@ test("campaign_list_retry_keeps_current_archive_export_error_after_selection_ref
     if (route.request().method() !== "GET") return route.fallback();
     campaignReads += 1;
     if (campaignReads === 2) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private campaign list diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private campaign list diagnostics" }) });
       return;
     }
     await route.fallback();
   });
   await page.route(`**/api/v1/campaigns/${campaign.id}/export`, async route => {
-    await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Campaign Archive export is unavailable." }) });
+    await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Campaign Archive export is unavailable." }) });
   });
 
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -337,7 +337,7 @@ test("campaign_manual_selection_keeps_pending_list_retry_visible", async ({ page
     if (route.request().method() !== "GET") return route.fallback();
     campaignReads += 1;
     if (campaignReads === 2) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private campaign list diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private campaign list diagnostics" }) });
       return;
     }
     await route.fallback();
@@ -380,7 +380,7 @@ test("campaign_selection_during_pending_retry_keeps_latest_route_and_editor", as
     if (route.request().method() !== "GET") return route.fallback();
     campaignReads += 1;
     if (campaignReads === 2) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private campaign list diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private campaign list diagnostics" }) });
       return;
     }
     if (campaignReads === 3) await retryGate;
@@ -425,7 +425,7 @@ for (const kind of ["worlds", "campaigns"] as const) {
       if (route.request().method() !== "GET") return route.fallback();
       reads += 1;
       if (reads === 2) {
-        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private list diagnostics" }) });
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private list diagnostics" }) });
         return;
       }
       if (reads === 3) await gate;
@@ -464,13 +464,13 @@ test("provider_list_retry_keeps_current_save_error_after_profile_selection_refre
     if (route.request().method() === "GET") {
       providerReads += 1;
       if (providerReads === 1) {
-        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private provider list diagnostics" }) });
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private provider list diagnostics" }) });
         return;
       }
       return route.fallback();
     }
     if (route.request().method() === "POST") {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private provider save diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private provider save diagnostics" }) });
       return;
     }
     await route.fallback();
@@ -509,14 +509,14 @@ test("operation_errors_do_not_offer_unrelated_list_retries", async ({ page }) =>
   await installLegacyUiFixture(page, fixture);
   await page.route(`**/api/v1/campaigns/${fixture.campaignId}`, async route => {
     if (route.request().method() === "PATCH") {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private save diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private save diagnostics" }) });
       return;
     }
     await route.fallback();
   });
   await page.route("**/api/v1/providers", async route => {
     if (route.request().method() === "POST") {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private provider diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private provider diagnostics" }) });
       return;
     }
     await route.fallback();
@@ -548,7 +548,7 @@ test("operation_errors_do_not_offer_unrelated_list_retries", async ({ page }) =>
 
   await page.route(`**/api/v1/worlds/${fixture.worldId}`, async route => {
     if (route.request().method() === "PATCH") {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private world action diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private world action diagnostics" }) });
       return;
     }
     await route.fallback();
@@ -581,7 +581,7 @@ test("retry_does_not_duplicate_writes after a separately retried list read", asy
     if (request.method() === "GET" && url.pathname === "/api/v1/campaigns") {
       campaignReads += 1;
       if (writes.length && campaignReads > 1 && campaignReads === 2) {
-        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Campaign list unavailable", correlationId: "safe-campaign-correlation" }) });
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Campaign list unavailable", correlationId: "safe-campaign-correlation" }) });
         return;
       }
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ campaigns: fixture.campaigns.map(campaign => ({ ...campaign, title: committedTitle })) }) });
@@ -610,7 +610,7 @@ test("campaign_list_retry_keeps_the_latest_missing_route_and_selected_campaign",
   await page.route("**/api/v1/campaigns", async route => {
     campaignReads += 1;
     if (campaignReads === 2 || campaignReads === 3) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private database diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private database diagnostics" }) });
       return;
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ campaigns: fixture.campaigns }) });
@@ -655,7 +655,7 @@ test("campaign_startup_retry_resolves_the_exact_missing_id_before_clearing_absen
   await page.route("**/api/v1/campaigns", async route => {
     campaignReads += 1;
     if (campaignReads === 1) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Private database diagnostics" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Private database diagnostics" }) });
       return;
     }
     const visibleCampaigns = campaignReads === 2
@@ -676,7 +676,7 @@ test("campaign_startup_retry_resolves_the_exact_missing_id_before_clearing_absen
   await page.route(`**/api/v1/campaigns/${requestedCampaignId}`, route => route.fulfill({
     status: 503,
     contentType: "application/json",
-    body: JSON.stringify({ message: "Private save diagnostics" })
+    body: JSON.stringify({ error: "fixture_error", message: "Private save diagnostics" })
   }), { times: 1 });
   await page.goto(`${origin}/nexus/index.html#campaigns?campaignId=${requestedCampaignId}`);
 
@@ -713,7 +713,7 @@ test("html_error_rendered_as_text with only safe correlation detail", async ({ p
     status: 503,
     contentType: "application/json",
     headers: { "x-correlation-id": "safe-html-correlation" },
-    body: JSON.stringify({ message: "<img src=x onerror=alert(1)> diagnostic details are private" })
+    body: JSON.stringify({ error: "fixture_error", message: "<img src=x onerror=alert(1)> diagnostic details are private" })
   }));
   await page.goto(`${origin}/nexus/index.html#world-library`);
   await page.locator(`#worldManagementCarousel [data-world-id="${fixture.worldId}"]`).click();

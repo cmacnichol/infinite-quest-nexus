@@ -55,7 +55,7 @@ async function exportRecords(pool: DatabasePool, ownerUserId: string): Promise<S
   });
 }
 
-integration("T19 story-memory archive compatibility", () => {
+integration("story-memory archive compatibility", () => {
   const restoreKinds: readonly ("system" | "campaign_zip")[] = process.platform === "linux"
     ? ["system", "campaign_zip"]
     : ["system"];

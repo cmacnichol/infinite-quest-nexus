@@ -101,6 +101,7 @@ const campaignRewindRequestSchema = campaignRewindSchema.extend({
 const campaignBranchRequestSchema = campaignBranchSchema;
 
 const branchCampaignRowSchema = z.object({
+  firstAppearanceEligible: z.boolean(),
   activeTurnNumber: z.number().int().min(0),
   worldVersionId: z.uuid(),
   title: z.string().trim().min(1),
@@ -108,6 +109,7 @@ const branchCampaignRowSchema = z.object({
   storyContextBudgetTokens: storyContextBudgetTokensSchema,
   turnControlStyle: z.enum(["action_only", "flexible_auto", "flexible_action", "flexible_scene"]),
   selectedCharacterId: z.string().nullable(),
+  selectedCharacterWorldId: z.uuid().nullable(),
   characterSnapshot: z.record(z.string(), z.unknown()).nullable(),
   characterProfile: z.record(z.string(), z.unknown()).nullable(),
   characterProfileRevision: z.number().int().min(0),
@@ -653,10 +655,11 @@ function createPostgresCampaignAuthorityRepository(
                 c.story_length_profile AS "storyLengthProfile",
                 c.story_context_budget_tokens AS "storyContextBudgetTokens",
                 c.turn_control_style AS "turnControlStyle",
-                c.selected_character_id AS "selectedCharacterId",
+                c.selected_character_id AS "selectedCharacterId", c.selected_character_world_id AS "selectedCharacterWorldId",
                 c.character_snapshot AS "characterSnapshot",
                 c.character_profile AS "characterProfile",
                 c.character_profile_revision AS "characterProfileRevision",
+                c.first_appearance_eligible AS "firstAppearanceEligible",
                 c.legacy_settings AS "legacySettings",
                 c.text_provider_profile_id AS "textProviderProfileId",
                 c.image_provider_profile_id AS "imageProviderProfileId",
@@ -773,8 +776,8 @@ function createPostgresCampaignAuthorityRepository(
            owner_user_id, world_version_id, title, status, active_turn_number,
            story_length_profile, story_context_budget_tokens, turn_control_style, selected_character_id,
            character_snapshot, character_profile, character_profile_revision,
-           legacy_settings, text_provider_profile_id, image_provider_profile_id
-         ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+           legacy_settings, text_provider_profile_id, image_provider_profile_id, first_appearance_eligible, selected_character_world_id
+         ) VALUES ($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
          RETURNING id`,
         [
           scope.ownerUserId,
@@ -790,7 +793,9 @@ function createPostgresCampaignAuthorityRepository(
           source.characterProfile === null ? 0 : 1,
           json(source.legacySettings),
           source.textProviderProfileId,
-          source.imageProviderProfileId
+          source.imageProviderProfileId,
+          source.firstAppearanceEligible,
+          source.selectedCharacterWorldId
         ]
       );
       const branchCampaignId = branchCampaign.rows[0]?.id;
@@ -1712,7 +1717,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
         character: characterLegacyText(row.characterProfile, row.characterSnapshot) || "",
         firstAction: String(overview.firstAction || ""),
         rules: String(overview.rules || ""),
-        playableCharacters: Array.isArray(content.playableCharacters) ? content.playableCharacters : []
+        playableCharacters: Array.isArray(content.playableCharacters) ? content.playableCharacters.filter((character: { campaignUse?: string }) => character?.campaignUse !== "supporting") : []
       };
       const settings = objectValue(row.legacySettings);
       const playerConfig = {

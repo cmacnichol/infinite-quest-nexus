@@ -18,7 +18,16 @@ export async function loadLocalSingleUserPolicy(pool: DatabasePool, bootstrap: R
   }
   const { rows: [seed] } = await pool.query("SELECT snapshot,policy_digest,local_single_user FROM instance_settings_revisions WHERE revision=1 AND kind='seed'");
   if (!seed || seed.local_single_user !== true) throw new Error("settings_local_existing_installation");
-  const policy = createLocalSingleUserPolicy(instanceSettingsSchema.parse(seed.snapshot), state.installationId, bootstrap.databaseMaxConnections);
+  const legacy = !("castPresetsEnabled" in seed.snapshot) && !("castContextWithoutDiscoveryEnabled" in seed.snapshot);
+  const policy = createLocalSingleUserPolicy(instanceSettingsSchema.parse({ castPresetsEnabled: false, castContextWithoutDiscoveryEnabled: false, ...seed.snapshot }), state.installationId, bootstrap.databaseMaxConnections);
+  if (legacy) {
+    policy.version = 1;
+    // The historical policy remains byte-for-byte digestible; effective gates are derived at use sites.
+    delete policy.featureGates.castPresetsEnabled;
+    delete policy.featureGates.castContextWithoutDiscoveryEnabled;
+    policy.featureGates.castContextEnabled = seed.snapshot.castContextEnabled;
+    policy.featureGates.castEditingEnabled = seed.snapshot.castEditingEnabled;
+  }
   if (seed.policy_digest !== settingsDigest(policy)) throw new Error("settings_policy_mismatch");
   return policy;
 }
@@ -44,7 +53,7 @@ export async function initializeLocalSingleUserSettings(pool: DatabasePool, boot
   if (!bootstrap.instanceSettingsPolicyFile && state.mode === "environment" && state.activationEpoch === "0" && state.requestedRevision === "1") {
     const actor = { userId: await initialOwnerId(pool), localSingleUser: true as const };
     try {
-      await createInstanceSettingsRepository(pool, { activationGuard: createSettingsActivationGuard(policy) }).activate({
+      await createInstanceSettingsRepository(pool, { activationGuard: createSettingsActivationGuard(policy, { implicitLocal: !bootstrap.instanceSettingsPolicyFile }) }).activate({
         expectedActiveRevision: null, expectedRequestedRevision: "1", policyDigest: settingsDigest(policy),
         maintenanceReference: "local-single-user-initialization", actor
       });

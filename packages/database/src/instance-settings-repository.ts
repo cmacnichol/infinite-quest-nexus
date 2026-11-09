@@ -23,8 +23,8 @@ export async function readSettingsState(client: DatabaseClient | DatabasePool): 
   if (!row) throw new Error("settings_state_missing");
   return { installationId: row.installation_id, mode: row.mode, schemaVersion: row.schema_version,
     activeRevision: row.active_revision, requestedRevision: row.requested_revision, activationEpoch: row.activation_epoch,
-    active: row.active === null ? null : instanceSettingsSchema.parse(row.active),
-    requested: row.requested === null ? null : instanceSettingsSchema.parse(row.requested), policyDigest: row.policy_digest ?? null };
+    active: row.active === null ? null : instanceSettingsSchema.parse({ castPresetsEnabled: false, castContextWithoutDiscoveryEnabled: false, ...row.active }),
+    requested: row.requested === null ? null : instanceSettingsSchema.parse({ castPresetsEnabled: false, castContextWithoutDiscoveryEnabled: false, ...row.requested }), policyDigest: row.policy_digest ?? null };
 }
 export async function lockSettingsState(client: DatabaseClient): Promise<void> {
   await client.query("SELECT pg_advisory_xact_lock(1936942451)");

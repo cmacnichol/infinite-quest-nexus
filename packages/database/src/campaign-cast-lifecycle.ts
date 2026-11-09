@@ -17,12 +17,20 @@ export async function applyCastBoundaryChange(client: DatabaseClient, scope: Cas
   // when a new timeline reaches the same turn number.
   const events = (await client.query("SELECT id,payload FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND effective_turn_number>$3", [scope.campaignId, scope.ownerUserId, boundary.turnNumber])).rows;
   for (const event of events) {
+    const parsed = event.payload.map((item: { command: unknown }) => castCommandSchema.parse(item.command));
+    // A seed published after its source turn carries world evidence on create and turn evidence beside it.
+    const anchoredByTurn = parsed.some((command: ReturnType<typeof castCommandSchema.parse>) => (command.kind === "mention" || command.kind === "observe") && command.evidence.kind === "turn" && command.evidence.turnNumber <= boundary.turnNumber);
+    const keepsCreate = (command: ReturnType<typeof castCommandSchema.parse>) => command.kind === "create"
+      && (command.evidence?.kind === "turn" ? command.evidence.turnNumber <= boundary.turnNumber : command.origin.kind === "world" && anchoredByTurn);
+    const retainedCreateIds = new Set(event.payload.filter((item: { command: unknown; characterId?: string }) => keepsCreate(castCommandSchema.parse(item.command)))
+      .map((item: { characterId?: string }) => item.characterId));
     const retained = event.payload.filter((item: { command: unknown }) => {
       const command = castCommandSchema.parse(item.command);
-      return command.kind === "create" && command.evidence?.kind === "turn" && command.evidence.turnNumber <= boundary.turnNumber
+      return command.kind === "seed_profile" && retainedCreateIds.has(command.characterId)
+        || keepsCreate(command)
         || (command.kind === "observe" || command.kind === "mention") && command.evidence.kind === "turn" && command.evidence.turnNumber <= boundary.turnNumber;
     });
-    if (retained.length) await client.query("UPDATE campaign_cast_events SET payload=$2,receipt=receipt-'result' WHERE id=$1", [event.id, JSON.stringify(retained)]);
+    if (retained.length) await client.query("UPDATE campaign_cast_events SET payload=$2,receipt=receipt-'result',effective_turn_number=$3 WHERE id=$1", [event.id, JSON.stringify(retained), boundary.turnNumber]);
     else await client.query("DELETE FROM campaign_cast_events WHERE id=$1", [event.id]);
   }
   await client.query("DELETE FROM campaign_cast_characters WHERE campaign_id=$1 AND owner_user_id=$2 AND first_observed_turn>$3", [scope.campaignId, scope.ownerUserId, boundary.turnNumber]);
@@ -36,7 +44,7 @@ export async function applyCastBoundaryChange(client: DatabaseClient, scope: Cas
 
 /** Copy only retained authority, using explicit mappings supplied by the caller. */
 export async function copyCampaignCast(client: DatabaseClient, source: CastScope, destination: CastScope,
-  throughTurn: number, turnIds: ReadonlyMap<string, string>): Promise<void> {
+  throughTurn: number, turnIds: ReadonlyMap<string, string>, crossWorld = false): Promise<void> {
   const state = (await client.query("SELECT revision,coverage_start_turn FROM campaign_cast_state WHERE campaign_id=$1 AND owner_user_id=$2", [source.campaignId, source.ownerUserId])).rows[0];
   if (!state) return;
   await rebuildCastWithClient(client, source, throughTurn);
@@ -65,13 +73,18 @@ export async function copyCampaignCast(client: DatabaseClient, source: CastScope
   const observationIds = new Map(observations.map((row) => [row.id, randomUUID()]));
   const eventIds = new Map(events.map((row) => [row.id, randomUUID()]));
   const remap = (value: any, key = ""): any => {
+    if (["profile", "campaignProfile", "set"].includes(key)) return value;
+    if (crossWorld && value?.kind === "world" && key === "evidence")
+      return { kind: "historical_world", sourceWorldVersionId: value.worldVersionId, sourcePath: value.sourcePath };
+    if (crossWorld && value?.kind === "world" && key === "origin")
+      return { kind: "historical_world", sourceWorldVersionId: value.worldVersionId, entityId: value.entityId };
     if (key === "evidence" && value?.kind === "turn" && (value.invalidated || !turnIds.has(value.turnId))) return { ...value, invalidated: true };
     if (Array.isArray(value)) return value.map((item) => remap(item, key === "characterIds" ? "characterId" : key === "observationIds" ? "observationId" : key));
     if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, remap(item, name)]));
     if (typeof value !== "string") return value;
     const mapping = ["characterId", "speakerCharacterId"].includes(key) ? characterIds
       : ["observationId", "supersedesObservationId"].includes(key) ? observationIds
-      : ["eventId", "editId"].includes(key) ? eventIds : key === "turnId" ? turnIds : null;
+      : ["eventId", "editId", "seedEventId"].includes(key) ? eventIds : key === "turnId" ? turnIds : null;
     if (!mapping) return value;
     const mapped = mapping.get(value);
     if (!mapped) throw new Error(`Invalid retained cast reference: ${key}`);
@@ -81,7 +94,7 @@ export async function copyCampaignCast(client: DatabaseClient, source: CastScope
   await client.query("INSERT INTO campaign_cast_state(owner_user_id,campaign_id,revision,coverage_start_turn) VALUES($1,$2,$3,$4)",
     [destination.ownerUserId, destination.campaignId, state.revision, state.coverage_start_turn === null ? null : throughTurn + 1]);
   for (const person of people) {
-    let origin = castOriginSchema.parse(person.origin);
+    let origin = castOriginSchema.parse(remap(person.origin, "origin"));
     if (origin.kind === "protagonist") {
       const row = (await client.query("SELECT selected_character_id FROM campaigns WHERE id=$1 AND owner_user_id=$2", [destination.campaignId, destination.ownerUserId])).rows[0];
       origin = { kind: "protagonist", selectedCharacterId: row.selected_character_id };
@@ -99,6 +112,8 @@ export async function copyCampaignCast(client: DatabaseClient, source: CastScope
       if (command.kind === "create") return characterIds.has(item.characterId!);
       if (command.kind === "observe") return observationIds.has(item.observationId!);
       if (command.kind === "mention") return characterIds.has(command.characterId) && turnIds.has(command.evidence.turnId);
+      if (command.kind === "seed_profile") return characterIds.has(command.characterId) && (event.effective_turn_number <= throughTurn
+        || event.payload.some((entry: { command: { kind: string }; characterId?: string }) => entry.command.kind === "create" && entry.characterId === command.characterId));
       if (command.kind === "detach") return event.effective_turn_number <= throughTurn && characterIds.has(command.characterId) && copyableAttachments.has(command.eventId);
       return event.effective_turn_number <= throughTurn && characterIds.has(command.characterId);
     });
@@ -107,7 +122,8 @@ export async function copyCampaignCast(client: DatabaseClient, source: CastScope
       throw new Error("Invalid retained cast detach reference.");
     const attachment = copyableAttachments.has(event.id) ? remap(event.attachment) : null;
     const receipt = castBatchReceiptSchema.parse(event.receipt);
-    delete receipt.result;
+    if (event.effective_turn_number > throughTurn || payload.length !== event.payload.length) delete receipt.result;
+    else if (receipt.result) receipt.result.character.id = characterIds.get(receipt.result.character.id)!;
     receipt.characterIds = receipt.characterIds.filter((id) => characterIds.has(id));
     receipt.observationIds = receipt.observationIds.filter((id) => observationIds.has(id));
     const mapped = remap(payload);
@@ -121,7 +137,7 @@ export async function copyCampaignCast(client: DatabaseClient, source: CastScope
     await client.query(`INSERT INTO campaign_cast_observations(id,owner_user_id,campaign_id,character_id,event_id,field,value,mode,speaker_character_id,evidence,supersedes_observation_id)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [observationIds.get(row.id), destination.ownerUserId, destination.campaignId,
       characterIds.get(row.character_id), eventIds.get(row.event_id), row.field, row.value, row.mode,
-      row.speaker_character_id ? characterIds.get(row.speaker_character_id) : null, JSON.stringify(remap(row.evidence)),
+      row.speaker_character_id ? characterIds.get(row.speaker_character_id) : null, JSON.stringify(remap(row.evidence, "evidence")),
       row.supersedes_observation_id ? observationIds.get(row.supersedes_observation_id) : null]);
   }
   await rebuildCastWithClient(client, destination);

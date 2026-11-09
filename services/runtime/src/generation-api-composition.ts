@@ -457,6 +457,7 @@ export function createApiGenerationApplication(
          installedCapability: resolvedOperatorConfig.installedCapability,
          enforceEnabled: resolvedOperatorConfig.enforceEnabled,
          castContextEnabled: resolvedOperatorConfig.castContextEnabled === true,
+         castDiscoveryEnabled: resolvedOperatorConfig.castDiscoveryEnabled === true,
          historyCoverageEnabled: resolvedOperatorConfig.historyCoverageEnabled !== false
       }),
       resolveQueuedResponsePolicy: createQueuedResponsePolicyResolver(providers, nativeTextExecutionPlanAdmission),

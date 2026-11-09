@@ -1,10 +1,14 @@
+import { castWorldChoicesSchema } from "@infinite-quest/contracts";
+import { castDraftPreviewRequestSchema, castDraftPreviewResponseSchema, type CastDraftPreviewRequest } from "@infinite-quest/contracts";
+import { castFromWorldPreviewQuerySchema, castFromWorldPreviewSchema, castFromWorldSchema, editAuthoredCastProfileSchema,
+  type CastFromWorld, type CastFromWorldPreviewQuery, type EditAuthoredCastProfile } from "@infinite-quest/contracts";
 import { castContextPreviewRequestSchema, castContextExplanationSchema, type CastContextPreviewRequest } from "@infinite-quest/contracts";
 import { reviewCastDetailSchema, reviewCastDetailResultSchema, type ReviewCastDetail } from "@infinite-quest/contracts";
 import { detachCastAttachmentSchema, detachCastAttachmentResultSchema, type DetachCastAttachment } from "@infinite-quest/contracts";
 import { z } from "zod";
 import { NexusApiError } from "@infinite-quest/client-core";
 import { charactersWorkspaceStatusSchema } from "@infinite-quest/contracts";
-import { castSnapshotSchema, castDetailSchema, castListQuerySchema, createCastCharacterSchema, editCastCharacterSchema, castDiscoveryStatusSchema,
+import { castRosterCharacterSchema, castSnapshotSchema, castDetailSchema, castListQuerySchema, createCastCharacterSchema, editCastCharacterSchema, castDiscoveryStatusSchema,
   castCandidateQuerySchema, castCandidateListSchema, resolveCastCandidateSchema, castCandidateResolutionSchema, type CastCandidateQuery, type ResolveCastCandidate,
   castWriteResultSchema, retryCastDiscoverySchema, castDiscoveryRetryResultSchema, type RetryCastDiscovery,
   type CastListQuery, type CreateCastCharacter, type EditCastCharacter } from "@infinite-quest/contracts";
@@ -14,8 +18,8 @@ import { readerTurnResponseSchema, readerTurnNumberSchema } from "@infinite-ques
 import { castBackfillRequestSchema, castBackfillPreviewSchema, castBackfillProgressSchema, castBackfillRetrySchema,
   type CastBackfillRequest, type CastBackfillRetry } from "@infinite-quest/contracts";
 
-const capabilities = z.object({ castEditing: z.boolean() });
-export const castListResponseSchema = castSnapshotSchema.extend({ nextCursor: z.uuid().nullable(), recentWindow: z.number().int().positive().optional(), capabilities,
+const capabilities = z.object({ castEditing: z.boolean(), castPresets: z.boolean().optional() });
+export const castListResponseSchema = castSnapshotSchema.extend({ characters: z.array(castRosterCharacterSchema), nextCursor: z.uuid().nullable(), recentWindow: z.number().int().positive().optional(), capabilities,
   attention: z.array(z.object({ characterId: z.uuid(), review: z.boolean(), conflict: z.boolean(), reviewCount: z.number().int().nonnegative().optional(), conflictCount: z.number().int().nonnegative().optional() }).strict()).max(50).optional() });
 export const castDetailResponseSchema = castDetailSchema.extend({ capabilities });
 export function createCampaignCastApi(options: NexusHttpClientOptions = {
@@ -24,6 +28,10 @@ export function createCampaignCastApi(options: NexusHttpClientOptions = {
   const http = createNexusHttpClient(options);
   const pathFor = (campaignId: string) => `/campaigns/${encodeURIComponent(campaignId)}/cast`;
   return {
+    draftPreview(campaignId: string, id: string, input: CastDraftPreviewRequest, signal?: AbortSignal) {
+      const path = `${pathFor(campaignId)}/${encodeURIComponent(id)}/draft-preview`, value = validatedRequest(castDraftPreviewRequestSchema, input, "POST", path);
+      return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: castDraftPreviewResponseSchema, ...(signal ? { signal } : {}) });
+    },
     sourceTurn: (campaignId: string, turnNumber: number) => http.request({ method: "GET",
       path: `/campaigns/${encodeURIComponent(campaignId)}/reader/turns/${readerTurnNumberSchema.parse(turnNumber)}?sourceHash=1`,
       responseSchema: readerTurnResponseSchema.extend({ sourceHash: z.string().regex(/^[a-f0-9]{64}$/u).optional() }) }),
@@ -99,6 +107,24 @@ export function createCampaignCastApi(options: NexusHttpClientOptions = {
       return http.request({ method: "GET", path: `${path}?${search}`, responseSchema: castListResponseSchema, ...(signal ? { signal } : {}) });
     },
     detail: (campaignId: string, id: string, signal?: AbortSignal) => http.request({ method: "GET", path: `${pathFor(campaignId)}/${encodeURIComponent(id)}`, responseSchema: castDetailResponseSchema, ...(signal ? { signal } : {}) }),
+    worldChoices: (campaignId: string) => http.request({ method: "GET", path: `${pathFor(campaignId)}/from-world`, responseSchema: castWorldChoicesSchema }),
+    async fromWorldPreview(campaignId: string, input: CastFromWorldPreviewQuery) {
+      const path = pathFor(campaignId) + "/from-world-preview";
+      const query = validatedRequest(castFromWorldPreviewQuerySchema, input, "GET", path);
+      const search = new URLSearchParams({ characterId: query.characterId });
+      if (query.targetCastCharacterId) search.set("targetCastCharacterId", query.targetCastCharacterId);
+      return http.request({ method: "GET", path: path + "?" + search, responseSchema: castFromWorldPreviewSchema });
+    },
+    async fromWorld(campaignId: string, input: CastFromWorld) {
+      const path = pathFor(campaignId) + "/from-world";
+      const value = validatedRequest(castFromWorldSchema, input, "POST", path);
+      return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: castWriteResultSchema });
+    },
+    async editAuthoredProfile(campaignId: string, id: string, input: EditAuthoredCastProfile) {
+      const path = pathFor(campaignId) + "/" + encodeURIComponent(id) + "/authored-profile";
+      const value = validatedRequest(editAuthoredCastProfileSchema, input, "POST", path);
+      return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: castWriteResultSchema });
+    },
     async create(campaignId: string, input: CreateCastCharacter) {
       const path = pathFor(campaignId), value = validatedRequest(createCastCharacterSchema, input, "POST", path);
       return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: castWriteResultSchema });

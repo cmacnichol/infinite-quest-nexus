@@ -2,8 +2,8 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
-const evidence = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T09";
-const fix1Evidence = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T09-fix1";
+const evidence = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T09";
+const fix1Evidence = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T09-fix1";
 const fix1EvidenceRun = process.env.T09_FIX1_EVIDENCE_RUN ?? "local";
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 
@@ -26,7 +26,7 @@ async function loadStoryDocument(page: Page, campaignId: string) {
 }
 
 async function expectSelectedSceneBelowReaderToolbar(page: Page, turnNumber: number) {
-  const settledAnchor = await page.waitForFunction(async (selectedTurn) => {
+  await expect.poll(() => page.evaluate(async (selectedTurn) => {
     const measure = () => {
       const toolbar = document.querySelector("[data-story-reader-toolbar]");
       const scene = document.querySelector(`#scene-${selectedTurn}`);
@@ -46,8 +46,7 @@ async function expectSelectedSceneBelowReaderToolbar(page: Page, turnNumber: num
 
     let previous = measure();
     if (!previous) return null;
-    let stableFrames = 0;
-    for (let frame = 0; frame < 180; frame += 1) {
+    for (let frame = 0; frame < 4; frame += 1) {
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
       const current = measure();
       if (!current) return null;
@@ -56,22 +55,11 @@ async function expectSelectedSceneBelowReaderToolbar(page: Page, turnNumber: num
       const stable = Math.abs(current.sceneTop - previous.sceneTop) <= 0.5
         && Math.abs(current.toolbarBottom - previous.toolbarBottom) <= 0.5
         && Math.abs(current.scrollY - previous.scrollY) <= 0.5;
-      stableFrames = aligned && unobscured && stable ? stableFrames + 1 : 0;
-      if (stableFrames >= 4) return current;
+      if (!aligned || !unobscured || !stable) return { ...current, aligned, unobscured, stable, viewportWidth: innerWidth };
       previous = current;
     }
-    return null;
-  }, turnNumber, { timeout: 8_000 });
-
-  const geometry = await settledAnchor.jsonValue() as {
-    gap: number;
-    sceneTop: number;
-    targetTop: number;
-    toolbarBottom: number;
-    scrollY: number;
-  };
-  expect(geometry.gap).toBeGreaterThanOrEqual(8);
-  expect(Math.abs(geometry.sceneTop - geometry.targetTop)).toBeLessThanOrEqual(3);
+    return { ...previous, aligned: true, unobscured: true, stable: true, viewportWidth: innerWidth };
+  }, turnNumber), { message: `Turn ${turnNumber} is aligned and unobscured for four frames`, timeout: 8_000 }).toMatchObject({ aligned: true, unobscured: true, stable: true });
 }
 
 test("previous_next_do_not_submit", async ({ page }) => {
@@ -266,11 +254,14 @@ test("long_scene_reader_toolbar_stays_available_without_scrolling_to_composer", 
 });
 
 test("settled_navigation_keeps_each_long_scene_anchor_below_both_sticky_layers", async ({ page }) => {
-  const { api, fixture } = await openReader(page, false);
+  const fixture = legacyUiFixture({ turnCount: 6, worldCount: 1, campaignCount: 1 });
   for (const turn of fixture.turns) {
     turn.narration = Array.from({ length: 36 }, (_, index) => `Paragraph ${index + 1}: ${"The station clock moved while the rain softened against the roof. ".repeat(5)}`).join("\n\n");
   }
+  const api = await installLegacyUiFixture(page, fixture);
   await loadStoryDocument(page, fixture.campaignId);
+  await expect(page.locator("#storySyncStatus")).toHaveText("Story synced");
+  await expectSelectedSceneBelowReaderToolbar(page, 6);
   const action = page.locator("#freeAction");
   await action.fill("Keep this draft while moving between long scenes.");
 

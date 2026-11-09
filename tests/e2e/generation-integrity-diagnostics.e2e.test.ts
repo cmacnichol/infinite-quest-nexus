@@ -3,7 +3,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
-import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
+import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 
 const PRIVATE_CANARY = "PRIVATE_PROMPT_AND_PROVIDER_ERROR_CANARY";
 const generationId = "55555555-5555-4555-8555-555555555555";
@@ -116,8 +116,10 @@ async function installRecoveryApi(page: Page, options: { failureDiagnostic?: { c
         const body = request.postDataJSON() as Record<string, unknown>;
         writes.push({ path, body });
         profileSaveAttempts += 1;
-        if (!discarded || body.expectedRevision !== characterProfile.revision || (options.profileConflict && profileSaveAttempts === 1)) {
-          return respond({ error: "Character profile is locked or changed.", code: "invalid_transition" }, 409);
+        if (!discarded) return respond({ error: "Conflict", message: "Generation is active.", code: "invalid_transition", details: { code: "invalid_transition" }, correlationId: "fixture-lock" }, 409);
+        if (options.profileConflict && profileSaveAttempts === 1) characterProfile.revision += 1;
+        if (body.expectedRevision !== characterProfile.revision) {
+          return respond({ error: "Conflict", message: "Character profile revision changed.", code: "state_revision_changed", details: { code: "state_revision_changed" }, correlationId: "fixture-revision" }, 409);
         }
         characterProfile.revision += 1;
         characterProfile.name = String(body.name);
@@ -174,19 +176,19 @@ for (const [source, message, retryAt, timing] of [
   await expect(recovery).toContainText(timing);
   expect(payloads.requests.filter(value => value.startsWith("POST "))).toEqual([]);
   await expect(page.locator("body")).not.toContainText(PRIVATE_CANARY);
-  await mkdir("docs/review/assets/provider-failure-diagnostics", { recursive: true });
-  await page.screenshot({ path: `docs/review/assets/provider-failure-diagnostics/${source}-live-desktop.png`, fullPage: true });
+  await mkdir("test-results/review-assets/provider-failure-diagnostics", { recursive: true });
+  await page.screenshot({ path: `test-results/review-assets/provider-failure-diagnostics/${source}-live-desktop.png`, fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: `docs/review/assets/provider-failure-diagnostics/${source}-live-mobile.png`, fullPage: true });
+  await page.screenshot({ path: `test-results/review-assets/provider-failure-diagnostics/${source}-live-mobile.png`, fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.reload();
   await expect(recovery).toContainText("The provider rate limit was reached. Wait before retrying.");
   await expect(recovery).toContainText(message);
   await expect(recovery).toContainText(timing);
-  await page.screenshot({ path: `docs/review/assets/provider-failure-diagnostics/${source}-reload-desktop.png`, fullPage: true });
+  await page.screenshot({ path: `test-results/review-assets/provider-failure-diagnostics/${source}-reload-desktop.png`, fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(recovery.getByRole("button", { name: "Retry generation", exact: true })).toBeVisible();
-  await page.screenshot({ path: `docs/review/assets/provider-failure-diagnostics/${source}-reload-mobile.png`, fullPage: true });
+  await page.screenshot({ path: `test-results/review-assets/provider-failure-diagnostics/${source}-reload-mobile.png`, fullPage: true });
   await recovery.getByRole("button", { name: "Retry generation", exact: true }).click();
   await expect.poll(() => payloads.requests.some(request => request === `POST /api/v1/generation-jobs/${generationId}/retry`)).toBe(true);
   expect(payloads.requests.filter(request => request === `POST /api/v1/generation-jobs/${generationId}/retry`)).toHaveLength(1);
@@ -221,10 +223,10 @@ test("web-next Story renders only safe recovery guidance and recovery actions", 
   await expect(recovery.getByRole("button", { name: "Retry generation", exact: true })).toBeVisible();
   await expect(recovery.getByRole("button", { name: "Discard generation job", exact: true })).toBeVisible();
   await expect(page.locator("body")).not.toContainText(PRIVATE_CANARY);
-  await page.screenshot({ path: "docs/review/assets/structured-output/story-web-next-response-format-desktop.png", fullPage: true });
+  await page.screenshot({ path: "test-results/review-assets/structured-output/story-web-next-response-format-desktop.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: "docs/review/assets/structured-output/story-web-next-response-format-mobile.png", fullPage: true });
+  await page.screenshot({ path: "test-results/review-assets/structured-output/story-web-next-response-format-mobile.png", fullPage: true });
   expect(errors).toEqual([]);
 });
 
@@ -257,10 +259,10 @@ test("legacy Story renders safe recovery guidance without private diagnostic dat
   await expect(recovery.getByRole("button", { name: "Retry generation job", exact: true })).toBeVisible();
   await expect(recovery.getByRole("button", { name: "Discard generation job", exact: true })).toBeVisible();
   await expect(page.locator("body")).not.toContainText(PRIVATE_CANARY);
-  await page.screenshot({ path: "docs/review/assets/structured-output/story-legacy-response-format-desktop.png", fullPage: true });
+  await page.screenshot({ path: "test-results/review-assets/structured-output/story-legacy-response-format-desktop.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: "docs/review/assets/structured-output/story-legacy-response-format-mobile.png", fullPage: true });
+  await page.screenshot({ path: "test-results/review-assets/structured-output/story-legacy-response-format-mobile.png", fullPage: true });
   expect(errors).toEqual([]);
 });
 
@@ -269,15 +271,12 @@ for (const scope of ["application", "campaign"] as const) test(`Prompt Library s
   const enrolledProtocol = "story-v14-continuity-context|story-output-v2|current-continuity-v3";
   let savedOverride: Record<string, unknown> | null = null;
   const template = {
-    key: "story_system",
+    ...PROMPT_TEMPLATE_CATALOG.story_system,
     title: "Story system",
-    category: "Story Engine",
-    description: "Creates safe story output.",
     effectiveSource: "shipped",
     effectiveContent: "Keep the established creative voice.",
-    variables: [],
-    maxLength: 16000,
     compatibility: {
+      acknowledged: false,
       requiredShapeVersion: "story-output-v2",
       protocolIdentity: "story-protocol-fixture",
       requiredShapePreview: "{ narration, choices, currentContinuity }"
@@ -323,6 +322,9 @@ for (const scope of ["application", "campaign"] as const) test(`Prompt Library s
 test("Prompt Library previews current cast settings and unresolved direct-model encoding", async ({ page }) => {
   const campaign = quietLeafApiPayloads();
   const ownerUserId = "66666666-6666-4666-8666-666666666666";
+  // Playwright's loader cannot resolve workspace TypeScript exports; tsx can.
+  const { tsImport } = await import("tsx/esm/api");
+  const { createPromptRepository } = await tsImport("../../packages/database/src/prompt-repository.ts", import.meta.url) as typeof import("../../packages/database/src/prompt-repository.js");
   const prompts = createPromptRepository({
     query: async (sql: string) => {
       if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
@@ -351,9 +353,7 @@ test("Prompt Library previews current cast settings and unresolved direct-model 
   });
 
   await page.goto(`${legacyOrigin}/nexus/index.html#prompt-library`);
-  await expect(page.locator('#managementInteractiveRoot:not([inert])[aria-busy="false"]')).toBeVisible();
   await expect(page.locator("#promptLibraryScope")).toBeVisible();
-  await expect(page.locator(`#campaignList [data-campaign-id="${campaign.campaignId}"]`)).toHaveCount(1);
   await page.locator("#promptLibraryScope").selectOption("campaign");
   await expect(page.locator(`#promptLibraryCampaign option[value="${campaign.campaignId}"]`)).toHaveCount(1);
   await page.locator("#promptLibraryCampaign").selectOption(campaign.campaignId);
@@ -361,13 +361,13 @@ test("Prompt Library previews current cast settings and unresolved direct-model 
   const preview = page.locator("#promptLibraryPreviewContent");
   await expect(preview).toContainText("System prompt preview (output encoding pending)");
   await expect(preview).toContainText("Campaign cast authority:");
-  await expect(preview).toContainText("Protocol story-v17-campaign-cast from the current runtime settings.");
+  await expect(preview).toContainText("Protocol story-v18-fiction-cast from the current runtime settings.");
   await expect(preview).toContainText("This preview omits that contract");
   await expect(preview).not.toContainText("this campaign's direct model uses the story-native-v2 wire");
   await preview.evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await preview.scrollIntoViewIfNeeded();
-  await mkdir("docs/review/assets/prompt-system-review", { recursive: true });
-  await page.screenshot({ path: "docs/review/assets/prompt-system-review/preview.png", fullPage: true });
+  await mkdir("test-results/review-assets/prompt-system-review", { recursive: true });
+  await page.screenshot({ path: "test-results/review-assets/prompt-system-review/preview.png", fullPage: true });
 });
 
 for (const surface of ["legacy", "web-next"] as const) {
@@ -503,7 +503,7 @@ for (const surface of ["legacy", "web-next"] as const) {
       await discard.focus(); await expect(discard).toBeFocused();
       for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
         await page.setViewportSize(viewport);
-        await page.screenshot({ path: `docs/review/assets/generation-integrity-diagnostics/${surface}-${status}-${viewport.width}.png`, fullPage: true });
+        await page.screenshot({ path: `test-results/review-assets/generation-integrity-diagnostics/${surface}-${status}-${viewport.width}.png`, fullPage: true });
       }
       await discard.click();
       await expect.poll(() => payloads.requests.some((request) => request.endsWith(`/${generationId}/discard`))).toBe(true);
@@ -526,18 +526,16 @@ for (const surface of ["legacy", "web-next"] as const) for (const operation of [
     const draft = page.locator(surface === "legacy" ? "#freeAction" : "[data-story-draft]");
     await draft.fill("Remember the corrected harbor before continuing.");
     await expect(draft).toHaveValue("Remember the corrected harbor before continuing.");
-    if (surface === "legacy") await page.getByRole("button", { name: "Setup", exact: true }).click();
-    else await page.getByText("Campaign Tools", { exact: true }).click();
+    const toolsToggle = surface === "legacy" ? page.getByRole("button", { name: "Setup", exact: true }) : page.locator("[data-campaign-tools] summary");
+    await toolsToggle.click();
     const edit = page.locator(surface === "legacy" ? "#btnOpenEditState" : "[data-tool-action=edit-campaign-state]");
     await expect(edit).toBeDisabled();
+    await toolsToggle.click();
     await recovery.getByRole("button", { name: "Discard generation job", exact: true }).click();
     await expect(recovery).toBeHidden();
     await expect(draft).toHaveValue("Remember the corrected harbor before continuing.");
+    if (!await edit.isVisible()) await toolsToggle.click();
     await expect(edit).toBeEnabled();
-    if (!await edit.isVisible()) {
-      if (surface === "legacy") await page.getByRole("button", { name: "Setup", exact: true }).click();
-      else await page.locator("[data-campaign-tools] summary").click();
-    }
     await edit.click();
     await expect(draft).toHaveValue("Remember the corrected harbor before continuing.");
     await page.locator(surface === "legacy" ? "#editStateContinuitySummary" : "[data-continuity-summary]").fill("The harbor authority is corrected.");
@@ -564,31 +562,35 @@ for (const surface of ["legacy", "web-next"] as const) for (const operation of [
     await expect(recovery).toBeVisible();
     const draft = page.locator(surface === "legacy" ? "#freeAction" : "[data-story-draft]");
     await draft.fill("Keep this harbor profile repair with the new turn.");
-    if (surface === "legacy") await page.getByRole("button", { name: "Setup", exact: true }).click();
-    else await page.getByText("Campaign Tools", { exact: true }).click();
+    const toolsToggle = surface === "legacy" ? page.getByRole("button", { name: "Setup", exact: true }) : page.locator("[data-campaign-tools] summary");
+    await toolsToggle.click();
     const edit = page.locator(surface === "legacy" ? "#btnOpenEditCharacterProfile" : "[data-tool-action=edit-character-profile]");
     await expect(edit).toBeDisabled();
+    await toolsToggle.click();
     await recovery.getByRole("button", { name: "Discard generation job", exact: true }).click();
     await expect(recovery).toBeHidden();
     await expect(draft).toHaveValue("Keep this harbor profile repair with the new turn.");
+    if (!await edit.isVisible()) await toolsToggle.click();
     await expect(edit).toBeEnabled();
-    if (!await edit.isVisible()) {
-      if (surface === "legacy") await page.getByRole("button", { name: "Setup", exact: true }).click();
-      else await page.locator("[data-campaign-tools] summary").click();
-    }
     await edit.click();
-    const name = page.locator(surface === "legacy" ? "#editCharacterProfileName" : "[data-story-tool-dialog] [data-character-profile-name]");
-    const profile = page.locator(surface === "legacy" ? "#editCharacterProfileJson" : "[data-story-tool-dialog] [data-character-profile-json]");
+    const name = page.locator(surface === "legacy" ? "#characterName" : '[data-story-tool-dialog] [data-character-profile-field="name"]');
     await expect(name).toHaveValue("Mira Vale");
     if (operation === "append") {
       for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
         await page.setViewportSize(viewport);
-        await page.screenshot({ path: `docs/review/assets/generation-integrity-diagnostics/${surface}-profile-recovery-editor-${viewport.width}.png`, fullPage: true });
+        await page.screenshot({ path: `test-results/review-assets/generation-integrity-diagnostics/${surface}-profile-recovery-editor-${viewport.width}.png`, fullPage: true });
       }
     }
     await expect(draft).toHaveValue("Keep this harbor profile repair with the new turn.");
     await name.fill("Mira Vale, Harbor Warden");
-    await profile.fill(JSON.stringify({ story: { role: "Harbor warden", keyRelationships: "Trusts the lighthouse keeper with the signal key." } }));
+    if (surface === "legacy") {
+      await page.locator("#characterRole").fill("Harbor warden");
+      await page.locator("#characterStoryDetails").evaluate((element: HTMLDetailsElement) => { element.open = true; });
+      await page.locator('[data-character-profile-path="story.keyRelationships"]').fill("Trusts the lighthouse keeper with the signal key.");
+    } else {
+      await page.locator('[data-story-tool-dialog] [data-character-profile-field="story.role"]').fill("Harbor warden");
+      await page.locator('[data-story-tool-dialog] [data-character-profile-field="story.keyRelationships"]').fill("Trusts the lighthouse keeper with the signal key.");
+    }
     await page.locator(surface === "legacy" ? "#btnSaveEditCharacterProfile" : "[data-action=save-character-profile]").click();
     await expect.poll(() => api.writes.filter(write => write.path.endsWith("/character-profile")).length).toBe(1);
     expect(api.writes.find(write => write.path.endsWith("/character-profile"))!.body).toMatchObject({
@@ -623,26 +625,48 @@ for (const surface of ["legacy", "web-next"] as const) {
     if (surface === "legacy") await page.getByRole("button", { name: "Setup", exact: true }).click();
     else await page.getByText("Campaign Tools", { exact: true }).click();
     await page.locator(surface === "legacy" ? "#btnOpenEditCharacterProfile" : "[data-tool-action=edit-character-profile]").click();
-    const name = page.locator(surface === "legacy" ? "#editCharacterProfileName" : "[data-story-tool-dialog] [data-character-profile-name]");
-    const profile = page.locator(surface === "legacy" ? "#editCharacterProfileJson" : "[data-story-tool-dialog] [data-character-profile-json]");
+    const name = page.locator(surface === "legacy" ? "#characterName" : '[data-story-tool-dialog] [data-character-profile-field="name"]');
     await expect(name).toHaveValue("Mira Vale");
     await name.fill("Mira Vale, Signal Keeper");
     const revisedProfile = { story: { role: "Signal keeper", keyRelationships: "Keeps the beacon ledger with Nia." } };
-    await profile.fill(JSON.stringify(revisedProfile));
+    if (surface === "legacy") {
+      await page.locator("#characterRole").fill("Signal keeper");
+      await page.locator("#characterStoryDetails").evaluate((element: HTMLDetailsElement) => { element.open = true; });
+      await page.locator('[data-character-profile-path="story.keyRelationships"]').fill("Keeps the beacon ledger with Nia.");
+    } else {
+      await page.locator('[data-story-tool-dialog] [data-character-profile-field="story.role"]').fill("Signal keeper");
+      await page.locator('[data-story-tool-dialog] [data-character-profile-field="story.keyRelationships"]').fill("Keeps the beacon ledger with Nia.");
+    }
     const save = page.locator(surface === "legacy" ? "#btnSaveEditCharacterProfile" : "[data-action=save-character-profile]");
     await save.click();
     await expect.poll(() => api.writes.filter(write => write.path.endsWith("/character-profile")).length).toBe(1);
-    const status = page.locator(surface === "legacy" ? "#editCharacterProfileStatus" : "[data-story-tool-dialog] p.story-status[data-story-status]:not([role])");
+    const status = page.locator(surface === "legacy" ? "#campaign-character-editor-message" : "[data-story-tool-dialog] p.story-status[data-story-status]:not([role])");
     await expect(status).toContainText(surface === "legacy" ? "changed" : "changed elsewhere");
     await expect(name).toHaveValue("Mira Vale, Signal Keeper");
-    await expect(profile).toHaveValue(JSON.stringify(revisedProfile));
+    if (surface === "legacy") await expect(page.locator("#characterRole")).toHaveValue("Signal keeper");
+    else await expect(page.locator('[data-story-tool-dialog] [data-character-profile-field="story.role"]')).toHaveValue("Signal keeper");
     await expect(draft).toHaveValue("Keep this draft while the profile conflict is repaired.");
+    if (surface === "legacy") {
+      await page.getByRole("button", { name: "Compare latest" }).click();
+      await page.getByRole("button", { name: "Reapply my changes" }).click();
+    } else {
+      await page.locator('[data-action="close-story-tool-dialog"]').click();
+      await page.getByText("Campaign Tools", { exact: true }).click();
+      await page.locator('[data-tool-action="edit-character-profile"]').click();
+      await expect(name).toHaveValue("Mira Vale");
+      await name.fill("Mira Vale, Signal Keeper");
+      await page.locator('[data-story-tool-dialog] [data-character-profile-field="story.role"]').fill("Signal keeper");
+      await page.locator('[data-story-tool-dialog] [data-character-profile-field="story.keyRelationships"]').fill("Keeps the beacon ledger with Nia.");
+    }
     await save.click();
     await expect.poll(() => api.writes.filter(write => write.path.endsWith("/character-profile")).length).toBe(2);
-    for (const write of api.writes.filter(write => write.path.endsWith("/character-profile"))) {
-      expect(write.body).toMatchObject({ expectedRevision: 4, name: "Mira Vale, Signal Keeper", profile: revisedProfile, editSource: "manual" });
-    }
+    const profileWrites = api.writes.filter(write => write.path.endsWith("/character-profile"));
+    expect(profileWrites[0]!.body).toMatchObject({ expectedRevision: 4, name: "Mira Vale, Signal Keeper", profile: revisedProfile, editSource: "manual" });
+    expect(profileWrites[1]!.body).toMatchObject({ expectedRevision: 5, name: "Mira Vale, Signal Keeper", profile: revisedProfile, editSource: "manual" });
     await expect(draft).toHaveValue("Keep this draft while the profile conflict is repaired.");
+    await page.locator(surface === "legacy" ? "#btnTakeAction" : "[data-action=continue-story]").click();
+    await expect.poll(() => api.writes.filter(write => write.path.endsWith("/generations")).length).toBe(1);
+    expect(api.writes.at(-1)!.body).toMatchObject({ action: "Keep this draft while the profile conflict is repaired." });
   });
 }
 

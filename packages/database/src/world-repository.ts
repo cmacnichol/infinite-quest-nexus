@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { seedCampaignCastWithClient } from "./campaign-cast-repository.js";
+import { castDiscoveryWorldIdentities } from "../../domain/src/campaign-cast-world-identities.js";
 import type {
   CampaignCreateView,
   CampaignListSource,
@@ -29,6 +32,7 @@ import {
   WORLD_CONTENT_SCHEMA_VERSION,
   worldImportRequestSchema,
   worldContentSchema,
+  validateWorldCharacterLinks,
   type WorldContent
 } from "../../contracts/src/world-library.js";
 import { normalizeCampaignTrackers } from "../../domain/src/campaign-trackers.js";
@@ -40,7 +44,7 @@ import {
   campaignCharacterSeed,
   campaignProfileFromCharacter,
   characterSnapshot,
-  resolvePlayableCharacters
+  resolvePlayableCharacters, resolveWorldCharacters
 } from "../../domain/src/world-characters.js";
 import type { DatabasePool } from "./pool.js";
 import {
@@ -83,6 +87,7 @@ export type CampaignCreationMemoryCollaborator = Pick<
 
 export type WorldRepositoryCollaborators = Readonly<{
   memory: CampaignCreationMemoryCollaborator;
+  castPresetsEnabled?: boolean;
 }>;
 
 function json(value: unknown): string {
@@ -113,7 +118,7 @@ function contentWithTitle(content: WorldContent, title: string): WorldContent {
 
 /** Public writes must reject stale or tampered source support before persistence. */
 function validatedWorldContentWithTitle(content: WorldContent, title: string): WorldContent {
-  return validateWorldSourceMaterialForContent(contentWithTitle(content, title));
+  return validateWorldCharacterLinks(validateWorldSourceMaterialForContent(contentWithTitle(content, title)));
 }
 
 const SENSITIVE_WORLD_KEYS = new Set([
@@ -1015,6 +1020,7 @@ export function createPostgresWorldRepository(): PostgresWorldRepository {
         campaign_transfers: number;
         chronicle_memories: number;
         model_chains: number;
+        cast_seed_evidence: number;
       }>(
         `SELECT
            (SELECT count(*)::int FROM campaigns
@@ -1028,7 +1034,9 @@ export function createPostgresWorldRepository(): PostgresWorldRepository {
            (SELECT count(*)::int FROM chronicle_memories
              WHERE owner_user_id = $2 AND world_version_id = $1) AS chronicle_memories,
            (SELECT count(*)::int FROM model_chains
-             WHERE owner_user_id = $2 AND world_version_id = $1) AS model_chains`,
+             WHERE owner_user_id = $2 AND world_version_id = $1) AS model_chains,
+           (SELECT count(*)::int FROM campaign_cast_events
+             WHERE owner_user_id = $2 AND payload @> jsonb_build_array(jsonb_build_object('command', jsonb_build_object('kind', 'seed_profile', 'worldVersionId', ($1::uuid)::text)))) AS cast_seed_evidence`,
         [scope.worldVersionId, scope.ownerUserId]
       );
       const counts = dependencies.rows[0];
@@ -1037,7 +1045,8 @@ export function createPostgresWorldRepository(): PostgresWorldRepository {
         campaign_migrations: Number(counts?.campaign_migrations ?? 0),
         campaign_transfers: Number(counts?.campaign_transfers ?? 0),
         chronicle_memories: Number(counts?.chronicle_memories ?? 0),
-        model_chains: Number(counts?.model_chains ?? 0)
+        model_chains: Number(counts?.model_chains ?? 0),
+        cast_seed_evidence: Number(counts?.cast_seed_evidence ?? 0)
       });
       if (blockers.length > 0) {
         return failure("deletion_blocked", { worldId: scope.worldId, worldVersionId: scope.worldVersionId, blockers });
@@ -1166,9 +1175,24 @@ function createPostgresCampaignRepository(
       } catch {
         return failure("invalid_transition", {
           worldVersionId: request.worldVersionId,
-          selectionIssue: content.playableCharacters.length > 1 && !request.selectedCharacterId ? "required" : "unknown"
+          selectionIssue: resolvePlayableCharacters(content).length > 1 && !request.selectedCharacterId ? "required" : "unknown"
         });
       }
+      const selections = request.startingCast ?? [];
+      if (selections.length && collaborators.castPresetsEnabled !== true) {
+        throw new WorldCampaignApplicationError("unavailable", "cast_presets_disabled");
+      }
+      const selectedIds = new Set<string>();
+      const startingEntries = selections.map((selection) => {
+        const index = content.playableCharacters.findIndex((entry) => entry.id === selection.characterId);
+        const entry = content.playableCharacters[index];
+        if (!entry || !["supporting", "both"].includes(entry.campaignUse) || entry.id === seed.character.id || selectedIds.has(entry.id)) {
+          throw new WorldCampaignApplicationError("invalid_request", "invalid_transition");
+        }
+        selectedIds.add(entry.id);
+        return { entry, index, alwaysInContext: selection.alwaysInContext };
+      });
+      const skippedStartingCast: Array<{ characterId: string; name: string; aliases: string[]; reason: "invalid_name" | "invalid_alias" }> = [];
       const snapshot = characterSnapshot(seed.character);
       const campaignProfile = campaignProfileFromCharacter(seed.character);
       const eventRules = validateCampaignEventTriggers(content.eventTriggers);
@@ -1179,11 +1203,11 @@ function createPostgresCampaignRepository(
       const campaign = await client.query<{ id: string }>(
         `INSERT INTO campaigns (
            owner_user_id, world_version_id, title, story_length_profile, story_context_budget_tokens, turn_control_style,
-           selected_character_id, character_snapshot, character_profile, character_profile_revision, legacy_settings
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+           selected_character_id, character_snapshot, character_profile, character_profile_revision, legacy_settings, first_appearance_eligible, selected_character_world_id
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
         [scope.ownerUserId, request.worldVersionId, request.title, request.storyLengthProfile,
           request.storyContextBudgetTokens, request.turnControlStyle, seed.character.id, json(snapshot), campaignProfile ? json(campaignProfile) : null,
-          campaignProfile ? 1 : 0, json({ useRpgStats: seed.rpgStats.length > 0 })]
+          campaignProfile ? 1 : 0, json({ useRpgStats: seed.rpgStats.length > 0 }), collaborators.castPresetsEnabled === true, source.world_id]
       );
       const campaignId = campaign.rows[0]?.id;
       if (!campaignId) throw new Error("Could not create campaign.");
@@ -1240,6 +1264,21 @@ function createPostgresCampaignRepository(
         campaignId,
         worldVersionId: request.worldVersionId
       });
+      for (const { entry, index, alwaysInContext } of startingEntries) {
+        const identity = castDiscoveryWorldIdentities({ playableCharacters: [entry] })[0];
+        if (!identity) {
+          skippedStartingCast.push({ characterId: entry.id, name: entry.name, aliases: [], reason: "invalid_name" });
+          continue;
+        }
+        const aliases = entry.profile?.identity.aliases ?? [];
+        const rejectedAliases = aliases.filter((alias) => !identity.aliases.includes(alias));
+        if (rejectedAliases.length) skippedStartingCast.push({ characterId: entry.id, name: entry.name, aliases: rejectedAliases, reason: "invalid_alias" });
+        await seedCampaignCastWithClient(client, { ownerUserId: scope.ownerUserId, campaignId }, {
+          characterId: randomUUID(), worldVersionId: request.worldVersionId, entry, index,
+          boundary: { turnNumber: 0, timelineRevision: 0 },
+          idempotencyKey: `campaign-seed:${campaignId}:${entry.id}`, alwaysInContext
+        });
+      }
       return success<CampaignCreateView>({
         id: campaignId,
         title: request.title,
@@ -1253,6 +1292,7 @@ function createPostgresCampaignRepository(
         worldVersionNumber: source.version_number,
         selectedCharacterId: seed.character.id,
         selectedCharacterName: seed.character.name,
+        skippedStartingCast,
         textProviderProfileId: null,
         imageProviderProfileId: null
       });
@@ -1441,6 +1481,11 @@ function createPostgresCampaignRepository(
           name: character.name,
           rpgStatCount: character.rpgStats.length,
           defaultTriggerCount: character.defaultTriggers.length
+        })),
+        startingCastCandidates: resolveWorldCharacters(content).map((character) => ({
+          id: character.id, name: character.name, campaignUse: character.campaignUse,
+          startingCastDefault: character.startingCastDefault, alwaysInContext: character.alwaysInContext,
+          role: String(character.profile?.role || ""), summary: String(character.characterText || character.profile?.background || "").slice(0, 260)
         })),
         readiness: assessWorldCampaignReadiness(content)
       };

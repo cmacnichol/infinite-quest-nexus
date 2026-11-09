@@ -17,7 +17,10 @@ function mergeCharacter(content: WorldContent, candidate: PlayableCharacter, cha
   const selected = characterId ?? candidate.id;
   const index = roster.findIndex((entry) => entry.id === selected);
   if (characterId !== undefined && (index < 0 || candidate.id !== characterId)) throw new AuthoringRepositoryError("invalid_state");
-  if (index >= 0) roster[index] = candidate;
+  if (index >= 0) {
+    const original = roster[index]!;
+    roster[index] = { ...candidate, id: original.id, source: original.source, campaignUse: original.campaignUse, startingCastDefault: original.startingCastDefault, alwaysInContext: original.alwaysInContext };
+  }
   else roster.push(candidate);
   return worldContentSchema.parse({ ...content, playableCharacters: roster });
 }

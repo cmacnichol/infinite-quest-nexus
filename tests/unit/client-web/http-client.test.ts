@@ -413,3 +413,11 @@ describe("createNexusHttpClient", () => {
     expect(queue.urls).toHaveLength(1);
   });
 });
+
+it("preserves a partial rate-limit error envelope", async () => {
+  const queue = fetchQueue(jsonResponse({ message: "Slow down", code: "rate_limited", details: { limit: 2 } }, 429, { "x-correlation-id": "ref-123" }));
+  const client = createNexusHttpClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: queue.fetchImpl });
+  await expect(client.request({ method: "GET", path: "/worlds", responseSchema })).rejects.toMatchObject({
+    statusCode: 429, message: "Slow down", domainCode: "rate_limited", details: { limit: 2 }, correlationId: "ref-123"
+  });
+});

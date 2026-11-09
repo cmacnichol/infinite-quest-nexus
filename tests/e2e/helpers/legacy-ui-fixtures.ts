@@ -1,4 +1,5 @@
 import type { Page, Route } from "@playwright/test";
+import { campaignCharacterProfileUpdateSchema, characterProfileSchema } from "../../../packages/contracts/src/world-library.js";
 import { quietLeafApiPayloads } from "../../fixtures/quiet-leaf-payloads.js";
 import type {
   LegacyUiFixture,
@@ -196,6 +197,10 @@ export async function installLegacyUiFixture(
   const requests: LegacyUiRequestRecord[] = [];
   const writes: LegacyUiRouteInstrumentation["writes"] = [];
   const pendingDelays: Array<() => void> = [];
+  let campaignProfile = {
+    campaignId: fixture.campaignId, revision: 3, name: "The Observer",
+    profile: characterProfileSchema.parse({ story: { role: "Guide" } })
+  };
 
   const fulfill = async (route: Route, body: unknown, status = 200) => {
     const serialized = JSON.stringify(body);
@@ -284,7 +289,15 @@ export async function installLegacyUiFixture(
       const id = path.split("/").at(-1) ?? "";
       result = await fulfill(route, fixture.worldDetails.get(id) ?? {});
     } else if (path === `/api/v1/world-versions/${fixture.worldVersionId}/playable-characters`) {
-      result = await fulfill(route, { characters: [{ id: "fixture-observer", name: "The Observer", rpgStatCount: 0, defaultTriggerCount: 0 }], readiness: { ready: true, issues: [] } });
+      result = await fulfill(route, { characters: [{ id: "fixture-observer", name: "The Observer", rpgStatCount: 0, defaultTriggerCount: 0 }], startingCastCandidates: [], readiness: { ready: true, issues: [] } });
+    } else if (path === `/api/v1/campaigns/${fixture.campaignId}/character-profile` && method === "PUT") {
+      const { name, profile } = campaignCharacterProfileUpdateSchema.parse(request.postDataJSON());
+      campaignProfile = { ...campaignProfile, name, profile, revision: campaignProfile.revision + 1 };
+      result = await fulfill(route, campaignProfile);
+    } else if (path === `/api/v1/campaigns/${fixture.campaignId}/character-profile` && method === "GET") {
+      const { name, profile } = campaignProfile;
+      result = await fulfill(route, { ...campaignProfile, characterId: "fixture-observer", storedProfile: { name, profile },
+        inheritedFromSnapshot: false, legacyCharacterText: "She wears a blue cloak.", rpgStats: [], defaultTriggers: [] });
     } else if (path === `/api/v1/campaigns/${fixture.campaignId}/sync-status`) {
       result = await fulfill(route, fixture.syncStatus);
     } else if (path === `/api/v1/campaigns/${fixture.campaignId}/turns`) {

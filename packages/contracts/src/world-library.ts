@@ -89,6 +89,9 @@ export const playableCharacterSchema = z.object({
   name: z.string().trim().min(1).max(200),
   characterText: longText,
   profile: characterProfileSchema.optional(),
+  campaignUse: z.enum(["playable", "supporting", "both"]).default("playable"),
+  startingCastDefault: z.boolean().default(true),
+  alwaysInContext: z.boolean().default(false),
   rpgStats: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
   defaultTriggers: z.array(z.unknown()).max(MAX_CHARACTER_MECHANICS_ITEMS).default([]),
   source: z.record(z.string(), z.unknown()).default({})
@@ -144,6 +147,19 @@ export const worldContentSchema = z.object({
   defaults: z.record(z.string(), z.unknown()).default({}),
   sourceMaterial: worldSourceMaterialSchema.optional()
 }).passthrough();
+
+/** Require each entity-to-roster link to resolve within this draft or immutable version. */
+export function validateWorldCharacterLinks<T extends { playableCharacters: readonly { id: string }[]; entities: readonly unknown[] }>(content: T): T {
+  const ids = new Set(content.playableCharacters.map((character) => character.id));
+  for (const entity of content.entities) {
+    if (!entity || typeof entity !== "object" || Array.isArray(entity)) continue;
+    const link = (entity as Record<string, unknown>).linkedCharacterId;
+    if (link !== undefined && (typeof link !== "string" || !ids.has(link))) {
+      throw new Error("Entity linkedCharacterId must reference a character in this world.");
+    }
+  }
+  return content;
+}
 
 export type WorldContent = z.infer<typeof worldContentSchema>;
 export type WorldSourceMaterial = z.infer<typeof worldSourceMaterialSchema>;
@@ -226,9 +242,27 @@ export const characterProfileOrganizationResultSchema = z.object({
   protocolVersion: z.string().trim().min(1).max(100)
 }).strict();
 
+export function worldCharacterNames(content: WorldContent, excludeCharacterId?: string): string[] {
+  const names = content.playableCharacters.filter((character) => character.id !== excludeCharacterId).map((character) => character.name);
+  for (const value of content.entities) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const entity = value as Record<string, unknown>;
+    if (!["character", "person", "npc"].includes(String(entity.kind ?? entity.type ?? entity.category ?? "").trim().toLowerCase())) continue;
+    const name = entity.name ?? entity.title ?? entity.label;
+    if (typeof name === "string" && name.trim()) names.push(name.trim());
+  }
+  return names;
+}
+
+export const castSuggestionSeedSchema = z.object({ name: z.string().trim().min(1).max(200), role: z.string().trim().min(1).max(2000), concept: z.string().trim().min(1).max(1000) }).strict();
+export const castSuggestionPreviewRequestSchema = z.object({ content: worldContentSchema, direction: z.string().trim().max(10000).optional(), count: z.number().int().min(3).max(8) }).strict();
+export const castSuggestionPreviewResponseSchema = z.object({ seeds: z.array(castSuggestionSeedSchema.extend({ seedId: z.uuid() })).max(8) }).strict();
+
 export const playableCharacterGenerationPreviewRequestSchema = z.object({
   content: worldContentSchema,
   prompt: z.string().trim().min(1).max(20_000),
+  seed: castSuggestionSeedSchema.optional(),
+  campaignUse: z.literal("supporting").optional(),
   characterId: characterId.optional(),
   progressKey: z.string().trim().min(1).max(512).optional()
 }).strict();
@@ -263,6 +297,7 @@ export const campaignCreateSchema = z.object({
   worldVersionId: z.uuid(),
   title,
   selectedCharacterId: characterId.optional(),
+  startingCast: z.array(z.object({ characterId, alwaysInContext: z.boolean().default(false) }).strict()).max(30).optional(),
   storyLengthProfile: storyLengthProfileSchema.default(DEFAULT_STORY_LENGTH_PROFILE),
   storyContextBudgetTokens: storyContextBudgetTokensSchema.default(DEFAULT_STORY_CONTEXT_BUDGET_TOKENS),
   turnControlStyle: campaignTurnControlStyleSchema.default("flexible_action")
@@ -360,3 +395,6 @@ export type ResourceDeleteRequest = z.infer<typeof resourceDeleteSchema>;
 export type WorldVersionDeleteRequest = z.infer<typeof worldVersionDeleteSchema>;
 export type WorldSummary = z.infer<typeof worldSummarySchema>;
 export type WorldListResponse = z.infer<typeof worldListResponseSchema>;
+
+export type CastSuggestionPreviewRequest = z.infer<typeof castSuggestionPreviewRequestSchema>;
+export type CastSuggestionPreviewResponse = z.infer<typeof castSuggestionPreviewResponseSchema>;

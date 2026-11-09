@@ -1,10 +1,16 @@
 import { z } from "zod";
 import { portableCampaignCastSchema, portableCastReferences } from "./campaign-cast.js";
 
+/** The enclosing campaign carries these markers even when its cast has never been initialized. */
+export function validCampaignRosterAuthority(record: Record<string, unknown>, version: unknown): boolean {
+  if (version !== 5) return !("firstAppearanceEligible" in record || "selectedCharacterWorldId" in record);
+  return typeof record.firstAppearanceEligible === "boolean" && z.uuid().nullable().safeParse(record.selectedCharacterWorldId).success;
+}
+
 /** Shared preview/commit boundary for the optional versioned cast extension. */
 export function validateCampaignArchiveCast(value: unknown, turns: ReadonlySet<string>): void {
   if (value === undefined) return;
-  if (value && typeof value === "object" && "formatVersion" in value && value.formatVersion !== 1 && value.formatVersion !== 2) {
+  if (value && typeof value === "object" && "formatVersion" in value && value.formatVersion !== 1 && value.formatVersion !== 2 && value.formatVersion !== 3) {
     throw new Error("cast_archive_version_unsupported");
   }
   const cast = portableCampaignCastSchema.parse(value);
@@ -337,8 +343,8 @@ export const archiveManifestV2Schema = z.object({
     context.addIssue({ code: "custom", message: "Campaign manifests require campaign, world, and world version identifiers." });
   }
   const campaignPayload = manifest.payloads.find((payload) => payload.kind === "campaign" && payload.path === "campaign.json");
-  if (!campaignPayload || campaignPayload.formatVersion !== 4) {
-    context.addIssue({ code: "custom", path: ["payloads"], message: "Version-two campaign manifests require campaign payload version four." });
+  if (!campaignPayload || ![4, 5].includes(campaignPayload.formatVersion)) {
+    context.addIssue({ code: "custom", path: ["payloads"], message: "Version-two campaign manifests require campaign payload version four or five." });
   }
 });
 

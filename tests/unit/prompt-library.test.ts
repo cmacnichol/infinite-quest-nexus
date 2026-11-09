@@ -18,7 +18,7 @@ import {
   STORY_SYSTEM_PROMPT,
   storyPromptCompatibilityIdentity,
   STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
-  CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   CAST_STORY_AUTHORITY_CONTRACT,
   STORY_OUTPUT_ENCODING_CONTRACT_V3,
   STORY_PROMPT_SCHEMA_VERSION,
@@ -623,7 +623,7 @@ describe("Prompt Library catalog", () => {
     const source = preview.sections.find((section) => section.label === "Story Memory contract source");
     expect(source).toMatchObject({
       role: "system",
-      content: `Protocol ${CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION} from the current runtime settings.`
+      content: `Protocol ${CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION} from the current runtime settings.`
     });
   });
 

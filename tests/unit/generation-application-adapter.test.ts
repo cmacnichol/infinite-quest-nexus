@@ -23,7 +23,6 @@ import type {
   GenerationResult,
   GenerationRetryLatestRequest
 } from "../../packages/contracts/src/index.js";
-import { isSafeGenerationDiagnosticErrorCode } from "../../services/api/src/generation-diagnostics.js";
 
 const ownerScope: OwnerScope = { ownerUserId: "11111111-1111-4111-8111-111111111111" };
 const campaignId = "22222222-2222-4222-8222-222222222222";
@@ -217,7 +216,7 @@ describe("generation application adapter", () => {
     }));
     const code = (mapped.details as { code: unknown }).code;
     expect(typeof code).toBe("string");
-    expect(isSafeGenerationDiagnosticErrorCode(code as string)).toBe(true);
+    expect(code).toBe("active_generation_exists");
     expect(Object.prototype.hasOwnProperty.call(mapped, "code")).toBe(false);
   });
 

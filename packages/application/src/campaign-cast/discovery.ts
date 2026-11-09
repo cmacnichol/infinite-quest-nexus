@@ -5,7 +5,7 @@ export type CastDiscoveryExecution = { providerProfileId: string; plan: TextExec
   /** Older development jobs may lack admission; runtime fails closed. */
   admission?: { routeBasis: TextExecutionRouteBasis; frozenResponseContracts: FrozenResponseContractsV2;
     providerType: "openrouter" | "openai_compatible"; configuration: Readonly<Record<string, unknown>>;
-    identityPolicy?: CastIdentityPolicy; promptIdentifier?: "cast-discovery-prompt-v1" | "cast-discovery-prompt-v2" };
+    identityPolicy?: CastIdentityPolicy; promptIdentifier?: "cast-discovery-prompt-v1" | "cast-discovery-prompt-v2"; castPresetsEnabled?: boolean | undefined };
 };
 export type CastDiscoveryClaim = {
   id: string; scope: CastScope; source: CastDiscoverySource; chunkOrdinal: number; chunkCount: number;

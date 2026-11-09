@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import Fastify from "fastify";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
@@ -10,6 +10,8 @@ import { registerCampaignCastRoutes } from "../../services/api/src/campaign-cast
 import { buildServer } from "../../services/api/src/server.js";
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
 import { inertStorageServerOptions } from "../helpers/build-server-options.js";
+import { sha256 } from "../../packages/domain/src/text.js";
+import { createApiCampaignCastApplication } from "../../services/runtime/src/campaign-cast-composition.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 integration("campaign cast editing API", () => {
@@ -20,18 +22,147 @@ integration("campaign cast editing API", () => {
     ownerUserId = await initialOwnerId(pool);
   }, 60_000);
   afterAll(async () => { await pool?.end(); });
-  async function fixture(enabled = true) {
+  async function fixture(enabled = true, presets = false) {
     const world = randomUUID(), version = randomUUID(), campaignId = randomUUID();
     await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Cast API')", [world, ownerUserId]);
     await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) VALUES($1,$2,$3,1,'{}')", [version, world, ownerUserId]);
     await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title) VALUES($1,$2,$3,'Cast API')", [campaignId, ownerUserId, version]);
     const app = Fastify();
-    const application = createCampaignCastApplication(createPostgresCampaignCastRepository(pool, { editingEnabled: enabled }));
-    await app.register(registerCampaignCastRoutes, { application, enabled, resolveOwner: async () => ({ ownerUserId }) });
+    const application = createCampaignCastApplication(createPostgresCampaignCastRepository(pool, { editingEnabled: enabled, castPresetsEnabled: presets }));
+    await app.register(registerCampaignCastRoutes, { application, enabled, presetsEnabled: presets, resolveOwner: async () => ({ ownerUserId }) });
     const base = `/api/v1/campaigns/${campaignId}/cast`;
     const write = { expectedCastRevision: 0, expectedBoundary: { turnNumber: 0, timelineRevision: 0 }, idempotencyKey: randomUUID() };
-    return { app, base, campaignId, write };
+    return { app, base, campaignId, version, write };
   }
+  it("maps corrected draft evidence to 409 without applying edits", async () => {
+    const { app, base, campaignId, write } = await fixture();
+    try {
+      const created = (await app.inject({ method: "POST", url: base, payload: { ...write, name: "Mara", aliases: [], profile: {} } })).json();
+      const turnId = randomUUID(), narration = "Mara is kind.", sourceHash = sha256(narration);
+      await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [campaignId]);
+      await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,1,$4)", [turnId, ownerUserId, campaignId, narration]);
+      const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+      await repo.applyBatch({ ownerUserId, campaignId }, { boundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: randomUUID(), commands: [{ kind: "observe", characterId: created.character.id, field: "story.role", value: "kind", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId, turnNumber: 1, narrationRevision: 0, sourceHash, paragraphId: "p1", quote: narration } }] });
+      const detail = (await app.inject({ method: "GET", url: `${base}/${created.character.id}` })).json();
+      const request = { expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: detail.boundary };
+      const context = await repo.draftPreviewContext!({ ownerUserId, campaignId }, created.character.id, request);
+      await pool.query(`INSERT INTO turn_narration_corrections(owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,source,created_by_user_id) VALUES($1,$2,$3,1,'Mara leaves.',$4,'user_edit',$1)`, [ownerUserId, campaignId, turnId, sourceHash]);
+      const response = await app.inject({ method: "PATCH", url: `${base}/${created.character.id}`, payload: { ...request, idempotencyKey: randomUUID(), setOverrides: { "story.personality": "kind" }, draftEvidenceFences: [{ path: "story.personality", value: "kind", evidence: context.evidence }] } });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().code).toBe("cast_draft_evidence_changed");
+      expect((await repo.detail({ ownerUserId, campaignId }, created.character.id)).character.profile["story.personality"]).toBeUndefined();
+    } finally { await app.close(); }
+  });
+  it("composes the draft route with the selected campaign provider without writing observations", async () => {
+    const { app: original, base, campaignId, write } = await fixture();
+    const created = (await original.inject({ method: "POST", url: base, payload: { ...write, name: "Mara", aliases: [], profile: {} } })).json();
+    await original.close();
+    const narration = "Mara is kind.", turnId = randomUUID(), sourceHash = sha256(narration), scope = { ownerUserId, campaignId };
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [campaignId]);
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,1,$4)", [turnId, ownerUserId, campaignId, narration]);
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const receipt = await repo.applyBatch(scope, { boundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: randomUUID(), commands: [{ kind: "observe", characterId: created.character.id, field: "story.role", value: "kind", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId, turnNumber: 1, narrationRevision: 0, sourceHash, paragraphId: "p1", quote: narration } }] });
+    const execute = vi.fn().mockResolvedValue({ content: JSON.stringify({ proposals: [{ path: "story.personality", value: "kind", evidenceIds: receipt.observationIds }] }), responseId: "r", finishReason: "stop", outputLimited: false, modelInstanceId: "m", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCost: null, rawMetadata: {} });
+    const providers = { resolution: { resolveDirect: vi.fn().mockResolvedValue({ status: "resolved", providerProfileId: randomUUID(), model: "m" }) }, execution: { text: vi.fn().mockResolvedValue({ execute, model: "m" }) } };
+    const app = Fastify();
+    await app.register(registerCampaignCastRoutes, { application: createApiCampaignCastApplication(pool, { castEditingEnabled: true }, providers as never), enabled: true, resolveOwner: async () => ({ ownerUserId }) });
+    try {
+      const detail = (await app.inject({ method: "GET", url: `${base}/${created.character.id}` })).json();
+      expect(detail.draftFromStoryEligible).toBe(true);
+      const before = await pool.query("SELECT count(*)::int AS count FROM campaign_cast_events WHERE campaign_id=$1", [campaignId]);
+      const response = await app.inject({ method: "POST", url: `${base}/${created.character.id}/draft-preview`, payload: { expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: detail.boundary } });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().proposals).toMatchObject([{ path: "story.personality", value: "kind", draftEvidenceFence: { path: "story.personality", value: "kind" } }]);
+      expect(execute).toHaveBeenCalledOnce();
+      expect((await pool.query("SELECT count(*)::int AS count FROM campaign_cast_events WHERE campaign_id=$1", [campaignId])).rows).toEqual(before.rows);
+    } finally { await app.close(); }
+  });
+  it("chooses one narrator state from installation capability, enrollment and discovery", async () => {
+    const { app, campaignId } = await fixture();
+    try {
+      const scope = { ownerUserId, campaignId };
+      const read = async (context: boolean, capability: "r1" | "r2" | null, discovery = false) => {
+        const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castContextEnabled: context, storyMemoryCapability: capability, discoveryEnabled: discovery });
+        return (await repo.workspaceRead!(scope)).status.narratorState;
+      };
+      await pool.query("DELETE FROM campaign_story_memory_enrollments WHERE owner_user_id=$1 AND campaign_id=$2", [ownerUserId, campaignId]);
+      expect(await read(false, "r2")).toBe("installation_disabled");
+      expect(await read(true, null)).toBe("installation_disabled");
+      expect(await read(true, "r1")).toBe("enrollment_missing");
+      await pool.query("INSERT INTO campaign_story_memory_enrollments(owner_user_id,campaign_id,capability,review_mode) VALUES($1,$2,'r2','off')", [ownerUserId, campaignId]);
+      expect(await read(true, "r1")).toBe("capability_insufficient");
+      expect(await read(true, "r2")).toBe("discovery_off");
+      expect(await read(true, "r2", true)).toBe("ready");
+    } finally { await app.close(); }
+  });
+  it("rejects world aliases that fail the same fiction predicate as campaign seeding", async () => {
+    const { app, base, version } = await fixture(true, true);
+    try {
+      await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [version, JSON.stringify({ world: { title: "Fixture" },
+        playableCharacters: [{ id: "keeper", name: "Keeper", campaignUse: "supporting", characterText: "Guide", profile: { identity: { aliases: ["Score: 12"] } } }] })]);
+      const response = await app.inject({ method: "GET", url: base + "/from-world-preview?characterId=keeper" });
+      expect(response.statusCode).toBe(422);
+      expect(response.json()).toMatchObject({ code: "cast_invalid_request", details: { fields: [{ path: "identity.aliases", code: "invalid_fiction" }] } });
+    } finally { await app.close(); }
+  });
+  it("offers the existing plain world identity after a campaign rename", async () => {
+    const { app, base, version, campaignId, write } = await fixture(true, true);
+    try {
+      await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [version, JSON.stringify({ world: { title: "Fixture" },
+        playableCharacters: [{ id: "keeper", name: "Keeper", campaignUse: "supporting", characterText: "Guide" }] })]);
+      const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+      const scope = { ownerUserId, campaignId };
+      const receipt = await repo.applyBatch(scope, { boundary: write.expectedBoundary, idempotencyKey: "plain-world-person",
+        commands: [{ kind: "create", origin: { kind: "world", worldVersionId: version, entityId: "keeper" }, evidence: { kind: "world", worldVersionId: version, sourcePath: "/playableCharacters/0" }, name: "Keeper", aliases: [] }] });
+      const id = receipt.characterIds[0]!;
+      const loaded = await repo.detail(scope, id);
+      await repo.edit(scope, id, { ...write, expectedCastRevision: loaded.revision, expectedCharacterRevision: loaded.character.revision, name: "Town Guide", aliases: [] });
+      const preview = await app.inject({ method: "GET", url: base + "/from-world-preview?characterId=keeper" });
+      expect(preview.json().eligibleTargets).toEqual([{ id, name: "Town Guide", revision: expect.any(Number) }]);
+    } finally { await app.close(); }
+  });
+  it("applies only a freshly previewed profile and returns the original HTTP receipt on retry", async () => {
+    const { app, base, version, write } = await fixture(true, true);
+    try {
+      await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [version, JSON.stringify({ world: { title: "Fixture" },
+        playableCharacters: [{ id: "keeper", name: "Keeper", campaignUse: "supporting", characterText: "Legacy note",
+          profile: { story: { background: "b".repeat(3000) } } }] })]);
+      const choices = () => app.inject({ method: "GET", url: base + "/from-world" });
+      expect((await choices()).json().characters).toEqual([{ characterId: "keeper", name: "Keeper", alwaysInContext: false }]);
+      const read = () => app.inject({ method: "GET", url: base + "/from-world-preview?characterId=keeper" });
+      const first = await read();
+      expect(first.statusCode).toBe(200);
+      const save = { ...write, expectedWorldVersionId: version, characterId: "keeper", previewFingerprint: first.json().previewFingerprint };
+      const added = await app.inject({ method: "POST", url: base + "/from-world", payload: { ...save, previewFingerprint: "0".repeat(64) } });
+      expect(added.json().code).toBe("cast_world_preview_changed");
+      expect((await read()).json()).toEqual(first.json());
+      const created = await app.inject({ method: "POST", url: base + "/from-world", payload: save });
+      expect(created.statusCode).toBe(201);
+      const result = created.json();
+      const complexText = '界"\\\u0001'.repeat(5000);
+      const short = complexText.slice(0, 2000);
+      const story = Object.fromEntries(["role", "background", "personality", "motivations", "fearsAndConflicts", "keyRelationships",
+        "narrativeHooks", "voiceAndMannerisms", "otherGuidance"].map(key => ["story." + key, complexText]));
+      const appearance = Object.fromEntries(["ancestryOrSpecies", "apparentAge", "genderPresentation", "build", "skinOrComplexion", "eyes",
+        "face", "hair", "clothing", "equipmentAndAccessories", "otherVisualDetails"].map((key, i) => ["appearance." + key, i < 6 ? short : complexText]));
+      const set = { ...story, ...appearance, "identity.pronouns": short, "appearance.distinguishingFeatures": Array(50).fill(short),
+        unclassifiedNotes: complexText.repeat(10) };
+      const edit = { ...write, idempotencyKey: randomUUID(), expectedCastRevision: result.revision,
+        expectedCharacterRevision: result.character.revision, set, aliases: Array.from({ length: 20 }, (_, i) => String(i).padEnd(200, "a")),
+        setOverrides: { "story.goals": complexText, "state.location": short, "state.condition": short, "state.clothing": short, "appearance.description": "" } };
+      const url = base + "/" + result.character.id + "/authored-profile";
+      expect(Buffer.byteLength(JSON.stringify(edit))).toBeGreaterThan(1024 * 1024);
+      const saved = await app.inject({ method: "POST", url, payload: edit });
+      expect(saved.statusCode).toBe(200);
+      expect(saved.json().character.campaignProfile.story.background).toBe(complexText);
+      expect((await app.inject({ method: "POST", url, payload: edit })).json()).toEqual(saved.json());
+      expect((await app.inject({ method: "POST", url: base + "/from-world", payload: save })).json()).toEqual(result);
+      const roster = (await app.inject({ method: "GET", url: base })).json().characters.find((person: { id: string }) => person.id === result.character.id);
+      expect(roster.profile["story.background"]).toHaveLength(200);
+      expect(roster).not.toHaveProperty("originProfile");
+      expect((await choices()).json().characters).toEqual([]);
+    } finally { await app.close(); }
+  });
   it("reads discovery status while editing is disabled and rejects unknown campaigns", async () => {
     const { app, base } = await fixture(false);
     try {
@@ -66,16 +197,16 @@ integration("campaign cast editing API", () => {
       expect(detail.json().unresolvedCandidateIds).toEqual([]);
     } finally { await app.close(); }
   });
-  it("publishes the operator capability and routes through the production server", async () => {
+  it.each([null, "r1"] as const)("publishes effective cast capabilities with Story Memory %s through the production server", async (storyMemoryCapability) => {
     const local = await fixture(); await local.app.close();
     const previousUrl = process.env.DATABASE_URL;
     process.env.DATABASE_URL = process.env.TEST_DATABASE_URL!;
-    const config = { ...loadRuntimeConfig(), systemArchiveEnabled: false, castEditingEnabled: true };
+    const config = { ...loadRuntimeConfig(), systemArchiveEnabled: false, castEditingEnabled: true, castContextEnabled: true, castPresetsEnabled: true, storyMemoryCapability };
     if (previousUrl === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = previousUrl;
     const application = createCampaignCastApplication(createPostgresCampaignCastRepository(pool, { editingEnabled: true }));
     const app = await buildServer({ ...inertStorageServerOptions({ pool, config }), cast: application });
     try {
-      expect((await app.inject({ method: "GET", url: "/api/v1/meta" })).json().capabilities.castEditing).toBe(true);
+      expect((await app.inject({ method: "GET", url: "/api/v1/meta" })).json().capabilities).toMatchObject({ castEditing: true, castContext: Boolean(storyMemoryCapability), castPresets: true });
       const response = await app.inject({ method: "POST", url: local.base, payload: { ...local.write, name: "Mara", aliases: [], profile: {} } });
       expect(response.statusCode).toBe(201);
       expect(response.json().character.name).toBe("Mara");
@@ -182,7 +313,7 @@ integration("campaign cast editing API", () => {
       expect(patch.statusCode).toBe(422);
       expect(patch.json()).toMatchObject({ code: "cast_protagonist_read_only", editorDestination: expect.stringContaining("character-profile") });
       expect((await live.app.inject({ method: "POST", url: live.base, payload: { ...live.write, ownerUserId: randomUUID(), name: "Mara", aliases: [], profile: {} } })).statusCode).toBe(422);
-      expect((await live.app.inject({ method: "POST", url: live.base, payload: { ...live.write, name: "x".repeat(70000), aliases: [], profile: {} } })).statusCode).toBe(413);
+      expect((await live.app.inject({ method: "POST", url: live.base, payload: { ...live.write, name: "x".repeat(350_000), aliases: [], profile: {} } })).statusCode).toBe(413);
     } finally { await live.app.close(); }
   });
 });

@@ -33,3 +33,18 @@ Generation never persists the candidate automatically. Unsaved premise and canon
 ## World characters and campaign Characters
 
 Published world characters are reusable starting canon. Story's **Characters** workspace manages the campaign's protagonist and supporting cast separately. Campaign corrections and discoveries do not edit the world draft or another campaign. Changing a world draft does not update existing campaign snapshots; publish and explicitly migrate when that is intended.
+
+
+Characters can be Playable, Supporting, or Both. Supporting characters need only a name and retain any mechanics if you later change their use. For Supporting and Both, choose whether they are selected by default in a new campaign and whether they are always included in narrator context. Duplicate a roster entry to create an independent copy, and use the move controls to set roster order. Existing characters remain Playable until changed. A world needs a playable character before a campaign can start.
+
+## Convert existing entities
+
+In **Mechanics & Characters**, select **Convert entities** when the draft contains unlinked people, NPCs, or character entities. Review the mapped guidance and properties that stay on the entity, select the people to convert, and give each a unique roster name. If you rename someone, choose whether to retain the former name as an alias. Shared names and aliases remain ambiguous for matching.
+
+Conversion adds Supporting characters to the local world draft and leaves the original entities and their relationships in place. The new characters are not selected by default for starting cast. Save the world to persist the conversion; close the draft without saving to discard it. You can edit the new characters and organize their guidance after saving the draft.
+
+## Suggest a starting cast
+
+In **Mechanics & Characters**, choose **Suggest cast**. Enter an optional direction and request three to eight character seeds. Review their names, roles and concepts, then choose **Expand selected**. The default text provider receives one seed request and one expansion per selected seed, plus any repair calls.
+
+You can stop after the current character, retry a single failed row, edit a finished suggestion in the character editor, or drop it. **Add selected to draft** adds the reviewed Supporting characters with their starting-cast option enabled. **Save world** persists the roster. Unadded suggestions last until the dialog closes or the page reloads. Manual character entry remains available when the provider is offline.

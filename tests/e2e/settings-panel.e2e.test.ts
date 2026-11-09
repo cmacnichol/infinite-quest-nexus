@@ -3,10 +3,10 @@ import { settingsFixture } from "../fixtures/instance-settings.js";
 import { INSTANCE_SETTING_FIELDS } from "../../packages/domain/src/instance-settings.js";
 import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 import type { InstanceSettingsView } from "../../packages/contracts/src/instance-settings.js";
-const base = `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "44174"}`;
+const base = `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}`;
 const mode = process.env.VITE_UI_COMPONENTS === "web-awesome" ? "web-awesome" : "native";
 async function api(page: Page, options: { conflict?: boolean; locked?: boolean } = {}) {
-  let unlocked = !options.locked; let patches = 0; const settings = settingsFixture(); settings.systemArchiveEnabled = false;
+  let unlocked = !options.locked; let patches = 0; let lastChanges: unknown; const settings = settingsFixture(); settings.systemArchiveEnabled = false;
   let current: InstanceSettingsView = {
     activeRevision: "1", requestedRevision: "1", active: settings, requested: structuredClone(settings), resetDefaults: structuredClone(settings), activationStatus: "active",
     fields: INSTANCE_SETTING_FIELDS.map(field => ({ ...field, scope: "installation", effectiveValue: field.key.includes(".") ? settings[field.key.split(".")[0] as "campaignArchiveLimits"][field.key.split(".")[1] as "maxEntries"] : settings[field.key as "logLevel"], permittedRange: field.kind === "integer" ? { min: field.minimum!, max: field.maximum! } : null, source: "database", applyMode: "restart", lockReason: field.key === "systemArchiveEnabled" ? "deployment_disabled" : field.key === "castAutoMatchEnabled" ? "dependency_disabled" : null }))
@@ -26,7 +26,7 @@ async function api(page: Page, options: { conflict?: boolean; locked?: boolean }
     if (path === "/api/v1/settings/instance") {
       if (!unlocked) return json({ code: "settings_unlock_required" }, 401);
       if (method === "PATCH") {
-        patches++; expect(route.request().headers()["x-settings-csrf"]).toBe("fixture-csrf"); const patch = route.request().postDataJSON();
+        patches++; expect(route.request().headers()["x-settings-csrf"]).toBe("fixture-csrf"); const patch = route.request().postDataJSON(); lastChanges = patch.changes;
         expect(patch.expectedRequestedRevision).toBe("1");
         if (options.conflict) return json({ code: "settings_conflict", currentRevision: "2" }, 409);
         current = { ...current, requested: { ...current.requested!, ...patch.changes }, requestedRevision: "2", activationStatus: "restart_required" };
@@ -35,7 +35,7 @@ async function api(page: Page, options: { conflict?: boolean; locked?: boolean }
     }
     return json({ code: "unexpected_fixture_request" }, 500);
   });
-  return { patches: () => patches, settings };
+  return { patches: () => patches, lastChanges: () => lastChanges, settings };
 }
 for (const width of [1440, 390]) {
   test(`${mode} Settings stage-only Save, review, units and keyboard at ${width}px`, async ({ page }) => {
@@ -53,7 +53,7 @@ for (const width of [1440, 390]) {
     await expect(page.locator(".settings-field").filter({ has: polling }).locator(".settings-comparison")).toContainText(`Active: ${fixture.settings.workerPollIntervalMs / 1000} seconds`);
     await expect(page.locator('nav[aria-label="Settings sections"] a[aria-current]')).toHaveText("Performance and Requests");
     expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
-    await page.screenshot({ path: `docs/review/assets/settings-panel/${mode}-performance-${width}.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/settings-panel/${mode}-performance-${width}.png`, fullPage: true });
     await page.reload(); await expect(polling).toHaveValue("1.5");
   });
 }
@@ -76,21 +76,21 @@ test(`${mode} guards installation drafts before leaving Settings`, async ({ page
   await section.dismiss();
   await click;
   await expect(polling).toHaveValue("1.5");
-  await page.screenshot({ path: `docs/review/assets/settings-panel/${mode}-retained-installation-draft.png` });
+  await page.screenshot({ path: `test-results/review-assets/settings-panel/${mode}-retained-installation-draft.png` });
   await page.getByRole("button", { name: "Discard section draft" }).click();
   await diagnostics.click();
   await expect(page).toHaveURL(/section=diagnostics/);
   expect(fixture.patches()).toBe(0);
 });
-test(`${mode} exposes all 40 fields with dependencies and reset preview`, async ({ page }) => {
+test(`${mode} exposes all 42 fields with dependencies and reset preview`, async ({ page }) => {
   await api(page); let count = 0;
   for (const section of ["characters", "sharing", "performance", "diagnostics"]) {
     await page.goto(`${base}/app/settings?section=${section}`); await expect(page.getByRole("button", { name: "Preview safe defaults" })).toBeVisible();
     count += await page.locator(".settings-field").count();
     if (section === "sharing") await expect(page.getByText("Permitted: 1 byte – 20 GiB.", { exact: true })).toBeVisible();
-    if (section === "sharing") { await expect(page.getByRole("checkbox", { name: "System Archive", exact: true })).toBeDisabled(); await expect(page.getByText("Blocked by deployment policy.", { exact: false }).first()).toBeVisible(); await page.screenshot({ path: `docs/review/assets/settings-panel/${mode}-sharing-desktop.png`, fullPage: true }); }
+    if (section === "sharing") { await expect(page.getByRole("checkbox", { name: "System Archive", exact: true })).toBeDisabled(); await expect(page.getByText("Blocked by deployment policy.", { exact: false }).first()).toBeVisible(); await page.screenshot({ path: `test-results/review-assets/settings-panel/${mode}-sharing-desktop.png`, fullPage: true }); }
   }
-  expect(count).toBe(40);
+  expect(count).toBe(42);
   await page.getByRole("button", { name: "Preview safe defaults" }).click(); await expect(page.getByRole("heading", { name: "Preview safe seeded defaults" })).toBeVisible();
 });
 test(`${mode} conflict keeps draft, operator logout clears it and key is cleared`, async ({ page }) => {
@@ -129,7 +129,7 @@ test(`${mode} retention accepts arbitrary whole seconds from minute-aligned save
   await expect(page.getByRole("status")).toHaveText("Saved — restart required");
   await expect(page.locator(".settings-field").filter({ has: preview }).locator(".settings-comparison")).toContainText("Saved: 61 seconds");
   await expect(page.locator(".settings-field").filter({ has: download }).locator(".settings-comparison")).toContainText("Saved: 301 seconds");
-  await page.screenshot({ path: `docs/review/assets/settings-panel/${mode}-retention-fix.png`, fullPage: true });
+  await page.screenshot({ path: `test-results/review-assets/settings-panel/${mode}-retention-fix.png`, fullPage: true });
 });
 test(`${mode} identity change removes loaded campaign titles and editor links`, async ({ page }) => {
   await api(page);
@@ -140,7 +140,7 @@ test(`${mode} identity change removes loaded campaign titles and editor links`, 
   await expect(page.getByText("Your account changed. Reload Settings to continue.")).toBeVisible();
   await expect(page.getByRole("link", { name: "Open campaign editor" })).toHaveCount(0);
   await expect(page.getByText("Fixture Story", { exact: true })).toHaveCount(0);
-  await page.screenshot({ path: `docs/review/assets/settings-panel/${mode}-identity-fix.png` });
+  await page.screenshot({ path: `test-results/review-assets/settings-panel/${mode}-identity-fix.png` });
 });
 test(`${mode} identity change ignores a late campaign response`, async ({ page }) => {
   await api(page);
@@ -181,7 +181,7 @@ test(`${mode} save reason recovery preserves the draft and other validation`, as
   await expect(reason).toBeFocused();
   await expect(polling).toHaveValue("1.5");
 
-  await page.locator(".settings-actions").screenshot({ path: `docs/review/assets/settings-panel/${mode}-save-reason-recovery.png` });
+  await page.locator(".settings-actions").screenshot({ path: `test-results/review-assets/settings-panel/${mode}-save-reason-recovery.png` });
   await capacity.fill("-1");
   await capacity.press("Tab");
   await reason.fill("Updated polling reason");
@@ -223,5 +223,21 @@ for (const lockCause of ["expiry", "rejected save"] as const) {
     await expect(reason).toHaveValue("");
     await expect(page.getByRole("heading", { name: "Review staged policy changes" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Save section", exact: true })).toBeDisabled();
+  });
+}
+
+for (const width of [1440, 390]) {
+  test(`${mode} stages both character controls at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    const fixture = await api(page);
+    await page.goto(`${base}/app/settings?section=characters`);
+    await page.getByRole("checkbox", { name: "Character presets", exact: true }).check();
+    await page.getByRole("checkbox", { name: "Character context without discovery", exact: true }).check();
+    await page.getByRole("textbox", { name: "Reason for this change" }).fill("Enable character options");
+    await page.getByRole("button", { name: "Save section", exact: true }).click();
+    await expect(page.getByRole("status")).toHaveText("Saved — restart required");
+    expect(fixture.patches()).toBe(1);
+    expect(fixture.lastChanges()).toMatchObject({ castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: true });
+    await page.screenshot({ path: `test-results/review-assets/settings-panel/${mode}-character-options-${width}.png`, fullPage: true });
   });
 }

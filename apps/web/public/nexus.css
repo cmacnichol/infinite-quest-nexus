@@ -482,7 +482,7 @@ button.dashboard-card { width: 100%; padding: 0; cursor: pointer; font: inherit;
 .campaign-create-advanced { border-top: 1px solid var(--line); padding-top: 12px; }
 .campaign-create-advanced > summary { color: var(--purple); cursor: pointer; font-weight: 800; }
 .campaign-create-advanced > label { margin-top: 14px; }
-#openCommittedCampaign[hidden] { display: none; }
+#createCampaignDialog [hidden], #characterDialog [hidden] { display: none !important; }
 .advanced-campaign-link { border: 1px solid var(--line); border-radius: 10px; padding: 11px 13px; background: #101522; color: var(--muted); font-size: .78rem; line-height: 1.45; }
 .advanced-campaign-link a { color: var(--purple); font-weight: 800; }
 .nexus-about-dialog { padding: 24px; }
@@ -740,3 +740,20 @@ legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 80
 .management-boot-status button:not([hidden]) { margin-top: 12px; }
 
 .retired-campaign-settings { display: none !important; }
+
+@media (max-width: 600px) {
+  .character-dialog-modal button, .character-dialog-modal summary, .character-profile-review-dialog button { min-height: 44px; }
+}
+
+.character-field-error { color: var(--danger, #ffa8a8); margin: .25rem 0 .75rem; }
+.campaign-character-feedback button { margin: .25rem .5rem .25rem 0; }
+
+#campaignCharacterFeedback:empty, #campaignCharacterFeedback:has(.campaign-character-feedback:empty) { display: none; }
+
+.starting-cast-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .35rem 1rem; padding: .5rem 0; border-bottom: 1px solid var(--border, #ccc); }
+.starting-cast-row details { grid-column: 1 / -1; }
+@media (max-width: 480px) { .starting-cast-row { grid-template-columns: 1fr; } .starting-cast-row details { grid-column: auto; } }
+.starting-cast-row > label { display: flex; align-items: center; gap: .5rem; min-width: 0; }
+.starting-cast-row input[type="checkbox"] { width: auto; flex: none; margin: 0; }
+#characterSupportingOptions label { display: flex; align-items: center; gap: .5rem; }
+#characterSupportingOptions input[type="checkbox"] { width: auto; flex: none; margin: 0; }

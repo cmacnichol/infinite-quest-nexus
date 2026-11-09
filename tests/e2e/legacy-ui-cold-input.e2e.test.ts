@@ -103,12 +103,13 @@ for (const phase of ["cold-entry", "held-sync"] as const) {
     const targetPath = phase === "cold-entry" ? entryPath : `/api/v1/campaigns/${fixture.campaignId}/sync-status`;
     await page.route(url => url.origin === origin && url.pathname === targetPath, async route => {
       gateHits += 1;
-      if (gateHits === 1) await gate.promise;
+      // The reader load and the activity access check both read sync-status; hold every read.
+      await gate.promise;
       try { await route.fallback(); } finally { completedRoutes += 1; }
     });
     try {
       await page.goto(`${origin}/story/${fixture.campaignId}`, { waitUntil: "commit" });
-      await expect.poll(() => gateHits).toBe(1);
+      await expect.poll(() => gateHits).toBeGreaterThanOrEqual(1);
       const field = page.locator("#freeAction");
       await expect(field).toBeVisible();
       await capture(page, testInfo, "before-input-held", evidence);

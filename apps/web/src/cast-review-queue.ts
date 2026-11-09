@@ -1,10 +1,10 @@
 import { createReviewSource } from "./character-review-source.js";
 import type { CastCharacter, CastCandidateList } from "@infinite-quest/contracts";
 import { buildReviewQueue, type ReviewItem, type CampaignCastApi } from "@infinite-quest/client-web";
-export function renderCastReview(options: { document: Document; container: HTMLElement; api: Omit<CampaignCastApi, "scans" | "sourceTurn"> & Partial<Pick<CampaignCastApi, "sourceTurn">>; campaign: string; current(): boolean; editing(): boolean; navigate(turn: number): void; back(): void; key(operation: string, value: unknown): string; clearKeys(): void; autoMatch?: boolean | null }) {
+export function renderCastReview(options: { document: Document; container: HTMLElement; api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview"> & Partial<Pick<CampaignCastApi, "sourceTurn">>; campaign: string; current(): boolean; editing(): boolean; navigate(turn: number): void; back(): void; key(operation: string, value: unknown): string; clearKeys(): void; autoMatch?: boolean | null; initialItem?: string }) {
   const { document, container, api, campaign } = options;
   const drafts = new Map<string, string>();
-  const skipped = new Set<string>(); let busy = false; let epoch = 0; let prioritizeCharacter: string | null = null; let cached: { matches: CastCandidateList; details: CastCandidateList; targets: CastCharacter[] } | null = null;
+  const skipped = new Set<string>(); let busy = false; let epoch = 0; let prioritizeCharacter: string | null = null; let initialItem = options.initialItem; let cached: { matches: CastCandidateList; details: CastCandidateList; targets: CastCharacter[] } | null = null;
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => { const el = document.createElement(tag); el.textContent = text; return el; };
   const button = (text: string, action: () => void, disabled = false) => { const el = node("button", text); el.type = "button"; el.disabled = disabled; el.addEventListener("click", action); return el; };
   const labelField = (field: string) => ({ "identity.pronouns": "Pronouns", "story.role": "Role", "story.background": "Background", "story.personality": "Personality", "story.motivations": "Motivations", "story.goals": "Goals", "story.voiceAndMannerisms": "Voice and mannerisms", "appearance.description": "Appearance", "state.location": "Last known location", "state.condition": "Condition", "state.clothing": "Clothing" } as Record<string, string>)[field] ?? field;
@@ -34,6 +34,19 @@ export function renderCastReview(options: { document: Document; container: HTMLE
       }
       if (!options.current() || token !== epoch) return;
       const queue = buildReviewQueue(matches.candidates, details.candidates).filter(item => !skipped.has(itemKey(item)));
+      if (initialItem) {
+        const index = queue.findIndex(item => initialItem === itemKey(item) || item.kind === "detail" && initialItem!.startsWith(`${itemKey(item)}:`));
+        if (index >= 0) {
+          const item = queue[index]!;
+          if (item.kind === "detail") {
+            const candidateId = initialItem.slice(itemKey(item).length + 1);
+            const entryIndex = item.entries.findIndex(entry => entry.candidate.id === candidateId);
+            if (entryIndex > 0) item.entries.unshift(...item.entries.splice(entryIndex, 1));
+          }
+          if (index > 0) queue.unshift(...queue.splice(index, 1));
+        }
+        initialItem = undefined;
+      }
       if (prioritizeCharacter) queue.sort((a, b) => Number(b.kind === "detail" && b.characterId === prioritizeCharacter) - Number(a.kind === "detail" && a.characterId === prioritizeCharacter));
       container.replaceChildren(node("h2", "Character review"), button("Back to characters", options.back));
       if (!queue.length) { container.append(node("p", skipped.size ? "Review complete for this pass." : "Nothing needs review.")); return; }
@@ -110,11 +123,13 @@ export function renderCastReview(options: { document: Document; container: HTMLE
           disclosure.open = drafts.has(draftKey);
           label.append(value); disclosure.append(summary, node("p", "An override takes precedence until you clear it in the character editor."), label);
           const protagonist = person?.origin?.kind === "protagonist";
-          if (!protagonist) row.append(disclosure);
-          else row.append(node("p", "Use the main character profile to change this field, or dismiss the suggestion."));
+          const permits = (action: "accept" | "confirm" | "dismiss") => detail.allowedActions ? detail.allowedActions.includes(action) : action === "dismiss" || !protagonist && (action !== "accept" || detail.canAcceptObservation === true);
+          if (permits("confirm")) row.append(disclosure);
+          else if (protagonist) row.append(node("p", "Use the main character profile to change this field, or dismiss the suggestion."));
+          else if (!permits("accept")) row.append(node("p", "This field belongs to the authored character profile."));
           let pending: { signature: string; request: Parameters<typeof api.resolveDetail>[2] } | null = null;
           async function decide(action: "accept" | "confirm" | "dismiss") {
-            if (locked() || protagonist && action !== "dismiss") return;
+            if (locked() || !permits(action)) return;
             busy = true; feedback.textContent = "Saving…";
             try {
               const signature = JSON.stringify([action, action === "confirm" ? value.value : null]);
@@ -132,11 +147,12 @@ export function renderCastReview(options: { document: Document; container: HTMLE
               drafts.delete(draftKey); pending = null; options.clearKeys(); await load();
             } catch (error) { failed(error); } finally { busy = false; }
           }
-          if (!protagonist && detail.canAcceptObservation === true) row.append(
+          if (permits("accept")) row.append(
             node("p", `Apply records this observation at turn ${candidate.source.turnNumber}; it does not lock the field.`),
             button("Apply and next", () => { void decide("accept"); }, !options.editing()));
-          else if (!protagonist) row.append(node("p", "This suggestion cannot be saved as an observed fact. Set an override only if you want to choose the value yourself."));
-          disclosure.append(button("Keep as override", () => { void decide("confirm"); }, !options.editing())); row.append(button("Dismiss detail", () => { void decide("dismiss"); }, !options.editing())); section.append(row);
+          else if (permits("confirm")) row.append(node("p", "This suggestion cannot be saved as an observed fact. Set an override only if you want to choose the value yourself."));
+          if (permits("confirm")) disclosure.append(button("Keep as override", () => { void decide("confirm"); }, !options.editing()));
+          if (permits("dismiss")) row.append(button("Dismiss detail", () => { void decide("dismiss"); }, !options.editing())); section.append(row);
         }
       }
       section.append(button("Skip for this pass", skip), feedback); container.append(section);

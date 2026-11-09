@@ -4,6 +4,7 @@ import {
   SYSTEM_ARCHIVE_DOMAINS,
   canonicalArchiveJson,
   parseSystemCampaignHistoryDetails,
+  validateWorldCharacterLinks,
   type ArchiveAssetRecord,
   type SystemArchiveDomain,
   type SystemRecordEnvelope,
@@ -39,6 +40,8 @@ function canonicalValueHash(value: unknown): string {
 }
 
 function validateWorldContent(content: WorldContent, assetIds: ReadonlySet<string>): void {
+  try { validateWorldCharacterLinks(content); }
+  catch { throw relationshipFailure(); }
   const entityIds = new Set(content.entities.map((entity) => entity.id));
   const characterIds = new Set(content.playableCharacters.map((character) => character.id));
   for (const relationship of content.relationships) {

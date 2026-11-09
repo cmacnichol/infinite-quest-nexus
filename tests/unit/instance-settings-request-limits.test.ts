@@ -57,6 +57,12 @@ describe("active Fastify ingress boundaries", () => {
 
 import { requestOperation } from "../../services/api/src/request-admission.js";
 describe("request admission scope",()=>{
+  it("admits local cast preview, apply and authored edits as standard owner-scoped requests", () => {
+    const cast = "/api/v1/campaigns/:campaignId/cast";
+    expect(requestOperation("GET", cast + "/from-world-preview")).toBeNull();
+    expect(requestOperation("POST", cast + "/from-world")).toBeNull();
+    expect(requestOperation("POST", cast + "/:characterId/authored-profile")).toBeNull();
+  });
   it("excludes management, ordinary provider configuration, progress, health, and authoring's owned admission",()=>{
     for(const [method,path] of [["POST","/api/v1/settings/operator-session"],["POST","/api/v1/providers"],["GET","/api/v1/providers"],["GET","/api/v1/imports/progress"],["GET","/health/ready"],["POST","/api/v1/authoring/jobs"],["POST","/api/v1/generation-jobs/:jobId/cancel"]]) expect(requestOperation(method!,path!)).toBeNull();
   });

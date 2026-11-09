@@ -170,6 +170,9 @@ function playableCharacter(character: InfiniteWorldsCharacter, index: number): P
     id: identifier("iw-character", name, index),
     name,
     characterText: sections(name, text(character.description), Array.isArray(character.initialTrackedItemValues) ? titled("Initial tracked item values", compact(character.initialTrackedItemValues)) : ""),
+    campaignUse: "playable",
+    startingCastDefault: true,
+    alwaysInContext: false,
     rpgStats: rpgStats(character.skills, name),
     defaultTriggers: trackers(character.initialTrackedItemValues, name),
     source: { type: "infinite-worlds-json", index }

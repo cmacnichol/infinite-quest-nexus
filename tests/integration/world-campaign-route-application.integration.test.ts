@@ -34,6 +34,7 @@ function worldContent(title: string, marker = "One") {
       id: "route-explorer",
       name: "Route Explorer",
       characterText: "An explorer of application boundaries.",
+      campaignUse: "playable" as const, startingCastDefault: true, alwaysInContext: false,
       rpgStats: [],
       defaultTriggers: [],
       source: {}

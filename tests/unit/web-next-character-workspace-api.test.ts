@@ -95,11 +95,9 @@ describe("Character Workspace API boundary", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     const [url, init] = fetch.mock.calls[0]!;
     expect(url).toBe("/api/v1/worlds/playable-characters/generate-preview");
-    expect(init).toMatchObject({
-      method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      signal: undefined
-    });
+    expect(init.method).toBe("POST");
+    expect(init.headers.get("accept")).toBe("application/json");
+    expect(init.headers.get("content-type")).toBe("application/json");
     const body = JSON.parse(String(init.body));
     expect(Object.keys(body)).toEqual(["content", "prompt", "characterId", "progressKey"]);
     expect(body.prompt).toBe("Deepen her connection to the mirrors.");
@@ -162,10 +160,8 @@ describe("Character Workspace API boundary", () => {
       progressPercent: 80,
       message: "Validating generated character."
     });
-    expect(fetch).toHaveBeenCalledWith(
-      "/api/v1/worlds/generate-progress?key=character%3Akey%20%2F%201",
-      { headers: { Accept: "application/json" }, signal: undefined }
-    );
+    expect(fetch.mock.calls[0]![0]).toBe("/api/v1/worlds/generate-progress?key=character%3Akey%20%2F%201");
+    expect(fetch.mock.calls[0]![1].headers.get("accept")).toBe("application/json");
   });
 
   it.each([
@@ -214,6 +210,7 @@ describe("Character Workspace API boundary", () => {
     const response = {
       ok: true,
       status: 200,
+      headers: new Headers(),
       json: vi.fn().mockRejectedValue(reason)
     } as unknown as Response;
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
@@ -230,6 +227,7 @@ describe("Character Workspace API boundary", () => {
 
     const pending = generateCharacterPreview({ content: draft, prompt: "Create", progressKey: "key" }, controller.signal);
     const reason = new DOMException("Workspace closed", "AbortError");
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
     controller.abort(reason);
 
     await expect(pending).rejects.toBe(reason);
@@ -253,4 +251,42 @@ describe("Character Workspace API boundary", () => {
     })).rejects.toThrow();
     expect(fetch).not.toHaveBeenCalled();
   });
+});
+
+it("allows a character preview without a progress key", async () => {
+  const fetch = vi.fn().mockResolvedValue(jsonResponse({ character: { id: "id", name: "Mara", characterText: "A guide." } }));
+  vi.stubGlobal("fetch", fetch);
+  await generateCharacterPreview({ content: draft, prompt: "Create" });
+  expect(JSON.parse(String(fetch.mock.calls[0]![1].body))).not.toHaveProperty("progressKey");
+});
+
+it("exposes typed preview and progress methods on the shared web client", async () => {
+  const { createNexusApiClient, createNoopSessionPort } = await import("../../packages/client-web/src/index.js");
+  const fetch = vi.fn().mockResolvedValueOnce(jsonResponse({ character: { id: "id", name: "Mara", characterText: "A guide." } }))
+    .mockResolvedValueOnce(jsonResponse({ status: "completed", phase: "done", progressPercent: 100, message: "Done" }));
+  const client = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: fetch });
+  const content = sanitizeCharacterGenerationContent(draft);
+  await expect(client.worlds.generateCharacterPreview({ content, prompt: "Create" })).resolves.toMatchObject({ character: { name: "Mara" } });
+  await expect(client.worlds.loadCharacterGenerationProgress("key / 1")).resolves.toMatchObject({ status: "completed" });
+  expect(fetch.mock.calls[1]![0]).toBe("/api/v1/worlds/generate-progress?key=key%20%2F%201");
+});
+
+it("posts reviewed Organize requests to the correct scoped routes", async () => {
+  const { createNexusApiClient, createNoopSessionPort } = await import("../../packages/client-web/src/index.js");
+  const fetch = vi.fn().mockImplementation(async () => jsonResponse({ candidate: {}, evidence: [], unassignedText: [], conflicts: [], warnings: [], protocolVersion: "organizer-v3" }));
+  const client = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: fetch });
+  const request = { expectedRevision: 2, character: { id: "mara", name: "Mara", characterText: "A guide." } };
+  await expect(client.worlds.organizeCharacter("world / 1", request)).resolves.toMatchObject({ protocolVersion: "organizer-v3" });
+  await expect(client.campaigns.organizeCharacter("campaign / 1", request)).resolves.toMatchObject({ protocolVersion: "organizer-v3" });
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+    "/api/v1/worlds/world%20%2F%201/draft/playable-characters/organize",
+    "/api/v1/campaigns/campaign%20%2F%201/character-profile/organize"
+  ]);
+});
+
+it("classifies an invalid preview request as a request failure", async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  await expect(generateCharacterPreview({ content: draft, prompt: " " })).rejects.toMatchObject({ kind: "request_failed" });
+  expect(fetch).not.toHaveBeenCalled();
 });

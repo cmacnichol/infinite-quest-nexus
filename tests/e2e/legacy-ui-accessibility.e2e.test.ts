@@ -136,7 +136,7 @@ test("tab_selected_and_panel_consistent", async ({ page }) => {
   await expect(page.locator("#world-author-overview")).toBeHidden();
   await page.locator("#worldAuthorNextStep").click();
   await expectTabGroupState(tabs);
-  await expect(tabs.getByRole("tab", { name: "Playable character" })).toHaveAttribute("aria-selected", "true");
+  await expect(tabs.getByRole("tab", { name: "Characters" })).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#world-author-mechanics")).toBeVisible();
   await page.locator("#cancelWorldAuthor").click();
   await expect(page.locator("#worldAuthorDialog")).toBeHidden();
@@ -929,11 +929,7 @@ async function measureCompositedTextContrast(
       color: style.color,
       rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       scroll: { x: window.scrollX, y: window.scrollY },
-      viewport: { width: window.innerWidth, height: window.innerHeight },
-      inlineColor: (element as HTMLElement).style.getPropertyValue("color"),
-      inlineColorPriority: (element as HTMLElement).style.getPropertyPriority("color"),
-      inlineShadow: (element as HTMLElement).style.getPropertyValue("text-shadow"),
-      inlineShadowPriority: (element as HTMLElement).style.getPropertyPriority("text-shadow")
+      viewport: { width: window.innerWidth, height: window.innerHeight }
     };
   });
   const geometry = (value: Awaited<ReturnType<typeof snapshot>>) => ({ rect: value.rect, scroll: value.scroll, viewport: value.viewport });
@@ -952,39 +948,16 @@ async function measureCompositedTextContrast(
       const clip = { x: captureBefore.rect.x, y: captureBefore.rect.y, width: captureBefore.rect.width, height: captureBefore.rect.height };
       const normal = await page.screenshot({ clip, scale: "css" });
       if (!sameGeometry(captureBefore, await snapshot())) throw new Error("T34_CAPTURE_DRIFT");
-      await target.evaluate(element => {
-        const htmlElement = element as HTMLElement;
-        htmlElement.style.setProperty("color", "transparent", "important");
-        htmlElement.style.setProperty("text-shadow", "none", "important");
+      // Keep text hidden for the entire capture even if polling replaces the status element.
+      const background = await page.screenshot({
+        clip, scale: "css", style: `${selector} { color: transparent !important; text-shadow: none !important; }`
       });
-      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-      const hiddenText = await snapshot();
-      if (!sameGeometry(captureBefore, hiddenText)) throw new Error("T34_CAPTURE_DRIFT");
-      let background: Buffer;
-      try {
-        background = await page.screenshot({ clip, scale: "css" });
-        if (!sameGeometry(captureBefore, await snapshot())) throw new Error("T34_CAPTURE_DRIFT");
-      } finally {
-        await target.evaluate((element, style) => {
-          const htmlElement = element as HTMLElement;
-          if (style.color) htmlElement.style.setProperty("color", style.color, style.colorPriority);
-          else htmlElement.style.removeProperty("color");
-          if (style.shadow) htmlElement.style.setProperty("text-shadow", style.shadow, style.shadowPriority);
-          else htmlElement.style.removeProperty("text-shadow");
-        }, { color: before.inlineColor, colorPriority: before.inlineColorPriority, shadow: before.inlineShadow, shadowPriority: before.inlineShadowPriority });
-      }
+      if (!sameGeometry(captureBefore, await snapshot())) throw new Error("T34_CAPTURE_DRIFT");
       normalImage = normal;
       backgroundImage = background;
       stableBefore = captureBefore;
       break;
     } catch (error) {
-      await target.evaluate((element, style) => {
-        const htmlElement = element as HTMLElement;
-        if (style.color) htmlElement.style.setProperty("color", style.color, style.colorPriority);
-        else htmlElement.style.removeProperty("color");
-        if (style.shadow) htmlElement.style.setProperty("text-shadow", style.shadow, style.shadowPriority);
-        else htmlElement.style.removeProperty("text-shadow");
-      }, { color: before.inlineColor, colorPriority: before.inlineColorPriority, shadow: before.inlineShadow, shadowPriority: before.inlineShadowPriority });
       if (!(error instanceof Error) || error.message !== "T34_CAPTURE_DRIFT" || attempt > 0) throw error;
       await target.scrollIntoViewIfNeeded();
       await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
@@ -1365,6 +1338,7 @@ async function assertSegmentImageRowsDoNotOverlap(page: Page, segmentId: string)
 }
 
 test("zero_turn_and_optional_image_theme_contrast", async ({ page, context }, testInfo) => {
+  test.setTimeout(90_000); // Pixel contrast sampling renders both Story states across all three themes.
   const zeroFixture = await openStory(page, 0);
   await acknowledgeZeroTurnBackground(page, zeroFixture);
   await installT34UserProfilePersistence(page, zeroFixture);

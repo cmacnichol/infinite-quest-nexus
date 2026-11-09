@@ -305,7 +305,7 @@ test("role readiness uses explicit inventory checks and preserves independent pr
   await expect(text.locator("[data-readiness-inventory]")).toHaveText("available");
   await expect(text.locator("[data-readiness-capability]")).toHaveText("Verified for current schema");
   expect(api.getInventoryCalls()).toBe(2);
-  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/T23-provider-readiness.png", fullPage: true });
+  await page.screenshot({ path: "test-results/sdd-evidence/legacy-ui-2026-10-03/T23-provider-readiness.png", fullPage: true });
   expect(api.requests.filter(({ path, method }) => method === "GET" && path === `/api/v1/providers/${textProfileId}/models`)).toHaveLength(2);
   expect(api.requests.some(({ path }) => /generations|\/turns(?:\/|$)/.test(path))).toBe(false);
 });
@@ -346,7 +346,7 @@ test("Model-mode Advanced structured settings are visible by keyboard and round-
   await page.goto(`${origin}/nexus/index.html#providers`);
   await expect(page.locator("#newProviderButton")).toBeVisible();
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
-  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/T23-provider-basic.png", fullPage: true });
+  await page.screenshot({ path: "test-results/sdd-evidence/legacy-ui-2026-10-03/T23-provider-basic.png", fullPage: true });
   const advanced = page.locator("#providerAdvancedSettings");
   await expect(advanced).not.toHaveAttribute("open", "");
   const summary = advanced.locator("summary");
@@ -355,7 +355,7 @@ test("Model-mode Advanced structured settings are visible by keyboard and round-
   await expect(advanced).toHaveAttribute("open", "");
   await expect(advanced.locator("#providerResponseFormatPolicy")).toBeVisible();
   await expect(advanced.locator("#providerTextOverrideMode")).toBeVisible();
-  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/T23-provider-advanced.png", fullPage: true });
+  await page.screenshot({ path: "test-results/sdd-evidence/legacy-ui-2026-10-03/T23-provider-advanced.png", fullPage: true });
   await page.locator("#providerContextTokens").fill("57344");
   await page.locator("#providerOutputTokens").fill("6144");
   await page.locator("#providerTemperature").fill("0.55");

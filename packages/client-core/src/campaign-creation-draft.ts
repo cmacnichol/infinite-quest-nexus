@@ -14,6 +14,7 @@ export type CampaignCreationDraft = {
   selectedCharacterId: string | null;
   turnControlStyle: CampaignTurnControlStyle;
   startAfterCreate: boolean;
+  startingCast?: { characterId: string; alwaysInContext: boolean }[];
 };
 
 /** Server-provided summary of the selected immutable version and its playable characters. */
@@ -60,6 +61,7 @@ export function buildCampaignCreateRequest(draft: CampaignCreationDraft): Campai
     worldVersionId: draft.worldVersionId,
     title: draft.title,
     selectedCharacterId: draft.selectedCharacterId,
-    turnControlStyle: draft.turnControlStyle
+    turnControlStyle: draft.turnControlStyle,
+    ...(draft.startingCast?.length ? { startingCast: draft.startingCast } : {})
   });
 }

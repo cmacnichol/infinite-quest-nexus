@@ -1,3 +1,4 @@
+import { validCampaignRosterAuthority } from "../../contracts/src/archives.js";
 import { archivePolicySnapshotSchema, historicalArchivePolicy, requireCompatibleArchivePreview, type ArchivePolicySnapshot } from "../../contracts/src/archive-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { ILLUSTRATION_NEGATIVE_PROMPT_DEFAULT } from "../../contracts/src/illustration-refinement-default.js";
@@ -17,7 +18,8 @@ import type {
   PortableJsonValue
 } from "../../application/src/imports/private-portable-composition.js";
 import type { WorldRepositoryPort } from "../../application/src/world-campaign/ports.js";
-import { legacyStorySchema, storyContextBudgetTokensFromUnknown, worldImportRequestSchema } from "../../contracts/src/index.js";
+import { legacyStorySchema, storyContextBudgetTokensFromUnknown, worldContentSchema, worldImportRequestSchema } from "../../contracts/src/index.js";
+import { selectPlayableCharacter } from "../../domain/src/world-characters.js";
 import { portableAcceptedGenerationPolicyProvenanceSchema } from "../../contracts/src/campaign-generation-policy.js";
 import type {
   ImportOwnerScope,
@@ -1260,9 +1262,12 @@ async function commitRichPortableCampaign(
   const sourceCampaign = unknownRecord(campaignPayload.campaign);
   const archiveRecords = unknownRecord(campaignPayload.archiveRecords);
   const campaignFormatVersion = campaignPayload.formatVersion;
-  const v4 = campaignFormatVersion === 4;
+  const hasGenerationPolicy = campaignFormatVersion === 4 || campaignFormatVersion === 5;
+  if (!validCampaignRosterAuthority(sourceCampaign, campaignFormatVersion)) {
+    throw new Error("portable_import_payload_invalid");
+  }
   if (!Array.isArray(campaignPayload.turns)
-    || (campaignFormatVersion !== undefined && campaignFormatVersion !== 3 && !v4)
+    || (campaignFormatVersion !== undefined && campaignFormatVersion !== 3 && !hasGenerationPolicy)
     || archiveRecords.formatVersion !== 1
     || chronicle.formatVersion !== 1 || !Array.isArray(chronicle.memories) || !Array.isArray(chronicle.summaries)) {
     throw new Error("portable_import_payload_invalid");
@@ -1277,7 +1282,7 @@ async function commitRichPortableCampaign(
   const importId = imported.rows[0]!.id;
   const turns = campaignPayload.turns;
   const sourceSettings = unknownRecord(campaignPayload.settings);
-  if (v4 && (campaignPayload.generationPolicyVersion !== 1
+  if (hasGenerationPolicy && (campaignPayload.generationPolicyVersion !== 1
     || !Object.prototype.hasOwnProperty.call(sourceSettings, "turnControlStyle")
     || !["action_only", "flexible_action", "flexible_scene"].includes(String(sourceSettings.turnControlStyle)))) {
     throw new Error("portable_import_payload_invalid");
@@ -1285,7 +1290,7 @@ async function commitRichPortableCampaign(
   const historicalTurnControlStyle = sourceSettings.turnControlStyle === "Auto"
     ? "flexible_auto"
     : sourceSettings.turnControlStyle;
-  const settings: Record<string, unknown> = !v4 && historicalTurnControlStyle === "flexible_auto"
+  const settings: Record<string, unknown> = !hasGenerationPolicy && historicalTurnControlStyle === "flexible_auto"
     ? { ...sourceSettings, turnControlStyle: normalizeHistoricalTurnControlStyle(historicalTurnControlStyle) }
     : { ...sourceSettings };
   const activeTurnNumber = Math.max(0, ...turns.map((turn) => Number(unknownRecord(turn).turnNumber ?? 0)));
@@ -1293,8 +1298,8 @@ async function commitRichPortableCampaign(
   await database.query(
     `INSERT INTO campaigns (
        id,owner_user_id,world_version_id,title,active_turn_number,legacy_settings,story_length_profile,story_context_budget_tokens,
-       turn_control_style,selected_character_id,character_snapshot,character_profile,character_profile_revision
-     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13)`,
+       turn_control_style,selected_character_id,character_snapshot,character_profile,character_profile_revision,first_appearance_eligible,selected_character_world_id
+     ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13,$14,$15)`,
     [campaignId, input.owner.ownerUserId, input.destination.worldVersionId,
       typeof sourceCampaign.title === "string" && sourceCampaign.title.trim() ? sourceCampaign.title : "Imported campaign",
       activeTurnNumber, JSON.stringify(settings),
@@ -1305,7 +1310,9 @@ async function commitRichPortableCampaign(
       typeof sourceCampaign.selectedCharacterId === "string" ? sourceCampaign.selectedCharacterId : null,
       sourceCampaign.characterSnapshot == null ? null : JSON.stringify(sourceCampaign.characterSnapshot),
       sourceCampaign.characterProfile == null ? null : JSON.stringify(sourceCampaign.characterProfile),
-      Number(sourceCampaign.characterProfileRevision ?? 0)]
+      Number(sourceCampaign.characterProfileRevision ?? 0), sourceCampaign.firstAppearanceEligible === true,
+      sourceCampaign.selectedCharacterWorldId && sourceCampaign.selectedCharacterWorldId === worldPayload.sourceWorldId
+        ? input.destination.worldId : sourceCampaign.selectedCharacterWorldId ?? null]
   );
   const maps: RichIdMaps = {
     campaign: new Map([[String(sourceCampaign.sourceCampaignId ?? "source-campaign"), campaignId]]),
@@ -1370,7 +1377,7 @@ async function commitRichPortableCampaign(
   );
   for (const [index, turnValue] of turns.entries()) {
     const turn = unknownRecord(turnValue);
-    const portableProvenance = v4
+    const portableProvenance = hasGenerationPolicy
       ? portableAcceptedGenerationPolicyProvenanceSchema.safeParse(turn.portableAcceptedGenerationPolicyProvenance)
       : { success: true as const, data: null };
     if (!portableProvenance.success) throw new Error("portable_import_payload_invalid");
@@ -1616,7 +1623,7 @@ async function commitPortableCampaign(
     throw new Error("portable_import_destination_invalid");
   }
   const destination = await database.query(
-    `SELECT 1
+    `SELECT version.content
        FROM worlds world
        JOIN world_versions version
          ON version.world_id=world.id AND version.owner_user_id=world.owner_user_id
@@ -1634,6 +1641,12 @@ async function commitPortableCampaign(
   );
   const storyValue = input.payload.story ?? input.payload.campaign;
   const story = legacyStorySchema.parse(storyValue);
+  if (sourceType === "portable_story_text") {
+    const provenance = unknownRecord((story as Record<string, unknown>).storyImportProvenance);
+    const selectedId = typeof provenance.selectedCharacterId === "string" ? provenance.selectedCharacterId : "";
+    if (!selectedId) throw new Error("portable_story_character_required");
+    selectPlayableCharacter(worldContentSchema.parse(destination.rows[0]!.content), selectedId);
+  }
   const normalized = sourceType === "portable_legacy_story"
     ? unknownRecord(input.payload.normalizedCampaign)
     : {};

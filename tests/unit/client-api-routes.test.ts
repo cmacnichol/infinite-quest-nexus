@@ -868,7 +868,7 @@ describe("client API route contracts without PostgreSQL", () => {
   });
 
   it("serves metadata without accepting caller identity as application identity", async () => {
-    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool() }));
+    const app = await buildServer(serverOptions({ config: { ...config(storageRoot), castContextEnabled: true, castPresetsEnabled: true }, pool: mockPool() }));
     try {
       const response = await app.inject({
         method: "GET",
@@ -881,6 +881,7 @@ describe("client API route contracts without PostgreSQL", () => {
       expect(response.statusCode).toBe(200);
       expect(response.headers["x-correlation-id"]).toBe("meta-route-correlation");
       expect(metaResponseSchema.parse(response.json()).application.name).toBe("Infinite Quest Nexus");
+      expect(response.json().capabilities).toMatchObject({ castContext: false, castPresets: false });
       expect(response.body).not.toContain("99999999-9999-4999-8999-999999999999");
     } finally {
       await app.close();
@@ -1037,6 +1038,22 @@ describe("client API route contracts without PostgreSQL", () => {
     } finally {
       await app.close();
     }
+  });
+
+  it("exposes only the safe cast presets 503 code and correlation reference", async () => {
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(),
+      worldCampaign: testWorldCampaignApplication({ createCampaign: async () => {
+        throw new WorldCampaignApplicationError("unavailable", "cast_presets_disabled");
+      } }) }));
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/v1/campaigns", payload: {
+        worldVersionId: WORLD_VERSION_ID, title: "Campaign", selectedCharacterId: "observer",
+        startingCast: [{ characterId: "ally", alwaysInContext: true }]
+      } });
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({ code: "cast_presets_disabled", details: { code: "cast_presets_disabled" }, correlationId: expect.any(String) });
+      expect(response.json().message).toContain("Starting cast presets are currently unavailable.");
+    } finally { await app.close(); }
   });
 
   it("returns actionable campaign validation through the HTTP route without authored rule text", async () => {
@@ -1622,6 +1639,21 @@ describe("client API route contracts without PostgreSQL", () => {
     }
   });
 
+  it("validates cast suggestion requests and binds them to the server owner", async () => {
+    const calls: unknown[] = [];
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), worldCampaign: testWorldCampaignApplication({
+      suggestCastPreview: async (scope, request) => { calls.push({ scope, request }); return { seeds: [{ seedId: "11111111-1111-4111-8111-111111111111", name: "Iris", role: "Guide", concept: "A scout" }] }; }
+    }) }));
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/v1/worlds/playable-characters/suggest-cast-preview", payload: { content: WORLD_CONTENT, count: 3 } });
+      expect(response.statusCode).toBe(200);
+      expect(calls).toEqual([expect.objectContaining({ scope: { ownerUserId: OWNER_ID }, request: expect.objectContaining({ count: 3 }) })]);
+      const invalid = await app.inject({ method: "POST", url: "/api/v1/worlds/playable-characters/suggest-cast-preview", payload: { content: WORLD_CONTENT, count: 9 } });
+      expect(invalid.statusCode).toBe(400);
+      expect(calls).toHaveLength(1);
+    } finally { await app.close(); }
+  });
+
   it("binds character preview generation to the server owner and forwards only the parsed progress key", async () => {
     const calls: Array<{ scope: Record<string, string>; request: Record<string, unknown> }> = [];
     const app = await buildServer(serverOptions({
@@ -1630,7 +1662,7 @@ describe("client API route contracts without PostgreSQL", () => {
       worldCampaign: testWorldCampaignApplication({
         generatePlayableCharacterPreview: async (scope, request) => {
           calls.push({ scope: { ...scope }, request: { ...request } });
-          return { character: { id: "trusted-edit-id", name: "Mara", characterText: "A patient observer.", rpgStats: [], defaultTriggers: [], source: {} } };
+          return { character: { id: "trusted-edit-id", name: "Mara", characterText: "A patient observer.", rpgStats: [], defaultTriggers: [], source: {}, campaignUse: "playable", startingCastDefault: true, alwaysInContext: false } };
         }
       })
     }));

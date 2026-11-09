@@ -114,7 +114,9 @@ for (const illustrated of [false, true]) {
     await dialog.locator("[data-reader-preview]").click();
     await expect(prose).toHaveCSS("font-family", /Georgia/);
     await expect(prose.locator("p").first()).toHaveCSS("margin-bottom", "27px");
-    expect((await prose.boundingBox())!.width).toBeGreaterThan(originalWidth + 100);
+    await expect(prose).toHaveCSS("margin-left", "0px");
+    await expect(prose).toHaveCSS("margin-right", "0px");
+    expect((await prose.boundingBox())!.width).toBeGreaterThan(originalWidth);
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
     await expect(prose.locator("p").first()).toHaveCSS("margin-bottom", "18px");

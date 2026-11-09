@@ -9,7 +9,7 @@ import { castFieldSchema } from "./campaign-cast.js";
  */
 export const providerOutputSchemaOperationV2Schema = z.enum([
   "story", "choices", "continuity_review", "rpg_assessment", "event_trigger_before", "event_trigger_after",
-  "scene_coverage", "event_coverage", "world_outline", "world_seed_character", "standalone_character",
+  "cast_suggestion", "cast_draft", "supporting_character", "scene_coverage", "event_coverage", "world_outline", "world_seed_character", "standalone_character",
   "character_organizer", "source_extraction", "source_synthesis", "source_character", "illustration_prompt_refinement", "cast_discovery"
 ]);
 export type ProviderOutputSchemaOperationV2 = z.infer<typeof providerOutputSchemaOperationV2Schema>;
@@ -24,7 +24,7 @@ export const responseContractOperationV2Schema = z.enum([
   "story_continuity_review", "story_continuity_repair", "rpg_assessment", "event_trigger_before",
   "event_trigger_after", "scene_coverage_validation", "event_coverage_validation",
   "world_outline", "world_outline_repair", "world_seed_character", "world_seed_character_repair",
-  "standalone_character", "standalone_character_repair", "character_organizer", "character_organizer_repair",
+  "cast_suggestion", "cast_suggestion_repair", "cast_draft", "cast_draft_repair", "supporting_character", "supporting_character_repair", "standalone_character", "standalone_character_repair", "character_organizer", "character_organizer_repair",
   "source_extraction", "source_extraction_repair", "source_synthesis", "source_synthesis_repair",
   "source_character", "source_character_repair", "illustration_prompt_refinement", "cast_discovery"
 ]);
@@ -32,7 +32,7 @@ export type ResponseContractOperationV2 = z.infer<typeof responseContractOperati
 
 export const directAuthoringTextOperationV2Schema = z.enum([
   "worldOutline", "worldOutlineRepair", "seedCharacter", "seedCharacterRepair",
-  "standaloneCharacter", "standaloneCharacterRepair", "organizer", "organizerRepair"
+  "castSuggestion", "castSuggestionRepair", "castDraft", "castDraftRepair", "supportingCharacter", "supportingCharacterRepair", "standaloneCharacter", "standaloneCharacterRepair", "organizer", "organizerRepair"
 ]);
 export type DirectAuthoringTextOperationV2 = z.infer<typeof directAuthoringTextOperationV2Schema>;
 
@@ -48,6 +48,12 @@ const directAuthoringContractIdentity = {
   worldOutlineRepair: { operation: "world_outline_repair", schemaOperation: "world_outline" },
   seedCharacter: { operation: "world_seed_character", schemaOperation: "world_seed_character" },
   seedCharacterRepair: { operation: "world_seed_character_repair", schemaOperation: "world_seed_character" },
+  castSuggestion: { operation: "cast_suggestion", schemaOperation: "cast_suggestion" },
+  castSuggestionRepair: { operation: "cast_suggestion_repair", schemaOperation: "cast_suggestion" },
+  castDraft: { operation: "cast_draft", schemaOperation: "cast_draft" },
+  castDraftRepair: { operation: "cast_draft_repair", schemaOperation: "cast_draft" },
+  supportingCharacter: { operation: "supporting_character", schemaOperation: "supporting_character" },
+  supportingCharacterRepair: { operation: "supporting_character_repair", schemaOperation: "supporting_character" },
   standaloneCharacter: { operation: "standalone_character", schemaOperation: "standalone_character" },
   standaloneCharacterRepair: { operation: "standalone_character_repair", schemaOperation: "standalone_character" },
   organizer: { operation: "character_organizer", schemaOperation: "character_organizer" },
@@ -160,6 +166,9 @@ const worldOutline = closed({
   character_seeds: { type: "array", minItems: 3, maxItems: 4, items: seed }
 });
 const seedCharacter = closed({ id: text(200), name: text(200), character_text: optionalText(200_000), profile: characterProfile, rpg_statistics: { type: "array", maxItems: 10_000, items: rpgStat }, default_triggers: { type: "array", maxItems: 10_000, items: defaultTrigger } });
+const castSuggestion = closed({ seeds: { type: "array", maxItems: 8, items: closed({ name: text(200), role: text(2000), concept: text(1000) }) } });
+const castDraft = closed({ proposals: { type: "array", maxItems: 30, items: closed({ path: text(200), value: text(20000), evidenceIds: { type: "array", maxItems: 40, items: string(36, 36, uuid) } }) } });
+const supportingCharacter = closed({ name: text(200), profile: characterProfile });
 const standaloneCharacter = closed({ name: text(200), profile: characterProfile, rpgStats: { type: "array", maxItems: 10_000, items: rpgStat }, defaultTriggers: { type: "array", maxItems: 10_000, items: defaultTrigger } });
 const organizer = closed({
   candidate: characterProfile, evidence: { type: "array", maxItems: 500, items: closed({ path: text(300), source: text(100), quote: text(4_000) }) },
@@ -213,6 +222,9 @@ const preferredRegistry: Readonly<Record<ProviderOutputSchemaOperationV2, Provid
   event_coverage: entry("event_coverage", "event-coverage-v1", "infinite_quest_event_coverage_v1", eventCoverage),
   world_outline: entry("world_outline", "world-outline-v1", "infinite_quest_world_outline_v1", worldOutline),
   world_seed_character: entry("world_seed_character", "world-seed-character-v1", "infinite_quest_world_seed_character_v1", seedCharacter),
+  cast_suggestion: entry("cast_suggestion", "cast-suggestion-v1", "infinite_quest_cast_suggestion_v1", castSuggestion),
+  cast_draft: entry("cast_draft", "cast-draft-v1", "infinite_quest_cast_draft_v1", castDraft),
+  supporting_character: entry("supporting_character", "supporting-character-v1", "infinite_quest_supporting_character_v1", supportingCharacter),
   standalone_character: entry("standalone_character", "standalone-character-v1", "infinite_quest_standalone_character_v1", standaloneCharacter),
   character_organizer: entry("character_organizer", "character-organizer-v1", "infinite_quest_character_organizer_v1", organizer),
   source_extraction: entry("source_extraction", "source-extraction-v1", "infinite_quest_source_extraction_v1", extraction),

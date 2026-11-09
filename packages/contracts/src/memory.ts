@@ -38,6 +38,7 @@ export const castContextExplanationSchema = z.object({
     reason: z.enum(["direct_reference", "open_thread", "pinned", "recent_observation", "recent_mention"]) }).strict()),
   omitted: z.array(z.object({ characterId: z.uuid(),
     reason: z.enum(["budget", "ignored", "ambiguous", "not_relevant", "stale_dynamic_fields"]) }).strict()),
+  omittedFields: z.array(z.object({ characterId: z.uuid(), field: z.string().max(80), reason: z.literal("budget") }).strict()).optional(),
   disabledReason: z.string().max(200).nullable()
 }).strict();
 export type CastContextExplanation = z.infer<typeof castContextExplanationSchema>;

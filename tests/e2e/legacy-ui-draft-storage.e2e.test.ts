@@ -6,8 +6,8 @@ import { expect, test, type Page } from "@playwright/test";
 const USER_ID = "4d7c311a-ecf2-4eeb-8c27-1aaaf13af931";
 const CAMPAIGN_ID = "53675828-1fb0-42ef-aaf1-33e5e4885586";
 const DRAFT_MODULE_URL = `/nexus/@fs/${fileURLToPath(new URL("../../packages/client-web/src/storage/story-action-drafts.ts", import.meta.url)).replaceAll("\\", "/")}`;
-const EVIDENCE_SCREENSHOT = fileURLToPath(new URL("../../.superpowers/sdd/legacy-ui-2026-10-03/evidence/T07/two-page-indexeddb.png", import.meta.url));
-const EVIDENCE_RESULTS = fileURLToPath(new URL("../../.superpowers/sdd/legacy-ui-2026-10-03/evidence/T07/browser-results.json", import.meta.url));
+const EVIDENCE_SCREENSHOT = fileURLToPath(new URL("../../test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T07/two-page-indexeddb.png", import.meta.url));
+const EVIDENCE_RESULTS = fileURLToPath(new URL("../../test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T07/browser-results.json", import.meta.url));
 
 async function clearDraftDatabase(page: Page): Promise<void> {
   await page.evaluate(() => new Promise<void>((resolve, reject) => {

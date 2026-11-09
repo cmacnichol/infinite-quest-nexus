@@ -365,7 +365,7 @@ describe("strict character profile organizer validation", () => {
     const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
     const result = organizeWorldCharacterProfileForOwner(
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Blue coat", rpgStats: [], defaultTriggers: [], source: {} } },
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Blue coat", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
       {
         resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
         execution: { text: async () => ({ execute: async (request: { input: string }) => { requests.push(request); return { content: JSON.stringify(responses.shift()), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
@@ -463,7 +463,7 @@ describe("strict character profile organizer validation", () => {
     const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
     const result = await organizeWorldCharacterProfileForOwner(
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", rpgStats: [], defaultTriggers: [], source: {} } },
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
       {
         resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId, model: "model" }) },
         execution: { text: async () => ({ id: providerProfileId, name: "Native", providerRole: "text", providerType: "openrouter", model: "model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, configuration: {}, executionRevision: "execution", authorityRevision: "authority", textSelection: { kind: "openrouter_preset", slug: "organizer" }, execute: async () => { throw new Error("legacy execute must not receive enabled native work"); } }) },
@@ -511,7 +511,7 @@ describe("strict character profile organizer validation", () => {
     const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
     await organizeWorldCharacterProfileForOwner(
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", rpgStats: [], defaultTriggers: [], source: {} } },
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
       {
         resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
         execution: { text: async () => ({ execute: async (request: unknown) => { requests.push(request as { systemPrompt: string; input: string }); return { content: JSON.stringify(responses.shift()), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
@@ -529,7 +529,7 @@ describe("strict character profile organizer validation", () => {
     const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
     await expect(organizeWorldCharacterProfileForOwner(
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", rpgStats: [], defaultTriggers: [], source: {} } },
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
       {
         resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
         execution: { text: async () => ({ execute: async (request: unknown) => { requests.push(request); return { content: "not JSON", responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
@@ -544,7 +544,7 @@ describe("strict character profile organizer validation", () => {
     const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
     await expect(organizeWorldCharacterProfileForOwner(
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", rpgStats: [], defaultTriggers: [], source: {} } },
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
       { resolution: { resolveDirect: async () => ({ status: "unavailable" }) } } as never
     )).rejects.toMatchObject({ name: "AuthoringResponseError", statusCode: 503, authoringFailure: { code: "authoring_provider_unavailable", stage: "organizer" } });
   });
@@ -553,7 +553,7 @@ describe("strict character profile organizer validation", () => {
     const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
     await expect(organizeWorldCharacterProfileForOwner(
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", rpgStats: [], defaultTriggers: [], source: {} } },
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
       {
         resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "missing", model: "model" }) },
         execution: { text: async () => { throw Object.assign(new Error("missing"), { statusCode: 404 }); } }
@@ -570,7 +570,7 @@ describe("strict character profile organizer validation", () => {
       const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
       const pending = organizeWorldCharacterProfileForOwner(
         { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
-        "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", rpgStats: [], defaultTriggers: [], source: {} } },
+        "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} } },
         {
           resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
           execution: { text: async () => ({ execute: requests }) },
@@ -642,6 +642,7 @@ describe("strict character profile organizer validation", () => {
       name: "Mira",
       characterText: "",
       profile: characterProfileSchema.parse({}),
+      campaignUse: "playable", startingCastDefault: true, alwaysInContext: false,
       rpgStats: [],
       defaultTriggers: [],
       source: {}
@@ -663,4 +664,91 @@ it("preserves profile extensions and untouched appearance when editing a field",
   expect(update.profile.extension).toEqual(original.profile.extension);
   expect(update.profile.unclassifiedNotes).toBe("Extra notes");
   expect(update.profile.appearance).toEqual(original.profile.appearance);
+});
+
+it("tracks editor changes and reapplies reviewed organization over a newer profile", async () => {
+  const { createEditorDraft, setEditorDraftField, stageEditorOrganize, reapplyEditorDraft, buildEditorPayload } = await import("../../packages/client-core/src/characters/editor-model.js");
+  const loaded = { name: "Mira", profile: characterProfileSchema.parse({ identity: { aliases: ["Smith, Jr."] }, appearance: { hair: "black" }, extension: { keep: true } }) };
+  let draft = createEditorDraft("campaign-main", loaded);
+  expect(draft.values["identity.aliases"]).toEqual(["Smith, Jr."]);
+  draft = setEditorDraftField(draft, "identity.aliases", ["Smith, Jr.", "Fox"]);
+  draft = stageEditorOrganize(draft, { "story.role": "Scout" }, "reviewed-v3");
+  draft = reapplyEditorDraft(draft, { ...loaded, profile: { ...loaded.profile, appearance: { ...loaded.profile.appearance, hair: "silver" } } });
+  const payload = buildEditorPayload(draft, { expectedRevision: 4, idempotencyKey: "supplied" });
+  expect(draft.changedPaths).toEqual(["identity.aliases", "story.role"]);
+  expect(payload).toMatchObject({ expectedRevision: 4, editSource: "ai_organized", organizerProtocolVersion: "reviewed-v3", profile: { identity: { aliases: ["Smith, Jr.", "Fox"] }, story: { role: "Scout" }, appearance: { hair: "silver" }, extension: { keep: true } } });
+});
+
+it("preserves prior manual edits when organizing repeatedly, discarding, and reapplying", async () => {
+  const { createEditorDraft, setEditorDraftField, stageEditorOrganize, discardEditorOrganize, markEditorConflict, reapplyEditorDraft, buildEditorPayload } = await import("../../packages/client-core/src/characters/editor-model.js");
+  const loaded = { name: "Mira", profile: characterProfileSchema.parse({ story: { role: "Scout", goals: "Home" } }) };
+  let draft = setEditorDraftField(createEditorDraft("campaign-main", loaded), "story.role", "Manual");
+  draft = stageEditorOrganize(draft, { "story.role": "Organized" }, "v1");
+  draft = stageEditorOrganize(draft, { "story.role": "Revised", "story.goals": "Travel" }, "v1");
+  const discarded = discardEditorOrganize(draft);
+  expect(discarded.values["story.role"]).toBe("Manual");
+  expect(buildEditorPayload(discarded, { expectedRevision: 1 }).editSource).toBe("manual");
+  draft = setEditorDraftField(draft, "story.role", "Manual after review");
+  draft = reapplyEditorDraft(markEditorConflict(draft), { ...loaded, profile: characterProfileSchema.parse({ story: { role: "Concurrent", goals: "Elsewhere" } }) });
+  expect(draft.conflict).toBe(false);
+  expect(buildEditorPayload(draft, { expectedRevision: 2 })).toMatchObject({ editSource: "ai_organized", organizerProtocolVersion: "v1", profile: { story: { role: "Manual after review", goals: "Travel" } } });
+  expect(discardEditorOrganize(draft).values).toMatchObject({ "story.role": "Manual after review", "story.goals": "Elsewhere" });
+});
+
+it("keeps reviewed provenance when the same value is set again", async () => {
+  const { createEditorDraft, setEditorDraftField, stageEditorOrganize, buildEditorPayload } = await import("../../packages/client-core/src/characters/editor-model.js");
+  const initial = createEditorDraft("campaign-main", { name: "Mira", profile: characterProfileSchema.parse({}) });
+  const organized = stageEditorOrganize(initial, { "story.role": "Scout" }, "reviewed-v3");
+  const unchanged = setEditorDraftField(organized, "story.role", "Scout");
+  expect(buildEditorPayload(unchanged, { expectedRevision: 1 })).toMatchObject({ editSource: "ai_organized", organizerProtocolVersion: "reviewed-v3" });
+});
+
+it("retains the right reviewed version across empty reviews, replacement and restaging", async () => {
+  const { createEditorDraft, setEditorDraftField, stageEditorOrganize, discardEditorOrganize, buildEditorPayload, projectEditorProfile } = await import("../../packages/client-core/src/characters/editor-model.js");
+  let draft = createEditorDraft("campaign-main", { name: "Mira", profile: characterProfileSchema.parse({}) });
+  draft = stageEditorOrganize(draft, { "story.role": "Scout" }, "v1");
+  draft = stageEditorOrganize(draft, {}, "v2");
+  draft = stageEditorOrganize(draft, { "story.role": "Scout" }, "v2");
+  expect(draft.acceptedOrganize?.protocolVersion).toBe("v1");
+  expect(() => stageEditorOrganize(draft, { "story.goals": "Travel" }, "v2")).toThrow("Save the earlier reviewed fields");
+  draft = stageEditorOrganize(draft, { "story.goals": "Travel" }, "v1");
+  draft = setEditorDraftField(draft, "story.goals", "Manual goal");
+  expect(draft.acceptedOrganize?.protocolVersion).toBe("v1");
+  draft = stageEditorOrganize(draft, { "story.goals": "New goal" }, "v1");
+  expect(discardEditorOrganize(draft).values["story.goals"]).toBe("Manual goal");
+  expect(projectEditorProfile(draft)).toMatchObject({ story: { role: "Scout", goals: "New goal" } });
+  expect(() => buildEditorPayload(draft)).toThrow("revision");
+});
+
+
+it("atomically rejects mixed organizer protocols but permits replacing all reviewed fields", async () => {
+  const { createEditorDraft, stageEditorOrganize, buildEditorPayload } = await import("../../packages/client-core/src/characters/editor-model.js");
+  const original = stageEditorOrganize(createEditorDraft("campaign-main", { name: "Mira", profile: characterProfileSchema.parse({}) }), { "story.role": "Scout" }, "v1");
+  expect(() => stageEditorOrganize(original, { "story.goals": "Travel" }, "v2")).toThrow("Save the earlier reviewed fields");
+  expect(original.values["story.goals"]).toBe("");
+  expect(original.acceptedOrganize?.protocolVersion).toBe("v1");
+  const replaced = stageEditorOrganize(original, { "story.role": "Captain", "story.goals": "Travel" }, "v2");
+  expect(buildEditorPayload(replaced, { expectedRevision: 2 })).toMatchObject({ editSource: "ai_organized", organizerProtocolVersion: "v2" });
+});
+
+it("projects a World character and emits a changed-only local preset delta", async () => {
+  const { createEditorDraft, setEditorDraftField, buildEditorPayload } = await import("../../packages/client-core/src/characters/editor-model.js");
+  const loaded = { id: "mira", name: "Mira", profile: characterProfileSchema.parse({ story: { role: "Scout", goals: "Home" }, extension: { keep: true } }), state: { location: "Harbor", condition: "Well" }, extension: { retained: true } };
+  const world = setEditorDraftField(createEditorDraft("world-draft", loaded), "story.role", "Captain");
+  expect(buildEditorPayload(world)).toMatchObject({ id: "mira", extension: { retained: true }, profile: { story: { role: "Captain", goals: "Home" }, extension: { keep: true } } });
+  let preset = createEditorDraft("campaign-preset", loaded);
+  expect(preset.values["state.location"]).toBe("Harbor");
+  preset = setEditorDraftField(preset, "state.location", "Road");
+  preset = setEditorDraftField(preset, "story.goals", "Travel");
+  expect(buildEditorPayload(preset)).toEqual({ changes: { "state.location": "Road", "story.goals": "Travel" } });
+});
+
+it("clears the campaign draft dirty state when an edit returns to its loaded value", async () => {
+  const { createEditorDraft, setEditorDraftField, markEditorConflict, reapplyEditorDraft, buildEditorPayload } = await import("../../packages/client-core/src/characters/editor-model.js");
+  const original = { name: "Mira", profile: characterProfileSchema.parse({ story: { role: "Scout" } }) };
+  let draft = setEditorDraftField(createEditorDraft("campaign-main", original), "story.role", "Captain");
+  draft = setEditorDraftField(draft, "story.role", "Scout");
+  expect(draft.changedPaths).toEqual([]);
+  draft = reapplyEditorDraft(markEditorConflict(draft), { ...original, profile: characterProfileSchema.parse({ story: { role: "Guide" } }) });
+  expect(buildEditorPayload(draft, { expectedRevision: 2 })).toMatchObject({ expectedRevision: 2, profile: { story: { role: "Guide" } } });
 });

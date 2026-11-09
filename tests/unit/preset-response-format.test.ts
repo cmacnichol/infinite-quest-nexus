@@ -64,6 +64,9 @@ const validEnvelopeFixtures = {
   event_coverage: { event_results: [{ event_id: "event-1", covered: true, missing_required_beats: [], contradictions: [] }] },
   world_outline: { title: "World", genre: "Fantasy", tone: "Hopeful", backgroundStory: "History", premise: "Quest", firstAction: "Begin", story_rules: "Respect vows", rpg_statistics: [stat], default_triggers: [trigger], event_triggers: [trigger], character_seeds: [{ id: "hero", name: "Hero", role: "Lead", concept: "A wanderer", narrative_hook: "A promise" }, { id: "guide", name: "Guide", role: "Mentor", concept: "A scholar", narrative_hook: "A map" }, { id: "rival", name: "Rival", role: "Foil", concept: "A knight", narrative_hook: "A debt" }] },
   world_seed_character: { id: "hero", name: "Hero", character_text: "", profile, rpg_statistics: [stat], default_triggers: [trigger] },
+  cast_suggestion: { seeds: [{ name: "Hero", role: "Guide", concept: "A guide" }] },
+  cast_draft: { proposals: [{ path: "story.role", value: "guard", evidenceIds: ["11111111-1111-4111-8111-111111111111"] }] },
+  supporting_character: { name: "Hero", profile },
   standalone_character: { name: "Hero", profile, rpgStats: [stat], defaultTriggers: [trigger] },
   character_organizer: { candidate: profile, evidence: [{ path: "story.role", source: "legacy", quote: "A scout" }], unassignedText: [], conflicts: [], warnings: [], protocolVersion: "organizer-v1" },
   source_extraction: { facts: [{ category: "character", subject: "Iris", predicate: "role", value: "Scout", provenance: "stated", citations: [{ evidenceId: "evidence:1234567890abcdef12345678" }] }] },
@@ -83,6 +86,9 @@ const malformedEnvelopeFixtures = {
   event_coverage: { ...validEnvelopeFixtures.event_coverage, event_results: [{ event_id: "event-1" }] },
   world_outline: { ...validEnvelopeFixtures.world_outline, character_seeds: [validEnvelopeFixtures.world_outline.character_seeds[0]] },
   world_seed_character: { ...validEnvelopeFixtures.world_seed_character, profile: { identity: { aliases: [], pronouns: "" } } },
+  cast_suggestion: { seeds: [{ name: 5 }] },
+  cast_draft: { proposals: [{ path: "story.role", value: 5, evidenceIds: [] }] },
+  supporting_character: { name: 5, profile },
   standalone_character: { ...validEnvelopeFixtures.standalone_character, rpgStats: [{ name: "Courage", value: "50", note: "Resolve" }] },
   character_organizer: { ...validEnvelopeFixtures.character_organizer, evidence: [{ path: "story.role", source: "legacy" }] },
   source_extraction: { ...validEnvelopeFixtures.source_extraction, facts: [{ ...validEnvelopeFixtures.source_extraction.facts[0], citations: [{}] }] },
@@ -160,7 +166,7 @@ describe("native response-contract admission", () => {
   it("publishes an immutable strict schema for every active response operation", () => {
     expect(providerOutputSchemaOperationV2Schema.options).toEqual([
       "story", "choices", "continuity_review", "rpg_assessment", "event_trigger_before", "event_trigger_after",
-      "scene_coverage", "event_coverage", "world_outline", "world_seed_character", "standalone_character",
+      "cast_suggestion", "cast_draft", "supporting_character", "scene_coverage", "event_coverage", "world_outline", "world_seed_character", "standalone_character",
       "character_organizer", "source_extraction", "source_synthesis", "source_character", "illustration_prompt_refinement", "cast_discovery"
     ]);
     for (const operation of providerOutputSchemaOperationV2Schema.options) {

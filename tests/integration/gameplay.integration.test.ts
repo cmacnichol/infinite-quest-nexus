@@ -521,7 +521,9 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     // synchronized campaign and Chronicle configuration contract. The bounded
     // legacy response-format projection adds 287 bytes to both payloads;
     // the nullable safe failure diagnostic adds another 25 bytes to each.
-    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 19_778, unchangedPayloadBytes: 3_579 });
+    // The normalized character defaults (campaignUse, alwaysInContext, startingCastDefault)
+    // add 76 bytes to each of the four character records in both payloads.
+    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 20_082, unchangedPayloadBytes: 3_883 });
     expect(unchangedPayloadBytes).toBeLessThan(initialPayloadBytes);
 
     replies.push({ content: validStory("A replacement changes the current history boundary.") });

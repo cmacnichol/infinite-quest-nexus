@@ -6,7 +6,10 @@ import { createLegacySectionLoader } from "../../apps/web/src/legacy-section-loa
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/src/story.js", "utf8");
-const managementHtml = readFileSync("apps/web/public/index.html", "utf8");
+const managementSourceHtml = readFileSync("apps/web/public/index.html", "utf8");
+const { document: mountedDocument } = parseHTML(managementSourceHtml);
+renderCharacterEditor(mountedDocument.querySelector("#characterDialog")!, null, {});
+const managementHtml = mountedDocument.toString();
 const managementScript = readFileSync("apps/web/src/nexus.js", "utf8");
 const providerHtml = readFileSync("apps/web-next/src/settings/provider-editor.html", "utf8");
 const providerScript = readFileSync("apps/web-next/src/settings/provider-editor.js", "utf8");
@@ -43,6 +46,7 @@ function managementFunctions<T extends Record<string, (...args: never[]) => unkn
   });
   const resolvedBindings = {
     writeCampaignSettings,
+    WORLD_PROFILE_FIELDS,
     campaignSectionLoader: { setSelection: vi.fn(), invalidate: vi.fn() },
     loadCampaignSettingsSectionForPanel: vi.fn(),
     setCampaignSettingsSectionContentVisibility: vi.fn(),
@@ -1197,9 +1201,7 @@ describe("Nexus management UI contracts", () => {
       "characterDistinguishingFeatures", "characterClothing", "characterEquipmentAndAccessories",
       "characterOtherVisualDetails", "characterUnclassifiedNotes"
     ]) {
-      const index = managementHtml.indexOf(`id="${fieldId}"`);
-      expect(index, `${fieldId} should be present`).toBeGreaterThan(-1);
-      expect(managementHtml.slice(index, index + 700)).toContain("placeholder=");
+      expect(managementDocument.getElementById(fieldId)?.getAttribute("placeholder"), fieldId).toBeTruthy();
     }
     expect(managementScript).toContain("input.placeholder = field.placeholder;");
   });
@@ -1467,7 +1469,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="playableCharacterRoster"');
     expect(managementHtml).toContain('id="addPlayableCharacter"');
     expect(managementHtml).toContain('id="newCampaignCharacter"');
-    expect(managementHtml).toContain("Playable characters can be authored, imported, or generated.");
+    expect(managementHtml).toContain("A published version requires at least one complete selectable character");
     expect(managementHtml).toContain("World imports retain every playable character.");
     expect(managementHtml).not.toContain('id="worldCharacter"');
     expect(managementHtml).not.toContain("Legacy/default character guidance");
@@ -1475,7 +1477,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("playableCharactersFromContent(worldAuthorWorkingContent)");
     expect(managementScript).not.toContain("Legacy/default character");
     expect(managementScript).toMatch(/async function loadWorldVersionPlayableCharacters\(selection = \{\}\)/);
-    expect(managementScript).toContain('/playable-characters`');
+    expect(managementScript).toContain("characterApi.worlds.playableCharacters(worldVersionId)");
     expect(managementScript).toContain("selectedCharacterId");
     expect(managementScript).toContain("const characterCount = Array.isArray(preview.characters) ? preview.characters.length : 0;");
     expect(managementScript).toContain("all ${characterCount} playable character");
@@ -1484,10 +1486,10 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("lets organization use notes before story fields are completed, while save targets missing fields", () => {
-    const elements = { characterName: { value: "Mira" }, characterGuidance: { value: "" }, characterRole: {}, characterUnclassifiedNotes: {} };
+    const elements = { characterName: { value: "Mira" }, characterGuidance: { value: "" }, characterRole: {}, characterUnclassifiedNotes: {}, characterCampaignUse: { value: "playable" }, characterStartingCastDefault: { checked: true }, characterAlwaysInContext: { checked: false } };
     const profile = { story: { role: "" }, unclassifiedNotes: "A patient guide" };
     const { characterFromForm } = managementFunctions<{ characterFromForm: (options?: { forOrganization: boolean }) => unknown }>(["characterFromForm"], {
-      elements, profileFromForm: () => profile, profileHasGuidance: () => false,
+      elements, profileFromForm: () => profile, profileHasGuidance: () => false, characterModalScope: "world", editingCharacterId: "",
       characterModalWorkingCharacter: { id: "mira", extension: "preserved" }, opaqueCharacterId: () => "new", characterRowsFromForm: () => []
     });
     expect(characterFromForm({ forOrganization: true })).toMatchObject({ name: "Mira", profile, extension: "preserved" });
@@ -1510,7 +1512,7 @@ describe("Nexus management UI contracts", () => {
       ["world", null, true, false], ["world", {}, false, true], ["campaign", null, false, false]
     ] as const) {
       const { updateCharacterGeneratorAvailability } = managementFunctions<{ updateCharacterGeneratorAvailability: () => boolean }>(["updateCharacterGeneratorAvailability"], {
-        elements, characterModalScope: scope, configuredDefaultTextProvider: () => provider, worldAuthorWorkingContent: {}, worldAuthorMode: "create", characterModalBusy: false
+        elements, characterModalScope: scope, configuredDefaultTextProvider: () => provider, worldAuthorWorkingContent: {}, worldAuthorMode: "create", characterModalBusy: false, suggestionApply: null
       });
       expect(updateCharacterGeneratorAvailability()).toBe(generatorVisible);
       expect(elements.characterGeneratorUnavailable!.classList.contains("hidden")).toBe(!fallbackVisible);
@@ -1536,7 +1538,7 @@ describe("Nexus management UI contracts", () => {
     let requested = false;
     const { generateCharacterFromPrompt } = managementFunctions<{ generateCharacterFromPrompt: () => Promise<void> }>(["generateCharacterFromPrompt"], {
       elements, worldAuthorBusy: false, characterModalScope: "world", worldAuthorWorkingContent: {}, characterModalBusy: false,
-      configuredDefaultTextProvider: () => ({}), window: { confirm: () => false }, CHARACTER_PROFILE_FIELDS: {},
+      configuredDefaultTextProvider: () => ({}), window: { confirm: () => false }, WORLD_PROFILE_FIELDS: [],
       profileFromForm: () => ({}), setCharacterModalControls: () => {}, setCharacterStatus: () => {},
       worldContentFromForm: () => ({}), editingCharacterId: "", api: async () => { requested = true; return {}; }
     });
@@ -1550,9 +1552,12 @@ describe("Nexus management UI contracts", () => {
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, HTMLInputElement & HTMLDetailsElement>;
     elements.characterName!.focus = () => {};
     const { openCampaignCharacterDialog } = managementFunctions<{ openCampaignCharacterDialog: () => Promise<void> }>(["openCampaignCharacterDialog"], {
-      elements, selectedCampaign: { id: "campaign" }, api: async () => ({ name: "Mira", profile: {} }),
+      elements, document, HTMLElement: document.defaultView!.HTMLElement, selectedCampaign: { id: "campaign" }, characterApi: { campaigns: { getCharacterProfile: async () => ({ name: "Mira", profile: {} }) }, generation: { syncStatus: async () => ({ pendingGeneration: null, generationRecovery: null }) } },
+      campaignProfileEditorRecord: (profile: unknown) => profile, setCampaignCharacterReviewLock: () => {},
+      createCampaignMainController: () => ({ setLocked: () => {} }),
+      campaignCharacterController: null, campaignCharacterLocked: false, campaignCharacterOpenEpoch: 0, campaignCharacterGenerationLocked: () => false,
       characterModalScope: "world", campaignCharacterProfileRevision: 0, editingCharacterId: "",
-      characterProfileOrganizationResult: null, characterProfileOrganizationApplied: false,
+      characterProfileOrganizationResult: null,
       populateCharacterForm: () => {}, setCharacterStatus: () => {}, setCharacterModalControls: () => {}, openEditDialog: () => {},
       campaignMessage: (message: string) => { throw new Error(message); }
     });
@@ -1563,7 +1568,7 @@ describe("Nexus management UI contracts", () => {
   it("uses one reviewed character modal for adding, editing, generating, and deleting", () => {
     expect(managementHtml.match(/id="characterDialog"/g)).toHaveLength(1);
     expect(managementHtml).toContain('id="characterForm"');
-    expect(managementHtml).toContain('id="characterName" required');
+    expect(managementDocument.querySelector("#characterName")?.hasAttribute("required")).toBe(true);
     expect(managementHtml).toContain('id="characterGuidance"');
     expect(managementHtml).toContain('id="characterRole"');
     expect(managementHtml).toContain('id="characterAncestryOrSpecies"');
@@ -1582,7 +1587,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementCss).toContain(".character-dialog-modal");
     expect(managementCss).toContain(".character-edit-row");
     expect(managementCss).toContain(".character-roster-card:hover");
-    expect(managementScript).toContain("function openCharacterDialog(characterId = \"\")");
+    expect(managementScript).toContain('function openCharacterDialog(characterId = "", preview = null, apply = null)');
     expect(managementScript).toContain('card.addEventListener("click", () => openCharacterDialog(character.id));');
     expect(managementScript).toContain('elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());');
     expect(managementScript).toContain("function updateWorldAuthorCharacters(characters)");
@@ -1611,7 +1616,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementDocument.querySelector("#worldGenreToneDisclosure #worldTone")).not.toBeNull();
     const ids = [...managementDocument.querySelectorAll("[id]")].map((element) => element.id);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(managementScript).toContain("const profile = sourceProfile && typeof sourceProfile === \"object\"");
+
     expect(managementScript).toContain("error.control = editor.querySelector('[data-character-field=\"value\"]')");
     expect(managementScript).toContain("if (disclosure) disclosure.open = true;");
     expect(managementScript).toContain("if (worldAuthorBusy) event.preventDefault();");
@@ -1622,7 +1627,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('String(provider.defaultModel || "").trim()');
     expect(managementScript).toContain('elements.characterGenerator.classList.toggle("hidden", !available);');
     expect(managementScript).toContain("async function generateCharacterFromPrompt()");
-    expect(managementScript).toContain("/api/v1/worlds/playable-characters/generate-preview");
+    expect(managementScript).toContain("characterApi.worlds.generateCharacterPreview(");
     expect(managementScript).toContain("content: worldContentFromForm()");
     expect(managementScript).toContain("Character generated. Review every field, then add it to the world form.");
     const generator = managementScript.match(/async function generateCharacterFromPrompt\(\) \{[\s\S]*?\n\}/)?.[0] || "";
@@ -2787,4 +2792,215 @@ describe("campaign import version detail generations", () => {
     expect([...harness.elements.campaignImportVersion.querySelectorAll("option")].map((option: HTMLOptionElement) => option.value)).toEqual(["", "current-version"]);
     expect(harness.previewCalls).toHaveBeenCalledTimes(1);
   });
+});
+import { renderCharacterEditor } from "../../apps/web/src/character-editor/renderer.js";
+
+it("mounts the character editor into the existing dialog with one alias per line", () => {
+  const { document, Event } = parseHTML('<dialog id="characterDialog"></dialog>');
+  const host = document.querySelector("#characterDialog")!;
+  const generate = vi.fn();
+  const change = vi.fn();
+  renderCharacterEditor(host, null, { generate, change });
+  const aliases = host.querySelector<HTMLTextAreaElement>("#characterAliases")!;
+  aliases.value = "Vale, Mira\nThe Fox";
+  aliases.dispatchEvent(new Event("input", { bubbles: true }));
+  expect(change).toHaveBeenCalledWith("identity.aliases", ["Vale, Mira", "The Fox"]);
+  host.querySelector<HTMLButtonElement>("#generateCharacter")!.click();
+  expect(generate).toHaveBeenCalledOnce();
+  expect(host.querySelector("#characterForm")).not.toBeNull();
+  expect(host.querySelector("#characterAliases")?.tagName).toBe("TEXTAREA");
+  expect(host.querySelector("#characterMechanics #characterStats")).not.toBeNull();
+});
+
+it("preserves comma-containing aliases and untouched profile extensions when reading the editor", () => {
+  const character = { name: "Mira", profile: { identity: { aliases: ["Vale, Mira"], custom: "retained" }, story: { role: "Guide" } } };
+  const elements = { characterAliases: { value: "Vale, Mira\nThe Fox" }, characterRole: { value: "Guide" } };
+  const { profileFromForm } = managementFunctions<{ profileFromForm: () => any }>(["profileFromForm"], {
+    characterModalWorkingCharacter: character, characterEditorDraft: createEditorDraft("world-draft", character),
+    WORLD_PROFILE_FIELDS: [{ path: "identity.aliases", world: { id: "characterAliases" } }, { path: "story.role", world: { id: "characterRole" } }], elements,
+    setEditorDraftField, projectEditorProfile
+  });
+  expect(profileFromForm()).toMatchObject({ identity: { aliases: ["Vale, Mira", "The Fox"], custom: "retained" }, story: { role: "Guide" } });
+});
+import { createEditorDraft, setEditorDraftField, projectEditorProfile } from "../../packages/client-core/src/characters/editor-model.js";
+import { WORLD_PROFILE_FIELDS } from "../../packages/client-core/src/characters/profile-fields.js";
+
+it("shows the admission message and reference for Generate and Organize", async () => {
+  const { document } = parseHTML(managementHtml);
+  const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, HTMLInputElement & HTMLDetailsElement>;
+  elements.characterGeneratorPrompt!.value = "A traveler";
+  const error = Object.assign(new Error("Too many requests"), { correlationId: "ref-123" });
+  const status = document.createElement("div");
+  const common = {
+    elements, worldAuthorBusy: false, characterModalScope: "world", worldAuthorWorkingContent: {}, characterModalBusy: false,
+    configuredDefaultTextProvider: () => ({}), window: { confirm: () => true }, WORLD_PROFILE_FIELDS: [],
+    profileFromForm: () => ({}), setCharacterModalControls: () => {}, setCharacterStatus: (message: string) => { status.textContent = message; },
+    worldContentFromForm: () => ({}), editingCharacterId: "", characterApi: { worlds: {
+      generateCharacterPreview: async () => { throw error; }, organizeCharacter: async () => { throw error; }
+    } }, selectedWorld: { id: "world", draftRevision: 1 }, selectedCampaign: null,
+    characterFromForm: () => ({}), setCharacterProfileOrganizationProgress: () => {},
+  };
+  const functions = managementFunctions<{ generateCharacterFromPrompt: () => Promise<void>; organizeCharacterProfile: () => Promise<void> }>(["characterAdmissionError", "generateCharacterFromPrompt", "organizeCharacterProfile"], common);
+  await functions.generateCharacterFromPrompt();
+  expect(status.textContent).toBe("Too many requests Reference: ref-123.");
+  await functions.organizeCharacterProfile();
+  expect(status.textContent).toBe("Too many requests Reference: ref-123.");
+});
+
+it("renders descriptor groups in World order and remounts without duplicate input callbacks", () => {
+  const { document, Event } = parseHTML('<dialog id="characterDialog"></dialog>');
+  const host = document.querySelector("#characterDialog")!;
+  const change = vi.fn();
+  renderCharacterEditor(host, null, { change });
+  renderCharacterEditor(host, null, { change });
+  const role = host.querySelector<HTMLTextAreaElement>("#characterRole")!;
+  role.value = "Guide";
+  role.dispatchEvent(new Event("input", { bubbles: true }));
+  expect(change).toHaveBeenCalledOnce();
+  expect([...host.querySelectorAll("#characterAppearance input, #characterAppearance textarea")].map((element) => element.id)).toEqual([
+    "characterAncestryOrSpecies", "characterApparentAge", "characterGenderPresentation", "characterBuild", "characterSkinOrComplexion", "characterFace", "characterEyes", "characterHair", "characterDistinguishingFeatures", "characterClothing", "characterEquipmentAndAccessories", "characterOtherVisualDetails"
+  ]);
+  expect(host.querySelector("#characterAncestryOrSpecies")?.tagName).toBe("INPUT");
+});
+  it("warns about world roster names and aliases without blocking editing", () => {
+    const { document } = parseHTML('<input id="characterName"><p id="characterDuplicateWarning" class="hidden"></p>');
+    const elements = Object.fromEntries([...document.querySelectorAll('[id]')].map((element) => [element.id, element])) as Record<string, HTMLElement>;
+    const { updateWorldCharacterDuplicateWarning } = managementFunctions<{ updateWorldCharacterDuplicateWarning: () => void }>(["updateWorldCharacterDuplicateWarning"], {
+      elements, characterModalScope: "world", editingCharacterId: "one", worldAuthorWorkingContent: {},
+      playableCharactersFromContent: () => [{ id: "one", name: "Mira" }, { id: "two", name: "Other", profile: { identity: { aliases: ["MIRA"] } } }]
+    });
+    (elements.characterName as HTMLInputElement).value = " mira ";
+    updateWorldCharacterDuplicateWarning();
+    expect(elements.characterDuplicateWarning!.classList.contains("hidden")).toBe(false);
+    (elements.characterName as HTMLInputElement).value = "Unique";
+    updateWorldCharacterDuplicateWarning();
+    expect(elements.characterDuplicateWarning!.classList.contains("hidden")).toBe(true);
+  });
+it("locks an open campaign editor when generation begins or status cannot be read", async () => {
+  const locks: boolean[] = [];
+  const notices: string[] = [];
+  const controller = { setLocked: (locked: boolean) => locks.push(locked) };
+  const bindings = {
+    characterModalBusy: false, characterApi: { generation: { syncStatus: async () => ({ pendingGeneration: { id: "job" }, generationRecovery: null }) } },
+    campaignCharacterController: controller, selectedCampaign: { id: "campaign" }, campaignCharacterLockEpoch: 0, campaignCharacterGenerationLocked: (status: { pendingGeneration: unknown; generationRecovery: unknown }) => Boolean(status.pendingGeneration || status.generationRecovery), elements: { characterDialog: { open: true } }, campaignCharacterLocked: false,
+    setCharacterStatus: (message: string) => notices.push(message), setCampaignCharacterReviewLock: () => {}
+  };
+  const { refreshCampaignCharacterLock } = managementFunctions<{ refreshCampaignCharacterLock: (id: string, controller: object) => Promise<void> }>(["refreshCampaignCharacterLock"], bindings);
+  await refreshCampaignCharacterLock("campaign", controller);
+  expect(locks).toEqual([true]);
+  expect(notices[0]).toMatch(/resolve generation/i);
+  bindings.characterApi.generation.syncStatus = async () => { throw new Error("offline"); };
+  await refreshCampaignCharacterLock("campaign", controller);
+  expect(locks).toEqual([true, true]);
+  expect(notices[1]).toMatch(/offline/);
+});
+it("ignores stale generation responses and unlocks after recovery resolves", async () => {
+  const locks: boolean[] = [];
+  const pending: Array<(status: object) => void> = [];
+  const controller = { setLocked: (locked: boolean) => locks.push(locked) };
+  const bindings = {
+    characterModalBusy: false, characterApi: { generation: { syncStatus: () => new Promise<object>((resolve) => pending.push(resolve)) } },
+    campaignCharacterController: controller, selectedCampaign: { id: "campaign" }, campaignCharacterLockEpoch: 0,
+    campaignCharacterGenerationLocked: (status: { pendingGeneration?: unknown; generationRecovery?: { status: string } }) => Boolean(status.pendingGeneration || status.generationRecovery?.status === "recoverable"),
+    elements: { characterDialog: { open: true } }, campaignCharacterLocked: true, setCharacterStatus: () => {}, setCampaignCharacterReviewLock: () => {}
+  };
+  const { refreshCampaignCharacterLock } = managementFunctions<{ refreshCampaignCharacterLock: (id: string, controller: object) => Promise<void> }>(["refreshCampaignCharacterLock"], bindings);
+  const first = refreshCampaignCharacterLock("campaign", controller);
+  const second = refreshCampaignCharacterLock("campaign", controller);
+  pending[1]!({ pendingGeneration: null, generationRecovery: { status: "failed" } });
+  await second;
+  pending[0]!({ pendingGeneration: { id: "old" }, generationRecovery: null });
+  await first;
+  expect(locks).toEqual([false]);
+  const staleCampaign = refreshCampaignCharacterLock("campaign", controller);
+  bindings.selectedCampaign.id = "other";
+  pending[2]!({ pendingGeneration: { id: "job" }, generationRecovery: null });
+  await staleCampaign;
+  expect(locks).toEqual([false]);
+});
+it("locks only pending or recoverable generation", () => {
+  const { campaignCharacterGenerationLocked } = managementFunctions<{ campaignCharacterGenerationLocked: (status: object) => boolean }>(["campaignCharacterGenerationLocked"], {});
+  expect(campaignCharacterGenerationLocked({ pendingGeneration: {}, generationRecovery: null })).toBe(true);
+  expect(campaignCharacterGenerationLocked({ pendingGeneration: null, generationRecovery: { status: "recoverable" } })).toBe(true);
+  expect(campaignCharacterGenerationLocked({ pendingGeneration: null, generationRecovery: { status: "failed" } })).toBe(false);
+  expect(campaignCharacterGenerationLocked({ pendingGeneration: null, generationRecovery: null })).toBe(false);
+});
+it("keeps organized campaign proposals unavailable while generation is locked or status fails", async () => {
+  const apply = { disabled: false, title: "" };
+  const controller = { saving: false, draft: { conflict: false }, setLocked: vi.fn() };
+  const bindings = {
+    characterModalBusy: false, characterModalScope: "campaign", campaignCharacterLocked: false, campaignCharacterLockEpoch: 0,
+    campaignCharacterController: controller, selectedCampaign: { id: "campaign" },
+    characterApi: { generation: { syncStatus: async () => ({ pendingGeneration: { id: "job" }, generationRecovery: null }) } },
+    campaignCharacterGenerationLocked: (status: { pendingGeneration: unknown }) => Boolean(status.pendingGeneration),
+    elements: { characterDialog: { open: true }, applyCharacterProfileReview: apply }, setCharacterStatus: vi.fn()
+  };
+  const { setCampaignCharacterReviewLock, refreshCampaignCharacterLock } = managementFunctions<{
+    setCampaignCharacterReviewLock: () => void; refreshCampaignCharacterLock: (id: string, controller: object) => Promise<void>
+  }>(["setCampaignCharacterReviewLock", "refreshCampaignCharacterLock"], bindings);
+  // The extraction harness binds helper names separately, as production does through module scope.
+  Object.assign(bindings, { setCampaignCharacterReviewLock });
+  await refreshCampaignCharacterLock("campaign", controller);
+  expect(apply.disabled).toBe(true);
+  expect(controller.setLocked).toHaveBeenCalledWith(true);
+});
+it("refreshes campaign lock after organizing and retains an open review through conflict", async () => {
+  const controller = { draft: { conflict: true }, setLocked: vi.fn() };
+  const refresh = vi.fn(async () => {});
+  const controls = vi.fn();
+  const review = vi.fn();
+  const { organizeCharacterProfile } = managementFunctions<{ organizeCharacterProfile: () => Promise<void> }>(["organizeCharacterProfile"], {
+    worldAuthorBusy: false, characterModalScope: "campaign", characterModalBusy: false,
+    characterFromForm: () => ({ name: "Mira" }), selectedCampaign: { id: "campaign" }, selectedWorld: null,
+    campaignCharacterProfileRevision: 2, campaignCharacterController: controller, campaignCharacterLocked: false,
+    elements: { characterDialog: { open: true } }, setCampaignCharacterReviewLock: review,
+    setCharacterModalControls: controls, setCharacterProfileOrganizationProgress: vi.fn(), setCharacterStatus: vi.fn(),
+    characterApi: { campaigns: { organizeCharacter: async () => ({ candidate: {} }) } }, renderCharacterProfileReview: vi.fn(),
+    refreshCampaignCharacterLock: refresh, characterAdmissionError: (error: Error) => error.message
+  });
+  await organizeCharacterProfile();
+  expect(controls).toHaveBeenCalledWith(false, true);
+  expect(controls).not.toHaveBeenCalledWith(false, false);
+  expect(controller.setLocked).toHaveBeenCalledWith(true);
+  expect(review).toHaveBeenCalled();
+  expect(refresh).toHaveBeenCalledWith("campaign", controller);
+});
+
+it("retains proposed fields instead of applying them under a generation lock or conflict", () => {
+  const close = vi.fn(), stage = vi.fn();
+  for (const [locked, conflict] of [[true, false], [false, true]]) {
+    const { applyCharacterProfileReview } = managementFunctions<{ applyCharacterProfileReview: () => void }>(["applyCharacterProfileReview"], {
+      worldAuthorBusy: false, characterModalScope: "campaign", characterModalBusy: false, campaignCharacterLocked: locked,
+      campaignCharacterController: { draft: { conflict } }, characterProfileOrganizationResult: { candidate: {} },
+      elements: { characterProfileReviewDialog: { close } }, stageEditorOrganize: stage
+    });
+    applyCharacterProfileReview();
+  }
+  expect(stage).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled();
+});
+it("rechecks generation before applying a campaign proposal", async () => {
+  const controller = { draft: { conflict: false } }, close = vi.fn(), stage = vi.fn(), lockReview = vi.fn();
+  const { applyCharacterProfileReview } = managementFunctions<{ applyCharacterProfileReview: () => Promise<void> }>(["applyCharacterProfileReview"], {
+    worldAuthorBusy: false, characterModalScope: "campaign", characterModalBusy: false, campaignCharacterLocked: false,
+    campaignCharacterController: controller, selectedCampaign: { id: "campaign" }, characterProfileOrganizationResult: { candidate: {} },
+    elements: { characterProfileReviewDialog: { open: true, close } }, setCampaignCharacterReviewLock: lockReview,
+    refreshCampaignCharacterLock: async () => { controller.draft.conflict = true; }, stageEditorOrganize: stage
+  });
+  await applyCharacterProfileReview();
+  expect(lockReview).toHaveBeenCalledWith(true);
+  expect(stage).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled();
+});
+it("does not apply proposals after a stale status check", async () => {
+  const controller = { draft: { conflict: false } }, close = vi.fn(), stage = vi.fn();
+  const { applyCharacterProfileReview } = managementFunctions<{ applyCharacterProfileReview: () => Promise<void> }>(["applyCharacterProfileReview"], {
+    worldAuthorBusy: false, characterModalScope: "campaign", characterModalBusy: false, campaignCharacterLocked: false,
+    campaignCharacterController: controller, selectedCampaign: { id: "campaign" }, characterProfileOrganizationResult: { candidate: {} },
+    elements: { characterProfileReviewDialog: { open: true, close } }, setCampaignCharacterReviewLock: vi.fn(),
+    refreshCampaignCharacterLock: async () => undefined, stageEditorOrganize: stage
+  });
+  await applyCharacterProfileReview();
+  expect(stage).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled();
 });

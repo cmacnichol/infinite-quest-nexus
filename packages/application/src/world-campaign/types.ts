@@ -24,6 +24,8 @@ import type {
   PlayerEventTrigger,
   PlayerRpgStat,
   PlayableCharacter,
+  CastSuggestionPreviewRequest,
+  CastSuggestionPreviewResponse,
   PlayableCharacterGenerationPreviewRequest,
   PlayableCharacterGenerationRequest,
   PlayableCharacterListResponse,
@@ -91,7 +93,8 @@ export type WorldCampaignTransitionFailureReason =
   | "idempotency_mismatch"
   | "deletion_blocked"
   | "invalid_transition"
-  | "generation_collaborator_unavailable";
+  | "generation_collaborator_unavailable"
+  | "cast_presets_disabled";
 
 export type WorldCampaignTransitionFailure = Readonly<{
   reason: WorldCampaignTransitionFailureReason;
@@ -561,3 +564,5 @@ export type {
   WorldStatusUpdateRequest,
   WorldVersionDeleteRequest
 };
+
+export type { CastSuggestionPreviewRequest, CastSuggestionPreviewResponse };

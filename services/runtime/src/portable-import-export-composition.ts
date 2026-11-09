@@ -1,5 +1,5 @@
 import { archivePolicySnapshotSchema, historicalArchivePolicy, requireCompatibleArchivePreview, stricterArchiveLimits, type ArchivePolicySnapshot, type ArchiveSafetyLimits } from "../../../packages/contracts/src/archive-policy.js";
-import { validateCampaignArchiveCast } from "../../../packages/contracts/src/archives.js";
+import { validateCampaignArchiveCast, validCampaignRosterAuthority } from "../../../packages/contracts/src/archives.js";
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { finished } from "node:stream/promises";
@@ -25,6 +25,7 @@ import {
   parseInfiniteWorldsStory
 } from "../../../packages/domain/src/infinite-worlds.js";
 import { legacyWorldContent } from "../../../packages/domain/src/legacy-story-world.js";
+import { resolvePlayableCharacters } from "../../../packages/domain/src/world-characters.js";
 import { normalizeLegacyCampaign } from "../../../packages/domain/src/legacy-campaign-normalization.js";
 import { extractCyoaLayers, parseCyoaExport, type TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
 import {
@@ -790,11 +791,15 @@ async function campaignZip(
     throw new Error("archive_format_invalid");
   }
   const campaignPayloadVersion = rawCampaign.formatVersion;
-  const isCurrentPolicyPayload = campaignPayloadVersion === 4;
+  const isCurrentPolicyPayload = campaignPayloadVersion === 4 || campaignPayloadVersion === 5;
   const declaredCampaignPayload = manifest.payloads.find((payload) => payload.kind === "campaign" && payload.path === "campaign.json");
   const compatibleCampaignPayload = manifest.formatVersion === 1
     ? campaignPayloadVersion === 3 && (declaredCampaignPayload?.formatVersion === 1 || declaredCampaignPayload?.formatVersion === 3)
-    : campaignPayloadVersion === 4 && declaredCampaignPayload?.formatVersion === 4;
+    : isCurrentPolicyPayload && declaredCampaignPayload?.formatVersion === campaignPayloadVersion;
+  const sourceCampaign = recordValue(rawCampaign.campaign);
+  if (!validCampaignRosterAuthority(sourceCampaign, campaignPayloadVersion)) {
+    throw new Error("archive_format_invalid");
+  }
   if (!declaredCampaignPayload || !compatibleCampaignPayload
     || (campaignPayloadVersion !== 3 && !isCurrentPolicyPayload)
     || !Array.isArray(rawCampaign.turns) || recordValue(rawCampaign.archiveRecords).formatVersion !== 1
@@ -1550,7 +1555,7 @@ export function createPortableFamilyPreviewAdapter(
         || loaded.worldVersionId !== command.destination.worldVersionId) {
         throw new Error("portable_import_destination_invalid");
       }
-      const characters = loaded.content.playableCharacters.map((character) => ({
+      const characters = resolvePlayableCharacters(loaded.content).map((character) => ({
         id: character.id,
         name: character.name
       }));

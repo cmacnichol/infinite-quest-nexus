@@ -209,7 +209,7 @@ describe("runtime role generation composition", () => {
     expect(values.createApiIllustration).toHaveBeenCalledWith(pool, apiIllustrationProviders);
     expect(values.createApiMemory).toHaveBeenCalledWith(pool, apiChronicleProviders);
     expect(values.createApiWorldCampaign).toHaveBeenCalledOnce();
-    expect(values.createApiWorldCampaign).toHaveBeenCalledWith(pool, apiProviders);
+    expect(values.createApiWorldCampaign).toHaveBeenCalledWith(pool, apiProviders, false);
     expect(values.createWorkerGeneration).not.toHaveBeenCalled();
     expect(values.buildServer).toHaveBeenCalledOnce();
     expect(values.buildServer).toHaveBeenCalledWith({
@@ -278,7 +278,7 @@ describe("runtime role generation composition", () => {
     expect(values.createWorkerProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport, expect.objectContaining({ credentialEncryptionKey: "role-secret" }));
     expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders, defaultStoryMemoryOperatorConfig);
     expect(values.createApiWorldCampaign).toHaveBeenCalledOnce();
-    expect(values.createApiWorldCampaign).toHaveBeenCalledWith(pool, apiProviders);
+    expect(values.createApiWorldCampaign).toHaveBeenCalledWith(pool, apiProviders, false);
     expect(values.createWorkerGeneration).toHaveBeenCalledOnce();
     expect(values.createWorkerGeneration).toHaveBeenCalledWith(
       pool, illustration, memory, workerGenerationProviders,

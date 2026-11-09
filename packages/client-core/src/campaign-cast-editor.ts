@@ -23,7 +23,8 @@ export function changeCastEditor(state: CastEditorState, changes: Partial<Omit<C
 export function setCastEditorField(state: CastEditorState, field: CastField, value: string | null): CastEditorState {
   const setOverrides = { ...state.setOverrides }, profile = { ...state.draft.profile };
   const clearOverrides = state.clearOverrides.filter((item) => item !== field);
-  if (value === null) { delete setOverrides[field]; delete profile[field]; clearOverrides.push(field); }
+  // Emptying an updating field returns it to the story value; only observed appearance has an empty override.
+  if (value === null || (!value.trim() && (field === "story.goals" || field.startsWith("state.")))) { delete setOverrides[field]; delete profile[field]; clearOverrides.push(field); }
   else { setOverrides[field] = value; profile[field] = value; }
   return { ...state, setOverrides, clearOverrides, draft: { ...state.draft, profile }, dirty: true, submission: null, error: null };
 }

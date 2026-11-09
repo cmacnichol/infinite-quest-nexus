@@ -147,8 +147,22 @@ export function buildScopedEntityCatalog(
   const characterSnapshot = isInput ? possibleInput?.characterSnapshot : suppliedCharacterSnapshot;
   const characterProfile = isInput ? possibleInput?.characterProfile : undefined;
 
+  const world = asRecord(worldContent);
+  const roster = Array.isArray(world?.playableCharacters) ? world.playableCharacters : [];
   const candidates = worldEntityValues(worldContent)
-    .map((value) => toReference(value, "world", "entity"))
+    .map((value) => {
+      const entity = asRecord(value);
+      const reference = toReference(value, "world", "entity");
+      const linked = typeof entity?.linkedCharacterId === "string"
+        ? roster.find((entry) => asRecord(entry)?.id === entity.linkedCharacterId) : undefined;
+      const linkedRecord = asRecord(linked);
+      if (!reference || !linkedRecord) return reference;
+      const name = firstText(linkedRecord, ["name"]);
+      if (!name) return reference;
+      return { ...reference, displayName: name,
+        aliases: uniqueAliases([name, profileAliases(linkedRecord)]),
+        equivalentIds: [`world:${linkedRecord.id}`] };
+    })
     .filter((value): value is EntityReference => Boolean(value));
   const characterSource = characterSnapshot ?? characterProfile;
   const character = toReference(
@@ -164,17 +178,23 @@ export function buildScopedEntityCatalog(
       const parsed = castCharacterSchema.safeParse(value);
       return parsed.success && parsed.data.origin.kind !== "protagonist" ? [parsed.data] : [];
     }) : [];
+  const consumed = new Set<string>();
   for (const person of campaignCharacters) {
+    if (consumed.has(person.id)) continue;
     const reference = toReference(person, "campaign", "character")!;
     if (person.origin.kind === "world" && person.origin.worldVersionId === possibleInput?.worldVersionId) {
       const origin = person.origin;
+      const worldIndex = candidates.findIndex((entry) => entry.source === "world" && (entry.id === `world:${origin.entityId}` || entry.equivalentIds?.includes(`world:${origin.entityId}`)));
+      const world = candidates[worldIndex];
+      const ids = world ? [world.id, ...world.equivalentIds ?? []] : [`world:${origin.entityId}`];
       const occurrences = campaignCharacters.filter((entry) => entry.origin.kind === "world"
-        && entry.origin.worldVersionId === origin.worldVersionId && entry.origin.entityId === origin.entityId);
-      const worldIndex = candidates.findIndex((entry) => entry.source === "world" && entry.id === `world:${origin.entityId}`);
-      if (occurrences.length === 1 && worldIndex >= 0) {
-        const world = candidates[worldIndex]!;
-        reference.equivalentIds = [world.id];
-        reference.aliases = uniqueAliases([...reference.aliases, ...world.aliases]);
+        && entry.origin.worldVersionId === origin.worldVersionId && ids.includes(`world:${entry.origin.entityId}`));
+      const origins = occurrences.map((entry) => entry.origin.kind === "world" ? entry.origin.entityId : "");
+      if (world && new Set(origins).size === origins.length) {
+        reference.equivalentIds = [...ids, ...occurrences.filter((entry) => entry.id !== person.id).map((entry) => `campaign:${entry.id}`)];
+        reference.aliases = uniqueAliases([...reference.aliases, ...world.aliases,
+          ...occurrences.filter((entry) => entry.id !== person.id).flatMap((entry) => [entry.name, ...entry.aliases])]);
+        occurrences.forEach((entry) => consumed.add(entry.id));
         candidates.splice(worldIndex, 1);
       }
     }

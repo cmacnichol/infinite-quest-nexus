@@ -33,7 +33,7 @@ function reply(narration: string): string {
   return JSON.stringify({ narration, choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Continue.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "Fixture relay.", continuity_summary: narration, canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
 }
 
-integration("T15 executor-backed continuity evidence", () => {
+integration("executor-backed continuity evidence", () => {
   let pool: DatabasePool;
   let server: Server;
   let ownerUserId = "";
@@ -312,5 +312,5 @@ integration("T15 executor-backed continuity evidence", () => {
       await mkdir(dirname(artifactPath), { recursive: true });
       await writeFile(artifactPath, `${JSON.stringify({ version: "story-continuity-private-artifact-v1", report, captures: privateCaptures })}\n`, { encoding: "utf8", flag: "wx" });
     }
-  }, 180_000);
+  }, 360_000); // 120 sequential histories each execute an accepted turn and a replay.
 });

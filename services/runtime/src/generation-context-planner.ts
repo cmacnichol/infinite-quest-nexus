@@ -15,7 +15,7 @@ import { reserveNewestWholeSuffix } from "../../../packages/application/src/memo
 import type { ProtectedFact } from "../../../packages/application/src/memory/story-history-facts.js";
 
 type SentCast = { coverage: CastContextSelection["coverage"]; notice: string; characters: {
-  characterId: string; revision: number; fields: { authority: "user" | "observation"; evidenceId: string;
+  characterId: string; revision: number; fields: { authority: "user" | "authored" | "observation"; evidenceId: string;
     source: { kind: string; effectiveTurnNumber?: number; turnNumber?: number } }[]
 }[] };
 
@@ -148,7 +148,8 @@ function generationSourceManifest(
       entries.push(completeEvidence({ source: { ...source, id: `${character.characterId}:${field.evidenceId}`,
         turnNumber: field.source.effectiveTurnNumber ?? field.source.turnNumber ?? null },
       semanticRole: field.authority === "user" ? "corrected_state"
-        : field.source.kind === "world" || field.source.kind === "historical_world" ? "world_reference" : "accepted_narration", rank: index, selectionGroup: "cast",
+        : field.authority === "authored" ? "character_authority"
+          : field.source.kind === "world" || field.source.kind === "historical_world" ? "world_reference" : "accepted_narration", rank: index, selectionGroup: "cast",
       sourcePath: `/cast/characters/${index}/fields/${fieldIndex}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority, sentAuthorityEvidenceOptions));
     }
   }

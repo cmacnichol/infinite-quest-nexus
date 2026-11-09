@@ -83,9 +83,11 @@ describe("createNexusApiClient", () => {
 
     expect(generation).toBe(client.generation);
     expect(Object.keys(client).sort()).toEqual(["activity", "campaigns", "generation", "illustrations", "meta", "providers", "session", "worlds"]);
-    expect(Object.keys(client.worlds).sort()).toEqual(["create", "list", "playableCharacters"]);
+    expect(Object.keys(client.worlds).sort()).toEqual([
+      "create", "generateCharacterPreview", "list", "loadCharacterGenerationProgress", "organizeCharacter", "playableCharacters", "suggestCastPreview"
+    ]);
     expect(Object.keys(client.campaigns).sort()).toEqual([
-      "branch", "correctTurnNarration", "create", "getCharacterProfile", "getTurnCorrection", "inspectState", "list", "readableExport", "rewind", "state", "turns", "updateCharacterProfile", "updateState"
+      "branch", "correctTurnNarration", "create", "getCharacterProfile", "getTurnCorrection", "inspectState", "list", "organizeCharacter", "readableExport", "rewind", "state", "turns", "updateCharacterProfile", "updateState"
     ]);
     expect(Object.keys(client.generation).sort()).toEqual([
       "cancel",
@@ -438,6 +440,18 @@ describe("createNexusApiClient", () => {
       kind: "response_schema_mismatch",
       path: `/campaigns/${campaignId}/sync-status`,
       issues: [expect.objectContaining({ path: ["generationRecovery", "replacementTurnId"] })]
+    });
+  });
+
+  it("preserves the public starting-cast 503 code and request reference", async () => {
+    const client = createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort(), fetchImpl: async () => new Response(JSON.stringify({
+      error: "WorldCampaignHttpError", message: "Starting cast presets are currently unavailable.",
+      code: "cast_presets_disabled", correlationId: "request-123", details: { code: "cast_presets_disabled" }
+    }), { status: 503, headers: { "content-type": "application/json" } }) });
+    await expect(client.campaigns.create({ worldVersionId, title: "Campaign", selectedCharacterId: "hero",
+      startingCast: [{ characterId: "ally", alwaysInContext: true }], storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32000, turnControlStyle: "flexible_action" })).rejects.toMatchObject({
+      statusCode: 503, domainCode: "cast_presets_disabled", correlationId: "request-123"
     });
   });
 

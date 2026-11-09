@@ -18,6 +18,7 @@ const generatedCharacter: PlayableCharacter = {
   id: "provider-id",
   name: "Ilyra Venn",
   characterText: "A patient cartographer who reads promises in reflected starlight.",
+  campaignUse: "playable", startingCastDefault: true, alwaysInContext: false,
   profile: {
     identity: { aliases: ["The Glass Reader"], pronouns: "she/her" },
     story: { role: "Guide", background: "", personality: "Patient", motivations: "", goals: "", fearsAndConflicts: "", keyRelationships: "", narrativeHooks: "", voiceAndMannerisms: "", otherGuidance: "" },

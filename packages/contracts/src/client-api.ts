@@ -85,6 +85,8 @@ export const metaResponseSchema = z.object({
   capabilities: z.object({
     systemArchive: z.boolean(),
     castEditing: z.boolean().optional().default(false),
+    castContext: z.boolean().optional().default(false),
+    castPresets: z.boolean().optional().default(false),
     nativeTextExecutionPlans: z.boolean().optional().default(false)
   }).strict()
 }).strict();
@@ -147,6 +149,7 @@ export const campaignCreateResponseSchema = z.object({
   worldVersionNumber: z.number().int().positive(),
   selectedCharacterId: z.string().trim().min(1),
   selectedCharacterName: z.string().trim().min(1),
+  skippedStartingCast: z.array(z.object({ characterId: z.string(), name: z.string(), aliases: z.array(z.string()).default([]), reason: z.enum(["invalid_name", "invalid_alias"]) })).max(2000).default([]),
   textProviderProfileId: z.uuid().nullable(),
   imageProviderProfileId: z.uuid().nullable()
 }).passthrough();
@@ -169,6 +172,12 @@ export const playableCharacterListResponseSchema = z.object({
     name: z.string().trim().min(1),
     rpgStatCount: z.number().int().min(0),
     defaultTriggerCount: z.number().int().min(0)
+  })),
+  startingCastCandidates: z.array(z.object({
+    id: z.string().trim().min(1), name: z.string().trim().min(1),
+    campaignUse: z.enum(["playable", "supporting", "both"]),
+    startingCastDefault: z.boolean(), alwaysInContext: z.boolean(),
+    role: z.string(), summary: z.string()
   })),
   readiness: z.object({
     ready: z.boolean(),
@@ -425,3 +434,12 @@ export type SyncStatusRequest = z.input<typeof syncStatusRequestSchema>;
 export type GenerationEnqueueResponse = z.infer<typeof generationEnqueueResponseSchema>;
 export type GenerationResult = z.infer<typeof generationResultSchema>;
 export type GenerationActionResponse = z.infer<typeof generationActionResponseSchema>;
+
+export const worldGenerationProgressResponseSchema = z.object({
+  status: z.enum(["processing", "completed", "failed", "unknown"]),
+  phase: z.string(),
+  progressPercent: z.number().min(0).max(100),
+  message: z.string(),
+  errorMessage: z.string().optional()
+}).strict();
+export type WorldGenerationProgressResponse = z.infer<typeof worldGenerationProgressResponseSchema>;

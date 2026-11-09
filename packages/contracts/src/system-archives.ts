@@ -385,6 +385,10 @@ const systemWorldContentSchema = z.object({
     name: identifierSchema,
     characterText: longTextSchema,
     profile: systemCharacterProfileSchema.optional(),
+    campaignUse: z.enum(["playable", "supporting", "both"]).optional(),
+    startingCastDefault: z.boolean().optional(),
+    alwaysInContext: z.boolean().optional(),
+    source: z.object({ type: z.literal("world-entity"), entityId: identifierSchema }).strict().optional(),
     rpgStats: z.array(systemRpgStatSchema).max(10_000),
     defaultTriggers: z.array(systemDefaultTriggerSchema).max(10_000)
   }).strict()).max(1_000),
@@ -394,7 +398,8 @@ const systemWorldContentSchema = z.object({
     kind: identifierSchema,
     description: longTextSchema,
     tags: z.array(identifierSchema).max(1_000),
-    facts: z.array(z.object({ key: identifierSchema, value: longTextSchema }).strict()).max(10_000)
+    facts: z.array(z.object({ key: identifierSchema, value: longTextSchema }).strict()).max(10_000),
+    linkedCharacterId: identifierSchema.optional()
   }).strict()).max(20_000),
   relationships: z.array(z.object({
     id: identifierSchema,
@@ -444,6 +449,9 @@ const systemCharacterSnapshotSchema = z.object({
   id: identifierSchema,
   name: identifierSchema,
   characterText: longTextSchema,
+  campaignUse: z.enum(["playable", "supporting", "both"]).optional(),
+  startingCastDefault: z.boolean().optional(),
+  alwaysInContext: z.boolean().optional(),
   profile: z.object({
     identity: z.object({
       aliases: z.array(boundedStringSchema(200)).max(20).optional(),
@@ -943,6 +951,14 @@ const systemCampaignRecordV3Schema = systemCampaignRecordV2Schema.safeExtend({
   })
 });
 
+// Older v3 records are verified as serialized, before assigning any import defaults.
+const systemCampaignRecordWithCastSchema = systemCampaignRecordV3Schema.safeExtend({
+  campaignRecordVersion: z.literal(4),
+  firstAppearanceEligible: z.boolean(),
+  selectedCharacterWorldId: z.uuid().nullable()
+});
+const systemCampaignRecordPortableSchema = z.union([systemCampaignRecordWithCastSchema, systemCampaignRecordV3Schema]);
+
 const systemTurnRecordV2Schema = systemTurnRecordSchema.safeExtend({
   authority: z.object({
     sourceTurnId: z.string().max(2_000).nullable(),
@@ -1198,7 +1214,7 @@ const systemRecordEnvelopeV3Schema = z.discriminatedUnion("domain", [
   z.object({ domain: z.literal("worlds"), ...systemRecordEnvelopeV3Base, record: systemWorldRecordV2Schema }).strict(),
   z.object({ domain: z.literal("world-versions"), ...systemRecordEnvelopeV3Base, record: systemWorldVersionRecordV2Schema }).strict(),
   z.object({ domain: z.literal("world-drafts"), ...systemRecordEnvelopeV3Base, record: systemWorldDraftRecordV2Schema }).strict(),
-  z.object({ domain: z.literal("campaigns"), ...systemRecordEnvelopeV3Base, record: systemCampaignRecordV3Schema }).strict(),
+  z.object({ domain: z.literal("campaigns"), ...systemRecordEnvelopeV3Base, record: systemCampaignRecordPortableSchema }).strict(),
   z.object({ domain: z.literal("turns"), ...systemRecordEnvelopeV3Base, record: systemTurnRecordV3Schema }).strict(),
   z.object({ domain: z.literal("turn-corrections"), ...systemRecordEnvelopeV3Base, record: systemTurnCorrectionRecordV2Schema }).strict(),
   z.object({ domain: z.literal("campaign-state"), ...systemRecordEnvelopeV3Base, record: systemCampaignStateRecordV3Schema }).strict(),

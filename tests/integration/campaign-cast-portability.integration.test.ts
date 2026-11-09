@@ -35,6 +35,52 @@ integration("campaign cast portable authority", () => {
     await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title) VALUES($1,$2,$3,'Cast portable')", [campaignId, ownerUserId, version]);
     return { ownerUserId, campaignId };
   }
+  it("round-trips empty-cast eligibility in both archive families and defaults historical records to false", async () => {
+    const samples: Array<{ campaignId: string; worldId: string; worldVersionId: string; selectedWorldId: string | null; marker: boolean | undefined }> = [];
+    for (const marker of [true, false, undefined]) {
+      const story = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+      story.world.title = `Empty eligibility ${randomUUID()}`;
+      const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "empty.story", story }));
+      const selectedWorldId = marker === true ? imported.worldId : marker === false ? randomUUID() : null;
+      await pool.query("UPDATE campaigns SET first_appearance_eligible=$2,selected_character_world_id=$3 WHERE id=$1", [imported.campaignId, marker === true, selectedWorldId]);
+      expect((await pool.query("SELECT count(*)::int AS n FROM campaign_cast_events WHERE campaign_id=$1", [imported.campaignId])).rows[0].n).toBe(0);
+      samples.push({ ...imported, marker, selectedWorldId });
+    }
+    const mutations = createPostgresPortableFamilyMutationRepository(createPostgresWorldRepositoryAdapters(pool, { memory: memoryGeneration(pool) }).worlds);
+    for (const sample of samples) {
+      const payload = JSON.parse(JSON.stringify(campaignArchivePayloads(await loadCampaignArchiveExportSnapshot(pool, ownerUserId, sample.campaignId))));
+      expect(payload.campaign.archiveRecords.cast).toBeUndefined();
+      if (sample.marker === undefined) { delete payload.campaign.campaign.firstAppearanceEligible; delete payload.campaign.campaign.selectedCharacterWorldId; payload.campaign.formatVersion = 4; }
+      const restored = await withTransaction(pool, client => mutations.commitCampaignZip(client, {
+        owner: { ownerUserId }, destination: { kind: "existing_world_version", worldId: sample.worldId, worldVersionId: sample.worldVersionId },
+        authorityFingerprint: sha256(randomUUID()), publishedAssets: [],
+        payload: { archiveFormat: "manifest_v1", sourceName: "empty.zip", ...payload }
+      }));
+      expect((await pool.query("SELECT first_appearance_eligible,selected_character_world_id FROM campaigns WHERE id=$1", [restored.campaignId])).rows[0]).toEqual({ first_appearance_eligible: sample.marker === true, selected_character_world_id: sample.selectedWorldId });
+      expect((await pool.query("SELECT count(*)::int AS n FROM campaign_cast_events WHERE campaign_id=$1", [restored.campaignId])).rows[0].n).toBe(0);
+    }
+    const records: SystemRecordEnvelope[] = [];
+    await createPostgresSystemArchiveExportRepository(pool, { sourceApplicationVersion: "0.1.0" }).withOwnerSnapshot({ ownerUserId }, async snapshot => {
+      for (const domain of SYSTEM_ARCHIVE_DOMAINS) for await (const record of snapshot.streamDomain(domain)) records.push(record);
+    });
+    const historical = records.find(record => record.domain === "campaigns" && record.sourceId === samples[2]!.campaignId)!;
+    delete (historical.record as { selectedCharacterWorldId?: string | null }).selectedCharacterWorldId;
+    delete (historical.record as { firstAppearanceEligible?: boolean }).firstAppearanceEligible;
+    delete (historical.record as { campaignRecordVersion?: number }).campaignRecordVersion;
+    const databaseName = `cast_empty_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(`CREATE DATABASE ${databaseName}`);
+    const url = new URL(process.env.TEST_DATABASE_URL!); url.pathname = `/${databaseName}`;
+    const destination = createDatabasePool(url.toString(), 4);
+    try {
+      await migrateDatabase(destination, resolve("database/migrations"));
+      const target = { ownerUserId: await initialOwnerId(destination) }, imports = createPostgresSystemArchiveImportRepository(destination);
+      await imports.withAtomicImport(target, { destination: await imports.destinationFingerprint(target, {}), ignore: {} }, transaction => transaction.insertLogicalDomains(records));
+      for (const sample of samples) {
+        expect((await destination.query("SELECT first_appearance_eligible,selected_character_world_id FROM campaigns WHERE id=$1", [sample.campaignId])).rows[0]).toEqual({ first_appearance_eligible: sample.marker === true, selected_character_world_id: sample.selectedWorldId });
+        expect((await destination.query("SELECT count(*)::int AS n FROM campaign_cast_events WHERE campaign_id=$1", [sample.campaignId])).rows[0].n).toBe(0);
+      }
+    } finally { await destination.end(); await pool.query(`DROP DATABASE ${databaseName}`); }
+  });
   it("restores cast through the real System Archive transaction after turns are restored", async () => {
     const story = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     story.world.title = `Cast system restore ${randomUUID()}`;
@@ -50,6 +96,7 @@ integration("campaign cast portable authority", () => {
       commands: [{ kind: "observe", characterId: created.character.id, field: "appearance.description", value: "blue eyes", mode: "fact", speakerCharacterId: null, supersedesObservationId: null,
         evidence: { kind: "turn", turnId: turn.turn_id, turnNumber: turn.turn_number, narrationRevision: turn.correction_revision, sourceHash, paragraphId: "p1", quote } }] },
       { attachment: { characterId: created.character.id, basis: "unique_name", sourceRanges: [{ turnId: turn.turn_id, narrationRevision: turn.correction_revision, sourceHash, paragraphId: "p1", start: 0, end: quote.length }] } }));
+    await pool.query("UPDATE campaigns SET first_appearance_eligible=true WHERE id=$1", [scope.campaignId]);
     const records: SystemRecordEnvelope[] = [];
     await createPostgresSystemArchiveExportRepository(pool, { sourceApplicationVersion: "0.1.0" }).withOwnerSnapshot({ ownerUserId }, async (snapshot) => {
       for (const domain of SYSTEM_ARCHIVE_DOMAINS) for await (const record of snapshot.streamDomain(domain)) records.push(record);
@@ -65,6 +112,7 @@ integration("campaign cast portable authority", () => {
       await imports.withAtomicImport(target, { destination: await imports.destinationFingerprint(target, {}), ignore: {} }, async (transaction) => {
         await transaction.insertLogicalDomains(records);
       });
+      expect((await destination.query("SELECT first_appearance_eligible FROM campaigns WHERE id=$1", [scope.campaignId])).rows[0].first_appearance_eligible).toBe(true);
       const value = await createPostgresCampaignCastRepository(destination).current({ ...target, campaignId: scope.campaignId });
       expect(value.characters.filter((c) => c.origin.kind !== "protagonist")).toEqual([
         expect.objectContaining({ name: "Mara", profile: { "appearance.description": "" } })
@@ -78,6 +126,62 @@ integration("campaign cast portable authority", () => {
         expectedCastRevision: detail.revision, expectedBoundary: detail.boundary, expectedCharacterRevision: person.revision, idempotencyKey: "restore-undo" });
       expect((await restoredRepository.detail(restoredScope, person.id)).observations).toEqual([]);
     } finally { await destination.end(); await pool.query(`DROP DATABASE ${databaseName}`); }
+  });
+  it("selects v3 for a long ordinary goal and rejects an invalid v2 declaration atomically", async () => {
+    const source = await fixture(), destination = await fixture(), repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const character = await repo.create(source, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 0, timelineRevision: 0 },
+      idempotencyKey: "long-goal", name: "Mara", aliases: [], profile: { "story.goals": "g".repeat(20_000) } });
+    const payload = await withTransaction(pool, client => exportCampaignCast(client, source));
+    expect(payload?.formatVersion).toBe(3);
+    expect(payload?.events[0]?.receipt?.result?.character.profile).toEqual(character.character.profile);
+    await expect(withTransaction(pool, client => importCampaignCast(client, destination, { ...payload, formatVersion: 2 },
+      { turns: new Map(), worlds: new Map() }))).rejects.toThrow();
+    expect((await pool.query("SELECT id FROM campaign_cast_events WHERE campaign_id=$1", [destination.campaignId])).rowCount).toBe(0);
+    await withTransaction(pool, client => importCampaignCast(client, destination, payload, { turns: new Map(), worlds: new Map() }));
+    expect((await repo.current(destination)).characters.find(person => person.name === "Mara")?.profile).toEqual(character.character.profile);
+  });
+  it("remaps archived seed activations, edits and receipts and rejects a dangling activation before restore", async () => {
+    const source = await fixture(), destination = await fixture();
+    const version = (await pool.query("SELECT world_version_id FROM campaigns WHERE id=$1", [source.campaignId])).rows[0].world_version_id;
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [version, JSON.stringify({ world: { title: "Test world" },
+      playableCharacters: [{ id: "keeper", name: "Keeper", characterText: "Original note", campaignUse: "supporting", profile: { story: { background: "b".repeat(3000) } } }] })]);
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+    const preview = await repo.fromWorldPreview!(source, { characterId: "keeper" });
+    const added = await repo.fromWorld!(source, { characterId: "keeper", expectedWorldVersionId: version, expectedCastRevision: preview.castRevision,
+      expectedBoundary: preview.boundary, idempotencyKey: "add", previewFingerprint: preview.previewFingerprint });
+    const edited = await repo.editAuthoredProfile!(source, added.character.id, { expectedCastRevision: added.revision, expectedBoundary: added.boundary,
+      expectedCharacterRevision: added.character.revision, idempotencyKey: "edit", set: { "story.role": "Warden" }, setOverrides: { "story.goals": "g".repeat(20000) } });
+    const payload = (await withTransaction(pool, client => exportCampaignCast(client, source)))!;
+    const forgedReceipt = structuredClone(payload);
+    forgedReceipt.events.at(-1)!.receipt!.result!.character.originProfile!.rosterName = "Forged origin";
+    await expect(withTransaction(pool, client => importCampaignCast(client, destination, forgedReceipt,
+      { turns: new Map(), worlds: new Map() }))).rejects.toThrow();
+    expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_state WHERE campaign_id=$1", [destination.campaignId])).rows[0].n).toBe(0);
+    const mappedDestination = await fixture();
+    const mappedVersion = (await pool.query("SELECT world_version_id FROM campaigns WHERE id=$1", [mappedDestination.campaignId])).rows[0].world_version_id;
+    await expect(withTransaction(pool, client => importCampaignCast(client, mappedDestination, payload,
+      { turns: new Map(), worlds: new Map([[version, mappedVersion]]) }))).rejects.toThrow("cast_archive_reference_invalid");
+    expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_state WHERE campaign_id=$1", [mappedDestination.campaignId])).rows[0].n).toBe(0);
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [mappedVersion,
+      JSON.stringify({ world: { title: "Other" }, playableCharacters: [{ id: "different", name: "Different", characterText: "" }] })]);
+    await expect(withTransaction(pool, client => importCampaignCast(client, mappedDestination, payload,
+      { turns: new Map(), worlds: new Map([[version, mappedVersion]]) }))).rejects.toThrow("cast_archive_reference_invalid");
+    const sourceContent = (await pool.query("SELECT content FROM world_versions WHERE id=$1", [version])).rows[0].content;
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [mappedVersion, JSON.stringify(sourceContent)]);
+    await withTransaction(pool, client => importCampaignCast(client, mappedDestination, payload, { turns: new Map(), worlds: new Map([[version, mappedVersion]]) }));
+    const mappedPerson = (await repo.current(mappedDestination)).characters.find(person => person.name === "Keeper")!;
+    expect(mappedPerson.originProfile).toMatchObject({ worldVersionId: mappedVersion, evidence: { kind: "world", worldVersionId: mappedVersion } });
+    const broken = structuredClone(payload);
+    const command = broken.events.flatMap(event => event.commands).find(item => item.command.kind === "edit_authored_profile")!.command;
+    if (command.kind === "edit_authored_profile") command.seedEventId = randomUUID();
+    await expect(withTransaction(pool, client => importCampaignCast(client, destination, broken, { turns: new Map(), worlds: new Map() }))).rejects.toThrow();
+    await withTransaction(pool, client => importCampaignCast(client, destination, payload, { turns: new Map(), worlds: new Map() }));
+    const restored = (await repo.current(destination)).characters.find(person => person.name === "Keeper")!;
+    expect(restored.profile).toEqual(edited.character.profile);
+    expect(restored.originProfile).toMatchObject({ legacyCharacterText: "Original note", evidence: { kind: "historical_world", sourceWorldVersionId: version } });
+    expect(restored.originProfile?.seedEventId).not.toBe(added.character.originProfile?.seedEventId);
+    const saved = (await withTransaction(pool, client => exportCampaignCast(client, destination)))!;
+    expect(saved.events.at(-1)?.receipt?.result?.character).toEqual(restored);
   });
   it("round-trips separate identities and user blanks with new IDs and no profile caches", async () => {
     const source = await fixture(), destination = await fixture();

@@ -5,7 +5,7 @@ import { CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY } from "../../package
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 const settingsUrl = `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}/app/settings?section=providers`;
-const screenshots = process.env.PLAYWRIGHT_LEGACY_PROVIDER_PRESET_SCREENSHOT_DIR ?? ".superpowers/sdd/2026-09-21-native-preset-audit-fixes/task-4-5-screenshots";
+const screenshots = process.env.PLAYWRIGHT_LEGACY_PROVIDER_PRESET_SCREENSHOT_DIR ?? "test-results/sdd-evidence/2026-09-21-native-preset-audit-fixes/task-4-5-screenshots";
 
 type Provider = Record<string, unknown> & {
   id: string;
@@ -318,7 +318,7 @@ test("stale preset list and detail completions cannot replace newer credential o
   const detailPattern = `**/api/v1/providers/${api.provider.id}/presets/nexus-story`;
   const delayedDetail = async (route: import("@playwright/test").Route) => {
     await detailGate;
-    await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "private upstream detail" }) });
+    await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "private upstream detail" }) });
   };
   await page.route(detailPattern, delayedDetail);
   await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("nexus-story");

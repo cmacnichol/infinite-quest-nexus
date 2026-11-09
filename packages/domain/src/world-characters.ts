@@ -8,6 +8,7 @@ import {
 } from "../../contracts/src/world-library.js";
 import { stripMechanicsLeakage, truncateAtBoundary } from "./text.js";
 import { validateCampaignEventTriggers } from "./campaign-event-triggers.js";
+import { castDiscoveryWorldIdentities } from "./campaign-cast-world-identities.js";
 export { characterFictionAuthority, completeCharacterFictionProfile, type CharacterFictionAuthority } from "./character-fiction-authority.js";
 
 export type CampaignCharacterSeed = {
@@ -18,10 +19,14 @@ export type CampaignCharacterSeed = {
 
 export type WorldCampaignReadinessIssueCode =
   | "no-playable-characters"
+  | "no-selectable-characters"
   | "missing-character-id"
   | "duplicate-character-id"
   | "missing-character-name"
   | "missing-character-text"
+  | "supporting-character-missing-guidance"
+  | "supporting-character-invalid-fiction-name"
+  | "supporting-character-invalid-fiction-alias"
   | "invalid-event-rule";
 
 export type WorldCampaignReadinessIssue = {
@@ -36,6 +41,7 @@ export type WorldCampaignReadinessIssue = {
 export type WorldCampaignReadinessAssessment = {
   ready: boolean;
   issues: WorldCampaignReadinessIssue[];
+  warnings?: WorldCampaignReadinessIssue[];
 };
 
 function values(value: unknown): unknown[] {
@@ -54,12 +60,16 @@ function mergeNamed(shared: unknown[], characterSpecific: unknown[]): unknown[] 
 
 export function assessWorldCampaignReadiness(content: WorldContent): WorldCampaignReadinessAssessment {
   const issues: WorldCampaignReadinessIssue[] = [];
+  const warnings: WorldCampaignReadinessIssue[] = [];
   const characters = content.playableCharacters;
   if (characters.length === 0) {
     issues.push({
       code: "no-playable-characters",
       message: "This world version has no playable characters."
     });
+  }
+  if (characters.length > 0 && resolvePlayableCharacters(content).length === 0) {
+    issues.push({ code: "no-selectable-characters", message: "This world version has no selectable characters." });
   }
 
   const seenIds = new Set<string>();
@@ -72,13 +82,13 @@ export function assessWorldCampaignReadiness(content: WorldContent): WorldCampai
     if (!id) {
       issues.push({
         code: "missing-character-id",
-        message: `Playable character ${characterIndex + 1} is missing an ID.`,
+        message: `Character ${characterIndex + 1} is missing an ID.`,
         characterIndex
       });
     } else if (seenIds.has(id)) {
       issues.push({
         code: "duplicate-character-id",
-        message: `Playable character ${characterIndex + 1} has a duplicate ID.`,
+        message: `Character ${characterIndex + 1} has a duplicate ID.`,
         characterIndex,
         characterId: id
       });
@@ -89,27 +99,39 @@ export function assessWorldCampaignReadiness(content: WorldContent): WorldCampai
     if (!name) {
       issues.push({
         code: "missing-character-name",
-        message: `Playable character ${characterIndex + 1} is missing a name.`,
+        message: `Character ${characterIndex + 1} is missing a name.`,
         characterIndex,
         ...(id ? { characterId: id } : {})
       });
     }
-    if (!characterText && !hasProfile) {
+    if (character.campaignUse !== "supporting" && !characterText && !hasProfile) {
       issues.push({
         code: "missing-character-text",
-        message: `Playable character ${characterIndex + 1} is missing character guidance.`,
+        message: `Character ${characterIndex + 1} is missing character guidance.`,
         characterIndex,
         ...(id ? { characterId: id } : {})
       });
+    }
+    if (character.campaignUse === "supporting") {
+      if (!characterText && !hasProfile) warnings.push({ code: "supporting-character-missing-guidance", message: `Character ${characterIndex + 1} is missing character guidance.`, characterIndex, ...(id ? { characterId: id } : {}) });
+    }
+    if (character.campaignUse !== "playable") {
+      const identity = castDiscoveryWorldIdentities({ playableCharacters: [character] })[0];
+      if (!identity || identity.name !== name) warnings.push({ code: "supporting-character-invalid-fiction-name", message: `Character ${characterIndex + 1} has a name that cannot be used for character tracking.`, characterIndex, ...(id ? { characterId: id } : {}) });
+      if (identity && (character.profile?.identity.aliases ?? []).some(alias => !identity.aliases.includes(alias))) warnings.push({ code: "supporting-character-invalid-fiction-alias", message: `Character ${characterIndex + 1} has an alias that cannot be used for character tracking.`, characterIndex, ...(id ? { characterId: id } : {}) });
     }
   }
 
   issues.push(...validateCampaignEventTriggers(content.eventTriggers).issues);
-  return { ready: issues.length === 0, issues };
+  return { ready: issues.length === 0, issues, ...(warnings.length ? { warnings } : {}) };
+}
+
+export function resolveWorldCharacters(content: WorldContent): PlayableCharacter[] {
+  return content.playableCharacters;
 }
 
 export function resolvePlayableCharacters(content: WorldContent): PlayableCharacter[] {
-  return content.playableCharacters;
+  return resolveWorldCharacters(content).filter((character) => character.campaignUse !== "supporting");
 }
 
 export function selectPlayableCharacter(content: WorldContent, selectedCharacterId?: string): PlayableCharacter {

@@ -472,8 +472,9 @@ export function mountWorldCreationPage(
     observedAuthoredDraft = serialized;
     if (disposed || !authoringSession || (authoringSession.state().job.kind !== "world_concept" && authoringSession.state().job.kind !== "story_source")) return;
     // Rendering/adopting the server's existing candidate is not a new edit.
-    if (serialized === JSON.stringify(authoringSession.currentCandidate())) return;
     const parsed = worldContentSchema.safeParse(state.draft);
+    const current = worldContentSchema.safeParse(authoringSession.currentCandidate());
+    if (parsed.success && current.success && JSON.stringify(parsed.data) === JSON.stringify(current.data)) return;
     authoringSession.edit(parsed.success ? parsed.data : null);
   }
 

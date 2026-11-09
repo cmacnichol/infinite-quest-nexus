@@ -186,6 +186,11 @@ describe("text provider adapters", () => {
     });
   });
 
+  it("caps legacy authoring responses below the provider ceiling", () => {
+    const bounded = serializeLegacyProviderRequest(profile, { systemPrompt: "system", input: "data", maxOutputTokens: 256 });
+    expect(JSON.parse(bounded.body).max_output_tokens).toBe(256);
+  });
+
   it("defaults provider request deadlines to five minutes", () => {
     const parsed = providerProfileInputSchema.parse({
       name: "Synthetic provider",

@@ -21,7 +21,7 @@ import {
   CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   STORY_OUTPUT_ENCODING_CONTRACT_V3,
   STORY_PROMPT_SCHEMA_VERSION,
-  castStoryMemoryPromptCompatibilityIdentity,
+  castStoryMemoryPromptCompatibilityIdentity, castV2StoryMemoryPromptCompatibilityIdentity, CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   storyPromptCompatibilityIdentity,
   storyPromptProtocolIdentity
 } from "../../contracts/src/story-prompt.js";
@@ -177,11 +177,12 @@ export async function resolveStoryMemoryPromptSnapshot(
   database: DatabaseClient,
   scope: PromptScope,
   continuityReviewMode: "off" | "observe" | "enforce" = "off",
-  castContext = false
+  castContext = false,
+  castProtocol: "v1" | "v2" = "v2"
 ): Promise<PromptSnapshotV2> {
   const templates = await resolveSnapshot(database, scope, true, "story_memory");
   const storyMemoryCompatibility = {
-    protocolIdentity: castContext ? castStoryMemoryPromptCompatibilityIdentity() : storyMemoryPromptCompatibilityRequirement("story_system")!.protocolIdentity,
+    protocolIdentity: castContext ? (castProtocol === "v1" ? castStoryMemoryPromptCompatibilityIdentity() : castV2StoryMemoryPromptCompatibilityIdentity()) : storyMemoryPromptCompatibilityRequirement("story_system")!.protocolIdentity,
     templateHashes: {
       story_system: templates.story_system.hash,
       event_extension: templates.event_extension.hash
@@ -283,7 +284,7 @@ async function withEffectiveStorySystemPreview(
   );
   const enrolled = enrollmentResult.rows.length > 0;
   const storyMemoryPromptProtocol = enrolled
-    ? options.castContextEnabled === true ? CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION : STORY_MEMORY_PROMPT_PROTOCOL_VERSION
+    ? options.castContextEnabled === true ? CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION : STORY_MEMORY_PROMPT_PROTOCOL_VERSION
     : null;
 
   const providerResult = campaign.text_provider_profile_id

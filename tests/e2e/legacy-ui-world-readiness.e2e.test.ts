@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T17");
+const evidenceDirectory = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T17");
 const versionOneId = "10000000-0000-4000-8000-000000000002";
 const versionTwoId = "10000000-0000-4000-8000-000000000003";
 const worldId = "10000000-0000-4000-8000-000000000001";
@@ -24,7 +24,7 @@ function publishedWorld(options: { draftHasCharacter?: boolean; campaigns?: Reco
     schemaVersion: 5,
     world: { title: "Aster Vale", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" },
     playableCharacters: options.draftHasCharacter ? [oldCharacter] : [],
-    entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {}
+    entities: [] as Record<string, unknown>[], relationships: [] as Record<string, unknown>[], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {}
   };
   const immutableContent = {
     ...draftContent,
@@ -94,7 +94,7 @@ async function installWorldApi(page: Page, options: ApiOptions = {}) {
       await options.holdWrite?.(method, path);
       if (failDraftSave) {
         failDraftSave = false;
-        return route.fulfill({ status: 503, json: { message: "Synthetic retryable draft save failure." } });
+        return route.fulfill({ status: 503, json: { error: "fixture_error", message: "Synthetic retryable draft save failure." } });
       }
       if (world) {
         world.title = body.title;
@@ -118,16 +118,16 @@ async function installWorldApi(page: Page, options: ApiOptions = {}) {
       readinessCalls += 1;
       await options.holdReadiness?.();
       const readinessStatus = readinessStatuses.length > 1 ? readinessStatuses.shift()! : readinessStatuses[0];
-      if (readinessStatus && readinessStatus >= 400) return route.fulfill({ status: readinessStatus, json: { message: "Synthetic readiness service unavailable." } });
+      if (readinessStatus && readinessStatus >= 400) return route.fulfill({ status: readinessStatus, json: { error: "fixture_error", message: "Synthetic readiness service unavailable." } });
       const version = world?.versions?.find((candidate: any) => path.includes(encodeURIComponent(candidate.id)) || path.endsWith(`/${candidate.id}/playable-characters`));
       const chars = version?.content?.playableCharacters || [];
       const assessment = options.assessment || { ready: chars.length > 0, issues: [] };
-      return route.fulfill({ json: { characters: chars.map((character: any) => ({ id: character.id, name: character.name, rpgStatCount: 0, defaultTriggerCount: 0 })), readiness: assessment } });
+      return route.fulfill({ json: { characters: chars.map((character: any) => ({ id: character.id, name: character.name, rpgStatCount: 0, defaultTriggerCount: 0 })), startingCastCandidates: [], readiness: assessment } });
     }
     if (path === "/api/v1/campaigns" && method === "GET") return route.fulfill({ json: { campaigns: existingCampaigns } });
     if (path === "/api/v1/campaigns" && method === "POST") {
       campaignCreates.push(body);
-      return route.fulfill({ status: 201, json: { id: "new-campaign", title: body.title } });
+      return route.fulfill({ status: 201, json: { id: "10000000-0000-4000-8000-000000000099", title: body.title, status: "active", activeTurnNumber: 0, storyLengthProfile: "standard", storyContextBudgetTokens: 32000, worldId, worldVersionId: body.worldVersionId, worldVersionNumber: 2, selectedCharacterId: "fixture-character", selectedCharacterName: "Mira Vale", textProviderProfileId: null, imageProviderProfileId: null } });
     }
     if (path === "/api/v1/dashboard/stats") return route.fulfill({ json: { worlds: { total: world ? 1 : 0 }, campaigns: { total: existingCampaigns.length }, turns: { total: 0 }, costs: { totalUsd: 0, byProvider: [] } } });
     if (path === "/api/v1/providers") return route.fulfill({ json: { providers: [] } });
@@ -247,7 +247,7 @@ test("a new world does not inherit readiness from the previously selected publis
   await page.locator('[data-world-author-step="review"]').click();
 
   const readiness = page.locator("#worldAuthorPublishedReadiness");
-  const fixEvidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T17-fix1");
+  const fixEvidenceDirectory = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T17-fix1");
   mkdirSync(fixEvidenceDirectory, { recursive: true });
   await readiness.scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(fixEvidenceDirectory, "new-world-no-inherited-readiness.png") });
@@ -297,6 +297,7 @@ test("failed readiness can be retried without losing current draft or character 
   await page.locator("#worldTitle").fill("Unsaved title during readiness retry");
   await page.locator('[data-world-author-step="character"]').click();
   await page.getByRole("button", { name: "Edit Mira Vale" }).click();
+  await page.locator("#characterStoryDetails > summary").click();
   await page.locator("#characterOtherGuidance").fill("Unsaved character guidance during readiness retry.");
   await page.locator("#saveCharacter").click();
   await page.locator('[data-world-author-step="review"]').click();
@@ -403,4 +404,122 @@ test("world author steps remain usable at 200 percent page zoom", async ({ page 
   await page.locator('[data-world-author-step="lore"]').click();
   await expect(page.locator("#world-author-lore")).toBeVisible();
   await page.screenshot({ path: resolve(evidenceDirectory, "world-author-steps-200-percent.png"), fullPage: false });
+});
+
+test("world author can save and duplicate a name-only supporting character", async ({ page }) => {
+  await installWorldApi(page);
+  await openNewWorld(page);
+  await page.locator('[data-tab-target="world-author-mechanics"]').click();
+  await page.locator("#addPlayableCharacter").click();
+  await page.locator("#characterName").fill("Scout");
+  await page.locator("#characterCampaignUse").selectOption("supporting");
+  await expect(page.locator("#characterGenerator")).toBeHidden();
+  await page.locator("#characterStartingCastDefault").check();
+  if (process.env.CAST_SCREENSHOT_ROOT) await page.screenshot({ path: resolve(process.env.CAST_SCREENSHOT_ROOT, "supporting-world-editor.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  if (process.env.CAST_SCREENSHOT_ROOT) await page.screenshot({ path: resolve(process.env.CAST_SCREENSHOT_ROOT, "supporting-world-editor-mobile.png") });
+  await page.locator("#saveCharacter").click();
+  await expect(page.locator("#characterDialog")).toBeHidden();
+  await expect(page.locator("#playableCharacterRoster")).toContainText("Supporting");
+  await expect(page.locator("#worldAuthorCharacterStatus")).toContainText("at least one playable character");
+  await page.locator("#playableCharacterRoster").getByRole("button", { name: "Duplicate Scout" }).click();
+  await expect(page.locator("#playableCharacterRoster")).toContainText("Scout copy");
+  if (process.env.CAST_SCREENSHOT_ROOT) await page.screenshot({ path: resolve(process.env.CAST_SCREENSHOT_ROOT, "supporting-world-roster.png") });
+});
+
+test("switching character use preserves existing mechanics", async ({ page }) => {
+  const fixture = publishedWorld({ draftHasCharacter: true });
+  const originalStats = [{ id: "strength", name: "Strength", value: 57, note: "Original" }];
+  const originalTrackers = [{ id: "trust", name: "Trust", value: "Wary", rules: "Change with choices" }];
+  (fixture.draftContent.playableCharacters as Array<Record<string, unknown>>)[0] = { ...oldCharacter, rpgStats: originalStats, defaultTriggers: originalTrackers };
+  const api = await installWorldApi(page, { initialWorld: fixture });
+  await openExistingWorld(page, fixture);
+  await page.locator('[data-world-author-step="character"]').click();
+  await expect(page.locator("#worldCharacterExistingNote")).toBeVisible();
+  await expect(page.locator("#worldCharacterPresetsUnavailable")).toContainText("New copies of world characters are disabled");
+  await page.getByRole("button", { name: "Edit Mira Vale" }).click();
+  await page.locator("#characterCampaignUse").selectOption("supporting");
+  await expect(page.locator("#characterMechanics")).toBeHidden();
+  await page.locator("#characterCampaignUse").selectOption("both");
+  await page.locator("#characterCampaignUse").selectOption("supporting");
+  await page.locator("#saveCharacter").click();
+  await page.locator("#saveWorldDraft").click();
+  await expect(page.locator("#worldAuthorDialog")).toBeHidden();
+  expect(api.getWorld()?.draftContent.playableCharacters[0].rpgStats).toEqual(originalStats);
+  expect(api.getWorld()?.draftContent.playableCharacters[0].defaultTriggers).toEqual(originalTrackers);
+});
+
+test("converts reviewed entities locally while preserving relationships", async ({ page }) => {
+  const fixture = publishedWorld({ draftHasCharacter: true });
+  fixture.draftContent.entities = [
+    { id: "npc-a", kind: "npc", name: "Mira Vale", description: "A blue coat", extra: "Kept on entity" },
+    { id: "npc-b", kind: "person", name: "Iven", description: "A ferryman" }
+  ];
+  fixture.draftContent.relationships = [{ id: "r", fromEntityId: "npc-a", toEntityId: "npc-b", kind: "knows", description: "" }];
+  const api = await installWorldApi(page, { initialWorld: fixture });
+  await openExistingWorld(page, fixture);
+  await page.locator('[data-world-author-step="character"]').click();
+  await page.getByRole("button", { name: "Convert entities" }).click();
+  const dialog = page.getByRole("dialog", { name: "Convert entities" });
+  await expect(dialog).toContainText("Kept on entity");
+  await dialog.getByLabel("Convert Mira Vale").check();
+  await dialog.getByRole("button", { name: "Convert selected" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("unique name");
+  await dialog.locator("section").first().getByLabel("Character name").fill("Mira North");
+  await dialog.getByLabel("Keep Mira Vale as an alias if renamed").check();
+  await dialog.getByLabel("Convert Iven").check();
+  if (process.env.CAST_SCREENSHOT_ROOT) {
+    await page.screenshot({ path: resolve(process.env.CAST_SCREENSHOT_ROOT, "conversion-preview.png") });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await dialog.evaluate((element) => { element.scrollTop = 0; });
+    await page.screenshot({ path: resolve(process.env.CAST_SCREENSHOT_ROOT, "conversion-preview-mobile.png") });
+  }
+  await dialog.getByRole("button", { name: "Convert selected" }).click();
+  expect(api.getWorld()?.draftContent.playableCharacters).toHaveLength(1);
+  await page.locator("#saveWorldDraft").click();
+  await expect(page.locator("#worldAuthorDialog")).toBeHidden();
+  const saved = api.getWorld()!.draftContent;
+  expect(saved.playableCharacters).toHaveLength(3);
+  expect(saved.playableCharacters[1]).toMatchObject({ name: "Mira North", campaignUse: "supporting", startingCastDefault: false,
+    profile: { identity: { aliases: ["Mira Vale"] }, unclassifiedNotes: "A blue coat" }, source: { type: "world-entity", entityId: "npc-a" } });
+  expect(saved.entities[0].linkedCharacterId).toBe(saved.playableCharacters[1].id);
+  expect(saved.relationships[0]).toMatchObject({ fromEntityId: "npc-a", toEntityId: "npc-b" });
+});
+
+test("blocks duplicate entity IDs and clears a link when its character is deleted", async ({ page }) => {
+  const fixture = publishedWorld({ draftHasCharacter: true });
+  fixture.draftContent.entities = [{ id: "dup", kind: "npc", name: "One" }, { id: "dup", kind: "npc", name: "Two" },
+    { id: "linked", kind: "npc", name: "Mira Vale", linkedCharacterId: oldCharacter.id }];
+  const api = await installWorldApi(page, { initialWorld: fixture });
+  await openExistingWorld(page, fixture);
+  await page.locator('[data-world-author-step="character"]').click();
+  await page.getByRole("button", { name: "Convert entities" }).click();
+  const dialog = page.getByRole("dialog", { name: "Convert entities" });
+  await dialog.getByLabel("Convert One").check();
+  await dialog.getByRole("button", { name: "Convert selected" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("entity ID is duplicated");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  page.once("dialog", (prompt) => prompt.accept());
+  await page.getByRole("button", { name: "Edit Mira Vale" }).click();
+  await page.locator("#deleteCharacter").click();
+  await page.locator("#saveWorldDraft").click();
+  await expect(page.locator("#worldAuthorDialog")).toBeHidden();
+  expect(api.getWorld()!.draftContent.entities[2]).not.toHaveProperty("linkedCharacterId");
+});
+
+test("conversion keeps selections across pages and detects a whitespace-equivalent name", async ({ page }) => {
+  const fixture = publishedWorld({ draftHasCharacter: true });
+  fixture.draftContent.entities = Array.from({ length: 51 }, (_, index) => ({ id: "npc-" + index, kind: "npc", name: "Sailor " + index }));
+  const api = await installWorldApi(page, { initialWorld: fixture });
+  await openExistingWorld(page, fixture); await page.locator('[data-world-author-step="character"]').click();
+  await page.getByRole("button", { name: "Convert entities" }).click();
+  const preview = page.getByRole("dialog", { name: "Convert entities" });
+  const first = preview.locator("section").first(); await first.getByRole("checkbox").first().check();
+  await first.getByLabel("Character name").fill("Mira   Vale"); await expect(first).toContainText("Shared name or alias");
+  await preview.getByRole("button", { name: "Show more entities" }).click();
+  await preview.locator("section").last().getByRole("checkbox").first().check();
+  await preview.getByRole("button", { name: "Convert selected" }).click(); await expect(preview).toContainText("unique name");
+  await first.getByLabel("Character name").fill("Watchkeeper"); await preview.getByRole("button", { name: "Convert selected" }).click();
+  await expect(preview).toBeHidden(); await expect(page.locator("#worldAuthorDialog")).toContainText("Sailor 50");
+  await expect(page.locator("#worldAuthorDialog")).toContainText("Watchkeeper"); expect(api.writes).toEqual([]);
 });

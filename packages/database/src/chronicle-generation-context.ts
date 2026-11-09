@@ -14,7 +14,7 @@ import type { DatabaseClient } from "./pool.js";
 import { castGenerationSnapshotSchema } from "../../contracts/src/campaign-cast-context.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
 import { characterFictionAuthority, stableStringify, stripMechanicsLeakage } from "../../domain/src/index.js";
-import { isHistoryCoverageContextProtocol } from "../../contracts/src/story-memory-policy.js";
+import { isHistoryCoverageContextProtocol, isCastV2ContextProtocol } from "../../contracts/src/story-memory-policy.js";
 import { loadPostgresChronicleGenerationCandidates } from "./chronicle-context-repository.js";
 import type { ChronicleGenerationTransactionDependencies } from "./chronicle-repository.js";
 import {
@@ -64,7 +64,7 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   const resolved = await resolveGenerationAuthoritySnapshot(client, {
     ...scope,
     ...(scope.expectedBaseIdentity && hasGenerationCharacterAuthority(scope.expectedBaseIdentity)
-      ? { baseIdentityVersion: scope.expectedBaseIdentity.version, captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined,
+      ? { baseIdentityVersion: scope.expectedBaseIdentity.version, castContextVersion: isCastV2ContextProtocol(scope.storyMemoryPolicy?.contextProtocol) ? "cast-context-v2" as const : "cast-context-v1" as const, ...(scope.storyMemoryPolicy?.castDiscoveryEnabled === undefined ? {} : { castDiscoveryEnabled: scope.storyMemoryPolicy.castDiscoveryEnabled }), captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined,
         ...(scope.expectedBaseIdentity.recentWindowTurns === undefined ? {} : { recentWindowTurns: scope.expectedBaseIdentity.recentWindowTurns }),
         captureStoryLedger: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol),
         captureProtectedFacts: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol) }

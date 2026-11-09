@@ -113,6 +113,9 @@ function emptyCandidate(id: string): PlayableCharacter {
     id,
     name: "",
     characterText: "",
+    campaignUse: "playable",
+    startingCastDefault: true,
+    alwaysInContext: false,
     profile: characterProfileSchema.parse({}),
     rpgStats: [],
     defaultTriggers: [],
@@ -226,7 +229,12 @@ export function applyGeneratedCharacter(
   const candidate = stripProhibitedRootKeys({
     ...(next.candidate as Record<string, unknown>),
     ...safeGenerated,
-    id: next.candidate.id
+    ...(next.candidate.campaignUse === "supporting" ? { rpgStats: next.candidate.rpgStats, defaultTriggers: next.candidate.defaultTriggers } : {}),
+    id: next.candidate.id,
+    source: next.candidate.source,
+    campaignUse: next.candidate.campaignUse,
+    startingCastDefault: next.candidate.startingCastDefault,
+    alwaysInContext: next.candidate.alwaysInContext
   });
   const parsed = playableCharacterSchema.safeParse(candidate);
   if (!parsed.success) throw new Error("Generated character does not satisfy the playable-character contract.");

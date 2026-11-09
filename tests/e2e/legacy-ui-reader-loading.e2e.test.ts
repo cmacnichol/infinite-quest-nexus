@@ -146,7 +146,7 @@ test("image_failure_keeps_story_and_does_not_write_campaign_state", async ({ pag
     if (request.method() === "GET" && path === apiPath(id, "illustration-segments")) {
       segmentReads += 1;
       if (segmentReads === 1) {
-        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Synthetic illustration read failure" }) });
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Synthetic illustration read failure" }) });
       } else {
         await route.fulfill({ json: { segments: [] } });
       }
@@ -176,7 +176,7 @@ test("a_failed_illustration_config_read_does_not_clear_accepted_narration", asyn
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     if (request.method() === "GET" && new URL(request.url()).pathname === apiPath(id, "illustration-config")) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Synthetic image configuration failure" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Synthetic image configuration failure" }) });
       return;
     }
     await route.fallback();

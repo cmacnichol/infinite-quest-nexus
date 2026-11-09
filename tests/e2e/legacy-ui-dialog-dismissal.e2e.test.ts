@@ -5,7 +5,7 @@ import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T04-fix1");
+const evidenceDirectory = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T04-fix1");
 const fixture = quietLeafApiPayloads();
 
 function response(body: unknown, status = 200) {
@@ -195,7 +195,7 @@ test("busy world save cannot be dismissed", async ({ page }) => {
 test("campaign character Save keeps its immediate server-authoritative meaning while busy", async ({ page }) => {
   const fixtureCampaign = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
   const path = `/api/v1/campaigns/${fixtureCampaign.campaignId}/character-profile`;
-  const instrumentation = await installLegacyUiFixture(page, fixtureCampaign, { delays: { [`PUT ${path}`]: 1000 } });
+  const instrumentation = await installLegacyUiFixture(page, fixtureCampaign, { delays: { [`PUT ${path}`]: 1000 }, manualDelayReleaseTimeoutMs: 10000 });
   await page.goto(`${origin}/nexus/index.html#campaigns`);
   await page.locator(`#campaignList [data-campaign-id="${fixtureCampaign.campaignId}"]`).click();
   await expect(page.locator("#campaignTitle")).toHaveValue("Fixture Campaign 1");
@@ -205,9 +205,11 @@ test("campaign character Save keeps its immediate server-authoritative meaning w
   await page.locator("#characterRole").fill("Synthetic role");
   const saveRequest = page.waitForRequest(request => request.method() === "PUT" && new URL(request.url()).pathname === path);
   await page.keyboard.press("Escape");
-  await expect(page.locator("#discardChangesDialog")).toBeVisible();
-  await expect(page.locator("#saveCampaignEditsDecision")).toBeVisible();
-  await page.locator("#saveCampaignEditsDecision").click();
+  const dialog = page.locator("#characterDialog");
+  await expect(dialog.getByText("You have unsaved changes.")).toHaveCount(1);
+  await expect(dialog.getByRole("button", { name: "Keep editing" })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Discard changes" })).toBeVisible();
+  await dialog.getByRole("button", { name: "Save changes" }).click();
   await saveRequest;
   await page.keyboard.press("Escape");
   await expect(page.locator("#characterDialog")).toBeVisible();

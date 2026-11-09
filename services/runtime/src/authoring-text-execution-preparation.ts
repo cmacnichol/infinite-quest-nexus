@@ -146,6 +146,7 @@ function canonicalAuthoringRequest(request: ProviderRequest): CanonicalProviderR
   return {
     systemPrompt: request.systemPrompt,
     input: request.input,
+    ...(request.maxOutputTokens === undefined ? {} : { maxOutputTokens: request.maxOutputTokens }),
     ...(request.recoveryInput ? { recoveryInput: request.recoveryInput } : {}),
     ...(completeRejectedDraft ? { completeRejectedDraft } : {}),
     ...(request.onChunk ? { onChunk: request.onChunk } : {})
@@ -403,7 +404,7 @@ export async function prepareDirectAuthoringTextExecution(input: Readonly<{
   });
   const trustedPrompts = Object.freeze(Object.fromEntries(promptEntries));
   const repairOperations = new Set<DirectAuthoringTextOperationV2>([
-    "worldOutlineRepair", "seedCharacterRepair", "standaloneCharacterRepair", "organizerRepair"
+    "castSuggestionRepair", "castDraftRepair", "supportingCharacterRepair", "worldOutlineRepair", "seedCharacterRepair", "standaloneCharacterRepair", "organizerRepair"
   ]);
   const requestScopeId = randomUUID();
   const activeInvocations = new Map<string, string>();

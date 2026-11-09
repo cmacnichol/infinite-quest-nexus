@@ -961,9 +961,10 @@ function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialog
         element(document, "p", undefined, world.premise),
         element(document, "p", undefined, world.rules)
       );
-      if (world.playableCharacters.length) {
+      const selectable = world.playableCharacters.filter(character => character.campaignUse !== "supporting");
+      if (selectable.length) {
         const characters = element(document, "ul");
-        for (const character of world.playableCharacters) characters.append(element(document, "li", undefined, character.name));
+        for (const character of selectable) characters.append(element(document, "li", undefined, character.name));
         dialog.append(element(document, "h3", undefined, "Available characters"), characters);
       }
     } else dialog.append(element(document, "p", undefined, "World setup is unavailable."));

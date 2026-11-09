@@ -37,3 +37,21 @@ For a detail supported by the original narration, **Apply and next** accepts the
 Tracking progress and review progress are separate. When tracking has a gap, open recovery to see the affected turn and reason. Retry failed work when appropriate, resume a paused scan, or preview the suggested missing range. Check the estimate before starting; completed work is preserved. Opening recovery or reviewing a character does not call the text provider.
 
 Use **Likely included for this input** to estimate which characters fit the current story context. Enter the intended story input and refresh the estimate. It explains selection and omissions within the available budget without sending a model request. Refresh after the story or characters change; later routing and action assessment can change the final selection.
+
+## Edit a campaign character
+
+In Nexus, open the campaign and choose **Edit characters…**. Search for a character, open their sheet, and choose **Edit character**. The main character has its own profile editor. **Open in Story** opens the same character in the Story panel, where you can inspect sources and review matches.
+
+For a supporting character copied from the world, **World canon** marks a value that the story cannot replace. Editing it affects only this campaign. **Reset to world value** restores the original copy. Resetting the character’s identity restores the roster name and aliases together. A field labeled **Added for this campaign** can be cleared so the story can fill it again.
+
+Goals, location, condition and current clothing update with the story. **Use discovered value** releases a hand edit. **Restore authored goals** returns to the world goals until a later observation changes them. **Observed in story** is separate from the authored appearance. Clearing that line hides it until you release the override.
+
+When presets are enabled, **Add from world** shows eligible characters in the campaign’s pinned world version. Review the proposed changes before adding a new character or applying a profile to an existing one. A detached match can receive a fresh copy on the same cast record. The Sources and edit history section keeps earlier edits.
+
+Save and reset actions are available again after pending or recoverable generation is resolved. Keep the editor open to retain your draft.
+
+## Draft a character from story evidence
+
+Open a companion or supporting character and choose **Edit character**. When the character has an eligible citation and generation is idle, **Draft from story** can suggest details for blank fields. You can give the campaign text model a direction. Review each suggestion alongside its current value, quoted passage and turn link. **Creative guidance** identifies optional writing guidance without a factual citation.
+
+**Apply selected suggestions** fills the local draft. **Save character** records your selections as hand edits. If the cited narration changes before saving, the editor keeps your draft and asks you to review fresh evidence. You can also enter your own details directly.

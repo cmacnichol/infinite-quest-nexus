@@ -64,12 +64,12 @@ async function main(args: string[]) {
       output({ status: "ok", mode: "environment" });
       return 0;
     }
-    const repository = createInstanceSettingsRepository(pool, { activationGuard: createSettingsActivationGuard(policy) });
+    const repository = createInstanceSettingsRepository(pool, { activationGuard: createSettingsActivationGuard(policy, { implicitLocal: config.instanceSettingsAccessMode === "local-single-user" && !config.instanceSettingsPolicyFile }) });
     return await runInstanceSettingsCommand(args, {
       config, policy, repository, actor, output, readJson,
       readRevision: async revision => {
         const { rows: [row] } = await pool.query("SELECT snapshot FROM instance_settings_revisions WHERE revision=$1", [settingsRevisionSchema.parse(revision)]);
-        return instanceSettingsSchema.parse(row?.snapshot);
+        return instanceSettingsSchema.parse({ castPresetsEnabled: false, castContextWithoutDiscoveryEnabled: false, ...row?.snapshot as object });
       },
       status: async () => {
         const state = await repository.read();

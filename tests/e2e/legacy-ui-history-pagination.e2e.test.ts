@@ -4,7 +4,7 @@ import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fix
 import { readerSceneWindowResponseSchema } from "../../packages/contracts/src/index.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T13-pagination";
+const evidenceDirectory = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T13-pagination";
 
 async function prepareStoryPage(page: Page, campaignId: string): Promise<void> {
   const html = (await readFile("apps/web/public/story.html", "utf8"))
@@ -60,7 +60,7 @@ async function selectedHistoryCardGeometry(page: Page, turnNumber: number): Prom
   readonly clientHeight: number;
   readonly scrollHeight: number;
 }> {
-  return page.evaluate((selectedTurnNumber) => {
+  const measure = () => page.evaluate((selectedTurnNumber) => {
     const scroller = document.querySelector<HTMLElement>("#turnHistoryDialog .dialog-scroll");
     const card = document.querySelector<HTMLElement>(`#turnHistoryDialog .history-card[aria-pressed="true"][data-turn-number="${selectedTurnNumber}"]`);
     const entry = card?.closest<HTMLElement>(".history-entry");
@@ -69,14 +69,19 @@ async function selectedHistoryCardGeometry(page: Page, turnNumber: number): Prom
     const entryRect = entry.getBoundingClientRect();
     const viewportTop = scrollerRect.top + scroller.clientTop;
     const viewportBottom = viewportTop + scroller.clientHeight;
+    // Scroll offsets and clientHeight are rounded in Chromium. DOMRects retain fractions.
+    const clippedPixels = Math.max(0, viewportTop - entryRect.top, entryRect.bottom - viewportBottom);
     return {
       turnNumber: Number(card.dataset.turnNumber),
-      fullyVisible: entryRect.top >= viewportTop && entryRect.bottom <= viewportBottom,
+      fullyVisible: clippedPixels < 1,
+      clippedPixels,
       scrollTop: scroller.scrollTop,
       clientHeight: scroller.clientHeight,
       scrollHeight: scroller.scrollHeight
     };
   }, turnNumber);
+  await expect.poll(async () => (await measure()).clippedPixels).toBeLessThan(1);
+  return measure();
 }
 
 type SelectedHistoryGeometrySample = {
@@ -117,7 +122,7 @@ async function selectHistoryCardWithGeometrySamples(page: Page, turnNumber: numb
       const viewportBottom = viewportTop + scroller.clientHeight;
       return {
         turnNumber: Number(card.dataset.turnNumber),
-        fullyVisible: entryRect.top >= viewportTop && entryRect.bottom <= viewportBottom,
+        fullyVisible: viewportTop - entryRect.top < 1 && entryRect.bottom - viewportBottom < 1,
         scrollerTop: scrollerRect.top,
         scrollerClientTop: scroller.clientTop,
         scrollerClientHeight: scroller.clientHeight,

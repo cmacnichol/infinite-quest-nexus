@@ -366,6 +366,8 @@ export { responseContractOperationV2Schema, type ResponseContractOperationV2 } f
 const authoringInvocationSchemas = {
   world_outline: "world_outline", world_outline_repair: "world_outline",
   world_seed_character: "world_seed_character", world_seed_character_repair: "world_seed_character",
+  cast_suggestion: "cast_suggestion", cast_suggestion_repair: "cast_suggestion", cast_draft: "cast_draft", cast_draft_repair: "cast_draft",
+  supporting_character: "supporting_character", supporting_character_repair: "supporting_character",
   standalone_character: "standalone_character", standalone_character_repair: "standalone_character",
   character_organizer: "character_organizer", character_organizer_repair: "character_organizer",
   source_extraction: "source_extraction", source_extraction_repair: "source_extraction",
