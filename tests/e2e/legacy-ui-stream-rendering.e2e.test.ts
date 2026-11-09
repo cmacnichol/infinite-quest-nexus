@@ -509,10 +509,16 @@ test("an unrecoverable stream keeps the prior accepted scene and explicit recove
 
 test("a late campaign A stream callback cannot paint over same-document campaign B", async ({ page }, testInfo) => {
   const harness = await installStreamHarness(page);
-  const queuedA = streamSnapshot(harness, "A-only late synthetic narration.");
-  await page.evaluate(() => window.__storyStreamFixture?.resetWriteCount());
-  await page.evaluate(() => window.__storyStreamFixture?.holdNextAnimationFrame());
-  await emitSnapshot(page, queuedA);
+  const initialA = "Campaign A is visible before switching.";
+  await emitSnapshot(page, streamSnapshot(harness, initialA));
+  await expect(page.locator(".streaming-narration")).toContainText(initialA);
+  const queuedA = streamSnapshot(harness, `${initialA} A-only late synthetic narration.`);
+  await page.evaluate(frame => {
+    const fixture = window.__storyStreamFixture!;
+    fixture.resetWriteCount();
+    fixture.holdNextAnimationFrame();
+    fixture.emit(frame);
+  }, queuedA);
   const frameWasPendingForA = await page.evaluate(() => window.__storyStreamFixture?.hasHeldAnimationFrame() ?? false);
   const narrationBeforeCampaignChange = await page.locator(".streaming-narration").textContent();
   const narrationWritesBeforeCampaignChange = await page.evaluate(() => window.__storyStreamFixture?.writeCount() ?? -1);
