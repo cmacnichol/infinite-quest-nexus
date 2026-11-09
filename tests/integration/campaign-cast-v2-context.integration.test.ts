@@ -35,7 +35,7 @@ it("keeps v1 replay stable and captures only bounded v2 fiction with discovery o
   expect(modern.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields.find(item => item.field === "story.goals")).toMatchObject({ value: "Find the hidden chart", source: "observation" });
   const gap = await withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled: true, version: "cast-context-v2" }));
   expect(gap.snapshot.discoveryStatus).toBe("pending");
-  expect(gap.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields.find(item => item.field === "story.goals")).toMatchObject({ value: "Find the lost ship", source: "authored" });
+  expect(gap.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields.find(item => item.field === "story.goals")).toMatchObject({ value: "Find the hidden chart", source: "observation" });
   await pool.query("UPDATE campaign_cast_state SET coverage_start_turn=1 WHERE campaign_id=$1", [campaignId]);
   const jobId = randomUUID();
   await pool.query(`INSERT INTO campaign_cast_discovery_jobs(id,owner_user_id,campaign_id,turn_id,turn_number,narration_revision,timeline_revision,source_hash,protocol,source,chunks,execution_snapshot,status)
@@ -49,7 +49,7 @@ it("keeps v1 replay stable and captures only bounded v2 fiction with discovery o
   expect(overridden.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields.find(item => item.field === "story.goals")).toMatchObject({ value: "Protect the captain", source: "override" });
   await repository.applyBatch(scope, { boundary: changed.boundary, idempotencyKey: "clear-goal-override", commands: [{ kind: "clear_override", characterId: created.character.id, field: "story.goals" }] });
   const cleared = await withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled: true, version: "cast-context-v2" }));
-  expect(cleared.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields.find(item => item.field === "story.goals")).toMatchObject({ value: "Find the lost ship", source: "authored" });
+  expect(cleared.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields.find(item => item.field === "story.goals")).toMatchObject({ value: "Find the hidden chart", source: "observation" });
 
 
   expect(modern.fingerprint).not.toBe(legacy.fingerprint);

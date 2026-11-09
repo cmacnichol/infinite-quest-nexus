@@ -1,8 +1,21 @@
 import { SUPPORTING_FIELDS, WORLD_EDITOR_FIELDS, type CharacterEditorDraft } from "@infinite-quest/client-core";
 
+/** Characters a one-item-per-line textarea can hold, including line breaks. */
+export const listTextareaLimit = (itemLength: number, items: number) => (itemLength + 1) * items - 1;
+
 export function characterFieldsForGroup(group: string | undefined) {
   return WORLD_EDITOR_FIELDS.filter(field => field.world?.group === group)
     .sort((a, b) => a.world!.order - b.world!.order);
+}
+
+/** One labelled supporting-character control; the caller owns the draft and status text. */
+export function createCastTextField(document: Document, options: { label: string; id: string; value: string; maxLength: number; multiline?: boolean; disabled: boolean; onInput(value: string): void }) {
+  const wrap = document.createElement("div"), caption = document.createElement("label"), input = document.createElement(options.multiline ? "textarea" : "input");
+  caption.textContent = options.label; caption.htmlFor = options.id;
+  input.id = options.id; input.value = options.value; input.maxLength = options.maxLength; input.disabled = options.disabled;
+  input.addEventListener("input", () => options.onInput(input.value));
+  wrap.append(caption, input);
+  return wrap;
 }
 
 /** Construct one profile control consistently in every character editor. */
@@ -154,6 +167,7 @@ export function renderCharacterEditor(host: Element, draft: CharacterEditorDraft
       <div class="button-row character-dialog-actions">
         <button id="deleteCharacter" class="button danger" type="button">Delete character</button>
         <span class="character-action-spacer"></span>
+        <button id="recheckCampaignCharacterGeneration" class="button secondary" type="button" hidden>Check generation status</button>
         <button id="cancelCharacter" class="button secondary" type="button">Cancel</button>
         <button id="saveCharacter" class="button primary" type="submit">Apply to world draft</button>
       </div>

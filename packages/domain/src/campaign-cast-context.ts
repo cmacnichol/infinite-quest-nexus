@@ -116,7 +116,7 @@ export function selectCastContext(input: {
 export type CastFictionCandidate = { characterId: string; name: string; revision?: number; fields: readonly { field: string; value: string; source: string; evidenceKind?: "turn" | "user" | "world" | "historical_world" | undefined; evidenceId?: string | undefined; effectiveTurn?: number | undefined }[] };
 const CAST_FICTION_FIELD_ORDER = castContextFictionFieldSchema.options;
 /** Admit the smallest identities first, then allocate one field per character per round. */
-export function allocateCastFictionContext(candidates: readonly CastFictionCandidate[], headroom: number, notice = "", coverage: CastContextSelection["coverage"] = { fromTurn: null, throughTurn: null, baseTurn: 0, current: false }): {
+export function allocateCastFictionContext(candidates: readonly CastFictionCandidate[], headroom: number, notice = "", coverage: CastContextSelection["coverage"] = { fromTurn: null, throughTurn: null, baseTurn: 0, current: false }, overridesFirst = false): {
   content: string; estimatedTokens: number; omittedCharacterIds: string[]; omittedFieldCount: number; omittedFields: { characterId: string; field: string; reason: "budget" }[];
 } {
   const budget = Number.isFinite(headroom) ? Math.min(3000, Math.max(0, Math.floor(headroom))) : 0;
@@ -131,11 +131,12 @@ export function allocateCastFictionContext(candidates: readonly CastFictionCandi
     records.push(record);
     if (estimateTokens(serialize()) > budget) { records.pop(); omittedCharacterIds.push(candidate.characterId); omittedFieldCount += candidate.fields.length; }
   }
-  for (const fieldName of CAST_FICTION_FIELD_ORDER) {
+  const isUserField = (field: CastFictionCandidate["fields"][number]) => field.source !== "observation" && field.source !== "authored";
+  for (const pass of overridesFirst ? ["user", "rest"] as const : ["all"] as const) for (const fieldName of CAST_FICTION_FIELD_ORDER) {
     for (const record of records) {
       const candidate = candidates.find(item => item.characterId === record.characterId)!;
       const field = candidate.fields.find(item => item.field === fieldName && item.value);
-      if (!field) continue;
+      if (!field || pass === "user" && !isUserField(field) || pass === "rest" && isUserField(field)) continue;
       const isObservation = field.source === "observation";
       const kind = field.evidenceKind ?? (isObservation ? "turn" : field.source === "authored" ? "world" : "user");
       record.fields.push({ field: field.field, value: field.value, authority: isObservation ? "observation" : field.source === "authored" ? "authored" : "user", evidenceId: field.evidenceId ?? record.characterId,
@@ -160,6 +161,8 @@ function selectCastContextV2(snapshot: CastGenerationSnapshot, input: { directio
   const matches = (text: string) => new Set(findEntityReferences(text, catalog).map(item => item.id));
   const direct = matches(directText), threads = matches(threadText);
   const omitted: CastContextExplanation["omitted"] = [];
+  // Campaigns without an active seed keep the ordering they had before presets.
+  const usesPresets = snapshot.fiction!.some(item => item.fields.some(field => field.source === "authored" || field.source === "campaign_edit"));
   const ranked = snapshot.characters.filter(person => {
     if (person.origin.kind === "protagonist") return false;
     if (person.ignored) { omitted.push({ characterId: person.id, reason: "ignored" }); return false; }
@@ -169,7 +172,8 @@ function selectCastContextV2(snapshot: CastGenerationSnapshot, input: { directio
     const reference = catalog.find(item => item.id === key)!;
     const ambiguous = !direct.has(key) && !threads.has(key) && findEntityReferences(`${directText}\n${threadText}`, [reference]).length > 0;
     const recent = Math.max(person.lastObservedTurn, person.lastMentionedTurn ?? 0);
-    const rank = direct.has(key) ? 0 : threads.has(key) ? 1 : !ambiguous && recent > 0 && recent >= baseTurn - 2 ? 2 : person.pinned ? 3 : 4;
+    const active = !ambiguous && recent > 0 && recent >= baseTurn - 2;
+    const rank = direct.has(key) ? 0 : threads.has(key) ? 1 : usesPresets ? (active ? 2 : person.pinned ? 3 : 4) : (person.pinned ? 2 : active ? 3 : 4);
     if (rank === 4) omitted.push({ characterId: person.id, reason: ambiguous ? "ambiguous" : "not_relevant" });
     return { person, rank, recent };
   }).filter(item => item.rank < 4).sort((a, b) => a.rank - b.rank || b.recent - a.recent || a.person.id.localeCompare(b.person.id, "en"));
@@ -178,20 +182,13 @@ function selectCastContextV2(snapshot: CastGenerationSnapshot, input: { directio
       : "Character tracking is incomplete. Observations are dated, lower-authority last-known state; use accepted history for later events.";
   const candidates = ranked.map(({ person }) => ({ characterId: person.id, revision: person.revision, name: person.name,
     fields: snapshot.fiction!.find(item => item.characterId === person.id)!.fields }));
-  const allocated = allocateCastFictionContext(candidates, input.budgetTokens, notice, coverage);
+  const allocated = allocateCastFictionContext(candidates, input.budgetTokens, notice, coverage, !usesPresets);
   const wire = allocated.content ? JSON.parse(allocated.content) as { characters: { characterId: string; revision: number; fields: CastV2ContextField[] }[] } : { characters: [] };
   const admitted = new Set(wire.characters.map(item => item.characterId));
-  const reasons: CastContextReason[] = ["direct_reference", "open_thread", "recent_observation", "pinned"];
+  const reasons: CastContextReason[] = usesPresets ? ["direct_reference", "open_thread", "recent_observation", "pinned"] : ["direct_reference", "open_thread", "pinned", "recent_observation"];
   return { content: allocated.content, estimatedTokens: allocated.estimatedTokens, coverage, omittedFieldCount: allocated.omittedFieldCount,
     omittedCharacterIds: allocated.omittedCharacterIds,
     records: wire.characters.map(character => ({ characterId: character.characterId, revision: character.revision, content: JSON.stringify(character), fields: character.fields })),
     explanation: { selected: ranked.filter(item => admitted.has(item.person.id)).map(item => ({ characterId: item.person.id, name: item.person.name, reason: reasons[item.rank]! })),
       omitted: [...omitted, ...allocated.omittedCharacterIds.map(characterId => ({ characterId, reason: "budget" as const }))], omittedFields: allocated.omittedFields } };
-}
-
-/** Gap handling only substitutes authored goals for an observed value; manual overrides always win. */
-export function resolveCastContextGoal(input: { value: string; source: string; authored: string; discoveryEnabled: boolean; coverageCurrent: boolean }): { value: string; source: string } {
-  if (input.discoveryEnabled && !input.coverageCurrent && input.source === "observation" && input.authored.trim())
-    return { value: input.authored, source: "authored" };
-  return { value: input.value, source: input.source };
 }

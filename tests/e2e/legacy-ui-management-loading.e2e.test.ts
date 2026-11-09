@@ -5,7 +5,7 @@ import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fix
 import type { LegacyUiFixture, LegacyUiRouteInstrumentation } from "./helpers/legacy-ui-fixtures.types.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const t26EvidenceDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence";
+const t26EvidenceDirectory = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence";
 const optionalSectionReads = [
   "story-memory",
   "memory/metrics",
@@ -223,7 +223,7 @@ test("a_failed_section_read_can_be_retried_by_reopening_its_tab", async ({ page 
     if (request.method() === "GET" && new URL(request.url()).pathname === path) {
       attempts += 1;
       if (attempts === 1) {
-        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Synthetic Story Memory read failure" }) });
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Synthetic Story Memory read failure" }) });
         return;
       }
     }
@@ -257,7 +257,7 @@ test("story_memory_reload_failure_after_save_keeps_private_details_hidden_and_re
         await route.fulfill({
           status: 503,
           contentType: "application/json",
-          body: JSON.stringify({ message: "PRIVATE_STORY_MEMORY_BODY_CANARY", correlationId: "story-safe-789" })
+          body: JSON.stringify({ error: "fixture_error", message: "PRIVATE_STORY_MEMORY_BODY_CANARY", correlationId: "story-safe-789" })
         });
         return;
       }
@@ -361,7 +361,7 @@ test("current_section_world_and_preview_errors_hide_private_bodies_and_keep_expl
         await route.fulfill({
           status: 503,
           contentType: "application/json",
-          body: JSON.stringify({ message: "PRIVATE_WORLD_BODY_CANARY", correlationId: "private/reference" })
+          body: JSON.stringify({ error: "fixture_error", message: "PRIVATE_WORLD_BODY_CANARY", correlationId: "private/reference" })
         });
         return;
       }
@@ -500,7 +500,7 @@ test("late_story_memory_error_from_campaign_a_does_not_replace_campaign_b_feedba
     aReads += 1;
     aStarted.resolve(undefined);
     await releaseA.promise;
-    await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "A private stale panel error" }) });
+    await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "A private stale panel error" }) });
     aFinished.resolve(undefined);
   });
   await campaignSectionRoute(page, idB, "story-memory", async (route) => {
@@ -552,7 +552,7 @@ test("hides_chronicle_a_while_chronicle_b_fails_then_reveals_only_b_after_retry"
     if (bMetricsAttempts === 1) {
       bMetricsStarted.resolve(undefined);
       await releaseFirstBMetrics.promise;
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Synthetic B Chronicle failure" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Synthetic B Chronicle failure" }) });
       return;
     }
     await route.fulfill({ json: chronicleMetricsResponse(29) });
@@ -608,7 +608,7 @@ test("hides_illustration_a_while_illustrations_b_fails_then_reveals_only_b_after
     if (bConfigAttempts === 1) {
       bConfigStarted.resolve(undefined);
       await releaseFirstBConfig.promise;
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Synthetic B illustration failure" }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Synthetic B illustration failure" }) });
       return;
     }
     await route.fulfill({ json: illustrationConfigResponse(654) });

@@ -3,7 +3,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T15/search";
+const evidenceDirectory = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T15/search";
 const historyControls = {
   search: "#turnHistorySearch",
   clearSearch: "#btnTurnHistorySearchClear",

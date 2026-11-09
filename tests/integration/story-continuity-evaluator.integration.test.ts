@@ -33,7 +33,7 @@ function reply(narration: string): string {
   return JSON.stringify({ narration, choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Continue.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "Fixture relay.", continuity_summary: narration, canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
 }
 
-integration("T15 executor-backed continuity evidence", () => {
+integration("executor-backed continuity evidence", () => {
   let pool: DatabasePool;
   let server: Server;
   let ownerUserId = "";

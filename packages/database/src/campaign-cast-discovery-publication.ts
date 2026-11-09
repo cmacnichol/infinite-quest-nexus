@@ -142,7 +142,7 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
           characterIds.push(characterId); observationIds.push(...receipt.observationIds); accepted++;
           current = await initializeCastWithClient(client, claim.scope); continue;
         }
-      } else if (livePresetsEnabled && claim.execution.admission?.castPresetsEnabled) { unresolved.push({ candidate: proposal, code: "identity_changed" }); continue; }
+      }
     }
     if (!characterId) {
       const receipt = await applyCastBatchWithClient(client, claim.scope, { boundary: current.boundary, idempotencyKey: `${key}:identity`,

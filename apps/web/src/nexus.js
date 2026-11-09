@@ -2,7 +2,7 @@ import { MAX_PLAYABLE_CHARACTERS } from "@infinite-quest/contracts";
 import { openCastSuggestions } from "./character-editor/suggest-cast.js";
 import { createLegacyCastPanel } from "./campaign-cast-panel.js";
 import { renderCharacterEditor } from "./character-editor/renderer.js";
-import { buildCampaignProfileUpdate, createCampaignMainController } from "./character-profile-form.js";
+import { buildCampaignProfileUpdate, createCampaignMainController } from "./character-editor/campaign-main-form.js";
 import { settingsBookmarkDestination } from "./settings-bookmark.js";
 import { createCampaignCastApi, createStoryMemoryApi, createNexusApiClient, createNoopSessionPort, writeCampaignSettings, browserDeviceStorage } from "@infinite-quest/client-web";
 import { mountLegacyDeviceProfile } from "../../shared-ui/profile/legacy-device-profile.js";
@@ -221,7 +221,6 @@ let characterModalBusy = false;
 let characterModalScope = "world";
 let campaignCharacterProfileRevision = 0;
 let campaignCharacterController = null;
-let campaignCharacterPoll = null;
 let campaignCharacterLocked = false;
 let campaignCharacterOpenEpoch = 0;
 let campaignCharacterLockEpoch = 0;
@@ -590,9 +589,6 @@ function clearCampaignEditorSelection({ focus = false } = {}) {
 const MIN_MEMORY_CONTEXT_BUDGET_TOKENS = 512;
 const MAX_MEMORY_CONTEXT_BUDGET_TOKENS = 1_000_000;
 const DEFAULT_MEMORY_CONTEXT_BUDGET_TOKENS = 32_000;
-const CHARACTER_PROFILE_FIELDS = Object.freeze(Object.fromEntries(
-  WORLD_PROFILE_FIELDS.map((field) => [field.path, field.world.id])
-));
 const SOGNI_DEFAULT_CONFIGURATION = Object.freeze({
   defaultWidth: 1280,
   defaultHeight: 720,
@@ -2980,7 +2976,7 @@ function profileValue(profile, path) {
 }
 
 function profileFromForm() {
-  for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+  for (const { path, world: { id } } of WORLD_PROFILE_FIELDS) {
     const raw = elements[id].value.trim();
     const value = path === "identity.aliases" || path === "appearance.distinguishingFeatures"
       ? raw.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean)
@@ -2993,7 +2989,7 @@ function profileFromForm() {
 }
 
 function profileHasGuidance(profile) {
-  return Object.keys(CHARACTER_PROFILE_FIELDS).filter((path) => path.startsWith("story.")).some((path) => {
+  return WORLD_PROFILE_FIELDS.map((field) => field.path).filter((path) => path.startsWith("story.")).some((path) => {
     const value = profileValue(profile, path);
     return Array.isArray(value) ? value.length > 0 : Boolean(String(value || "").trim());
   });
@@ -3007,7 +3003,7 @@ function populateCharacterForm(character, readOnly = false) {
   elements.characterGuidance.value = String(character.characterText || "");
   elements.characterGuidanceSource.classList.toggle("hidden", !elements.characterGuidance.value.trim());
   const profile = character.profile || emptyCharacterProfile();
-  for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+  for (const { path, world: { id } } of WORLD_PROFILE_FIELDS) {
     const value = profileValue(profile, path);
     elements[id].value = Array.isArray(value)
       ? value.join("\n")
@@ -3171,7 +3167,7 @@ function characterFromForm({ forOrganization = false } = {}) {
     error.control = elements.characterName;
     throw error;
   }
-  if ((forOrganization || elements.characterCampaignUse.value !== "supporting") && !profileHasGuidance(profile) && !characterText && !(forOrganization && String(profile.unclassifiedNotes || "").trim())) {
+  if ((forOrganization || characterModalScope !== "campaign" && elements.characterCampaignUse.value !== "supporting") && !profileHasGuidance(profile) && !characterText && !(forOrganization && String(profile.unclassifiedNotes || "").trim())) {
     const error = new Error(forOrganization
       ? "Add notes, imported source guidance, or story details to organize."
       : "Add at least one story detail, such as a role or background, before saving.");
@@ -3483,7 +3479,7 @@ function setWorldAuthorStatus(message = "", type = "") {
 
 const WORLD_AUTHOR_STEPS = Object.freeze([
   { id: "basics", panel: "world-author-overview", next: "lore", nextLabel: "Continue to Lore" },
-  { id: "lore", panel: "world-author-lore", next: "character", nextLabel: "Continue to Playable character" },
+  { id: "lore", panel: "world-author-lore", next: "character", nextLabel: "Continue to Characters" },
   { id: "character", panel: "world-author-mechanics", next: "review", nextLabel: "Continue to Review" },
   { id: "review", panel: "world-author-review", next: "basics", nextLabel: "Back to Basics" }
 ]);
@@ -4151,7 +4147,7 @@ async function generateCharacterFromPrompt() {
     // Fields are populated only after a complete response has passed the client boundary checks.
     elements.characterName.value = previousName;
     elements.characterGuidance.value = previousGuidance;
-    for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+    for (const { path, world: { id } } of WORLD_PROFILE_FIELDS) {
       const value = profileValue(previousProfile, path);
       elements[id].value = Array.isArray(value) ? value.join("\n") : String(value || "");
     }
@@ -4165,7 +4161,7 @@ function renderCharacterProfileReview(result) {
   characterProfileOrganizationResult = result;
   elements.characterProfileReviewList.replaceChildren();
   const existingProfile = profileFromForm();
-  for (const [path] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+  for (const { path } of WORLD_PROFILE_FIELDS) {
     const value = profileValue(result.candidate, path);
     const existingValue = profileValue(existingProfile, path);
     const hasProposed = Array.isArray(value) ? value.length > 0 : Boolean(String(value || "").trim());
@@ -4274,7 +4270,7 @@ async function applyCharacterProfileReview() {
     return;
   }
   for (const [path, value] of Object.entries(stagedValues)) {
-    elements[CHARACTER_PROFILE_FIELDS[path]].value = Array.isArray(value) ? value.join("\n") : String(value || "");
+    elements[WORLD_PROFILE_FIELDS.find((field) => field.path === path).world.id].value = Array.isArray(value) ? value.join("\n") : String(value || "");
   }
   elements.characterProfileReviewDialog.close();
   setCharacterStatus("Selected proposals applied to the unsaved form. Save the character to persist them.", "success");
@@ -4286,7 +4282,7 @@ function campaignProfileEditorRecord(result) {
 
 function syncCampaignCharacterDraft() {
   elements.characterName.value = characterEditorDraft.values.name || "";
-  for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
+  for (const { path, world: { id } } of WORLD_PROFILE_FIELDS) {
     const value = characterEditorDraft.values[path];
     elements[id].value = Array.isArray(value) ? value.join("\n") : String(value || "");
   }
@@ -4371,10 +4367,14 @@ async function openCampaignCharacterDialog() {
       reapply(latest) { characterEditorDraft = reapplyEditorDraft(characterEditorDraft, campaignProfileEditorRecord(latest)); campaignCharacterProfileRevision = latest.revision; syncCampaignCharacterDraft(); },
       load(latest) { characterEditorDraft = createEditorDraft("campaign-main", campaignProfileEditorRecord(latest)); campaignCharacterProfileRevision = latest.revision; syncCampaignCharacterDraft(); },
       markConflict() { characterEditorDraft = markEditorConflict(characterEditorDraft); },
-      setLocked(locked) { setCharacterModalControls(locked); },
+      setLocked(locked) {
+        setCharacterModalControls(locked);
+        elements.recheckCampaignCharacterGeneration.hidden = !locked || controller.saving;
+        elements.recheckCampaignReviewGeneration.hidden = !locked || controller.saving;
+      },
       focus() { elements.characterName.focus(); },
       fieldControl(path) {
-        return elements[CHARACTER_PROFILE_FIELDS[path]] ?? elements.characterName;
+        return elements[WORLD_PROFILE_FIELDS.find((field) => field.path === path)?.world.id] ?? elements.characterName;
       }
     };
     const controller = createCampaignMainController(form, {
@@ -4417,7 +4417,6 @@ async function openCampaignCharacterDialog() {
     controller.setLocked(campaignCharacterLocked);
     setCampaignCharacterReviewLock();
     if (campaignCharacterLocked) setCharacterStatus("Finish or resolve generation before saving the character profile.");
-    campaignCharacterPoll = window.setInterval(() => void refreshCampaignCharacterLock(campaignId, controller), 2000);
     elements.characterName.focus();
   } catch (error) {
     if (openEpoch !== campaignCharacterOpenEpoch || selectedCampaign?.id !== campaignId) return;
@@ -4637,7 +4636,7 @@ async function loadWorldVersionPlayableCharacters(selection = {}) {
   }
   setWorldCampaignReadiness("Checking whether the selected world version is campaign-ready…");
   try {
-    const response = await api(`/api/v1/world-versions/${encodeURIComponent(worldVersionId)}/playable-characters`);
+    const response = await characterApi.worlds.playableCharacters(worldVersionId);
     if (!isCurrent()) return;
     worldVersionCharacters = Array.isArray(response.characters) ? response.characters : [];
     const hasReadinessAssessment = response.readiness && typeof response.readiness.ready === "boolean";
@@ -4942,12 +4941,22 @@ function renderStartingCast(session) {
     elements.startingCastNotice.textContent = "Starting cast will be available when characters load.";
     return;
   }
-  const candidates = session.castCandidates.filter((item) => item.campaignUse !== "playable" && item.id !== elements.newCampaignCharacter.value);
+  const mainCharacterId = elements.newCampaignCharacter.value;
+  const candidates = session.castCandidates.filter((item) => item.campaignUse !== "playable" && item.id !== mainCharacterId);
+  if (session.previousMainCharacterId !== mainCharacterId) {
+    const returning = candidates.find((item) => item.id === session.previousMainCharacterId);
+    const otherTicks = candidates.filter((item) => item !== returning && session.castSelections.get(item.id)?.selected).length;
+    if (returning && session.castSelections.get(returning.id)?.selected && otherTicks >= 30) {
+      session.castSelections.get(returning.id).selected = false;
+      session.castRestoreNotice = `${returning.name} was left unticked because 30 characters are already selected.`;
+    } else session.castRestoreNotice = "";
+    session.previousMainCharacterId = mainCharacterId;
+  }
   const selected = candidates.filter((item) => session.castSelections.get(item.id)?.selected);
-  const totalSelected = [...session.castSelections.values()].filter((item) => item.selected).length;
+  const totalSelected = selected.length;
   const pins = selected.filter((item) => session.castSelections.get(item.id)?.alwaysInContext).length;
   const contextNotice = castContextAvailable ? "Story Memory is set on the campaign after you create it." : castNarratorNotice("installation_disabled", "").text;
-  elements.startingCastNotice.textContent = `${selected.length} of 30 selected.${totalSelected >= 30 ? (selected.length < totalSelected ? " A selected main character is reserved; remove another selection to choose someone else." : " Remove a selection to choose another.") : ""}${pins > 5 ? " Always-included characters take up narrator context in every turn." : ""}${session.staleCast ? " Some unavailable selections were removed." : ""} ${contextNotice}`;
+  elements.startingCastNotice.textContent = `${selected.length} of 30 selected.${totalSelected >= 30 ? " Remove a selection to choose another." : ""}${session.castRestoreNotice ? " " + session.castRestoreNotice : session.castOverCap ? " Some characters were left unticked at the 30 limit." : ""}${pins > 5 ? " Always-included characters take up narrator context in every turn." : ""}${session.staleCast ? " Some unavailable selections were removed." : ""} ${contextNotice}`;
   if (!candidates.length) {
     const empty = document.createElement("p"); empty.textContent = "No Supporting characters available. Add NPCs in the world editor."; list.append(empty); return;
   }
@@ -4958,7 +4967,7 @@ function renderStartingCast(session) {
     const row = document.createElement("div"); row.className = "starting-cast-row";
     const label = document.createElement("label");
     const tick = document.createElement("input"); tick.type = "checkbox"; tick.checked = state.selected; tick.disabled = createCampaignSubmitting || createCampaignCommitted || (!state.selected && totalSelected >= 30);
-    tick.addEventListener("change", () => { state.selected = tick.checked; renderStartingCast(session); });
+    tick.addEventListener("change", () => { state.selected = tick.checked; session.castRestoreNotice = ""; renderStartingCast(session); });
     label.append(tick, document.createTextNode(` ${item.name}${item.role ? ` · ${item.role}` : ""}`)); row.append(label);
     const pinLabel = document.createElement("label"); const pin = document.createElement("input"); pin.type = "checkbox"; pin.checked = state.alwaysInContext; pin.disabled = createCampaignSubmitting || createCampaignCommitted || !state.selected;
     pin.addEventListener("change", () => { state.alwaysInContext = pin.checked; renderStartingCast(session); });
@@ -4995,6 +5004,7 @@ async function loadCampaignCreationCharacters(session) {
     for (const item of candidates) if (!session.castSelections.has(item.id)) {
       const selected = item.campaignUse !== "playable" && item.id !== (session.initialDraft?.selectedCharacterId || (characters.length === 1 ? characters[0].id : "")) && item.startingCastDefault && selectedCount < 30;
       if (selected) selectedCount++;
+      else if (item.startingCastDefault && item.campaignUse !== "playable" && selectedCount >= 30) session.castOverCap = true;
       session.castSelections.set(item.id, { selected, alwaysInContext: item.alwaysInContext === true });
     }
     session.castCandidates = candidates;
@@ -5145,7 +5155,7 @@ async function createCampaignFromWorld(event) {
         notice = { text: "Character context status could not be checked.", href: "/app/settings?section=campaign&campaignId=" + encodeURIComponent(campaign.id), label: "Campaign settings" };
       }
     }
-    if (skipped.length || notice?.href) {
+    if (skipped.length) {
       const messages = skipped.map((item) => item.reason === "invalid_name"
         ? `${item.name}: character was skipped because its name is invalid.`
         : `${item.name}: invalid aliases were omitted: ${item.aliases.join(", ")}.`);
@@ -7749,7 +7759,7 @@ elements.convertEntities.addEventListener("click", () => {
       if (row.keep.checked && normalize(name) !== normalize(row.preview.name)
         && profile.identity.aliases.length < 20
         && !profile.identity.aliases.some((alias) => normalize(alias) === normalize(row.preview.name))) profile.identity.aliases.push(row.preview.name);
-      roster.push({ id, name, profile, characterText: row.preview.characterText, campaignUse: "supporting", startingCastDefault: false,
+      roster.push({ id, name, profile, characterText: "", campaignUse: "supporting", startingCastDefault: false,
         alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: { type: "world-entity", entityId: row.preview.entityId } });
       links.set(row.preview.entityId, id);
     }
@@ -7780,6 +7790,11 @@ characterReviewLockNotice.setAttribute("role", "status");
 characterReviewLockNotice.className = "field-note";
 elements.applyCharacterProfileReview.parentElement.before(characterReviewLockNotice);
 elements.characterReviewLockNotice = characterReviewLockNotice;
+for (const control of [elements.recheckCampaignCharacterGeneration, elements.recheckCampaignReviewGeneration]) {
+  control.addEventListener("click", () => {
+    if (selectedCampaign && campaignCharacterController) void refreshCampaignCharacterLock(selectedCampaign.id, campaignCharacterController);
+  });
+}
 elements.cancelCharacterProfileReview.addEventListener("click", () => {
   characterProfileOrganizationResult = null;
   elements.characterProfileReviewDialog.close();
@@ -7791,8 +7806,8 @@ const campaignCastPanel = createLegacyCastPanel({
   generationActive: () => false,
   checkLock: async id => campaignCharacterGenerationLocked(await characterApi.generation.syncStatus(id)),
   getProfile: id => characterApi.campaigns.getCharacterProfile(id),
-  openProtagonist: onClose => {
-    elements.characterDialog.addEventListener("close", () => onClose?.(elements.characterDialog.returnValue === "saved"), { once: true });
+  openProtagonist: afterClose => {
+    elements.characterDialog.addEventListener("close", () => afterClose?.(elements.characterDialog.returnValue === "saved"), { once: true });
     void openCampaignCharacterDialog();
   },
   navigateToTurn: async turn => { if (selectedCampaign) window.location.assign("/story/" + encodeURIComponent(selectedCampaign.id) + "?turn=" + encodeURIComponent(turn)); }
@@ -7805,8 +7820,8 @@ elements.characterDialog.addEventListener("close", () => {
   suggestionApply = null;
   ++campaignCharacterOpenEpoch;
   ++campaignCharacterLockEpoch;
-  if (campaignCharacterPoll) window.clearInterval(campaignCharacterPoll);
-  campaignCharacterPoll = null;
+  elements.recheckCampaignCharacterGeneration.hidden = true;
+  elements.recheckCampaignReviewGeneration.hidden = true;
   campaignCharacterController?.dispose();
   campaignCharacterController = null;
   campaignCharacterLocked = false;

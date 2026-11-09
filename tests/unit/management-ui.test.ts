@@ -1477,7 +1477,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("playableCharactersFromContent(worldAuthorWorkingContent)");
     expect(managementScript).not.toContain("Legacy/default character");
     expect(managementScript).toMatch(/async function loadWorldVersionPlayableCharacters\(selection = \{\}\)/);
-    expect(managementScript).toContain('/playable-characters`');
+    expect(managementScript).toContain("characterApi.worlds.playableCharacters(worldVersionId)");
     expect(managementScript).toContain("selectedCharacterId");
     expect(managementScript).toContain("const characterCount = Array.isArray(preview.characters) ? preview.characters.length : 0;");
     expect(managementScript).toContain("all ${characterCount} playable character");
@@ -1489,7 +1489,7 @@ describe("Nexus management UI contracts", () => {
     const elements = { characterName: { value: "Mira" }, characterGuidance: { value: "" }, characterRole: {}, characterUnclassifiedNotes: {}, characterCampaignUse: { value: "playable" }, characterStartingCastDefault: { checked: true }, characterAlwaysInContext: { checked: false } };
     const profile = { story: { role: "" }, unclassifiedNotes: "A patient guide" };
     const { characterFromForm } = managementFunctions<{ characterFromForm: (options?: { forOrganization: boolean }) => unknown }>(["characterFromForm"], {
-      elements, profileFromForm: () => profile, profileHasGuidance: () => false,
+      elements, profileFromForm: () => profile, profileHasGuidance: () => false, characterModalScope: "world", editingCharacterId: "",
       characterModalWorkingCharacter: { id: "mira", extension: "preserved" }, opaqueCharacterId: () => "new", characterRowsFromForm: () => []
     });
     expect(characterFromForm({ forOrganization: true })).toMatchObject({ name: "Mira", profile, extension: "preserved" });
@@ -1512,7 +1512,7 @@ describe("Nexus management UI contracts", () => {
       ["world", null, true, false], ["world", {}, false, true], ["campaign", null, false, false]
     ] as const) {
       const { updateCharacterGeneratorAvailability } = managementFunctions<{ updateCharacterGeneratorAvailability: () => boolean }>(["updateCharacterGeneratorAvailability"], {
-        elements, characterModalScope: scope, configuredDefaultTextProvider: () => provider, worldAuthorWorkingContent: {}, worldAuthorMode: "create", characterModalBusy: false
+        elements, characterModalScope: scope, configuredDefaultTextProvider: () => provider, worldAuthorWorkingContent: {}, worldAuthorMode: "create", characterModalBusy: false, suggestionApply: null
       });
       expect(updateCharacterGeneratorAvailability()).toBe(generatorVisible);
       expect(elements.characterGeneratorUnavailable!.classList.contains("hidden")).toBe(!fallbackVisible);
@@ -1538,7 +1538,7 @@ describe("Nexus management UI contracts", () => {
     let requested = false;
     const { generateCharacterFromPrompt } = managementFunctions<{ generateCharacterFromPrompt: () => Promise<void> }>(["generateCharacterFromPrompt"], {
       elements, worldAuthorBusy: false, characterModalScope: "world", worldAuthorWorkingContent: {}, characterModalBusy: false,
-      configuredDefaultTextProvider: () => ({}), window: { confirm: () => false }, CHARACTER_PROFILE_FIELDS: {},
+      configuredDefaultTextProvider: () => ({}), window: { confirm: () => false }, WORLD_PROFILE_FIELDS: [],
       profileFromForm: () => ({}), setCharacterModalControls: () => {}, setCharacterStatus: () => {},
       worldContentFromForm: () => ({}), editingCharacterId: "", api: async () => { requested = true; return {}; }
     });
@@ -1555,8 +1555,7 @@ describe("Nexus management UI contracts", () => {
       elements, document, HTMLElement: document.defaultView!.HTMLElement, selectedCampaign: { id: "campaign" }, characterApi: { campaigns: { getCharacterProfile: async () => ({ name: "Mira", profile: {} }) }, generation: { syncStatus: async () => ({ pendingGeneration: null, generationRecovery: null }) } },
       campaignProfileEditorRecord: (profile: unknown) => profile, setCampaignCharacterReviewLock: () => {},
       createCampaignMainController: () => ({ setLocked: () => {} }),
-      campaignCharacterController: null, campaignCharacterLocked: false, campaignCharacterPoll: null, campaignCharacterOpenEpoch: 0, campaignCharacterGenerationLocked: () => false,
-      window: { setInterval: () => 1 },
+      campaignCharacterController: null, campaignCharacterLocked: false, campaignCharacterOpenEpoch: 0, campaignCharacterGenerationLocked: () => false,
       characterModalScope: "world", campaignCharacterProfileRevision: 0, editingCharacterId: "",
       characterProfileOrganizationResult: null,
       populateCharacterForm: () => {}, setCharacterStatus: () => {}, setCharacterModalControls: () => {}, openEditDialog: () => {},
@@ -1588,7 +1587,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementCss).toContain(".character-dialog-modal");
     expect(managementCss).toContain(".character-edit-row");
     expect(managementCss).toContain(".character-roster-card:hover");
-    expect(managementScript).toContain("function openCharacterDialog(characterId = \"\")");
+    expect(managementScript).toContain('function openCharacterDialog(characterId = "", preview = null, apply = null)');
     expect(managementScript).toContain('card.addEventListener("click", () => openCharacterDialog(character.id));');
     expect(managementScript).toContain('elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());');
     expect(managementScript).toContain("function updateWorldAuthorCharacters(characters)");
@@ -2818,7 +2817,7 @@ it("preserves comma-containing aliases and untouched profile extensions when rea
   const elements = { characterAliases: { value: "Vale, Mira\nThe Fox" }, characterRole: { value: "Guide" } };
   const { profileFromForm } = managementFunctions<{ profileFromForm: () => any }>(["profileFromForm"], {
     characterModalWorkingCharacter: character, characterEditorDraft: createEditorDraft("world-draft", character),
-    CHARACTER_PROFILE_FIELDS: { "identity.aliases": "characterAliases", "story.role": "characterRole" }, elements,
+    WORLD_PROFILE_FIELDS: [{ path: "identity.aliases", world: { id: "characterAliases" } }, { path: "story.role", world: { id: "characterRole" } }], elements,
     setEditorDraftField, projectEditorProfile
   });
   expect(profileFromForm()).toMatchObject({ identity: { aliases: ["Vale, Mira", "The Fox"], custom: "retained" }, story: { role: "Guide" } });
@@ -2834,7 +2833,7 @@ it("shows the admission message and reference for Generate and Organize", async 
   const status = document.createElement("div");
   const common = {
     elements, worldAuthorBusy: false, characterModalScope: "world", worldAuthorWorkingContent: {}, characterModalBusy: false,
-    configuredDefaultTextProvider: () => ({}), window: { confirm: () => true }, CHARACTER_PROFILE_FIELDS: {},
+    configuredDefaultTextProvider: () => ({}), window: { confirm: () => true }, WORLD_PROFILE_FIELDS: [],
     profileFromForm: () => ({}), setCharacterModalControls: () => {}, setCharacterStatus: (message: string) => { status.textContent = message; },
     worldContentFromForm: () => ({}), editingCharacterId: "", characterApi: { worlds: {
       generateCharacterPreview: async () => { throw error; }, organizeCharacter: async () => { throw error; }

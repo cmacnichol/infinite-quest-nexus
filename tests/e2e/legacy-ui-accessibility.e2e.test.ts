@@ -136,7 +136,7 @@ test("tab_selected_and_panel_consistent", async ({ page }) => {
   await expect(page.locator("#world-author-overview")).toBeHidden();
   await page.locator("#worldAuthorNextStep").click();
   await expectTabGroupState(tabs);
-  await expect(tabs.getByRole("tab", { name: "Playable character" })).toHaveAttribute("aria-selected", "true");
+  await expect(tabs.getByRole("tab", { name: "Characters" })).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#world-author-mechanics")).toBeVisible();
   await page.locator("#cancelWorldAuthor").click();
   await expect(page.locator("#worldAuthorDialog")).toBeHidden();

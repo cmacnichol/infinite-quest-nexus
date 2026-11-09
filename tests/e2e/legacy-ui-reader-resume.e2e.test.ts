@@ -10,7 +10,7 @@ import {
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 const alternateTurnId = "99999999-9999-4999-8999-999999999999";
-const screenshotDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T11-fix2/screenshots";
+const screenshotDirectory = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T11-fix2/screenshots";
 
 declare global {
   interface Window {
@@ -120,8 +120,8 @@ async function watchReaderPositionWrites(page: Page): Promise<void> {
   });
 }
 
-async function installExactTurnRoute(page: Page, fixture: ReturnType<typeof legacyUiFixture>, getTurn: () => Record<string, unknown>) {
-  const path = `**/api/v1/campaigns/${fixture.campaignId}/reader/turns/12`;
+async function installExactTurnRoute(page: Page, fixture: ReturnType<typeof legacyUiFixture>, getTurn: () => Record<string, unknown>, turnNumber = 12) {
+  const path = `**/api/v1/campaigns/${fixture.campaignId}/reader/turns/${turnNumber}`;
   let requests = 0;
   await page.route(path, async (route) => {
     requests += 1;
@@ -550,12 +550,14 @@ test("a pinned resumed turn supports accepted-neighbor History lookups", async (
 
   await page.locator("#btnTurnHistoryDone").click();
   await expect(page.locator("#readerTurnCount")).toHaveText("Turn 12 of 317");
-  await expect(page.locator("#btnPrev")).toBeDisabled();
+  await expect(page.locator("#btnPrev")).toBeEnabled();
   await expect(page.locator("#btnNext")).toBeEnabled();
+  const nextLookupCount = await installExactTurnRoute(page, fixture, () => fixture.turns[12]!, 13);
   await page.locator("#btnNext").click();
-  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 317 of 317");
-  await expect(page.locator("#scene-317")).toBeVisible();
+  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 13 of 317");
+  await expect(page.locator("#scene-13")).toBeVisible();
   expect(lookupCount()).toBe(1);
+  expect(nextLookupCount()).toBe(1);
 });
 test("a manual scroll cancels a pending exact-turn restore", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });

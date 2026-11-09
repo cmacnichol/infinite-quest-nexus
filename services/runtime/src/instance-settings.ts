@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { deploymentSettingsPolicySchema, instanceSettingsSchema, settingsFeatureGatesSchema, type DeploymentSettingsPolicy, type InstanceSettings } from "../../../packages/contracts/src/instance-settings.js";
-import { deriveSettingsPolicyForLocalMode, resolveInstanceSettings, resolveRequestPolicy } from "../../../packages/domain/src/instance-settings.js";
+import { deriveSettingsPolicyForLocalMode, LOCAL_PANEL_GATES, resolveInstanceSettings, resolveRequestPolicy } from "../../../packages/domain/src/instance-settings.js";
 import { validateSettingsPolicy, type SettingsState } from "../../../packages/application/src/settings/index.js";
 import { createInstanceSettingsRepository } from "../../../packages/database/src/instance-settings-repository.js";
 import { withTransaction } from "../../../packages/database/src/pool.js";
@@ -42,7 +42,7 @@ export function resolveRuntimeSettingsState(state:SettingsState, bootstrap:Runti
   const effectivePolicy = deriveSettingsPolicyForLocalMode(policy, bootstrap.instanceSettingsAccessMode === "local-single-user" && !bootstrap.instanceSettingsPolicyFile);
   validateSettingsPolicy(state.active,effectivePolicy,resolveInstanceSettings);
   const gates=Object.fromEntries(Object.keys(settingsFeatureGatesSchema.shape).map(key => [key, effectivePolicy.featureGates[key as keyof typeof effectivePolicy.featureGates]])) as typeof policy.featureGates;
-  for(const key of Object.keys(settingsFeatureGatesSchema.shape) as (keyof typeof gates)[]) gates[key] = gates[key] === true && (bootstrap.instanceSettingsAccessMode === "local-single-user" && (key === "castPresetsEnabled" || key === "castContextWithoutDiscoveryEnabled") || bootstrap[key]===true);
+  for(const key of Object.keys(settingsFeatureGatesSchema.shape) as (keyof typeof gates)[]) gates[key] = gates[key] === true && (bootstrap.instanceSettingsAccessMode === "local-single-user" && LOCAL_PANEL_GATES.has(key) || bootstrap[key]===true);
   const resolved=resolveInstanceSettings(state.active,{...effectivePolicy,featureGates:gates},{role:bootstrap.role,databaseMaxConnections:bootstrap.databaseMaxConnections});
   if(!resolved.ok) throw new Error('settings_policy_rejected');
   // Emergency deployment disables are honored but divergence cannot become healthy.

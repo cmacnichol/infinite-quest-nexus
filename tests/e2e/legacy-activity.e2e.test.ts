@@ -95,7 +95,7 @@ for (const width of [1440, 390]) {
     if (width === 390) await group.locator("pre").first().evaluate(node => node.scrollIntoView({ block: "start" }));
     const doneBounds = await page.locator("#btnCloseActivityLog").boundingBox();
     expect(doneBounds).not.toBeNull(); expect(doneBounds!.y).toBeGreaterThanOrEqual(0); expect(doneBounds!.y + doneBounds!.height).toBeLessThanOrEqual(844);
-    await page.screenshot({ path: `docs/review/assets/legacy-activity/error-details-${width}.png`, fullPage: false });
+    await page.screenshot({ path: `test-results/review-assets/legacy-activity/error-details-${width}.png`, fullPage: false });
     await page.keyboard.press("Escape"); await expect(page.locator("#activityLogDialog")).not.toBeVisible(); expect(api.errors).toEqual([]); expect(api.writes).toEqual([]);
   });
   test(`legacy activity ${width} cached delayed reconnect and image failure preserve accepted story`, async ({ page }) => {
@@ -105,10 +105,10 @@ for (const width of [1440, 390]) {
     await expect(page.locator("#activityLogList")).toContainText("Illustration");
     await page.locator("#activityLogFilter").selectOption("illustrations"); await page.locator(".activity-log-entry summary").click();
     await expect(page.locator("#activityLogList")).toContainText("image_failed");
-    await page.screenshot({ path: `docs/review/assets/legacy-activity/image-failure-${width}.png`, fullPage: false });
+    await page.screenshot({ path: `test-results/review-assets/legacy-activity/image-failure-${width}.png`, fullPage: false });
     await page.locator("#activityLogFilter").selectOption("all"); api.offline(true); await refresh(page);
     await expect(page.locator("#activityLogNotices")).toContainText("History may be delayed"); await expect(page.locator("#activityLogNotices")).toContainText("Showing cached activity");
-    await page.screenshot({ path: `docs/review/assets/legacy-activity/cache-reconnect-${width}.png`, fullPage: false });
+    await page.screenshot({ path: `test-results/review-assets/legacy-activity/cache-reconnect-${width}.png`, fullPage: false });
     api.offline(false); await refresh(page); await expect(page.locator("#activityLogNotices")).not.toContainText("History may be delayed");
     await page.keyboard.press("Escape"); await expect(page.locator("#scene-1")).toContainText("The platform is quiet"); expect(api.writes).toEqual([]); expect(api.errors).toEqual([]);
   });

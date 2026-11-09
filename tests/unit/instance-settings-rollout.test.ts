@@ -61,6 +61,8 @@ it("reconstructs the original local policy digest while permitting the new contr
   oldPolicy.version = 1;
   delete oldPolicy.featureGates.castPresetsEnabled;
   delete oldPolicy.featureGates.castContextWithoutDiscoveryEnabled;
+  oldPolicy.featureGates.castContextEnabled = seed.snapshot.castContextEnabled;
+  oldPolicy.featureGates.castEditingEnabled = seed.snapshot.castEditingEnabled;
   const digest = settingsDigest(oldPolicy);
   const pool = { query: async (sql: string) => sql.includes("instance_settings_state")
     ? { rows: [{ installation_id: installationId, mode: "database", schema_version: 1, active_revision: "1", requested_revision: "1", activation_epoch: "1", active: oldSnapshot, requested: oldSnapshot, policy_digest: digest }] }

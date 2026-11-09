@@ -218,7 +218,7 @@ integration("World Library and campaign version integration", () => {
     onTestFinished(() => browser.close());
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     const webOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-    const screenshotRoot = resolve(process.env.CAST_SCREENSHOT_ROOT ?? "docs/review/assets/unified-character-editor-phase-4");
+    const screenshotRoot = resolve(process.env.CAST_SCREENSHOT_ROOT ?? "test-results/review-assets/unified-character-editor-phase-4");
     await page.route("**/api/v1/**", async route => {
       const requestUrl = new URL(route.request().url());
       const response = await route.fetch({ url: `${origin}${requestUrl.pathname}${requestUrl.search}`, headers: { ...route.request().headers(), origin } });
@@ -248,9 +248,13 @@ integration("World Library and campaign version integration", () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     const row = await pool.query<{ id: string }>("SELECT id FROM campaigns WHERE world_version_id=$1 AND title=$2", [published.worldVersionId, "Browser cast campaign"]);
     const campaignId = row.rows[0]!.id;
-    await page.goto(`${webOrigin}/nexus/index.html?proof=cast#campaigns?campaignId=${campaignId}`);
-    await browserExpect(page.locator(`#campaignList [data-campaign-id="${campaignId}"]`)).toBeVisible();
-    await page.locator("#editCampaignCharacter").click();
+    async function openCampaignCast(proof: string) {
+      await page.goto(`${webOrigin}/nexus/index.html?proof=${proof}#campaigns?campaignId=${campaignId}`);
+      await browserExpect(page.locator("#nexusVersion")).toHaveText(/^v.+/);
+      await browserExpect(page.locator(`#campaignList [data-campaign-id="${campaignId}"]`)).toBeVisible();
+      await page.locator("#editCampaignCharacter").click();
+    }
+    await openCampaignCast("cast");
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Ally", exact: true }).first().click();
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true }).click();
     await page.locator("#cast-story-role").fill("Campaign guide");
@@ -269,8 +273,7 @@ integration("World Library and campaign version integration", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: resolve(screenshotRoot, "story-deep-link-390.png") });
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(`${webOrigin}/nexus/index.html?proof=return#campaigns?campaignId=${campaignId}`);
-    await page.locator("#editCampaignCharacter").click();
+    await openCampaignCast("return");
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Ally", exact: true }).first().click();
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true }).click();
     await page.screenshot({ path: resolve(screenshotRoot, "reset-restore-controls-1440.png") });
@@ -297,8 +300,7 @@ integration("World Library and campaign version integration", () => {
     const nextVersion = await publishWorld(pool, world.id, worldPublishSchema.parse({ expectedRevision: nextDraft.revision }));
     await migrateCampaignWorld(pool, campaignId, campaignWorldMigrationSchema.parse({ worldVersionId: nextVersion.worldVersionId }));
     await rewindCampaign(pool, campaignId, { targetTurnNumber: 0 });
-    await page.goto(`${webOrigin}/nexus/index.html?proof=migrated#campaigns?campaignId=${campaignId}`);
-    await page.locator("#editCampaignCharacter").click();
+    await openCampaignCast("migrated");
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Ally", exact: true }).first().click();
     await browserExpect(page.locator("#campaignCastDialog")).toContainText("World goal");
     await (await import("node:fs/promises")).mkdir(screenshotRoot, { recursive: true });

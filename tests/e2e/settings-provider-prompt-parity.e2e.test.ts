@@ -5,7 +5,7 @@ import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-lib
 const base = `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}`;
 const legacy = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 const mode = process.env.VITE_UI_COMPONENTS === "web-awesome" ? "web-awesome" : "native";
-const folder = "docs/review/assets/settings-panel";
+const folder = "test-results/review-assets/settings-panel";
 const fixture = quietLeafApiPayloads();
 const template = { ...PROMPT_TEMPLATE_CATALOG.story_system, effectiveSource: "shipped", effectiveContent: "Fixture instructions." };
 async function api(page: Page) {

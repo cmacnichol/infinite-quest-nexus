@@ -2,7 +2,7 @@ import { createStoryDraftReview } from "./character-editor/story-draft.js";
 import { renderPresetFields } from "./character-editor/preset-fields.js";
 import { renderWorldCastPicker } from "./character-editor/world-cast-picker.js";
 import { castNarratorNotice, buildPresetRequest, changePresetField, createPresetDraft, presetField, presetFields, SUPPORTING_FIELDS, type PresetDraft } from "@infinite-quest/client-core";
-import { renderSupportingEditorFields } from "./character-editor/renderer.js";
+import { createCastTextField, listTextareaLimit, renderSupportingEditorFields } from "./character-editor/renderer.js";
 import { renderCastReview } from "./cast-review-queue.js";
 import { buildCharacterSheet, canSaveCastEditor, createCastEditor, changeCastEditor, setCastEditorField, prepareCastSubmission,
   failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, characterProvenanceLabel, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
@@ -46,6 +46,10 @@ export function createLegacyCastPanel(options: {
     lockedByServer = active;
     if (changed && editingForm && !saving) renderEditor();
     return !locked();
+  }
+  function showEditorLock() {
+    status("Finish or resolve the current generation before editing characters. Your draft is preserved.");
+    if (options.campaignPage) dialog.append(button("Check generation status", () => { void syncLock(); }));
   }
   let latestRoster: List | null = null;
   let discovery: CastDiscoveryStatus | null = null;
@@ -320,7 +324,7 @@ export function createLegacyCastPanel(options: {
     controls.addEventListener("submit", (event) => { event.preventDefault(); query = search.value; workspace.setQuery(query, filter); void loadRoster(); });
     dialog.append(controls);
     if (!enabled) status("Character editing is disabled. Saved characters remain available to read.");
-    else if (locked()) status("Finish or resolve the current generation before editing characters.");
+    else if (!options.campaignPage && locked()) status("Finish or resolve the current generation before editing characters.");
     else dialog.append(button("Add character", async () => {
       const token = epoch;
       if (options.checkLock) await syncLock();
@@ -488,7 +492,7 @@ export function createLegacyCastPanel(options: {
     shell("Character details"); editingForm = true;
     const form = node("form"); form.className = "cast-editor"; form.dataset.characterContext = "campaign-preset";
     const readonly = locked() || !enabled || saving;
-    if (locked()) status("Finish or resolve the current generation before editing characters. Your draft is preserved.");
+    if (locked()) showEditorLock();
     const save = node("button", saving ? "Saving…" : "Save character"); save.type = "submit"; save.id = "cast-save";
     const changed = () => { save.disabled = readonly || !dirty() || Boolean(editor?.conflict); };
     renderPresetFields(form, state, readonly, changed, expanded, options.campaignPage
@@ -535,17 +539,15 @@ export function createLegacyCastPanel(options: {
       const opener = button("Edit main character", () => { options.openProtagonist(() => { if (dialog.open && opener.isConnected) opener.focus(); }); });
       dialog.append(opener);
     } else if (!enabled) status("Character editing is disabled. Your draft is kept here until you close it.");
-    else if (lockedByServer || options.generationActive()) status("Finish or resolve the current generation before editing characters.");
+    else if (lockedByServer || options.generationActive()) showEditorLock();
     const form = node("form"); form.className = "cast-editor";
     form.dataset.characterContext = "campaign-supporting";
     form.append(node("p", editor.characterId ? "Saved facts are filled in. Edit only what needs changing." : "Only a name is required. Add details you know, or review story matches to fill characters from evidence."));
     const save = node("button", editor.saving ? "Saving…" : "Save character"); save.type = "submit"; save.className = "primary"; save.id = "cast-save";
     const syncSave = () => { save.disabled = Boolean(locked) || !canSaveCastEditor(editor!); };
     function textInput(label: string, id: string, value: string, max: number, changed: (value: string) => void, multiline = false) {
-      const wrap = node("div"), caption = node("label", label); caption.htmlFor = id;
-      const input = multiline ? node("textarea") : node("input"); input.id = id; input.value = value; input.maxLength = max;
-      input.disabled = Boolean(locked); input.addEventListener("input", () => { changed(input.value); syncSave(); });
-      wrap.append(caption, input); form.append(wrap); return wrap;
+      const wrap = createCastTextField(document, { label, id, value, maxLength: max, multiline, disabled: Boolean(locked), onInput(text) { changed(text); syncSave(); } });
+      form.append(wrap); return wrap;
     }
     const nameWrap = textInput("Name", "cast-name", editor.draft.name, 200, (name) => { editor = changeCastEditor(editor!, { name }); updateDuplicateWarning(); });
     const duplicateWarning = node("p"); duplicateWarning.setAttribute("role", "status"); nameWrap.append(duplicateWarning);
@@ -568,8 +570,8 @@ export function createLegacyCastPanel(options: {
       duplicateWarning.textContent = duplicate ? "A character with this name already exists. You can still save." : "";
     }
     updateDuplicateWarning();
-    textInput("Aliases (one per line)", "cast-aliases", editor.draft.aliases.join("\n"), 4020,
-      (value) => { editor = changeCastEditor(editor!, { aliases: value.split("\n").map((v) => v.trim()).filter(Boolean) }); }, true);
+    textInput("Aliases (one per line)", "cast-aliases", editor.draft.aliases.join("\n"), listTextareaLimit(200, 20),
+      (value) => { editor = changeCastEditor(editor!, { aliases: value.split("\n").map((v) => v.trim()).filter(Boolean) }); updateDuplicateWarning(); }, true);
     renderSupportingEditorFields(form, { expanded, existing: Boolean(editor.characterId), field(path, label) {
       const field = path as CastField;
       const wrap = textInput(label, `cast-${field.replace(".", "-")}`, editor!.draft.profile[field] ?? "", 2000,
@@ -722,6 +724,6 @@ export function createLegacyCastPanel(options: {
     shell("Characters"); dialog.showModal(); workspace.open(campaign); await loadRoster();
     if (!dialog.open || campaign !== id) return;
     if (characterId) await openDetail(characterId);
-    if (options.checkLock && dialog.open) lockPoll = setInterval(() => { if (editingForm && !saving) void syncLock(); }, 2000);
+    if (!options.campaignPage && options.checkLock && dialog.open) lockPoll = setInterval(() => { if (editingForm && !saving) void syncLock(); }, 2000);
   } };
 }

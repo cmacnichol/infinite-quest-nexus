@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T12");
+const evidenceDirectory = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T12");
 const savedPreferences: ReaderPreferences = { widthCh: 72, fontSizePx: 18, lineHeight: 1.7, theme: "dark" };
 type ThemeMetricValue = number | string | boolean | Record<string, string | number | boolean | Record<string, string>>;
 

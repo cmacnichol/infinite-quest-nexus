@@ -230,6 +230,7 @@ async function installJourneyApi(page: Page, options: { readonly imageFailure?: 
       const characters = version ? selectedCharacters(version.content) : [];
       return respond({
         characters: characters.map(character => ({ id: character.id, name: character.name, rpgStatCount: 0, defaultTriggerCount: 0 })),
+        startingCastCandidates: [],
         readiness: { ready: characters.length > 0, issues: [] }
       });
     }
@@ -262,7 +263,22 @@ async function installJourneyApi(page: Page, options: { readonly imageFailure?: 
         worldVersionId: campaign.worldVersionId,
         worldVersionNumber: campaign.worldVersionNumber
       });
-      return respond({ id: campaignId, title: campaign.title, selectedCharacterName: "Mira Vale" }, 201);
+      return respond({
+        id: campaignId,
+        title: campaign.title,
+        status: "active",
+        activeTurnNumber: 0,
+        storyLengthProfile: "standard",
+        storyContextBudgetTokens: 32000,
+        worldId,
+        worldVersionId: campaign.worldVersionId,
+        worldVersionNumber: campaign.worldVersionNumber,
+        selectedCharacterId: campaign.selectedCharacterId,
+        selectedCharacterName: "Mira Vale",
+        skippedStartingCast: [],
+        textProviderProfileId: null,
+        imageProviderProfileId: null
+      }, 201);
     }
 
     if (path.startsWith("/api/v1/generation-jobs/") && method === "GET") {

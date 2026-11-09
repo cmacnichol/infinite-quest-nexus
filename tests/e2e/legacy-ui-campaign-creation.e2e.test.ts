@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T20");
+const evidenceDirectory = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T20");
 
 async function installCreationApi(page: Page, worldCount = 1) {
   const fixture = legacyUiFixture({ turnCount: 0, worldCount, campaignCount: 0 });
@@ -24,13 +24,13 @@ async function installCreationApi(page: Page, worldCount = 1) {
       creates.push(route.request().postDataJSON() as Record<string, unknown>);
       if (failNextCreate) {
         failNextCreate = false;
-        return route.fulfill({ status: 503, json: { message: "Campaign create failed." } });
+        return route.fulfill({ status: 503, json: { error: "ServiceUnavailable", message: "Campaign create failed." } });
       }
       await holdCreate;
       return route.fulfill({ status: 201, json: { id: "00000000-0000-4000-8000-000000000099", title: "A campaign", status: "active", activeTurnNumber: 0, storyLengthProfile: "standard", storyContextBudgetTokens: 32000, worldId: fixture.worlds[0]!.id, worldVersionId: "00000000-0000-4000-8000-000000000098", worldVersionNumber: 1, selectedCharacterId: "fixture-observer", selectedCharacterName: "The Observer", textProviderProfileId: null, imageProviderProfileId: null } });
     }
     if (route.request().method() === "GET" && failCampaignRefresh) {
-      return route.fulfill({ status: 503, json: { message: "Campaign list refresh failed." } });
+      return route.fulfill({ status: 503, json: { error: "fixture_error", message: "Campaign list refresh failed." } });
     }
     return route.fallback();
   });
@@ -314,27 +314,45 @@ for (const intent of ["Create only", "Create and start"]) {
   });
 }
 
-test("starting cast caps defaults and keeps ticks across protagonist switches", async ({ page }) => {
-  await installCreationApi(page);
+test("starting cast caps defaults and keeps ticks across protagonist switches", async ({ page }, info) => {
+  const api = await installCreationApi(page);
   await page.route("**/api/v1/meta", route => route.fulfill({ json: { application: { version: "fixture" }, capabilities: { castPresets: true } } }));
   const candidates = Array.from({ length: 31 }, (_, i) => ({ id: `cast-${i}`, name: `Companion ${i}`, campaignUse: i === 0 ? "both" : "supporting", startingCastDefault: true, alwaysInContext: i < 6, role: "", summary: "" }));
+  candidates[0]!.name = "River guide";
+  candidates[30]!.name = "River scout";
   await page.route("**/api/v1/world-versions/*/playable-characters", route => route.fulfill({ json: {
-    characters: [{ id: "fixture-observer", name: "The Observer", rpgStatCount: 0, defaultTriggerCount: 0 }, { id: "cast-0", name: "Companion 0", rpgStatCount: 0, defaultTriggerCount: 0 }],
+    characters: [{ id: "fixture-observer", name: "The Observer", rpgStatCount: 0, defaultTriggerCount: 0 }, { id: "cast-0", name: "River guide", rpgStatCount: 0, defaultTriggerCount: 0 }],
     startingCastCandidates: candidates, readiness: { ready: true, issues: [] }
   } }));
   await openDashboardCreation(page);
   await fillCampaignBasics(page);
   await expect(page.locator("#startingCastNotice")).toContainText("30 of 30");
   await expect(page.locator("#startingCastNotice")).toContainText("take up narrator context");
-  await expect(page.getByLabel("Companion 30", { exact: true })).toBeDisabled();
+  const last = page.getByLabel("River scout", { exact: true });
+  const returning = page.getByLabel("River guide", { exact: true });
+  await expect(last).toBeDisabled();
   await page.locator("#newCampaignCharacter").selectOption("cast-0");
-  await expect(page.locator("#startingCastNotice")).toContainText("selected main character is reserved");
-  await expect(page.getByLabel("Companion 30", { exact: true })).toBeDisabled();
+  await expect(page.locator("#startingCastNotice")).toContainText("29 of 30");
+  await expect(last).toBeEnabled();
   await page.locator("#newCampaignCharacter").selectOption("fixture-observer");
-  await expect(page.getByLabel("Companion 0", { exact: true })).toBeChecked();
+  await expect(returning).toBeChecked();
   await expect(page.locator("#startingCastNotice")).toContainText("30 of 30");
   await page.setViewportSize({ width: 390, height: 844 });
   if (process.env.CAST_SCREENSHOT_ROOT) await page.screenshot({ path: resolve(process.env.CAST_SCREENSHOT_ROOT, "starting-cast-mobile.png") });
+  await page.locator("#newCampaignCharacter").selectOption("cast-0");
+  await last.check();
+  await page.locator("#newCampaignCharacter").selectOption("fixture-observer");
+  await expect(last).toBeChecked();
+  await expect(returning).not.toBeChecked();
+  await expect(returning).toBeDisabled();
+  await expect(page.locator("#startingCastNotice")).toContainText("River guide was left unticked because 30 characters are already selected.");
+  await page.locator("#startingCastSearch").fill("River");
+  await page.locator("#startingCastNotice").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: process.env.EDITOR_FINAL_EVIDENCE
+    ? resolve(process.env.EDITOR_FINAL_EVIDENCE, "starting-cast-at-capacity-390.png") : info.outputPath("starting-cast-at-capacity-390.png") });
+  await page.locator("#confirmCreateCampaign").click();
+  await expect.poll(() => api.creates.length).toBe(1);
+  expect(api.creates[0]!.startingCast).toEqual(candidates.slice(1).map(item => ({ characterId: item.id, alwaysInContext: item.alwaysInContext })));
 });
 
 test("character loading can be retried without losing the campaign title", async ({ page }) => {
@@ -343,7 +361,7 @@ test("character loading can be retried without losing the campaign title", async
   await page.route("**/api/v1/world-versions/*/playable-characters", async route => {
     if (!failed && await page.locator("#createCampaignDialog").isVisible()) {
       failed = true;
-      return route.fulfill({ status: 503, json: { message: "Temporary failure" } });
+      return route.fulfill({ status: 503, json: { error: "fixture_error", message: "Temporary failure" } });
     }
     return route.fallback();
   });
@@ -362,7 +380,7 @@ for (const [state, intent, label, section] of [
   ["capability_insufficient", "Create and start", "Character settings", "characters"],
   ["enrollment_missing", "Create and start", "Story Memory settings", "campaign"]
 ] as const) {
-  test(`shows the actionable narrator notice for ${state} after ${intent}`, async ({ page }) => {
+  test(`does not interrupt ${intent} for the ${state} narrator notice`, async ({ page }) => {
     const api = await installCreationApi(page);
     await page.route("**/api/v1/meta", route => route.fulfill({ json: { capabilities: { castPresets: true, castContext: state !== "installation_disabled" } } }));
     await page.route("**/api/v1/world-versions/*/playable-characters", route => route.fulfill({ json: {
@@ -377,11 +395,10 @@ for (const [state, intent, label, section] of [
     await openDashboardCreation(page); await fillCampaignBasics(page);
     await expect(page.locator("#startingCastNotice")).toContainText(state === "installation_disabled" ? "won't reach the narrator" : "after you create it");
     await page.locator(intent === "Create and start" ? "#createAndStartCampaign" : "#confirmCreateCampaign").click();
-    const link = page.locator("#createCampaignDialog").getByRole("link", { name: label, exact: true });
-    await expect(link).toHaveAttribute("href", section === "characters" ? "/app/settings?section=characters"
-      : "/app/settings?section=campaign&campaignId=00000000-0000-4000-8000-000000000099");
-    await expect(page.locator("#confirmCreateCampaign")).toBeDisabled();
-    await expect(page.locator("#createAndStartCampaign")).toBeDisabled();
+    if (intent === "Create and start") await page.waitForURL("**/story/00000000-0000-4000-8000-000000000099");
+    else await expect(page.locator("#createCampaignDialog")).toBeHidden();
+    await expect(page.getByRole("link", { name: label, exact: true })).toHaveCount(0);
+    void section;
     expect(api.creates).toHaveLength(1);
   });
 }

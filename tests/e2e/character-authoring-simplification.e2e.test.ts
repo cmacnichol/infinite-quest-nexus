@@ -158,7 +158,7 @@ for (const width of [1440, 390]) test(`Nexus reviews, stops and retries cast sug
   await page.locator("#characterName").fill("Mira Edited"); await page.getByRole("button", { name: "Apply to suggestion" }).click();
   await expect(rows.first().getByLabel("Name", { exact: true })).toHaveValue("Mira Edited");
   page.once("dialog", confirm => confirm.dismiss()); await page.keyboard.press("Escape"); await expect(dialog).toBeVisible();
-  await page.screenshot({ path: `docs/review/assets/unified-character-editor-phase-5/suggest-cast-${width}.png` });
+  await page.screenshot({ path: `test-results/review-assets/unified-character-editor-phase-5/suggest-cast-${width}.png` });
   await dialog.getByRole("button", { name: "Add selected to draft" }).click(); await expect(dialog).toBeHidden();
   await expect(page.locator("#worldAuthorDialog")).toContainText("Mira Edited");
   expect(expansions).toEqual(["Mira", "Vale Renamed", "Vale Renamed"]); expect(writes).toEqual([]);

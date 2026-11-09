@@ -6,7 +6,7 @@ import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(process.env.PLAYWRIGHT_EVIDENCE_DIRECTORY ?? ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T18");
+const evidenceDirectory = resolve(process.env.PLAYWRIGHT_EVIDENCE_DIRECTORY ?? "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T18");
 const base = quietLeafApiPayloads();
 
 async function installAuthoringApi(page: Page, options: {
@@ -25,7 +25,7 @@ async function installAuthoringApi(page: Page, options: {
     if (path === "/api/v1/worlds" && method === "POST") {
       if (options.holdWorldSave) {
         await options.holdWorldSave();
-        return route.fulfill({ status: 503, json: { message: "Synthetic retryable draft save failure." } });
+        return route.fulfill({ status: 503, json: { error: "fixture_error", message: "Synthetic retryable draft save failure." } });
       }
       return route.fulfill({ status: 201, json: { id: "synthetic-world" } });
     }
@@ -267,7 +267,7 @@ test("character organization busy state freezes disclosure navigation and restor
   await page.route("**/api/v1/worlds/*/draft/playable-characters/organize", async (route) => {
     started();
     await held;
-    await route.fulfill({ status: 503, json: { message: "Synthetic organization failure." } });
+    await route.fulfill({ status: 503, json: { error: "ServiceUnavailable", message: "Synthetic organization failure." } });
   });
   await page.goto(`${origin}/nexus/index.html#world-library`);
   await page.locator(`#worldManagementCarousel [data-world-id="${fixture.worldId}"]`).click();
@@ -355,7 +355,7 @@ test("campaign Organize review survives generation lock and profile conflict", a
   await page.route(`**${path}`, route => {
     if (route.request().method() === "PUT" && conflict) {
       conflict = false;
-      return route.fulfill({ status: 409, json: { message: "Profile changed", details: { code: "state_revision_changed" } } });
+      return route.fulfill({ status: 409, json: { error: "fixture_error", message: "Profile changed", details: { code: "state_revision_changed" } } });
     }
     return route.fallback();
   });
@@ -367,11 +367,13 @@ test("campaign Organize review survives generation lock and profile conflict", a
   const review = page.locator("#characterProfileReviewDialog"), apply = page.locator("#applyCharacterProfileReview");
   await expect(review).toContainText("blue cloak"); await expect(apply).toBeEnabled();
   generationActive = true;
-  await expect(apply).toBeDisabled({ timeout: 6000 });
+  await apply.click();
+  await expect(apply).toBeDisabled();
   await expect(review).toContainText("Proposals are retained");
   await expect(page.locator("#saveCharacter")).toBeDisabled();
   generationActive = false;
-  await expect(apply).toBeEnabled({ timeout: 6000 });
+  await review.getByRole("button", { name: "Check generation status" }).click();
+  await expect(apply).toBeEnabled();
   await apply.click(); await expect(review).toBeHidden();
   await page.locator("#saveCharacter").click();
   const editor = page.locator("#characterDialog");

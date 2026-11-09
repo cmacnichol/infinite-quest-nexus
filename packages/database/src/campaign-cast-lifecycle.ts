@@ -17,14 +17,17 @@ export async function applyCastBoundaryChange(client: DatabaseClient, scope: Cas
   // when a new timeline reaches the same turn number.
   const events = (await client.query("SELECT id,payload FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND effective_turn_number>$3", [scope.campaignId, scope.ownerUserId, boundary.turnNumber])).rows;
   for (const event of events) {
-    const retainedCreateIds = new Set(event.payload.filter((item: { command: unknown; characterId?: string }) => {
-      const command = castCommandSchema.parse(item.command);
-      return command.kind === "create" && command.evidence?.kind === "turn" && command.evidence.turnNumber <= boundary.turnNumber;
-    }).map((item: { characterId?: string }) => item.characterId));
+    const parsed = event.payload.map((item: { command: unknown }) => castCommandSchema.parse(item.command));
+    // A seed published after its source turn carries world evidence on create and turn evidence beside it.
+    const anchoredByTurn = parsed.some((command: ReturnType<typeof castCommandSchema.parse>) => (command.kind === "mention" || command.kind === "observe") && command.evidence.kind === "turn" && command.evidence.turnNumber <= boundary.turnNumber);
+    const keepsCreate = (command: ReturnType<typeof castCommandSchema.parse>) => command.kind === "create"
+      && (command.evidence?.kind === "turn" ? command.evidence.turnNumber <= boundary.turnNumber : command.origin.kind === "world" && anchoredByTurn);
+    const retainedCreateIds = new Set(event.payload.filter((item: { command: unknown; characterId?: string }) => keepsCreate(castCommandSchema.parse(item.command)))
+      .map((item: { characterId?: string }) => item.characterId));
     const retained = event.payload.filter((item: { command: unknown }) => {
       const command = castCommandSchema.parse(item.command);
       return command.kind === "seed_profile" && retainedCreateIds.has(command.characterId)
-        || command.kind === "create" && command.evidence?.kind === "turn" && command.evidence.turnNumber <= boundary.turnNumber
+        || keepsCreate(command)
         || (command.kind === "observe" || command.kind === "mention") && command.evidence.kind === "turn" && command.evidence.turnNumber <= boundary.turnNumber;
     });
     if (retained.length) await client.query("UPDATE campaign_cast_events SET payload=$2,receipt=receipt-'result',effective_turn_number=$3 WHERE id=$1", [event.id, JSON.stringify(retained), boundary.turnNumber]);

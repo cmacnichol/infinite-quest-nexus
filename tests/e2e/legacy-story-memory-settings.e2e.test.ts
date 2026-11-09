@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { storyMemorySettingsUpdateSchema } from "../../packages/contracts/src/story-memory-policy.js";
 
-const screenshots = ".superpowers/sdd/nexus-story-continuity-implementation-plan-2026-09-16/story-memory-screenshots";
+const screenshots = "test-results/sdd-evidence/nexus-story-continuity-implementation-plan-2026-09-16/story-memory-screenshots";
 const worldId = "33333333-3333-4333-8333-333333333333";
 const worldVersionId = "44444444-4444-4444-8444-444444444444";
 const campaignAId = "11111111-1111-4111-8111-111111111111";

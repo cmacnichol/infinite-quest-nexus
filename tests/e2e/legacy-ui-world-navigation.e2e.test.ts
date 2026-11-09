@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T05-fix3");
+const evidenceDirectory = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T05-fix3");
 const worldA = {
   id: "11111111-1111-4111-8111-111111111111",
   title: "World Alpha",
@@ -105,14 +105,14 @@ async function fixtureRoute(route: Route) {
     if (gate) await gate;
     if (detailFailures.has(worldId)) {
       status = 503;
-      body = { message: `Synthetic ${String(detail.title || worldId)} detail failure` };
+      body = { error: "fixture_error", message: `Synthetic ${String(detail.title || worldId)} detail failure` };
     } else body = detail;
   } else if (parts[0] === "world-versions" && parts[2] === "playable-characters" && request.method() === "GET") {
     const versionId = parts[1]!;
     const gate = versionGates.get(versionId);
     if (gate) await gate;
     const versionName = versionId === "11111111-1111-4111-8111-111111111121" ? "world-a-v1" : versionId === "11111111-1111-4111-8111-111111111122" ? "world-a-v2" : versionId;
-    body = { characters: [{ id: `${versionId}-character`, name: `${versionName} character`, rpgStatCount: 1, defaultTriggerCount: 1 }], readiness: { ready: true, issues: [] } };
+    body = { characters: [{ id: `${versionId}-character`, name: `${versionName} character`, rpgStatCount: 1, defaultTriggerCount: 1 }], startingCastCandidates: [], readiness: { ready: true, issues: [] } };
   } else if (parts[0] === "worlds" && parts.length === 3 && parts[2] === "cover-job") {
     body = parts[1] === "11111111-1111-4111-8111-111111111111" && coverJobGates.has("cover-job-a")
       ? { id: "cover-job-a", status: "generating" }
@@ -137,7 +137,7 @@ async function fixtureRoute(route: Route) {
     const detail = worldDetails.get("11111111-1111-4111-8111-111111111111")!;
     if (input.expectedRevision !== detail.draftRevision) {
       status = 409;
-      body = { message: "Synthetic draft revision conflict" };
+      body = { error: "fixture_error", message: "Synthetic draft revision conflict" };
     } else {
       detail.title = input.title;
       detail.draftRevision = Number(detail.draftRevision) + 1;

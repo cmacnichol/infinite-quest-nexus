@@ -8,7 +8,7 @@ import {
   instanceSettingsHistorySchema, instanceSettingsPatchSchema, instanceSettingsViewSchema, instanceSettingsSchema,
   settingsFeatureGatesSchema, type DeploymentSettingsPolicy, type InstanceSettings, type SettingsFieldKey, type SettingsFeatureKey
 } from "../../../packages/contracts/src/instance-settings.js";
-import { deriveSettingsPolicyForLocalMode, resolveInstanceSettings, INSTANCE_SETTING_FIELDS } from "../../../packages/domain/src/instance-settings.js";
+import { deriveSettingsPolicyForLocalMode, LOCAL_PANEL_GATES, resolveInstanceSettings, INSTANCE_SETTING_FIELDS } from "../../../packages/domain/src/instance-settings.js";
 import { createSettingsOperatorSessions, SettingsHttpError } from "./settings-operator-session.js";
 
 function effectiveValue(snapshot: InstanceSettings, key: SettingsFieldKey) {
@@ -70,7 +70,7 @@ export function createInstanceSettingsHttpComposition(
     const mounted = deriveSettingsPolicyForLocalMode(currentPolicy(), bootstrap.instanceSettingsAccessMode === "local-single-user" && !bootstrap.instanceSettingsPolicyFile);
     const gates = Object.fromEntries(Object.keys(settingsFeatureGatesSchema.shape).map(key => [key, mounted.featureGates[key as SettingsFeatureKey]])) as typeof mounted.featureGates;
     for (const key of Object.keys(settingsFeatureGatesSchema.shape) as SettingsFeatureKey[]) {
-      gates[key] = gates[key] === true && (bootstrap.instanceSettingsAccessMode === "local-single-user" && (key === "castPresetsEnabled" || key === "castContextWithoutDiscoveryEnabled") || bootstrap[key] === true);
+      gates[key] = gates[key] === true && (bootstrap.instanceSettingsAccessMode === "local-single-user" && LOCAL_PANEL_GATES.has(key) || bootstrap[key] === true);
     }
     return { ...mounted, featureGates: gates };
   };

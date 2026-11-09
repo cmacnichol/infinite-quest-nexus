@@ -148,8 +148,8 @@ export const worldContentSchema = z.object({
   sourceMaterial: worldSourceMaterialSchema.optional()
 }).passthrough();
 
-/** Reject dangling entity-to-roster links at mutable-world write boundaries. */
-export function validateWorldCharacterLinks(content: WorldContent): WorldContent {
+/** Require each entity-to-roster link to resolve within this draft or immutable version. */
+export function validateWorldCharacterLinks<T extends { playableCharacters: readonly { id: string }[]; entities: readonly unknown[] }>(content: T): T {
   const ids = new Set(content.playableCharacters.map((character) => character.id));
   for (const entity of content.entities) {
     if (!entity || typeof entity !== "object" || Array.isArray(entity)) continue;

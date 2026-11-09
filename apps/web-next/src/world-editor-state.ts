@@ -19,6 +19,7 @@ export interface PendingRemoval {
   collection: DraftCollectionName;
   originalIndex: number;
   value: unknown;
+  unlinkedEntities?: unknown[];
 }
 
 export interface DraftSaveError {
@@ -235,11 +236,19 @@ export function removeCollectionItem(
   }
   const draft = clone(state.draft);
   const [value] = draft[collection].splice(index, 1);
+  const removedCharacterId = collection === "playableCharacters" ? (value as { id?: unknown }).id : undefined;
+  const unlinkedEntities: unknown[] = [];
+  if (typeof removedCharacterId === "string") {
+    for (const entity of draft.entities as Array<Record<string, unknown>>) {
+      if (entity?.linkedCharacterId === removedCharacterId) { unlinkedEntities.push(entity.id); delete entity.linkedCharacterId; }
+    }
+  }
   const removal: PendingRemoval = {
     id: `draft-removal-${state.nextRemovalSequence}`,
     collection,
     originalIndex: originalCollectionIndex(state.pendingRemovals, collection, index),
-    value: clone(value)
+    value: clone(value),
+    ...(unlinkedEntities.length ? { unlinkedEntities } : {})
   };
   return {
     ...state,
@@ -260,6 +269,9 @@ export function restoreCollectionItem(state: WorldEditorState, removalId: string
   ).length;
   const restorationIndex = removal.originalIndex - earlierPendingCount;
   draft[removal.collection].splice(restorationIndex, 0, clone(removal.value));
+  for (const entity of draft.entities as Array<Record<string, unknown>>) {
+    if (removal.unlinkedEntities?.includes(entity?.id) && !entity.linkedCharacterId) entity.linkedCharacterId = (removal.value as { id: string }).id;
+  }
   return {
     ...state,
     draft,

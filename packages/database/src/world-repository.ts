@@ -1020,6 +1020,7 @@ export function createPostgresWorldRepository(): PostgresWorldRepository {
         campaign_transfers: number;
         chronicle_memories: number;
         model_chains: number;
+        cast_seed_evidence: number;
       }>(
         `SELECT
            (SELECT count(*)::int FROM campaigns
@@ -1033,7 +1034,9 @@ export function createPostgresWorldRepository(): PostgresWorldRepository {
            (SELECT count(*)::int FROM chronicle_memories
              WHERE owner_user_id = $2 AND world_version_id = $1) AS chronicle_memories,
            (SELECT count(*)::int FROM model_chains
-             WHERE owner_user_id = $2 AND world_version_id = $1) AS model_chains`,
+             WHERE owner_user_id = $2 AND world_version_id = $1) AS model_chains,
+           (SELECT count(*)::int FROM campaign_cast_events
+             WHERE owner_user_id = $2 AND payload @> jsonb_build_array(jsonb_build_object('command', jsonb_build_object('kind', 'seed_profile', 'worldVersionId', ($1::uuid)::text)))) AS cast_seed_evidence`,
         [scope.worldVersionId, scope.ownerUserId]
       );
       const counts = dependencies.rows[0];
@@ -1042,7 +1045,8 @@ export function createPostgresWorldRepository(): PostgresWorldRepository {
         campaign_migrations: Number(counts?.campaign_migrations ?? 0),
         campaign_transfers: Number(counts?.campaign_transfers ?? 0),
         chronicle_memories: Number(counts?.chronicle_memories ?? 0),
-        model_chains: Number(counts?.model_chains ?? 0)
+        model_chains: Number(counts?.model_chains ?? 0),
+        cast_seed_evidence: Number(counts?.cast_seed_evidence ?? 0)
       });
       if (blockers.length > 0) {
         return failure("deletion_blocked", { worldId: scope.worldId, worldVersionId: scope.worldVersionId, blockers });
@@ -1288,7 +1292,7 @@ function createPostgresCampaignRepository(
         worldVersionNumber: source.version_number,
         selectedCharacterId: seed.character.id,
         selectedCharacterName: seed.character.name,
-        ...(skippedStartingCast.length ? { skippedStartingCast } : {}),
+        skippedStartingCast,
         textProviderProfileId: null,
         imageProviderProfileId: null
       });

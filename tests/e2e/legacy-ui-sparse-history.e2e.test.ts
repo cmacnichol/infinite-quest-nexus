@@ -140,7 +140,8 @@ async function seedCurrentBaseDraft(page: Page, fixture: Fixture, baseTurn: Turn
     baseTurn,
     text,
     draftRevision: actionDraftRevision,
-    updatedAt: timestamp
+    // Local drafts expire after 30 days, so this must be relative to the run.
+    updatedAt: new Date().toISOString()
   });
 }
 

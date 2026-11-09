@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T17");
+const evidenceDirectory = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T17");
 const versionOneId = "10000000-0000-4000-8000-000000000002";
 const versionTwoId = "10000000-0000-4000-8000-000000000003";
 const worldId = "10000000-0000-4000-8000-000000000001";
@@ -94,7 +94,7 @@ async function installWorldApi(page: Page, options: ApiOptions = {}) {
       await options.holdWrite?.(method, path);
       if (failDraftSave) {
         failDraftSave = false;
-        return route.fulfill({ status: 503, json: { message: "Synthetic retryable draft save failure." } });
+        return route.fulfill({ status: 503, json: { error: "fixture_error", message: "Synthetic retryable draft save failure." } });
       }
       if (world) {
         world.title = body.title;
@@ -118,7 +118,7 @@ async function installWorldApi(page: Page, options: ApiOptions = {}) {
       readinessCalls += 1;
       await options.holdReadiness?.();
       const readinessStatus = readinessStatuses.length > 1 ? readinessStatuses.shift()! : readinessStatuses[0];
-      if (readinessStatus && readinessStatus >= 400) return route.fulfill({ status: readinessStatus, json: { message: "Synthetic readiness service unavailable." } });
+      if (readinessStatus && readinessStatus >= 400) return route.fulfill({ status: readinessStatus, json: { error: "fixture_error", message: "Synthetic readiness service unavailable." } });
       const version = world?.versions?.find((candidate: any) => path.includes(encodeURIComponent(candidate.id)) || path.endsWith(`/${candidate.id}/playable-characters`));
       const chars = version?.content?.playableCharacters || [];
       const assessment = options.assessment || { ready: chars.length > 0, issues: [] };
@@ -247,7 +247,7 @@ test("a new world does not inherit readiness from the previously selected publis
   await page.locator('[data-world-author-step="review"]').click();
 
   const readiness = page.locator("#worldAuthorPublishedReadiness");
-  const fixEvidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T17-fix1");
+  const fixEvidenceDirectory = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T17-fix1");
   mkdirSync(fixEvidenceDirectory, { recursive: true });
   await readiness.scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(fixEvidenceDirectory, "new-world-no-inherited-readiness.png") });

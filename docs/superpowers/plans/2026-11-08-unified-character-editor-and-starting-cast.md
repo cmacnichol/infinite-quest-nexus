@@ -489,6 +489,11 @@ All 109 Chromium tests in the four mapped browser suites passed. The rendered ch
 
 [Screenshot evidence](../../review/assets/unified-character-editor-phase-5) includes Nexus cast suggestions and entity conversion at desktop and phone widths, both Story editors, and Web-Next Supporting generation.
 
+### Publication of phases 1–5
+
+- [x] Include the reviewed fixes for editor locks and field limits, preset and starting-cast eligibility, evidence capture and rewind, and validation of linked world characters during archive preview and import.
+- [x] Keep the first release on cast archive formats 1–3. Migration 0131 is the last migration in this release. The lifecycle writers, format 4 reader and promotion receipt migration ship in the separate phase 6 release.
+
 ## Phase 6 · Release reversible lifecycle operations
 
 Start a separate release branch or PR series from the accepted phase 5 baseline. First distribute the v4 readers. Keep lifecycle writes inactive until all readers are compatible and the operations below have passed their release tests.
@@ -551,7 +556,7 @@ pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts
 
 **Modify** `packages/contracts/src/campaign-cast.ts`, `services/api/src/campaign-cast-routes.ts`, `packages/client-web/src/campaign-cast-api.ts`, `packages/application/src/campaign-cast/ports.ts`, `packages/database/src/authoring-world-apply-adapter.ts`, `packages/database/src/world-repository.ts`, `packages/database/src/system-archive-export-repository.ts`, `packages/database/src/system-archive-import-repository.ts`, `packages/contracts/src/system-archives.ts`, `packages/application/src/system-archives/portability-registry.ts`, `apps/web/src/campaign-cast-panel.ts`, `docs/player-guide/characters-and-stats.md`.
 
-**Create** `database/migrations/0131_campaign_cast_promotion_receipts.sql` (use the next free number at phase 6 integration).
+**Create** `database/migrations/0132_campaign_cast_promotion_receipts.sql` (use the next free number at phase 6 integration).
 
 **Interface.** `GET cast/:id/promotion-preview?worldId=...` returns destination-keyed candidates. `POST cast/:id/promote` receives the selected source for each destination, both scopes’ revision fences and the idempotency key.
 

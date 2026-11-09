@@ -1106,6 +1106,8 @@ describe("durable cast discovery", () => {
     const resolved = await editor.resolveCandidate(f.scope, pending.candidates[0]!.id, { action: "create", expectedCastRevision: pending.revision,
       expectedBoundary: pending.boundary, idempotencyKey: "approve-world" });
     expect(resolved.character.originProfile?.entityId).toBe("mara");
+    const seedEvent = (await pool.query("SELECT attachment FROM campaign_cast_events WHERE id=$1", [resolved.character.originProfile!.seedEventId])).rows[0];
+    expect(seedEvent.attachment).toMatchObject({ characterId: resolved.character.id, basis: "unique_world_name" });
   });
   it("requires new identity review when a held world match changes before approval", async () => {
     const f = await fixture();

@@ -4,7 +4,7 @@ import type { CreateCastCharacter, EditCastCharacter, CastWriteResult, CastDetai
   CastCandidateList, CastCandidateQuery, ResolveCastCandidate, CastCandidateResolution } from "@infinite-quest/contracts";
 
 export interface CampaignCastWritePort {
-  draftPreviewContext?(scope: CastScope, id: string, input: import("@infinite-quest/contracts").CastDraftPreviewRequest): Promise<{ character: import("@infinite-quest/contracts").CastCharacter; boundary: CastBoundary; evidence: import("@infinite-quest/contracts").CastDraftPreviewResponse["evidence"]; observedPaths: string[] }>;
+  draftPreviewContext?(scope: CastScope, id: string, input: import("@infinite-quest/contracts").CastDraftPreviewRequest): Promise<{ character: import("@infinite-quest/contracts").CastCharacter; boundary: CastBoundary; evidence: import("@infinite-quest/contracts").CastDraftPreviewResponse["evidence"]; observedPaths: string[]; textProviderProfileId: string | null; worldContent: unknown }>;
   worldChoices?(scope: CastScope): Promise<import("@infinite-quest/contracts").CastWorldChoices>;
   fromWorldPreview?(scope: CastScope, input: import("@infinite-quest/contracts").CastFromWorldPreviewQuery): Promise<import("@infinite-quest/contracts").CastFromWorldPreview>;
   fromWorld?(scope: CastScope, input: import("@infinite-quest/contracts").CastFromWorld): Promise<CastWriteResult>;

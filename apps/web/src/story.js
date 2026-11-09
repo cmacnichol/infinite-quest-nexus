@@ -36,7 +36,7 @@ import {
 } from "./story-generation-monitor.js";
 import { handleStoryEscape } from "./story-keyboard.js";
 import { bindLegacyTabGroup } from "./legacy-tabs.js";
-import { createCharacterProfileForm, createCampaignMainController } from "./character-profile-form.js";
+import { createCharacterProfileForm, createCampaignMainController } from "./character-editor/campaign-main-form.js";
 import { createLegacyCastPanel } from "./campaign-cast-panel.js";
 import { createStoryStreamRenderer } from "./story-stream-renderer.js";
 import {
@@ -6243,7 +6243,11 @@ async function init() {
     if (settings) settings.href = "/app/settings?" + new URLSearchParams({section:"campaign",campaignId,returnTo:location.pathname + location.search});
     await reconcileCampaignStartup(campaignId);
     const character = new URLSearchParams(window.location.search).get("character");
-    if (character && state.campaignId === campaignId) await castPanel?.open(character, $("btnOpenCast"));
+    if (character && state.campaignId === campaignId) {
+      const cleaned = new URL(window.location.href); cleaned.searchParams.delete("character");
+      window.history.replaceState(window.history.state, "", cleaned);
+      await castPanel?.open(character, $("btnOpenCast"));
+    }
     const turn = Number(new URLSearchParams(window.location.search).get("turn"));
     if (!character && Number.isSafeInteger(turn) && turn > 0 && state.campaignId === campaignId) {
       await ensureCompleteTurnHistory(); navigateToTurn(turn);

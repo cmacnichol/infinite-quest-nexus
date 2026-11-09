@@ -99,8 +99,8 @@ integration("PostgreSQL generation command repository", () => {
       resolveStoryMemoryPolicySnapshot: async () => ({
         policy,
         policyHash: storyMemoryPolicyHash(policy),
-        contextProtocol: castContext ? "current-continuity-v4" : "current-continuity-v3",
-        promptProtocol: castContext ? "story-v17-campaign-cast" : "story-v14-continuity-context",
+        contextProtocol: castContext ? "current-continuity-v6" : "current-continuity-v3",
+        promptProtocol: castContext ? "story-v18-fiction-cast" : "story-v14-continuity-context",
         ...(castContext ? { castContext: true as const } : {}),
         providerConfigurationFingerprint: "a".repeat(64)
       })
@@ -644,7 +644,7 @@ integration("PostgreSQL generation command repository", () => {
     ]));
   });
 
-  it("freezes cast capability, v4 base and v17 prompt for append and replacement", async () => {
+  it("freezes cast capability, v4 base and v18 prompt for append and replacement", async () => {
     const commands = enrolledPolicyRepository(true);
     for (const replacement of [false, true]) {
       const imported = await campaign();
@@ -654,9 +654,9 @@ integration("PostgreSQL generation command repository", () => {
       const row = (await pool.query("SELECT generation_base_identity,context_options,prompt_snapshot,prompt_protocol_version FROM generation_jobs WHERE id=$1", [job.id])).rows[0];
       expect(row.generation_base_identity).toMatchObject({ version: "generation-base-v4", castRevision: 0,
         castFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/), baseTurnNumber: replacement ? 1 : 2 });
-      expect(row.context_options.storyMemoryPolicy).toMatchObject({ castContext: true, promptProtocol: "story-v17-campaign-cast", contextProtocol: "current-continuity-v4" });
-      expect(row.prompt_snapshot.storyMemoryCompatibility.protocolIdentity).toBe("story-v17-campaign-cast|story-output-v2|current-continuity-v4");
-      expect(row.prompt_protocol_version).toContain("story-v17-campaign-cast");
+      expect(row.context_options.storyMemoryPolicy).toMatchObject({ castContext: true, promptProtocol: "story-v18-fiction-cast", contextProtocol: "current-continuity-v6" });
+      expect(row.prompt_snapshot.storyMemoryCompatibility.protocolIdentity).toBe("story-v18-fiction-cast|story-output-v2|current-continuity-v6");
+      expect(row.prompt_protocol_version).toContain("story-v18-fiction-cast");
       await commands.cancel({ ownerUserId, jobId: job.id });
     }
   });

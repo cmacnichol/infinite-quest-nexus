@@ -17,7 +17,7 @@ const OWNER_ID = "11111111-1111-4111-8111-111111111111";
 const PRODUCTION_ROOT = resolve("apps/web/dist");
 const DEVELOPMENT_ROOT = resolve("apps/web");
 const NEXT_ROOT = resolve("apps/web-next/dist");
-const EVIDENCE_ROOT = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T31-served-runtime");
+const EVIDENCE_ROOT = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T31-served-runtime");
 
 type RuntimeSurface = Readonly<{
   name: string;

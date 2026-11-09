@@ -5,7 +5,7 @@ import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T04-fix1");
+const evidenceDirectory = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T04-fix1");
 const fixture = quietLeafApiPayloads();
 
 function response(body: unknown, status = 200) {

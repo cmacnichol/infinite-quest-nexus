@@ -8,7 +8,7 @@ import {
   setEditorDraftField
 } from "@infinite-quest/client-core";
 import { campaignCharacterProfileUpdateSchema, type CampaignCharacterProfile } from "@infinite-quest/contracts";
-import { characterFieldsForGroup, createCharacterField } from "./character-editor/renderer.js";
+import { characterFieldsForGroup, createCharacterField } from "./renderer.js";
 
 type Profile = CampaignCharacterProfile & { revision: number };
 const groups = [
@@ -113,6 +113,7 @@ export function createCampaignMainController(form: Form, options: Options) {
   let latest: Profile | null = null;
 
   function setLocked(value: boolean) {
+    if (locked && !value) region.querySelector("[data-generation-lock]")?.remove();
     locked = value;
     form.setLocked(locked || busy);
     if (options.saveButton) options.saveButton.disabled = locked || busy || form.draft.conflict;
@@ -130,6 +131,7 @@ export function createCampaignMainController(form: Form, options: Options) {
     status.textContent = text;
     region.replaceChildren(status);
     status.focus();
+    return status;
   }
 
   function addButton(label: string, action: () => void, purpose?: "dismiss" | "save") {
@@ -200,9 +202,10 @@ export function createCampaignMainController(form: Form, options: Options) {
         showConflict();
       } else if ((problem.statusCode ?? problem.status) === 409 && (code === "invalid_transition" || code === "generation_in_progress")) {
         setLocked(true);
-        message("Finish or resolve generation before saving the character profile.");
+        message("Finish or resolve generation before saving the character profile.").dataset.generationLock = "";
       } else {
-        message(`Profile could not be saved: ${problem.message || String(error)}`);
+        const notice = message(`Profile could not be saved: ${problem.message || String(error)}`);
+        if (locked) notice.dataset.generationLock = "";
       }
     } finally {
       busy = false;

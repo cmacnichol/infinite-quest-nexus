@@ -79,7 +79,7 @@ test("failed_world_detail_read_can_be_retried", async ({ page }) => {
   let attempts = 0;
   await page.route(`**${worldPath(selectedId)}`, async (route) => {
     attempts += 1;
-    if (attempts === 1) await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Synthetic detail read failure" }) });
+    if (attempts === 1) await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Synthetic detail read failure" }) });
     else await route.fallback();
   });
   await page.goto(`${origin}/nexus/index.html#world-library`);

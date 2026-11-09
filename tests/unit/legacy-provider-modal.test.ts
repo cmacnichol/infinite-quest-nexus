@@ -52,13 +52,13 @@ describe("legacy provider and authoring dismissal", () => {
   });
 
   it("labels world-scoped character application as a local draft operation", () => {
-    expect(nexusSource).toContain('elements.saveCharacter.textContent = "Apply to world draft"');
+    expect(nexusSource).toContain('elements.saveCharacter.textContent = preview ? "Apply to suggestion" : "Apply to world draft"');
     expect(nexusSource).toContain("worldAuthorWorkingContent");
     expect(nexusSource).toContain("Save the world form to persist this change");
   });
 
   it("preserves immediate campaign character profile persistence", () => {
-    expect(nexusSource).toContain("/character-profile");
+    expect(nexusSource).toContain("characterApi.campaigns.updateCharacterProfile(campaignId, payload)");
     expect(nexusSource).toContain('method: "PUT"');
     expect(nexusSource).toContain('characterModalScope === "campaign"');
   });

@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const screenshotDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/screenshots");
+const screenshotDirectory = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/screenshots");
 
 test("native Escape, Cancel, and backdrop use one dismissal policy with nested focus restoration", async ({ page }) => {
   mkdirSync(screenshotDirectory, { recursive: true });

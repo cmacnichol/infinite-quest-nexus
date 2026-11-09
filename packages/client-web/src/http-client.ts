@@ -103,7 +103,8 @@ async function parseHttpError(response: Response): Promise<NexusApiError> {
   }
 
   const envelope = parsed.data;
-  return new NexusApiError(envelope.message ?? `Request failed with HTTP ${response.status}.`, {
+  const recognized = Boolean(envelope.error || envelope.code || typeof envelope.details?.code === "string");
+  return new NexusApiError((recognized ? envelope.message : undefined) ?? `Request failed with HTTP ${response.status}.`, {
     statusCode: response.status,
     correlationId: envelope.correlationId ?? headerCorrelationId,
     ...(envelope.error ? { errorName: envelope.error } : {}),

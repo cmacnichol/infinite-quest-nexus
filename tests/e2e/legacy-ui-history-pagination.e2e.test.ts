@@ -4,7 +4,7 @@ import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fix
 import { readerSceneWindowResponseSchema } from "../../packages/contracts/src/index.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T13-pagination";
+const evidenceDirectory = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T13-pagination";
 
 async function prepareStoryPage(page: Page, campaignId: string): Promise<void> {
   const html = (await readFile("apps/web/public/story.html", "utf8"))

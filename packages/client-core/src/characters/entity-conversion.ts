@@ -31,6 +31,6 @@ export function previewEntityConversions(entities: unknown) {
     if (["background", "lore"].flatMap((key) => strings(row[key])).join("\n\n").length > 20_000)
       unconverted["background (original)"] = [row.background, row.lore];
     if (strings(row.aliases).length + strings(row.alias).length > 20) unconverted["aliases (original)"] = [row.aliases, row.alias];
-    return [{ entityId, name, profile, characterText: notes, unconverted }];
+    return [{ entityId, name, profile, unconverted }];
   });
 }

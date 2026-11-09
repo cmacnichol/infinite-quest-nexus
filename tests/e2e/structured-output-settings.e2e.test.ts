@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const screenshots = "docs/review/assets/settings-panel";
+const screenshots = "test-results/review-assets/settings-panel";
 
 type Provider = Record<string, unknown> & {
   id: string;

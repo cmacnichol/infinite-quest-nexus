@@ -6,7 +6,7 @@ import {
 } from "../../packages/contracts/src/provider-output-schema.js";
 import type { SchemaVerificationV2 } from "../../packages/contracts/src/text-response-format.js";
 import { authoringStageOutputSchema, authoringWorldOutlineSchema } from "../../packages/contracts/src/authoring.js";
-import { characterProfileOrganizationResultSchema, playableCharacterSchema } from "../../packages/contracts/src/world-library.js";
+import { castSuggestionSeedSchema, characterProfileOrganizationResultSchema, playableCharacterSchema } from "../../packages/contracts/src/world-library.js";
 import { sourceFactSchema } from "../../packages/contracts/src/source-authoring.js";
 import { castDiscoveryOutputSchema } from "../../packages/contracts/src/campaign-cast-discovery.js";
 import { stableStringify } from "../../packages/domain/src/text.js";
@@ -31,7 +31,7 @@ export const DEFAULT_STRUCTURED_OUTPUT_PROBE: Readonly<Omit<ProbeInput, "profile
   inputUsdPerToken: 0.00000027,
   outputUsdPerToken: 0.00000041,
   contextTokens: 163_840,
-  maxCalls: 18,
+  maxCalls: 21,
   maxOutputTokens: 2_048,
   temperature: 0,
   priceObservedAt: ""
@@ -125,6 +125,9 @@ function responseFor(operation: ProbeOperation): unknown {
     case "world_outline": return { title: "Synthetic world", genre: "Fantasy", tone: "Measured", backgroundStory: "Synthetic background.", premise: "Synthetic premise.", firstAction: "Begin carefully.", story_rules: "Preserve the fixture.", rpg_statistics: [], default_triggers: [], event_triggers: [], character_seeds: [1, 2, 3].map((id) => ({ id: `seed-${id}`, name: `Seed ${id}`, role: "Traveler", concept: "Synthetic concept.", narrative_hook: "Synthetic hook." })) };
     case "world_seed_character": return { id: "seed-1", name: "Seed 1", character_text: "", profile: characterProfile(), rpg_statistics: [], default_triggers: [] };
     case "standalone_character": return { name: "Synthetic character", profile: characterProfile(), rpgStats: [], defaultTriggers: [] };
+    case "supporting_character": return { name: "Synthetic companion", profile: characterProfile() };
+    case "cast_suggestion": return { seeds: [{ name: "Synthetic companion", role: "Guide", concept: "A synthetic guide." }] };
+    case "cast_draft": return { proposals: [{ path: "story.background", value: "Synthetic background.", evidenceIds: ["00000000-0000-4000-8000-000000000001"] }] };
     case "character_organizer": return { candidate: characterProfile(), evidence: [], unassignedText: [], conflicts: [], warnings: [], protocolVersion: "character-profile-organization-v1" };
     case "source_extraction": return { facts: [{ category: "rule", subject: "Synthetic world", predicate: "requires", value: "evidence", provenance: "stated", citations: [{ evidenceId: "evidence:aaaaaaaaaaaaaaaaaaaaaaaa" }] }] };
     case "source_synthesis":
@@ -158,11 +161,11 @@ function validateResponse(operation: ProbeOperation, value: unknown): { ok: true
           id: seed.id, name: seed.name, role: seed.role, concept: seed.concept, narrativeHook: seed.narrative_hook
         })),
         rpgStats: outline.rpg_statistics, defaultTriggers: outline.default_triggers, eventTriggers: outline.event_triggers });
-    } else if (operation === "world_seed_character" || operation === "standalone_character") {
+    } else if (operation === "world_seed_character" || operation === "standalone_character" || operation === "supporting_character") {
       const character = value as Record<string, any>;
       playableCharacterSchema.parse({ id: character.id ?? "synthetic-character", name: character.name,
         characterText: character.character_text ?? "", profile: character.profile,
-        rpgStats: character.rpg_statistics ?? character.rpgStats, defaultTriggers: character.default_triggers ?? character.defaultTriggers, source: {} });
+        rpgStats: character.rpg_statistics ?? character.rpgStats ?? [], defaultTriggers: character.default_triggers ?? character.defaultTriggers ?? [], source: {} });
     } else if (operation === "character_organizer") characterProfileOrganizationResultSchema.parse(value);
     else if (operation === "source_extraction") {
       const facts = (value as Record<string, any>).facts as Array<Record<string, any>>;
@@ -175,6 +178,7 @@ function validateResponse(operation: ProbeOperation, value: unknown): { ok: true
         mappings: result.fields.map((field: Record<string, unknown>) => ({ target: "world", path: field.path, value: field.value, supportingFactIds: field.supportingFactIds })), expansionCandidates: [] });
     } else if (operation === "illustration_prompt_refinement") parseRefinedPrompt(JSON.stringify(value));
     else if (operation === "cast_discovery") castDiscoveryOutputSchema.parse(value);
+    else if (operation === "cast_suggestion") (value as { seeds: unknown[] }).seeds.forEach(seed => castSuggestionSeedSchema.parse(seed));
     return { ok: true };
   } catch { return { ok: false, reason: "application_parser" }; }
 }

@@ -15,8 +15,8 @@ const replacementResultTurnId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const timestamp = "2026-10-03T12:00:00.000Z";
 const databaseName = "infiniteQuest-reader-local-v1";
 const storeName = "actionDrafts";
-const screenshotDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/screenshots/T08";
-const fix1EvidenceDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T08-fix1";
+const screenshotDirectory = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/screenshots/T08";
+const fix1EvidenceDirectory = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T08-fix1";
 
 interface HarnessOptions {
   readonly ownerId?: string;

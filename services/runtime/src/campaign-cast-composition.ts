@@ -38,7 +38,7 @@ export function createApiCampaignCastApplication(pool: DatabasePool, config: Pic
       // Recheck all guards after metadata I/O, including races with corrections and other retries.
       return jobs.retryFailed(scope, id, request, execution);
     }
-  }, createApiCastBackfillApplication(pool, config, providers), createCastDraftPreview(pool, repository, providers));
+  }, createApiCastBackfillApplication(pool, config, providers), createCastDraftPreview(repository, providers));
 }
 
 export function createWorkerCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castPresetsEnabled" | "castDiscoveryEnabled" | "castBackfillEnabled" | "castAutoMatchEnabled" | "castContextEnabled" | "storyMemoryCapability">,

@@ -84,7 +84,7 @@ describe("createNexusApiClient", () => {
     expect(generation).toBe(client.generation);
     expect(Object.keys(client).sort()).toEqual(["activity", "campaigns", "generation", "illustrations", "meta", "providers", "session", "worlds"]);
     expect(Object.keys(client.worlds).sort()).toEqual([
-      "create", "generateCharacterPreview", "list", "loadCharacterGenerationProgress", "organizeCharacter", "playableCharacters"
+      "create", "generateCharacterPreview", "list", "loadCharacterGenerationProgress", "organizeCharacter", "playableCharacters", "suggestCastPreview"
     ]);
     expect(Object.keys(client.campaigns).sort()).toEqual([
       "branch", "correctTurnNarration", "create", "getCharacterProfile", "getTurnCorrection", "inspectState", "list", "organizeCharacter", "readableExport", "rewind", "state", "turns", "updateCharacterProfile", "updateState"
