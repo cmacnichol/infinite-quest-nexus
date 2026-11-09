@@ -9,6 +9,8 @@ export default defineConfig({
   // These files need the servers started by their own playwright.*.config.ts.
   testIgnore: ["quiet-leaf-*.e2e.test.ts", "story-only-campaigns.e2e.test.ts", "story-only-new-ui.e2e.test.ts", "web-awesome-core.e2e.test.ts"],
   fullyParallel: false,
+  // The zoom accessibility tests launch their own browsers and time out with more workers.
+  workers: 4,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? "github" : "line",

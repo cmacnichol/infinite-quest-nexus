@@ -44,8 +44,6 @@ jobs:
         run: pnpm test:integration
 
       - name: Run browser tests
-        # Non-blocking until the remaining known failures are resolved.
-        continue-on-error: true
         run: pnpm test:e2e
 
       - name: Build application

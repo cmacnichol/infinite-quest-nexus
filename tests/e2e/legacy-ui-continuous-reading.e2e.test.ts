@@ -227,6 +227,21 @@ async function visibleKeyboardFocus(page: Page): Promise<{
   });
 }
 
+/** Startup uses smooth scrolling, so require a sustained stop rather than two equal samples. */
+async function waitForScrollToStop(page: Page): Promise<void> {
+  await page.evaluate(() => new Promise<void>(resolve => {
+    let last = window.scrollY;
+    let stableFrames = 0;
+    const check = () => {
+      stableFrames = window.scrollY === last ? stableFrames + 1 : 0;
+      last = window.scrollY;
+      if (stableFrames >= 30) resolve();
+      else requestAnimationFrame(check);
+    };
+    requestAnimationFrame(check);
+  }));
+}
+
 async function saveContinuousPreference(page: Page, value: boolean): Promise<void> {
   // locator.click() auto-scrolls this sticky-header button and would move the reader under test.
   const profileButton = await page.locator("#btnOpenUserProfile").boundingBox();
@@ -397,7 +412,12 @@ test("older and newer scene groups use sparse accepted neighbors and retry atomi
 
   const olderButton = page.getByRole("button", { name: "Load older scenes" });
   await expect(olderButton).toBeVisible();
+  // Put the reader at the top of the window, where this control is, once startup scrolling ends.
+  await waitForScrollToStop(page);
+  await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
+  await waitForScrollToStop(page);
   await olderButton.focus();
+  await waitForScrollToStop(page);
   const anchorTopBefore = await page.locator("#scene-29").evaluate(element => element.getBoundingClientRect().top);
   await page.keyboard.press("Enter");
   await expect.poll(() => sceneWindowRequests(requests, fixture.campaignId).some(request => request.direction === "older")).toBe(true);
@@ -413,8 +433,8 @@ test("older and newer scene groups use sparse accepted neighbors and retry atomi
   expect(olderRequest.neighborLimit).toBeLessThanOrEqual(9);
   expect((await renderedSceneTurns(page)).length).toBeLessThanOrEqual(10);
   await expect(page.locator("#scene-29")).toBeVisible();
-  const anchorTopAfter = await page.locator("#scene-29").evaluate(element => element.getBoundingClientRect().top);
-  expect(Math.abs(anchorTopAfter - anchorTopBefore)).toBeLessThanOrEqual(2);
+  // The reader restores its anchor on the next animation frame after installing the scenes.
+  await expect.poll(async () => Math.abs(await page.locator("#scene-29").evaluate(element => element.getBoundingClientRect().top) - anchorTopBefore)).toBeLessThanOrEqual(2);
   const focusedAfterOlder = await visibleKeyboardFocus(page);
   expect(focusedAfterOlder.connected).toBe(true);
   expect(focusedAfterOlder.focusVisible).toBe(true);
