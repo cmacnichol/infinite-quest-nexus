@@ -709,6 +709,7 @@ for (const surface of ["legacy", "web-next"] as const) {
     }
     await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${api.fixture.campaignId}` : `${webNextOrigin}/app/story/${api.fixture.campaignId}`);
     const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
+    if (surface === "web-next") await expect(page.locator("[data-page=story-player]")).toHaveAttribute("aria-busy", "false");
     const keep = surface === "legacy" ? page.locator("#btnKeepGenerationReview") : recovery.getByRole("button", { name: "Keep this turn", exact: true });
     await keep.click();
     await expect.poll(() => api.decisions).toEqual([{ reviewId, revision: 1, decision: "keep" }]);

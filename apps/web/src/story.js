@@ -3996,13 +3996,14 @@ function navigateToTurn(turnNumber) {
   retirePendingContinuousReaderRequest();
   readerPositionChoicePending = false;
   state.readerPinnedTurn = null;
-  hideReaderResumePrompt();
+  // The user chose a turn. An earlier resume offer must not shift its scroll target.
+  state.readerResumePosition = null;
   clearResponseEditSession();
   state.viewTurnNumber = target === latest ? null : target;
   syncReaderResumePrompt();
   const isContinuous = Boolean(state.user?.settings?.continuousReading);
   if (!isContinuous) {
-    renderAllScenes();
+    renderAllScenes({ autoScroll: false });
   } else {
     const targetTurn = state.turns.find((turn) => Number(turn.turnNumber) === target) || null;
     const turnId = targetTurn?.id || targetTurn?.turnId;

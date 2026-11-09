@@ -2340,34 +2340,30 @@ async function importThroughLegacyUi(
         newUploadRequests += 1;
       }
     });
-    const resumedResponse = page.waitForResponse((response) => {
-      const url = new URL(response.url());
-      return url.pathname === `/api/v1/system-imports/uploads/${resumedUpload.id}`
-        && response.request().method() === "GET";
-    });
-    const completionResponse = page.waitForResponse((response) => {
-      const url = new URL(response.url());
-      return url.pathname === `/api/v1/system-imports/uploads/${resumedUpload.id}/complete`
-        && response.request().method() === "POST";
-    });
-    const previewResponse = page.waitForResponse((response) => {
-      const url = new URL(response.url());
-      return url.pathname === "/api/v1/system-imports/preview" && response.request().method() === "POST";
-    });
-    await page.locator("#systemArchiveFile").setInputFiles(archivePath);
-    const resumedView = await (await resumedResponse).json() as Record<string, unknown>;
+    // The file input exists before the controller has loaded the archive capability and owner.
+    const fileInput = page.locator("#systemArchiveFile:enabled");
+    await fileInput.waitFor({ state: "visible" });
+    const uploadPath = `/api/v1/system-imports/uploads/${resumedUpload.id}`;
+    const waitForApiResponse = (path: string, method: "GET" | "POST") =>
+      page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === method);
+    const [resumedResponse, completionResponse, previewHttpResponse] = await Promise.all([
+      waitForApiResponse(uploadPath, "GET"),
+      waitForApiResponse(`${uploadPath}/complete`, "POST"),
+      waitForApiResponse("/api/v1/system-imports/preview", "POST"),
+      fileInput.setInputFiles(archivePath),
+    ]);
+    const resumedView = await resumedResponse.json() as Record<string, unknown>;
     expect(resumedView).toMatchObject({
       id: resumedUpload.id,
       status: "uploading",
       receivedBytes: resumedUpload.byteLength,
     });
-    const completedUpload = await (await completionResponse).json() as Record<string, unknown>;
+    const completedUpload = await completionResponse.json() as Record<string, unknown>;
     expect(completedUpload).toMatchObject({
       id: resumedUpload.id,
       status: "completed",
       receivedBytes: resumedUpload.byteLength,
     });
-    const previewHttpResponse = await previewResponse;
     expect(previewHttpResponse.request().postDataJSON()).toMatchObject({ uploadId: resumedUpload.id });
     const previewView = systemImportPreviewViewSchema.parse(await previewHttpResponse.json());
     expect(newUploadRequests).toBe(0);

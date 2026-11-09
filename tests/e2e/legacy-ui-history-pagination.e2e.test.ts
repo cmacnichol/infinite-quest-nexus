@@ -60,7 +60,7 @@ async function selectedHistoryCardGeometry(page: Page, turnNumber: number): Prom
   readonly clientHeight: number;
   readonly scrollHeight: number;
 }> {
-  return page.evaluate((selectedTurnNumber) => {
+  const measure = () => page.evaluate((selectedTurnNumber) => {
     const scroller = document.querySelector<HTMLElement>("#turnHistoryDialog .dialog-scroll");
     const card = document.querySelector<HTMLElement>(`#turnHistoryDialog .history-card[aria-pressed="true"][data-turn-number="${selectedTurnNumber}"]`);
     const entry = card?.closest<HTMLElement>(".history-entry");
@@ -77,6 +77,8 @@ async function selectedHistoryCardGeometry(page: Page, turnNumber: number): Prom
       scrollHeight: scroller.scrollHeight
     };
   }, turnNumber);
+  await expect.poll(async () => (await measure()).fullyVisible).toBe(true);
+  return measure();
 }
 
 type SelectedHistoryGeometrySample = {
