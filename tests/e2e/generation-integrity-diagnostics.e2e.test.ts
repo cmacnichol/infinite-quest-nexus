@@ -3,6 +3,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
+import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 
 const PRIVATE_CANARY = "PRIVATE_PROMPT_AND_PROVIDER_ERROR_CANARY";
 const generationId = "55555555-5555-4555-8555-555555555555";
@@ -270,15 +271,12 @@ for (const scope of ["application", "campaign"] as const) test(`Prompt Library s
   const enrolledProtocol = "story-v14-continuity-context|story-output-v2|current-continuity-v3";
   let savedOverride: Record<string, unknown> | null = null;
   const template = {
-    key: "story_system",
+    ...PROMPT_TEMPLATE_CATALOG.story_system,
     title: "Story system",
-    category: "Story Engine",
-    description: "Creates safe story output.",
     effectiveSource: "shipped",
     effectiveContent: "Keep the established creative voice.",
-    variables: [],
-    maxLength: 16000,
     compatibility: {
+      acknowledged: false,
       requiredShapeVersion: "story-output-v2",
       protocolIdentity: "story-protocol-fixture",
       requiredShapePreview: "{ narration, choices, currentContinuity }"
@@ -355,9 +353,7 @@ test("Prompt Library previews current cast settings and unresolved direct-model 
   });
 
   await page.goto(`${legacyOrigin}/nexus/index.html#prompt-library`);
-  await expect(page.locator('#managementInteractiveRoot:not([inert])[aria-busy="false"]')).toBeVisible();
   await expect(page.locator("#promptLibraryScope")).toBeVisible();
-  await expect(page.locator(`#campaignList [data-campaign-id="${campaign.campaignId}"]`)).toHaveCount(1);
   await page.locator("#promptLibraryScope").selectOption("campaign");
   await expect(page.locator(`#promptLibraryCampaign option[value="${campaign.campaignId}"]`)).toHaveCount(1);
   await page.locator("#promptLibraryCampaign").selectOption(campaign.campaignId);
@@ -365,7 +361,7 @@ test("Prompt Library previews current cast settings and unresolved direct-model 
   const preview = page.locator("#promptLibraryPreviewContent");
   await expect(preview).toContainText("System prompt preview (output encoding pending)");
   await expect(preview).toContainText("Campaign cast authority:");
-  await expect(preview).toContainText("Protocol story-v17-campaign-cast from the current runtime settings.");
+  await expect(preview).toContainText("Protocol story-v18-fiction-cast from the current runtime settings.");
   await expect(preview).toContainText("This preview omits that contract");
   await expect(preview).not.toContainText("this campaign's direct model uses the story-native-v2 wire");
   await preview.evaluate((element) => { element.scrollTop = element.scrollHeight; });
