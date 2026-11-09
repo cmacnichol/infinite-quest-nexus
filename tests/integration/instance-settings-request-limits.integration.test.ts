@@ -141,6 +141,8 @@ integration("two API replica request admission", () => {
       expect((await apps[1]!.inject({url,method:"HEAD"})).statusCode).toBe(429);
       expect((await apps[1]!.inject({url})).statusCode).toBe(429);
       finish();expect((await first).statusCode).toBe(200);
+      // The response can reach the client before its onResponse lease release commits.
+      await expect.poll(async()=>(await pools[0]!.query("SELECT count(*)::int AS count FROM api_admission_leases")).rows).toEqual([{count:0}]);
       expect((await apps[1]!.inject({url,method:"HEAD"})).statusCode).toBe(200);
       await expect.poll(async()=>(await pools[0]!.query("SELECT count(*)::int AS count FROM api_admission_leases")).rows).toEqual([{count:0}]);
     } finally {finish();await Promise.all(apps.map(app=>app.close()));await Promise.all(pools.map(pool=>pool.end()));}
