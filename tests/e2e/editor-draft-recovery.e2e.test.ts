@@ -11,7 +11,10 @@ for (const surface of ["Story", "campaign"] as const) {
     let recovery = false;
     await page.route(`**/api/v1/campaigns/${fixture.campaignId}/sync-status`, route => route.fulfill({ json: {
       ...fixture.syncStatus, pendingGeneration: null,
-      generationRecovery: recovery ? { id: "55555555-5555-4555-8555-555555555555", status: "recoverable" } : null
+      generationRecovery: recovery ? {
+        id: "55555555-5555-4555-8555-555555555555", status: "recoverable", expectedTurnNumber: 2,
+        operationKind: "append", replacementTurnId: null, attempts: 1, errorCode: null, errorMessage: null, resultTurnId: null
+      } : null
     } }));
     let latest = { name: "The Observer", profile: characterProfileSchema.parse({ story: { role: "Scout" } }), revision: 3 };
     let writes = 0;
@@ -98,14 +101,20 @@ for (const surface of ["Story", "campaign"] as const) {
     expect(editor.writes).toBe(1);
   });
 
-  test(`${surface} locks and unlocks a dirty draft when recovery begins`, async ({ page }) => {
-    const editor = await setup(page);
+  test(`${surface} preserves a dirty draft while generation recovery blocks saving`, async ({ page }) => {
+    const editor = await setup(page, false);
     await editor.role.fill("Archivist");
     editor.setRecovery(true);
+    if (surface === "campaign") await editor.save.click();
     await expect(editor.role).toBeDisabled({ timeout: 10000 });
     await expect(editor.role).toHaveValue("Archivist");
+    expect(editor.writes).toBe(0);
     editor.setRecovery(false);
+    if (surface === "campaign") await editor.dialog.getByRole("button", { name: "Check generation status" }).click();
     await expect(editor.role).toBeEnabled({ timeout: 10000 });
     await expect(editor.role).toHaveValue("Archivist");
+    await editor.save.click();
+    await expect(editor.dialog).toBeHidden();
+    expect(editor.writes).toBe(1);
   });
 }

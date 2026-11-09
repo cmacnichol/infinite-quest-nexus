@@ -526,18 +526,16 @@ for (const surface of ["legacy", "web-next"] as const) for (const operation of [
     const draft = page.locator(surface === "legacy" ? "#freeAction" : "[data-story-draft]");
     await draft.fill("Remember the corrected harbor before continuing.");
     await expect(draft).toHaveValue("Remember the corrected harbor before continuing.");
-    if (surface === "legacy") await page.getByRole("button", { name: "Setup", exact: true }).click();
-    else await page.getByText("Campaign Tools", { exact: true }).click();
+    const toolsToggle = surface === "legacy" ? page.getByRole("button", { name: "Setup", exact: true }) : page.locator("[data-campaign-tools] summary");
+    await toolsToggle.click();
     const edit = page.locator(surface === "legacy" ? "#btnOpenEditState" : "[data-tool-action=edit-campaign-state]");
     await expect(edit).toBeDisabled();
+    await toolsToggle.click();
     await recovery.getByRole("button", { name: "Discard generation job", exact: true }).click();
     await expect(recovery).toBeHidden();
     await expect(draft).toHaveValue("Remember the corrected harbor before continuing.");
+    if (!await edit.isVisible()) await toolsToggle.click();
     await expect(edit).toBeEnabled();
-    if (!await edit.isVisible()) {
-      if (surface === "legacy") await page.getByRole("button", { name: "Setup", exact: true }).click();
-      else await page.locator("[data-campaign-tools] summary").click();
-    }
     await edit.click();
     await expect(draft).toHaveValue("Remember the corrected harbor before continuing.");
     await page.locator(surface === "legacy" ? "#editStateContinuitySummary" : "[data-continuity-summary]").fill("The harbor authority is corrected.");
@@ -564,18 +562,16 @@ for (const surface of ["legacy", "web-next"] as const) for (const operation of [
     await expect(recovery).toBeVisible();
     const draft = page.locator(surface === "legacy" ? "#freeAction" : "[data-story-draft]");
     await draft.fill("Keep this harbor profile repair with the new turn.");
-    if (surface === "legacy") await page.getByRole("button", { name: "Setup", exact: true }).click();
-    else await page.getByText("Campaign Tools", { exact: true }).click();
+    const toolsToggle = surface === "legacy" ? page.getByRole("button", { name: "Setup", exact: true }) : page.locator("[data-campaign-tools] summary");
+    await toolsToggle.click();
     const edit = page.locator(surface === "legacy" ? "#btnOpenEditCharacterProfile" : "[data-tool-action=edit-character-profile]");
     await expect(edit).toBeDisabled();
+    await toolsToggle.click();
     await recovery.getByRole("button", { name: "Discard generation job", exact: true }).click();
     await expect(recovery).toBeHidden();
     await expect(draft).toHaveValue("Keep this harbor profile repair with the new turn.");
+    if (!await edit.isVisible()) await toolsToggle.click();
     await expect(edit).toBeEnabled();
-    if (!await edit.isVisible()) {
-      if (surface === "legacy") await page.getByRole("button", { name: "Setup", exact: true }).click();
-      else await page.locator("[data-campaign-tools] summary").click();
-    }
     await edit.click();
     const name = page.locator(surface === "legacy" ? "#characterName" : '[data-story-tool-dialog] [data-character-profile-field="name"]');
     await expect(name).toHaveValue("Mira Vale");
