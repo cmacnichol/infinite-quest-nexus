@@ -348,7 +348,22 @@ test("committed_campaign_recovery_modal_remains_reachable_during_route_intent", 
   let campaignListReads = 0;
   await page.route("**/api/v1/campaigns", async (route) => {
     if (route.request().method() === "POST") {
-      await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ id: "10000000-0000-4000-8000-000000008888", title: "Committed fixture" }) });
+      await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({
+        id: "10000000-0000-4000-8000-000000008888",
+        title: "Committed fixture",
+        status: "active",
+        activeTurnNumber: 0,
+        storyLengthProfile: "standard",
+        storyContextBudgetTokens: 32000,
+        worldId: fixture.worlds[0]?.id,
+        worldVersionId: fixture.worlds[0]?.latestVersionId,
+        worldVersionNumber: 1,
+        selectedCharacterId: "fixture-observer",
+        selectedCharacterName: "The Observer",
+        skippedStartingCast: [],
+        textProviderProfileId: null,
+        imageProviderProfileId: null
+      }) });
       return;
     }
     campaignListReads += 1;

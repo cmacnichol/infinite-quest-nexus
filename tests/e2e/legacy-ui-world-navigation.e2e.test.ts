@@ -112,7 +112,7 @@ async function fixtureRoute(route: Route) {
     const gate = versionGates.get(versionId);
     if (gate) await gate;
     const versionName = versionId === "11111111-1111-4111-8111-111111111121" ? "world-a-v1" : versionId === "11111111-1111-4111-8111-111111111122" ? "world-a-v2" : versionId;
-    body = { characters: [{ id: `${versionId}-character`, name: `${versionName} character`, rpgStatCount: 1, defaultTriggerCount: 1 }], readiness: { ready: true, issues: [] } };
+    body = { characters: [{ id: `${versionId}-character`, name: `${versionName} character`, rpgStatCount: 1, defaultTriggerCount: 1 }], startingCastCandidates: [], readiness: { ready: true, issues: [] } };
   } else if (parts[0] === "worlds" && parts.length === 3 && parts[2] === "cover-job") {
     body = parts[1] === "11111111-1111-4111-8111-111111111111" && coverJobGates.has("cover-job-a")
       ? { id: "cover-job-a", status: "generating" }

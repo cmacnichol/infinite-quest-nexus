@@ -3480,7 +3480,7 @@ function setWorldAuthorStatus(message = "", type = "") {
 
 const WORLD_AUTHOR_STEPS = Object.freeze([
   { id: "basics", panel: "world-author-overview", next: "lore", nextLabel: "Continue to Lore" },
-  { id: "lore", panel: "world-author-lore", next: "character", nextLabel: "Continue to Playable character" },
+  { id: "lore", panel: "world-author-lore", next: "character", nextLabel: "Continue to Characters" },
   { id: "character", panel: "world-author-mechanics", next: "review", nextLabel: "Continue to Review" },
   { id: "review", panel: "world-author-review", next: "basics", nextLabel: "Back to Basics" }
 ]);

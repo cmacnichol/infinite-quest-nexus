@@ -8,7 +8,7 @@ import { currentCastReviewCandidates } from "./campaign-cast-current-review.js";
 /** Read enrollment and progress, then filter current review evidence through the effective cast. */
 export async function readCastDiscoveryStatus(pool: DatabasePool | DatabaseClient, rawScope: CastScope, enabled: boolean, projected?: CastSnapshot): Promise<CastDiscoveryStatus> {
   const scope = castScopeSchema.parse(rawScope);
-  if (!("release" in pool)) return withTransaction(pool as DatabasePool, client => readCastDiscoveryStatus(client, scope, enabled, projected));
+  if ("connect" in pool && !("release" in pool)) return withTransaction(pool as DatabasePool, client => readCastDiscoveryStatus(client, scope, enabled, projected));
   const snapshot = projected ?? await (async () => {
     const { rebuildCastWithClient } = await import("./campaign-cast-repository.js");
     const campaign = (await pool.query("SELECT active_turn_number FROM campaigns WHERE id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows[0];
