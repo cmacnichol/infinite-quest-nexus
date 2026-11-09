@@ -944,8 +944,9 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
     const campaign = await pool.query<{ id: string }>(
       `INSERT INTO campaigns (
          owner_user_id,world_version_id,title,active_turn_number,turn_control_style,
-         selected_character_id,character_snapshot,character_profile,character_profile_revision
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9) RETURNING id`,
+         selected_character_id,character_snapshot,character_profile,character_profile_revision,
+         first_appearance_eligible,selected_character_world_id
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,$11) RETURNING id`,
       [
         ownerUserId,
         latestVersionByWorld.get(worldId),
@@ -956,6 +957,8 @@ async function seedRepresentativeOwner(pool: DatabasePool, assetRoot: string): P
         campaignIndex === 0 ? JSON.stringify(representativeCharacterSnapshot) : null,
         campaignIndex === 0 ? JSON.stringify(currentCharacterProfile) : null,
         campaignIndex === 0 ? 2 : 0,
+        campaignIndex === 0,
+        campaignIndex === 0 ? worldId : null,
       ],
     );
     const campaignId = campaign.rows[0]!.id;
@@ -2032,6 +2035,9 @@ async function assertRepresentativeArchive(
       status: "active",
       activeTurnNumber: 2,
       settings: { turnControlStyle: "Scene Direction" },
+      campaignRecordVersion: 4,
+      firstAppearanceEligible: true,
+      selectedCharacterWorldId: source.worldIds[0],
       selectedCharacterId: representativeCharacterSnapshot.id,
       characterSnapshot: representativeCharacterSnapshot,
       characterProfile: currentCharacterProfile,
@@ -2054,6 +2060,9 @@ async function assertRepresentativeArchive(
       status: "active",
       activeTurnNumber: 1,
       settings: { turnControlStyle: "Action" },
+      campaignRecordVersion: 4,
+      firstAppearanceEligible: false,
+      selectedCharacterWorldId: null,
       selectedCharacterId: null,
       characterSnapshot: null,
       characterProfile: null,
@@ -2623,6 +2632,8 @@ async function assertImportedAuthority(
       legacy_settings: Record<string, unknown>;
       turn_control_style: string;
       selected_character_id: string | null;
+      first_appearance_eligible: boolean;
+      selected_character_world_id: string | null;
       character_snapshot: Record<string, unknown> | null;
       character_profile: Record<string, unknown> | null;
       character_profile_revision: number;
@@ -2631,7 +2642,7 @@ async function assertImportedAuthority(
     }>(
       `SELECT id,owner_user_id,world_version_id,title,status,active_turn_number,legacy_settings,
               turn_control_style,selected_character_id,character_snapshot,character_profile,
-              character_profile_revision,created_at,updated_at
+              character_profile_revision,first_appearance_eligible,selected_character_world_id,created_at,updated_at
          FROM campaigns ORDER BY title`,
     );
     expect(campaigns.rows).toEqual([
@@ -2642,6 +2653,8 @@ async function assertImportedAuthority(
         legacy_settings: {},
         turn_control_style: "flexible_scene",
         selected_character_id: representativeCharacterSnapshot.id,
+        first_appearance_eligible: true,
+        selected_character_world_id: source.worldIds[0],
         character_snapshot: representativeCharacterSnapshot,
         character_profile: currentCharacterProfile,
         character_profile_revision: 2,
@@ -2654,6 +2667,8 @@ async function assertImportedAuthority(
         legacy_settings: {},
         turn_control_style: "flexible_action",
         selected_character_id: null,
+        first_appearance_eligible: false,
+        selected_character_world_id: null,
         character_snapshot: null,
         character_profile: null,
         character_profile_revision: 0,
