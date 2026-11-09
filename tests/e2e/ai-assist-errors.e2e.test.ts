@@ -1,4 +1,7 @@
 import { expect, test } from "@playwright/test";
+import { mockAuthoringSession } from "./helpers/authoring-session.js";
+
+test.beforeEach(mockAuthoringSession);
 
 test("world creation retains its prompt and renders a safe authoring error", async ({ page }, testInfo) => {
   await page.route("**/api/v1/authoring/capabilities", (route) => route.fulfill({

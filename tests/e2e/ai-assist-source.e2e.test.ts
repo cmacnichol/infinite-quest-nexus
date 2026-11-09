@@ -2,6 +2,9 @@ import { expect, test } from "@playwright/test";
 import { authoringJobViewSchema, type AuthoringJobView } from "../../packages/contracts/src/authoring.js";
 import { normalizeSourceDocument } from "../../packages/domain/src/source-authoring.js";
 import { validateSourceCitation } from "../../packages/domain/src/source-authoring.js";
+import { mockAuthoringSession } from "./helpers/authoring-session.js";
+
+test.beforeEach(mockAuthoringSession);
 
 const base = "http://127.0.0.1:43174";
 type StorySourceJob = Extract<AuthoringJobView, { kind: "story_source" }>;

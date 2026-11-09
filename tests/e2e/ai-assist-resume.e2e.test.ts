@@ -1,6 +1,9 @@
 import { expect, test, type Page, type BrowserContext, type TestInfo } from "@playwright/test";
 import { characterProfileSchema } from "../../packages/contracts/src/world-library.js";
 import type { AuthoringJobView, AuthoringSubmit } from "../../packages/contracts/src/authoring.js";
+import { mockAuthoringSession } from "./helpers/authoring-session.js";
+
+test.beforeEach(mockAuthoringSession);
 
 const base = "http://127.0.0.1:43174";
 const character = (id = "hero", name = "Ilyra") => ({ id, name, characterText: "A patient guide through reflected starlight.", profile: characterProfileSchema.parse({ story: { role: "Guide", personality: "Patient" } }), campaignUse: "playable" as const, startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} });

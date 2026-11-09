@@ -191,10 +191,15 @@ test("history search debounces for 250ms and resets its opaque cursor when the q
   await expect(page.locator("#storySyncStatus")).toContainText("Story synced");
   await openHistory(page);
 
+  const start = new Date("2030-01-01T00:00:00Z");
+  await page.clock.install({ time: start });
+  await page.clock.pauseAt(new Date(start.getTime() + 1_000));
   await enterSearch(page, "query alpha");
-  await page.waitForTimeout(180);
+  await page.clock.runFor(249);
   expect(queryRequests(requests, fixture.campaignId)).toHaveLength(0);
+  await page.clock.runFor(1);
   await expect.poll(() => queryRequests(requests, fixture.campaignId).length).toBe(1);
+  await page.clock.resume();
   const firstQuery = new URL(queryRequests(requests, fixture.campaignId)[0]!.url);
   expect(firstQuery.searchParams.get("q")).toBe("query alpha");
 

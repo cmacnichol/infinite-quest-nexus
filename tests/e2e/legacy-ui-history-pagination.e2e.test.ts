@@ -69,15 +69,18 @@ async function selectedHistoryCardGeometry(page: Page, turnNumber: number): Prom
     const entryRect = entry.getBoundingClientRect();
     const viewportTop = scrollerRect.top + scroller.clientTop;
     const viewportBottom = viewportTop + scroller.clientHeight;
+    // Scroll offsets and clientHeight are rounded in Chromium. DOMRects retain fractions.
+    const clippedPixels = Math.max(0, viewportTop - entryRect.top, entryRect.bottom - viewportBottom);
     return {
       turnNumber: Number(card.dataset.turnNumber),
-      fullyVisible: entryRect.top >= viewportTop && entryRect.bottom <= viewportBottom,
+      fullyVisible: clippedPixels < 1,
+      clippedPixels,
       scrollTop: scroller.scrollTop,
       clientHeight: scroller.clientHeight,
       scrollHeight: scroller.scrollHeight
     };
   }, turnNumber);
-  await expect.poll(async () => (await measure()).fullyVisible).toBe(true);
+  await expect.poll(async () => (await measure()).clippedPixels).toBeLessThan(1);
   return measure();
 }
 
@@ -119,7 +122,7 @@ async function selectHistoryCardWithGeometrySamples(page: Page, turnNumber: numb
       const viewportBottom = viewportTop + scroller.clientHeight;
       return {
         turnNumber: Number(card.dataset.turnNumber),
-        fullyVisible: entryRect.top >= viewportTop && entryRect.bottom <= viewportBottom,
+        fullyVisible: viewportTop - entryRect.top < 1 && entryRect.bottom - viewportBottom < 1,
         scrollerTop: scrollerRect.top,
         scrollerClientTop: scroller.clientTop,
         scrollerClientHeight: scroller.clientHeight,

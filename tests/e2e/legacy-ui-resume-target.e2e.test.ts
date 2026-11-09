@@ -127,16 +127,18 @@ test("403 Story load is shown as an access problem rather than a deleted campaig
 });
 
 test("network failure keeps Story recovery visible and retries the scoped load", async ({ page }) => {
-  const api = await installApi(page, 503);
+  await installApi(page, 503);
   await installStoryDocument(page);
   await page.goto(`${origin}/story/${campaignId}`);
 
   await expect(page.locator("#storyLoadRecovery")).toBeVisible();
   await expect(page.locator("#storyLoadRecovery")).toContainText("could not be loaded");
   await expect(page.locator("#storyLoadRetry")).toBeVisible();
+  await page.route(`${origin}/api/v1/campaigns/${campaignId}/sync-status`, route =>
+    route.fulfill({ status: 403, json: {} })
+  );
   await page.locator("#storyLoadRetry").click();
-  await expect.poll(() => api.syncRequests()).toBe(2);
-  await expect(page.locator("#storyLoadRecovery")).toBeVisible();
+  await expect(page.locator("#storyLoadRecovery")).toContainText("don't have access");
   await expect(page.locator("#storyArea .turn")).toHaveCount(0);
 });
 
