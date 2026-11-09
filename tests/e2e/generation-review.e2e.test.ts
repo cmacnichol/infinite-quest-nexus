@@ -545,9 +545,12 @@ for (const surface of ["legacy", "web-next"] as const) {
       await page.route(`**/story/${api.fixture.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
     }
     await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${api.fixture.campaignId}` : `${webNextOrigin}/app/story/${api.fixture.campaignId}`);
-    await page.reload();
     const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
-    await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeVisible();
+    const keepTurn = recovery.getByRole("button", { name: "Keep this turn", exact: true });
+    await expect(keepTurn).toBeEnabled();
+    await expect(recovery).toContainText("The lighthouse bell answered across the harbor.");
+    await page.reload();
+    await expect(keepTurn).toBeVisible();
     await expect(recovery).toContainText("The lighthouse bell answered across the harbor.");
     expect(api.decisions).toEqual([]);
     expect(api.writePaths).toEqual([]);
