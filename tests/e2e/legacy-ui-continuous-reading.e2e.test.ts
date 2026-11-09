@@ -228,7 +228,10 @@ async function visibleKeyboardFocus(page: Page): Promise<{
 }
 
 async function saveContinuousPreference(page: Page, value: boolean): Promise<void> {
-  await page.locator("#btnOpenUserProfile").click();
+  // locator.click() auto-scrolls this sticky-header button and would move the reader under test.
+  const profileButton = await page.locator("#btnOpenUserProfile").boundingBox();
+  if (!profileButton) throw new Error("The profile button is not rendered.");
+  await page.mouse.click(profileButton.x + profileButton.width / 2, profileButton.y + profileButton.height / 2);
   const control = page.locator("#userProfileContinuousReading");
   await expect(control).toBeVisible();
   await control.setChecked(value);
