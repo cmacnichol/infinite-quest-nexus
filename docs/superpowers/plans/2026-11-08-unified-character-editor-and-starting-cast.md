@@ -487,7 +487,7 @@ pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts
 
 All 109 Chromium tests in the four mapped browser suites passed. The rendered checks cover no-provider manual entry, empty seeds, serial expansion, stop and retry, edits before adding, explicit world save, entity conversion and retained relationships. Story tests cover generation locks, per-field suggestions, cited turns, creative guidance, manual edits, stale citations, and comparing and reapplying across a changed campaign revision. Both clients exercise new and existing Supporting characters with hidden mechanics. Model responses in these checks use deterministic fixtures. Live-provider output quality is unassessed.
 
-[Screenshot evidence](../../review/assets/unified-character-editor-phase-5) includes Nexus cast suggestions and entity conversion at desktop and phone widths, both Story editors, and Web-Next Supporting generation.
+[Screenshot evidence](https://github.com/cmacnichol/infinite-quest-nexus/tree/1006fa714d121db4acdd51cda63fb8ca55459f67/docs/review/assets/unified-character-editor-phase-5) includes Nexus cast suggestions and entity conversion at desktop and phone widths, both Story editors, and Web-Next Supporting generation.
 
 ### Publication of phases 1–5
 
