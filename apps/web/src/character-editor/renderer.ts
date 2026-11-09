@@ -167,6 +167,7 @@ export function renderCharacterEditor(host: Element, draft: CharacterEditorDraft
       <div class="button-row character-dialog-actions">
         <button id="deleteCharacter" class="button danger" type="button">Delete character</button>
         <span class="character-action-spacer"></span>
+        <button id="recheckCampaignCharacterGeneration" class="button secondary" type="button" hidden>Check generation status</button>
         <button id="cancelCharacter" class="button secondary" type="button">Cancel</button>
         <button id="saveCharacter" class="button primary" type="submit">Apply to world draft</button>
       </div>

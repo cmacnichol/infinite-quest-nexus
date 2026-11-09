@@ -694,6 +694,25 @@ Do these in order, because each step leaves the app working. Web-Next has its ow
 - [x] **8.40** Run client boundaries, both web builds, unit tests, and the campaign-cast, legacy-ui-campaign-edits, authoring-disclosures and unified-character-editor browser suites.
 - [x] **4.28** Tick once 8.35 to 8.40 pass.
 
+## Phase 9 · Final review corrections
+
+- [x] **9.1 · Undo alias overflow (6.3, 6.11).** Preview the restored alias union and let the user resolve a set over 20 before confirming. Verify independent edits, portable replay, and the browser flow.
+- [x] **9.2 · Promotion target identity (6.7).** Offer the original roster entry in its source world after renames, including an unseeded roster origin or explicit entity link. Scope origins to the owned destination world. Recompute eligible Replace targets under lock and reject unrelated entries without changing the draft.
+- [x] **9.3 · Starting cast at capacity (A10).** Preserve all explicit selections when a former protagonist returns to a full checklist. Verify the returning character and the last user-selected character in Chromium.
+- [x] **9.4 · Merged goal preview (6.1).** Use the effective merged goal policy in the preview, including target-only authored fallback and restoration cutoffs. Compare preview with the persisted result.
+- [x] **9.5 · Campaign-page generation lock (A9).** Check at open and save, preserve Story live locking, and cover idle request counts and a generation starting before save.
+- [x] **9.6 · Portable lifecycle validation (D18, D19).** Enforce the live undo and seed-detach restrictions during archive replay, including a lifecycle transition backdated across its prerequisite. Verify rejection before import writes.
+- [x] **9.7 · Converted entity links (5.6, 5.16).** Reject dangling roster references in archived drafts and immutable versions before import, using the world-write link validation.
+- [x] **9.8 · Diff hygiene.** Remove the trailing blank line in the cast context test and check the full change against the original baseline.
+
+**Final review evidence.** The Chromium run passed all 120 cases across the cast, unified editor, campaign creation, campaign edits and authoring disclosures suites. It exercised the 30th selection, campaign lock checks, and explicit alias selection at desktop and phone widths. The separate PostgreSQL-backed browser proof confirmed the predicted goal in the merge dialog and replaced the original renamed roster entry without increasing the roster count. [Screenshots](../../review/assets/unified-character-editor-final-review)
+
+Six PostgreSQL application suites passed 185 tests, including the real browser proof. They cover repository and API writes, discovery, generation, world library behavior, and merge/undo.
+
+Five Linux PostgreSQL archive and lifecycle suites passed 131 tests. Both archive families rejected the invalid transitions before cast import, while a valid late-published mention survived export and import. System Archive rejected dangling links in each world record type. The full unit run passed 5,601 tests with 44 skipped. TypeScript, repository and client boundaries, both web builds, and the diff against the original baseline passed.
+
+Undo keeps the existing v4 journal format. When a valid later edit takes the restored alias set over 20, the user reviews the full set. Confirmation validates the selection under the campaign lock. The PostgreSQL regressions also cover nested merges, idempotent retry, rewind, and portable replay.
+
 ## Release evidence and rollback
 
 | First incompatible change | Evidence before activation | Recovery after activation |

@@ -196,4 +196,3 @@ it("keeps dated lower-authority state through enrollment gaps and distinguishes 
   expect(off.notice).toContain("discovery is off");
   expect(off.characters[0].fields).toEqual(gap.characters[0].fields);
 });
-

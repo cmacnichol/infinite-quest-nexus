@@ -230,7 +230,9 @@ export const portableCampaignCastSchema = z.object({
       .map(([key, value]) => `${JSON.stringify(key)}:${canonical(value)}`).join(",")}}` : JSON.stringify(item);
   const detached = new Set<string>();
   const activeMerges = new Map<string, { target: string; source: string; order: number }>();
+  let lastLifecycleTurn = 0;
   const removed = new Set<string>();
+  const currentNames = new Map<string, string>();
   type AliasOperation = { eventId: string; aliases: string[]; delta?: { added: string[]; removed: string[] }; mergeOwned: boolean };
   const aliasHistory = new Map<string, AliasOperation[]>(), currentAliases = new Map<string, string[]>(), undoneAliases = new Set<string>();
   const replayAliases = (characterId: string) => {
@@ -244,6 +246,9 @@ export const portableCampaignCastSchema = z.object({
   for (const [order, event] of value.events.entries()) {
     const receipt = event.receipt;
     const merges = event.commands.filter(item => item.command.kind === "merge");
+    const undo = event.commands.find(item => item.command.kind === "unmerge")?.command;
+    if (undo?.kind === "unmerge" && (event.commands[0]?.command !== undo || event.commands.slice(1).some(({ command }) =>
+      command.kind !== "identity" || command.characterId !== undo.characterId))) fail();
     if (merges.length) {
       const merge = merges[0]!.command;
       const identities = event.commands.filter(item => item.command.kind === "identity");
@@ -269,7 +274,14 @@ export const portableCampaignCastSchema = z.object({
     }
     for (const item of event.commands) {
     const command = item.command;
-    if (value.formatVersion < 4 && (["merge", "unmerge", "remove", "restore"].includes(command.kind) || command.kind === "identity" && command.aliasChanges)) fail();
+    const lifecycleCommand = ["merge", "unmerge", "remove", "restore"].includes(command.kind);
+    if (value.formatVersion < 4 && (lifecycleCommand || command.kind === "identity" && command.aliasChanges)) fail();
+    // Live decisions use the active turn. Rewind discards later decisions before another can be written.
+    // Their journal prefixes must therefore also be valid at each historical turn. Discovery may arrive out of order.
+    if (lifecycleCommand || command.kind === "detach" && seedCommands.has(command.eventId)) {
+      if (event.effectiveTurnNumber < lastLifecycleTurn) fail();
+      lastLifecycleTurn = event.effectiveTurnNumber;
+    }
     if (command.kind === "merge") {
       if (!created.has(command.sourceCharacterId) || command.sourceCharacterId === command.characterId
         || characters.get(command.sourceCharacterId)?.origin.kind === "protagonist" || characters.get(command.characterId)?.origin.kind === "protagonist"
@@ -282,10 +294,12 @@ export const portableCampaignCastSchema = z.object({
     }
     if (command.kind === "unmerge") {
       const merge = activeMerges.get(command.mergeEventId);
-      if (!merge || merge.target !== command.characterId || [...activeMerges.values()].some(later => later.order > merge.order && (later.source === merge.source || later.target === merge.source || later.source === merge.target || later.target === merge.target))) fail();
+      if (!merge || merge.target !== command.characterId || removed.has(command.characterId)
+        || [...activeMerges.values()].some(later => later.order > merge.order && (later.source === merge.source || later.target === merge.source || later.source === merge.target || later.target === merge.target))) fail();
       activeMerges.delete(command.mergeEventId);
       undoneAliases.add(command.mergeEventId);
       replayAliases(command.characterId);
+      if (event.commands.length > 1 && (currentAliases.get(command.characterId)?.length ?? 0) <= 20) fail();
       if (![...activeMerges.values()].some(item => item.target === command.characterId)) {
         aliasHistory.set(command.characterId, [{ eventId: event.id, aliases: currentAliases.get(command.characterId) ?? [], mergeOwned: false }]);
       }
@@ -315,6 +329,9 @@ export const portableCampaignCastSchema = z.object({
       if (value.formatVersion === 1) fail();
       const attachment = attachments.get(command.eventId);
       if (!attachment || command.eventId === event.id || attachment.characterId !== command.characterId || detached.has(command.eventId)) fail();
+      // Live detach resolves merged sources to their target before checking for a dependent merge.
+      if (seedCommands.has(command.eventId) && [...activeMerges.values()].some(merge =>
+        merge.target === command.characterId || merge.source === command.characterId)) fail();
       detached.add(command.eventId);
       if (seeds.get(command.characterId) === command.eventId) seeds.delete(command.characterId);
     }
@@ -328,6 +345,7 @@ export const portableCampaignCastSchema = z.object({
         || JSON.stringify(characters.get(item.characterId)?.origin) !== JSON.stringify(command.origin)) fail();
       else {
         created.add(item.characterId);
+        currentNames.set(item.characterId, command.name);
         aliasHistory.set(item.characterId, [{ eventId: event.id, aliases: command.aliases, mergeOwned: false }]);
         currentAliases.set(item.characterId, command.aliases);
       }
@@ -337,6 +355,9 @@ export const portableCampaignCastSchema = z.object({
         || characters.get(command.characterId)!.firstObservedTurn > event.effectiveTurnNumber) fail();
       if (command.kind === "identity") {
         const mergeOwned = merges.length > 0, before = currentAliases.get(command.characterId) ?? [];
+        if (undo && (command.name !== currentNames.get(command.characterId) || command.aliases.some(alias => !before.includes(alias))
+          || new Set(command.aliases.map(normalizeCastAlias)).size !== command.aliases.length)) fail();
+        currentNames.set(command.characterId, command.name);
         if (!mergeOwned && [...activeMerges.values()].some(merge => merge.target === command.characterId) && !command.aliasChanges) fail();
         if (command.aliasChanges && canonical(command.aliasChanges) !== canonical(castAliasDelta(before, command.aliases))) fail();
         const operation: AliasOperation = { eventId: event.id, aliases: command.aliases, mergeOwned, ...(command.aliasChanges ? { delta: command.aliasChanges } : {}) };
@@ -353,6 +374,7 @@ export const portableCampaignCastSchema = z.object({
       }
     }
   }
+    if (undo?.kind === "unmerge" && (currentAliases.get(undo.characterId)?.length ?? 0) > 20) fail();
     if (receipt?.observationIds.some(id => !observations.has(id))) fail();
     const result = receipt?.result?.character;
     if (result && canonical(result.origin) !== canonical(characters.get(result.id)?.origin)) fail();

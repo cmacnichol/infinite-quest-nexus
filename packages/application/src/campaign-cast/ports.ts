@@ -6,7 +6,7 @@ import type { CreateCastCharacter, EditCastCharacter, CastWriteResult, CastDetai
 export interface CampaignCastWritePort {
   promotionPreview?(scope: CastScope, id: string, worldId: string): Promise<import("@infinite-quest/contracts").CastPromotionPreview>;
   promote?(scope: CastScope, id: string, request: import("@infinite-quest/contracts").CastPromote): Promise<import("@infinite-quest/contracts").CastPromoteResult>;
-  unmergePreview?(scope: CastScope, targetId: string, mergeEventId: string): Promise<{ target: import("@infinite-quest/contracts").CastCharacter; source: import("@infinite-quest/contracts").CastCharacter; revision: number; boundary: CastBoundary; expectedCharacterRevision: number; expectedSourceCharacterRevision: number }>;
+  unmergePreview?(scope: CastScope, targetId: string, mergeEventId: string): Promise<import("@infinite-quest/contracts").CastUnmergePreview>;
   mergePreview?(scope: CastScope, targetId: string, sourceId: string): Promise<import("@infinite-quest/contracts").CastMergePreview>;
   merge?(scope: CastScope, targetId: string, request: import("@infinite-quest/contracts").CastMergeRequest): Promise<CastWriteResult>;
   unmerge?(scope: CastScope, targetId: string, request: import("@infinite-quest/contracts").CastUnmergeRequest): Promise<CastWriteResult>;

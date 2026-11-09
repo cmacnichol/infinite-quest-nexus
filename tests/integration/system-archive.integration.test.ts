@@ -20,6 +20,7 @@ import {
   systemArchiveManifestSchema,
   systemArchiveReportSchema,
   systemRecordEnvelopeSchema,
+  type SystemRecordEnvelope,
 } from "../../packages/contracts/src/system-archives.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
@@ -62,6 +63,7 @@ import {
   withSystemMutationPermit,
 } from "../../services/api/src/system-import-gate.js";
 import { workerMemoryApplication } from "../helpers/memory-applications.js";
+import { castArchiveLifecycle, invalidCastArchiveSequences } from "../fixtures/cast-archive-lifecycle.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -2318,6 +2320,58 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(pool.query<{ count: string }>("SELECT count(*)::text AS count FROM worlds"))
       .resolves.toMatchObject({ rows: [{ count: "0" }] });
   });
+
+  it.each([...invalidCastArchiveSequences, "restore-undo-detach", "world-drafts", "world-versions"] as const)(
+    "checks %s relationships during System Archive preview and atomic import", async scenario => {
+      const zip = await JSZip.loadAsync(productionImportFixture!.bytes);
+      const manifest = JSON.parse(await zip.file("manifest.json")!.async("string")) as MutableSystemManifest;
+      const domain = scenario === "world-drafts" || scenario === "world-versions" ? scenario : "campaigns";
+      const entry = manifest.entries.find(item => item.path.startsWith(`records/${domain}/`))!;
+      const record = systemRecordEnvelopeSchema.parse(JSON.parse((await zip.file(entry.path)!.async("string")).trim()));
+      if (record.domain === "world-drafts" || record.domain === "world-versions") {
+        record.record.content.entities = [{ id: "guide-entity", name: "Guide", kind: "npc", description: "", tags: [], facts: [],
+          linkedCharacterId: "missing-roster-entry" }];
+      } else if (record.domain === "campaigns" && scenario !== "world-drafts" && scenario !== "world-versions") {
+        record.record.cast = castArchiveLifecycle(scenario, { worldVersionId, rosterId: "roundtrip-character", turnId,
+          narration: "The gate opens silently.", narrationRevision: 1 });
+      } else throw new Error("Unexpected archive fixture domain.");
+      const bytes = Buffer.from(`${JSON.stringify(record)}\n`);
+      zip.file(entry.path, bytes);
+      entry.byteLength = bytes.length;
+      entry.sha256 = sha256(bytes);
+      refreshSystemFingerprint(manifest);
+      zip.file("manifest.json", JSON.stringify(manifest));
+      await withStagedArchive(await zip.generateAsync({ type: "nodebuffer" }), limits, async staged => {
+        const inspection = inspectSystemArchiveForPreview(staged, limits);
+        if (scenario === "restore-undo-detach") await expect(inspection).resolves.toBeDefined();
+        else await expect(inspection).rejects.toMatchObject({ code: domain === "campaigns" ? "archive-json-invalid" : "archive-world-mismatch" });
+      });
+      await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
+      await pool.query("DELETE FROM system_archive_jobs");
+      await pool.query("DELETE FROM system_archive_uploads");
+      const imports = createPostgresSystemArchiveImportRepository(pool);
+      const owner = { ownerUserId };
+      const destination = await imports.destinationFingerprint(owner, {});
+      // Supply the raw records for this logical restore. Illustration rows require the separate asset attachment step.
+      const records: SystemRecordEnvelope[] = [];
+      for (const upstream of SYSTEM_ARCHIVE_DOMAINS.filter(domain => domain !== "illustrations")) {
+        for (const shard of manifest.entries.filter(item => item.path.startsWith(`records/${upstream}/`))) {
+          const lines = (await zip.file(shard.path)!.async("string")).trim().split("\n").filter(Boolean);
+          records.push(...lines.map(line => JSON.parse(line)));
+        }
+      }
+      const imported = imports.withAtomicImport(owner, { destination, ignore: {} }, tx => tx.insertLogicalDomains(records));
+      if (scenario === "restore-undo-detach") {
+        await imported;
+        expect((await pool.query("SELECT count(*)::int AS events FROM campaign_cast_events WHERE campaign_id=$1", [campaignId])).rows)
+          .toEqual([{ events: 8 }]);
+      } else {
+        await expect(imported).rejects.toThrow(domain === "campaigns" ? "Invalid cast archive relationships" : "character link");
+        expect((await pool.query("SELECT (SELECT count(*) FROM worlds)::int worlds, (SELECT count(*) FROM campaign_cast_events)::int events")).rows)
+          .toEqual([{ worlds: 0, events: 0 }]);
+      }
+    },
+  );
 
   it("restores global and campaign prompt overrides with the same key without collapsing scope", async () => {
     await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");

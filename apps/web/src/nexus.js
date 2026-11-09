@@ -221,7 +221,6 @@ let characterModalBusy = false;
 let characterModalScope = "world";
 let campaignCharacterProfileRevision = 0;
 let campaignCharacterController = null;
-let campaignCharacterPoll = null;
 let campaignCharacterLocked = false;
 let campaignCharacterOpenEpoch = 0;
 let campaignCharacterLockEpoch = 0;
@@ -4368,7 +4367,11 @@ async function openCampaignCharacterDialog() {
       reapply(latest) { characterEditorDraft = reapplyEditorDraft(characterEditorDraft, campaignProfileEditorRecord(latest)); campaignCharacterProfileRevision = latest.revision; syncCampaignCharacterDraft(); },
       load(latest) { characterEditorDraft = createEditorDraft("campaign-main", campaignProfileEditorRecord(latest)); campaignCharacterProfileRevision = latest.revision; syncCampaignCharacterDraft(); },
       markConflict() { characterEditorDraft = markEditorConflict(characterEditorDraft); },
-      setLocked(locked) { setCharacterModalControls(locked); },
+      setLocked(locked) {
+        setCharacterModalControls(locked);
+        elements.recheckCampaignCharacterGeneration.hidden = !locked || controller.saving;
+        elements.recheckCampaignReviewGeneration.hidden = !locked || controller.saving;
+      },
       focus() { elements.characterName.focus(); },
       fieldControl(path) {
         return elements[WORLD_PROFILE_FIELDS.find((field) => field.path === path)?.world.id] ?? elements.characterName;
@@ -4414,7 +4417,6 @@ async function openCampaignCharacterDialog() {
     controller.setLocked(campaignCharacterLocked);
     setCampaignCharacterReviewLock();
     if (campaignCharacterLocked) setCharacterStatus("Finish or resolve generation before saving the character profile.");
-    campaignCharacterPoll = window.setInterval(() => void refreshCampaignCharacterLock(campaignId, controller), 2000);
     elements.characterName.focus();
   } catch (error) {
     if (openEpoch !== campaignCharacterOpenEpoch || selectedCampaign?.id !== campaignId) return;
@@ -4939,13 +4941,22 @@ function renderStartingCast(session) {
     elements.startingCastNotice.textContent = "Starting cast will be available when characters load.";
     return;
   }
-  const candidates = session.castCandidates.filter((item) => item.campaignUse !== "playable" && item.id !== elements.newCampaignCharacter.value);
+  const mainCharacterId = elements.newCampaignCharacter.value;
+  const candidates = session.castCandidates.filter((item) => item.campaignUse !== "playable" && item.id !== mainCharacterId);
+  if (session.previousMainCharacterId !== mainCharacterId) {
+    const returning = candidates.find((item) => item.id === session.previousMainCharacterId);
+    const otherTicks = candidates.filter((item) => item !== returning && session.castSelections.get(item.id)?.selected).length;
+    if (returning && session.castSelections.get(returning.id)?.selected && otherTicks >= 30) {
+      session.castSelections.get(returning.id).selected = false;
+      session.castRestoreNotice = `${returning.name} was left unticked because 30 characters are already selected.`;
+    } else session.castRestoreNotice = "";
+    session.previousMainCharacterId = mainCharacterId;
+  }
   const selected = candidates.filter((item) => session.castSelections.get(item.id)?.selected);
-  for (const extra of selected.splice(30)) { session.castSelections.get(extra.id).selected = false; session.castOverCap = true; }
   const totalSelected = selected.length;
   const pins = selected.filter((item) => session.castSelections.get(item.id)?.alwaysInContext).length;
   const contextNotice = castContextAvailable ? "Story Memory is set on the campaign after you create it." : castNarratorNotice("installation_disabled", "").text;
-  elements.startingCastNotice.textContent = `${selected.length} of 30 selected.${totalSelected >= 30 ? " Remove a selection to choose another." : ""}${session.castOverCap ? " Some characters were left unticked at the 30 limit." : ""}${pins > 5 ? " Always-included characters take up narrator context in every turn." : ""}${session.staleCast ? " Some unavailable selections were removed." : ""} ${contextNotice}`;
+  elements.startingCastNotice.textContent = `${selected.length} of 30 selected.${totalSelected >= 30 ? " Remove a selection to choose another." : ""}${session.castRestoreNotice ? " " + session.castRestoreNotice : session.castOverCap ? " Some characters were left unticked at the 30 limit." : ""}${pins > 5 ? " Always-included characters take up narrator context in every turn." : ""}${session.staleCast ? " Some unavailable selections were removed." : ""} ${contextNotice}`;
   if (!candidates.length) {
     const empty = document.createElement("p"); empty.textContent = "No Supporting characters available. Add NPCs in the world editor."; list.append(empty); return;
   }
@@ -4956,7 +4967,7 @@ function renderStartingCast(session) {
     const row = document.createElement("div"); row.className = "starting-cast-row";
     const label = document.createElement("label");
     const tick = document.createElement("input"); tick.type = "checkbox"; tick.checked = state.selected; tick.disabled = createCampaignSubmitting || createCampaignCommitted || (!state.selected && totalSelected >= 30);
-    tick.addEventListener("change", () => { state.selected = tick.checked; renderStartingCast(session); });
+    tick.addEventListener("change", () => { state.selected = tick.checked; session.castRestoreNotice = ""; renderStartingCast(session); });
     label.append(tick, document.createTextNode(` ${item.name}${item.role ? ` · ${item.role}` : ""}`)); row.append(label);
     const pinLabel = document.createElement("label"); const pin = document.createElement("input"); pin.type = "checkbox"; pin.checked = state.alwaysInContext; pin.disabled = createCampaignSubmitting || createCampaignCommitted || !state.selected;
     pin.addEventListener("change", () => { state.alwaysInContext = pin.checked; renderStartingCast(session); });
@@ -7779,6 +7790,11 @@ characterReviewLockNotice.setAttribute("role", "status");
 characterReviewLockNotice.className = "field-note";
 elements.applyCharacterProfileReview.parentElement.before(characterReviewLockNotice);
 elements.characterReviewLockNotice = characterReviewLockNotice;
+for (const control of [elements.recheckCampaignCharacterGeneration, elements.recheckCampaignReviewGeneration]) {
+  control.addEventListener("click", () => {
+    if (selectedCampaign && campaignCharacterController) void refreshCampaignCharacterLock(selectedCampaign.id, campaignCharacterController);
+  });
+}
 elements.cancelCharacterProfileReview.addEventListener("click", () => {
   characterProfileOrganizationResult = null;
   elements.characterProfileReviewDialog.close();
@@ -7804,8 +7820,8 @@ elements.characterDialog.addEventListener("close", () => {
   suggestionApply = null;
   ++campaignCharacterOpenEpoch;
   ++campaignCharacterLockEpoch;
-  if (campaignCharacterPoll) window.clearInterval(campaignCharacterPoll);
-  campaignCharacterPoll = null;
+  elements.recheckCampaignCharacterGeneration.hidden = true;
+  elements.recheckCampaignReviewGeneration.hidden = true;
   campaignCharacterController?.dispose();
   campaignCharacterController = null;
   campaignCharacterLocked = false;

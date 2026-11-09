@@ -1,9 +1,10 @@
 import { castFieldSchema, castAuthoredPathSchema, type CastCharacter, type CastObservation } from "../../contracts/src/campaign-cast.js";
-import { castEvidenceOrder } from "./campaign-cast.js";
+import { characterProfileSchema } from "../../contracts/src/world-library.js";
+import { castEvidenceOrder, resolveSeededCastProfile } from "./campaign-cast.js";
 import { normalizeEntityTerm } from "./entity-references.js";
 
 /** Build the review from full current identities; no truncation occurs before review. */
-export function previewCastMerge(target: CastCharacter, source: CastCharacter, targetObservations: readonly CastObservation[] = [], sourceObservations: readonly CastObservation[] = [], observationOrder: ReadonlyMap<string, number> = new Map()) {
+export function previewCastMerge(target: CastCharacter, source: CastCharacter, targetObservations: readonly CastObservation[] = [], sourceObservations: readonly CastObservation[] = [], observationOrder: ReadonlyMap<string, number> = new Map(), targetGoalCutoff?: number) {
   const seen = new Set([normalizeEntityTerm(target.name)]);
   const aliasCandidates = [ ...target.aliases, source.name, ...source.aliases ].filter(value => {
     const key = normalizeEntityTerm(value);
@@ -36,9 +37,26 @@ export function previewCastMerge(target: CastCharacter, source: CastCharacter, t
     const stable = !["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(path);
     const choiceRequired = different && ((targetManual && sourceManual) || (stable && !targetManual && !sourceManual && targetValue !== null && sourceValue !== null && targetAuthority !== "authored"));
     let defaultChoice: "source" | "target" | null = null;
+    let automaticValue: string | null | undefined;
     if (!choiceRequired) {
       if (targetManual) defaultChoice = "target";
       else if (sourceManual && !(stable && targetAuthority === "authored" && targetValue)) defaultChoice = "source";
+      else if (path === "story.goals" && target.campaignProfile) {
+        // Replay the combined history in journal order against the surviving seed.
+        const observations = [...targetObservations, ...sourceObservations]
+          .filter(item => item.field === path)
+          .sort((a, b) => (observationOrder.get(a.id) ?? 0) - (observationOrder.get(b.id) ?? 0))
+          .map(item => ({ ...item, characterId: target.id }));
+        const resolved = resolveSeededCastProfile({
+          profile: characterProfileSchema.parse(target.campaignProfile), observations, overrides: [],
+          ...(targetGoalCutoff === undefined ? {} : { restoreGoalsAfterTurn: targetGoalCutoff })
+        });
+        automaticValue = resolved.profile[path] ?? null;
+        if (automaticValue !== null) {
+          if (automaticValue === targetValue) defaultChoice = "target";
+          else if (automaticValue === sourceValue) defaultChoice = "source";
+        }
+      }
       else if (!stable && !targetManual && !sourceManual) {
         const facts = [...targetObservations.map(item => ({ item, side: "target" as const })), ...sourceObservations.map(item => ({ item, side: "source" as const }))].filter(({ item }) => item.field === path && item.mode === "fact");
         const superseded = new Set(facts.map(({ item }) => item.supersedesObservationId).filter(Boolean));
@@ -56,7 +74,7 @@ export function previewCastMerge(target: CastCharacter, source: CastCharacter, t
     const allowedChoices: ("source" | "target")[] = choiceRequired
       || (stable && targetAuthority === "authored" && targetValue !== null && sourceValue !== null && different)
       ? ["target", "source"] : [];
-    return { path, target: targetValue, source: sourceValue, choiceRequired, defaultChoice, allowedChoices };
+    return { path, target: targetValue, source: sourceValue, choiceRequired, defaultChoice, allowedChoices, ...(automaticValue === undefined ? {} : { automaticValue }) };
   });
   return { aliasCandidates, fields };
 }

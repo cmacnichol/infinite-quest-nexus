@@ -49,6 +49,10 @@ export function createLegacyCastPanel(options: {
     if (changed && editingForm && !saving) renderEditor();
     return !locked();
   }
+  function showEditorLock() {
+    status("Finish or resolve the current generation before editing characters. Your draft is preserved.");
+    if (options.campaignPage) dialog.append(button("Check generation status", () => { void syncLock(); }));
+  }
   let latestRoster: List | null = null;
   let discovery: CastDiscoveryStatus | null = null;
   let narratorState: import("@infinite-quest/contracts").CastNarratorState | undefined;
@@ -322,7 +326,7 @@ export function createLegacyCastPanel(options: {
     controls.addEventListener("submit", (event) => { event.preventDefault(); query = search.value; workspace.setQuery(query, filter); void loadRoster(); });
     dialog.append(controls);
     if (!enabled) status("Character editing is disabled. Saved characters remain available to read.");
-    else if (locked()) status("Finish or resolve the current generation before editing characters.");
+    else if (!options.campaignPage && locked()) status("Finish or resolve the current generation before editing characters.");
     else dialog.append(button("Add character", async () => {
       const token = epoch;
       if (options.checkLock) await syncLock();
@@ -510,7 +514,7 @@ export function createLegacyCastPanel(options: {
     shell("Character details"); editingForm = true;
     const form = node("form"); form.className = "cast-editor"; form.dataset.characterContext = "campaign-preset";
     const readonly = locked() || !enabled || saving;
-    if (locked()) status("Finish or resolve the current generation before editing characters. Your draft is preserved.");
+    if (locked()) showEditorLock();
     const save = node("button", saving ? "Saving…" : "Save character"); save.type = "submit"; save.id = "cast-save";
     const changed = () => { save.disabled = readonly || !dirty() || Boolean(editor?.conflict); };
     renderPresetFields(form, state, readonly, changed, expanded, options.campaignPage
@@ -557,7 +561,7 @@ export function createLegacyCastPanel(options: {
       const opener = button("Edit main character", () => { options.openProtagonist(() => { if (dialog.open && opener.isConnected) opener.focus(); }); });
       dialog.append(opener);
     } else if (!enabled) status("Character editing is disabled. Your draft is kept here until you close it.");
-    else if (lockedByServer || options.generationActive()) status("Finish or resolve the current generation before editing characters.");
+    else if (lockedByServer || options.generationActive()) showEditorLock();
     const form = node("form"); form.className = "cast-editor";
     form.dataset.characterContext = "campaign-supporting";
     form.append(node("p", editor.characterId ? "Saved facts are filled in. Edit only what needs changing." : "Only a name is required. Add details you know, or review story matches to fill characters from evidence."));
@@ -760,6 +764,6 @@ export function createLegacyCastPanel(options: {
     shell("Characters"); dialog.showModal(); workspace.open(campaign); await loadRoster();
     if (!dialog.open || campaign !== id) return;
     if (characterId) await openDetail(characterId);
-    if (options.checkLock && dialog.open) lockPoll = setInterval(() => { if (editingForm && !saving) void syncLock(); }, 2000);
+    if (!options.campaignPage && options.checkLock && dialog.open) lockPoll = setInterval(() => { if (editingForm && !saving) void syncLock(); }, 2000);
   } };
 }

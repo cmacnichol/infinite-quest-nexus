@@ -1,5 +1,6 @@
 import type { CampaignCastApi } from "@infinite-quest/client-web";
 import type { CastDetail, CastMergePreview, CastPromotionPreview, CastMergeRequest, CastPromote } from "@infinite-quest/contracts";
+import { normalizeCastAlias } from "@infinite-quest/contracts";
 import { CHARACTER_FIELD_DESCRIPTORS } from "@infinite-quest/client-core";
 
 type Action = "remove" | "restore" | "merge" | "unmerge" | "promote";
@@ -99,7 +100,7 @@ export function showLifecycle(action: Action, options: {
     const emptyFields: string[] = [];
     const fields = p.fields.flatMap(field => {
       const name = fieldName(field.path);
-      if (field.target === null && field.source === null) {
+      if (field.target === null && field.source === null && !field.automaticValue) {
         emptyFields.push(name);
         return [];
       }
@@ -114,8 +115,12 @@ export function showLifecycle(action: Action, options: {
       row.append(el("legend", name), comparison);
       body.append(row);
       if (!field.allowedChoices.length) {
-        const winner = field.defaultChoice === "source" ? source : target;
-        row.append(el("p", "Keeps " + winner.name + "’s value."));
+        if (field.automaticValue !== undefined) {
+          row.append(el("p", field.automaticValue === null ? "No goal after merge." : "Goal after merge: " + field.automaticValue));
+        } else {
+          const winner = field.defaultChoice === "source" ? source : target;
+          row.append(el("p", "Keeps " + winner.name + "’s value."));
+        }
         return [];
       }
       const select = el("select");
@@ -151,14 +156,40 @@ export function showLifecycle(action: Action, options: {
     screen("Review undo merge"); const token = ++epoch, event = options.mergeEventId!;
     try {
       const p = await api.unmergePreview(campaign, person.id, event); if (epoch !== token || !dialog.open) return;
-      for (const row of [p.target,p.source]) body.append(el("h3", row.name), el("p", "Aliases: " + (row.aliases.join(", ") || "None")),
-        ...Object.entries(row.profile).map(([path,value]) => el("p", fieldName(path) + ": " + display(value))));
-      footer.prepend(button("Confirm undo merge", () => void write(async () => {
+      const reviewRequired = p.target.aliases.length > 20;
+      const aliasInputs: HTMLInputElement[] = [];
+      const confirm = button("Confirm undo merge", () => void write(async () => {
         const payload = { expectedBoundary: p.boundary, expectedCastRevision: p.revision, expectedCharacterRevision: p.expectedCharacterRevision,
-          expectedSourceCharacterRevision: p.expectedSourceCharacterRevision, mergeEventId: event };
+          expectedSourceCharacterRevision: p.expectedSourceCharacterRevision, mergeEventId: event,
+          ...(reviewRequired ? { reviewedAliases: aliasInputs.filter(input => input.checked).map(input => input.value) } : {}) };
         const result = await api.unmerge(campaign, person.id, { ...payload, idempotencyKey: key(payload) });
         return { id: result.character.id, message: "Merge undone." };
-      }, () => void undo())));
+      }, () => void undo()));
+      for (const row of [p.target, p.source]) {
+        body.append(el("h3", row.name));
+        if (row === p.target && reviewRequired) {
+          const group = el("fieldset"), count = el("p");
+          group.append(el("legend", "Aliases to keep after undo"), el("p", "Restoring the original aliases would exceed the limit. Choose up to 20 to keep."), count);
+          count.setAttribute("aria-live", "polite");
+          function updateCount() {
+            const total = aliasInputs.filter(input => input.checked).length;
+            count.textContent = total + " selected (maximum 20)";
+            confirm.disabled = total > 20;
+          }
+          const seen = new Set<string>();
+          for (const alias of row.aliases) {
+            const normalized = normalizeCastAlias(alias);
+            if (seen.has(normalized)) continue;
+            seen.add(normalized);
+            const input = el("input"), label = el("label", alias);
+            input.type = "checkbox"; input.checked = true; input.value = alias; input.onchange = updateCount;
+            label.className = "cast-choice"; label.prepend(input); group.append(label); aliasInputs.push(input);
+          }
+          updateCount(); body.append(group);
+        } else body.append(el("p", "Aliases: " + (row.aliases.join(", ") || "None")));
+        body.append(...Object.entries(row.profile).map(([path,value]) => el("p", fieldName(path) + ": " + display(value))));
+      }
+      footer.prepend(confirm);
     } catch (error) { if (epoch === token) fail(error); }
   }
   async function worlds() {

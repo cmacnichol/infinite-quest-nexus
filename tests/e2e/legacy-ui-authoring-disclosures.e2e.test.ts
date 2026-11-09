@@ -367,11 +367,13 @@ test("campaign Organize review survives generation lock and profile conflict", a
   const review = page.locator("#characterProfileReviewDialog"), apply = page.locator("#applyCharacterProfileReview");
   await expect(review).toContainText("blue cloak"); await expect(apply).toBeEnabled();
   generationActive = true;
-  await expect(apply).toBeDisabled({ timeout: 6000 });
+  await apply.click();
+  await expect(apply).toBeDisabled();
   await expect(review).toContainText("Proposals are retained");
   await expect(page.locator("#saveCharacter")).toBeDisabled();
   generationActive = false;
-  await expect(apply).toBeEnabled({ timeout: 6000 });
+  await review.getByRole("button", { name: "Check generation status" }).click();
+  await expect(apply).toBeEnabled();
   await apply.click(); await expect(review).toBeHidden();
   await page.locator("#saveCharacter").click();
   const editor = page.locator("#characterDialog");

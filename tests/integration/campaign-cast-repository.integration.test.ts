@@ -102,6 +102,82 @@ integration("campaign cast PostgreSQL foundation", () => {
     expect((await repo.current(f.scope)).characters.find(person => person.id === created.character.id)?.removed).toBe(false);
   });
 
+  async function castFromRoster(roster: { id: string; name: string; goals?: string }[]) {
+    const f = await fixture();
+    const content = { world: { title: "Cast review" }, playableCharacters: roster.map(({ id, name, goals }) => ({
+      id, name, campaignUse: "supporting", characterText: "", profile: { story: { goals: goals ?? "" } }
+    })) };
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [f.worldVersionId, JSON.stringify(content)]);
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true, castPresetsEnabled: true });
+    async function seed(characterId: string) {
+      const preview = await repo.fromWorldPreview!(f.scope, { characterId });
+      return repo.fromWorld!(f.scope, { characterId, expectedWorldVersionId: f.worldVersionId, previewFingerprint: preview.previewFingerprint,
+        expectedCastRevision: preview.castRevision, expectedBoundary: preview.boundary, idempotencyKey: randomUUID() });
+    }
+    return { f, repo, seed, content };
+  }
+
+  it("promotes a renamed seed only to a reviewed roster target in the chosen world", async () => {
+    const { f, repo, seed, content } = await castFromRoster([{ id: "guide", name: "Sera" }, { id: "other", name: "Keeper" }]);
+    const seeded = await seed("guide");
+    const { character } = await repo.editAuthoredProfile!(f.scope, seeded.character.id, {
+      expectedBoundary: seeded.boundary, expectedCastRevision: seeded.revision, expectedCharacterRevision: seeded.character.revision,
+      name: "Renamed in campaign", idempotencyKey: randomUUID()
+    });
+    const world = (await pool.query("SELECT world_id FROM world_versions WHERE id=$1", [f.worldVersionId])).rows[0].world_id;
+    content.playableCharacters[0]!.name = "Renamed in draft";
+    const foreignWorld = randomUUID();
+    await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Another world')", [foreignWorld, ownerUserId]);
+    for (const id of [world, foreignWorld]) {
+      await pool.query("INSERT INTO world_drafts(world_id,owner_user_id,revision,content) VALUES($1,$2,1,$3)", [id, ownerUserId, JSON.stringify(content)]);
+    }
+    expect((await repo.promotionPreview!(f.scope, character.id, foreignWorld)).matches).toEqual([]);
+    const preview = await repo.promotionPreview!(f.scope, character.id, world);
+    expect(preview.matches).toEqual([{ characterId: "guide", name: "Renamed in draft" }]);
+    const replace = { worldId: world, expectedDraftRevision: preview.draftRevision, expectedCastRevision: preview.castRevision,
+      expectedCharacterRevision: preview.characterRevision, expectedBoundary: preview.boundary, mode: "replace" as const,
+      selections: [{ destinationPath: "name", sourcePath: "name" }], idempotencyKey: randomUUID() };
+    await expect(repo.promote!(f.scope, character.id, { ...replace, targetCharacterId: "other" })).rejects.toMatchObject({ code: "cast_world_character_unavailable" });
+    const result = await repo.promote!(f.scope, character.id, { ...replace, targetCharacterId: "guide" });
+    expect(result).toMatchObject({ characterId: "guide", draftRevision: 2 });
+  });
+
+  it("matches retained world origins by roster identity or explicit entity link", async () => {
+    const { f, repo, content } = await castFromRoster([{ id: "guide", name: "Sera" }, { id: "collision", name: "Unrelated" }]);
+    const entities = [{ id: "linked", name: "Contact", linkedCharacterId: "guide" }, { id: "collision", name: "Different person" }];
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [f.worldVersionId, JSON.stringify({ ...content, entities })]);
+    const world = (await pool.query("SELECT world_id FROM world_versions WHERE id=$1", [f.worldVersionId])).rows[0].world_id;
+    await pool.query("INSERT INTO world_drafts(world_id,owner_user_id,revision,content) VALUES($1,$2,1,$3)", [world, ownerUserId, JSON.stringify(content)]);
+    for (const [entityId, sourcePath, match] of [["guide", "/playableCharacters/0", true], ["linked", "/entities/0", true], ["collision", "/entities/1", false]] as const) {
+      const created = await repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: randomUUID(), commands: [{ kind: "create",
+        name: "Campaign " + entityId, aliases: [], origin: { kind: "world", worldVersionId: f.worldVersionId, entityId },
+        evidence: { kind: "world", worldVersionId: f.worldVersionId, sourcePath } }] });
+      const preview = await repo.promotionPreview!(f.scope, created.characterIds[0]!, world);
+      expect(preview.matches).toEqual(match ? [{ characterId: "guide", name: "Sera" }] : []);
+    }
+  });
+
+  it.each([false, true])("previews the persisted seeded goal after merge (target restored: %s)", async restored => {
+    const { f, repo, seed } = await castFromRoster([{ id: "target", name: "Keeper", goals: restored ? "Guard the harbor" : "" },
+      { id: "source", name: "Sera", goals: "Find home" }]);
+    const target = (await seed("target")).character, source = (await seed("source")).character;
+    if (restored) {
+      await repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: randomUUID(), commands: [{ kind: "observe", characterId: source.id,
+        field: "story.goals", value: "Sail away", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: f.evidence }] });
+      const detail = await repo.detail(f.scope, target.id);
+      await repo.editAuthoredProfile!(f.scope, target.id, { expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision,
+        expectedBoundary: detail.boundary, restoreAuthoredGoals: true, idempotencyKey: randomUUID() });
+    }
+    const preview = await repo.mergePreview!(f.scope, target.id, source.id);
+    const goal = preview.fields.find(field => field.path === "story.goals")!;
+    const result = await repo.merge!(f.scope, target.id, { expectedCastRevision: preview.target.revision, expectedCharacterRevision: preview.target.character.revision,
+      expectedBoundary: preview.target.boundary, sourceCharacterId: source.id, expectedSourceCharacterRevision: preview.source.character.revision,
+      choices: {}, reviewedAliases: preview.aliasCandidates, idempotencyKey: randomUUID() });
+    const expected = restored ? "Guard the harbor" : null;
+    expect(result.character.profile["story.goals"] ?? null).toBe(expected);
+    expect(goal).toMatchObject({ automaticValue: expected, defaultChoice: restored ? "target" : null });
+  });
+
   it("coalesces identical authored and current appearance values in promotion", async () => {
     const f = await fixture(), destination = randomUUID();
     await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Promotion target')", [destination, ownerUserId]);

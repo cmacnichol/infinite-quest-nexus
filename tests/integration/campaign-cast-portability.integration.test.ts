@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { castArchiveLifecycle, invalidCastArchiveSequences } from "../fixtures/cast-archive-lifecycle.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool, withTransaction } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { applyCastBatchWithClient, createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
@@ -264,6 +265,41 @@ integration("campaign cast portable authority", () => {
       await expect(withTransaction(pool, (client) => importCampaignCast(client, scope, payload, { turns: new Map(), worlds: new Map() }))).rejects.toThrow();
     }
     expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_state WHERE campaign_id=$1", [scope.campaignId])).rows[0].n).toBe(0);
+  });
+  it.each(invalidCastArchiveSequences)("rejects %s before issuing any cast import SQL", async sequence => {
+    const target = await fixture();
+    const payload = castArchiveLifecycle(sequence, { worldVersionId: randomUUID(), rosterId: "guide", turnId: randomUUID(),
+      narration: "Guide arrives.", narrationRevision: 0 });
+    await withTransaction(pool, async client => {
+      const query = vi.spyOn(client, "query");
+      try {
+        await expect(importCampaignCast(client, target, payload, { turns: new Map(), worlds: new Map() }))
+          .rejects.toThrow("Invalid cast archive relationships");
+        expect(query).not.toHaveBeenCalled();
+      } finally { query.mockRestore(); }
+    });
+  });
+  it("restores an earlier-turn mention published after a later Undo", async () => {
+    const scope = await fixture(), turnId = randomUUID(), narration = "Guide arrives.";
+    const { world_version_id: worldVersionId } = (await pool.query(
+      "UPDATE campaigns SET active_turn_number=3 WHERE id=$1 RETURNING world_version_id", [scope.campaignId])).rows[0];
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [worldVersionId, {
+      world: { title: "Cast portable" }, playableCharacters: [{ id: "guide", name: "Guide" }],
+    }]);
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,1,$4)",
+      [turnId, ownerUserId, scope.campaignId, narration]);
+    const cast = castArchiveLifecycle("late-mention", { worldVersionId, rosterId: "guide", turnId, narration, narrationRevision: 0 });
+    await withTransaction(pool, client => importCampaignCast(client, scope, cast, {
+      turns: new Map([[turnId, turnId]]), worlds: new Map([[worldVersionId, worldVersionId]]),
+    }));
+    const repo = createPostgresCampaignCastRepository(pool);
+    const current = await repo.current(scope);
+    const prior = await repo.loadSnapshot(scope, { ...current.boundary, turnNumber: 2 });
+    expect(prior.characters.some(person => person.mergedIntoCharacterId)).toBe(true);
+    expect(current.characters.some(person => person.mergedIntoCharacterId)).toBe(false);
+    const restored = await withTransaction(pool, client => exportCampaignCast(client, scope));
+    expect(restored?.events.slice(-2).map(event => [event.commands[0]!.command.kind, event.effectiveTurnNumber]))
+      .toEqual([["unmerge", 3], ["mention", 1]]);
   });
   it("rejects forged attachment ranges before writing cast authority", async () => {
     const scope = await fixture(), characterId = randomUUID(), turnId = randomUUID(), createId = randomUUID(), eventId = randomUUID(), observationId = randomUUID();

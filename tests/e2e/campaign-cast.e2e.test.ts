@@ -1146,6 +1146,8 @@ for (const width of [1280, 390]) test(`lifecycle review, merge, undo, remove and
   await fixture(page, false, true);
   const sourceId = "99999999-9999-4999-8999-999999999999", mergeId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const boundary = { turnNumber: 1, timelineRevision: 0 }, writes: any[] = [];
+  const undoAliases = [...Array.from({ length: 20 }, (_, index) => "Alias " + (index + 1)), "Harbor guide"];
+  let retryUndo = true;
   let revision = 0, removed = false, merged = false, stale = true, delayPreview = false;
   let releasePreview: (() => void) | undefined;
   const previewGate = new Promise<void>(resolve => { releasePreview = resolve; });
@@ -1163,11 +1165,12 @@ for (const width of [1280, 390]) test(`lifecycle review, merge, undo, remove and
     if (tail === candidateId) return send(detail(person()));
     if (tail === sourceId) return send(detail(source()));
     if (tail === `${candidateId}/merge-preview`) { if (delayPreview) await previewGate; return send({ target: (({ capabilities, ...rest }) => rest)(detail(person())), source: (({ capabilities, ...rest }) => rest)(detail(source())), aliasCandidates: Array.from({ length: 21 }, (_, i) => `Alias ${i + 1}`), fields: [{ path: "story.role", target: "Guide", source: "Guard", choiceRequired: true, defaultChoice: null, allowedChoices: ["target", "source"] }] }); }
-    if (tail === `${candidateId}/unmerge-preview`) return send({ target: person(), source: source(), revision, boundary, expectedCharacterRevision: revision, expectedSourceCharacterRevision: 0 });
+    if (tail === `${candidateId}/unmerge-preview`) return send({ target: { ...person(), aliases: undoAliases }, source: source(), revision, boundary, expectedCharacterRevision: revision, expectedSourceCharacterRevision: 0 });
     if (tail === `${candidateId}/promotion-preview`) return send({ worldId, draftRevision: stale ? 1 : 2, characterRevision: revision, castRevision: revision, boundary,
       destinations: [{ path: "name", candidates: [{ sourcePath: "name", value: "Mara" }], tickedByDefault: true, requiredOnAdd: true }, { path: "appearance.otherVisualDetails", candidates: [{ sourcePath: "authored.appearance.otherVisualDetails", value: "Brown coat" }, { sourcePath: "observed.appearance.description", value: "Blue coat" }], tickedByDefault: false, requiredOnAdd: false }, { path: "story.goals", candidates: [{ sourcePath: "observed.story.goals", value: "Find home" }], tickedByDefault: false, requiredOnAdd: false }], matches: [{ characterId: "existing", name: "Mara" }] });
     if (tail && req.method() === "POST") {
       const input = req.postDataJSON(); writes.push({ tail, input });
+      if (tail.endsWith("/unmerge") && retryUndo) { retryUndo = false; return send({ code: "unavailable", message: "Try again" }, 503); }
       if (tail.endsWith("/promote")) { if (stale) { stale = false; return send({ code: "cast_promotion_conflict", message: "Changed" }, 409); } return send({ worldId, draftRevision: 3, characterId: input.targetCharacterId ?? "new" }); }
       revision++; if (tail.endsWith("/merge")) merged = true; if (tail.endsWith("/unmerge")) merged = false;
       if (tail.endsWith("/remove")) removed = true; if (tail.endsWith("/restore")) removed = false;
@@ -1194,7 +1197,20 @@ for (const width of [1280, 390]) test(`lifecycle review, merge, undo, remove and
   await dialog.locator("select").selectOption("source"); await dialog.getByRole("button", { name: "Confirm merge" }).click();
   await expect(dialog).toHaveCount(0); expect(writes.at(-1).input.reviewedAliases).toHaveLength(20); expect(writes.at(-1).input.choices["story.role"]).toBe("source");
   await workspace.getByRole("button", { name: "Undo merge" }).click(); dialog = page.locator("dialog.cast-lifecycle"); await expect(dialog.getByText("Review undo merge")).toBeVisible(); await capture("undo");
-  await dialog.getByRole("button", { name: "Confirm undo merge" }).click(); await expect(dialog).toHaveCount(0);
+  const confirmUndo = dialog.getByRole("button", { name: "Confirm undo merge" });
+  await expect(confirmUndo).toBeDisabled();
+  await expect(dialog.getByLabel("Harbor guide")).toBeChecked();
+  await expect(dialog.getByText("21 selected (maximum 20)")).toBeVisible();
+  const finalRoot = "test-results/review-assets/unified-character-editor-final-review";
+  await mkdir(finalRoot, { recursive: true });
+  await page.screenshot({ path: `${finalRoot}/undo-alias-selection-${width}.png` });
+  await dialog.getByLabel("Alias 1", { exact: true }).uncheck();
+  await expect(dialog.getByText("20 selected (maximum 20)")).toBeVisible();
+  await confirmUndo.click(); await expect(confirmUndo).toBeEnabled();
+  const attemptedUndo = writes.at(-1).input;
+  expect(attemptedUndo.reviewedAliases).toEqual(undoAliases.slice(1));
+  await confirmUndo.click(); await expect(dialog).toHaveCount(0);
+  expect(writes.at(-1).input).toEqual(attemptedUndo);
   await workspace.getByRole("button", { name: "Remove from cast" }).click(); dialog = page.locator("dialog.cast-lifecycle"); await capture("removed"); await dialog.getByRole("button", { name: "Confirm remove" }).click();
   await expect(dialog).toHaveCount(0);
   await workspace.getByRole("button", { name: "Add character", exact: true }).click();

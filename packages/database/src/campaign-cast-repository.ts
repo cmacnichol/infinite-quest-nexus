@@ -1,5 +1,5 @@
 import { castPromoteSchema, castPromoteResultSchema, type CastPromotionPreview } from "../../contracts/src/campaign-cast-promotion.js";
-import { castMergeRequestSchema, castUnmergeRequestSchema } from "../../contracts/src/campaign-cast-merge.js";
+import { castMergeRequestSchema, castUnmergePreviewSchema, castUnmergeRequestSchema } from "../../contracts/src/campaign-cast-merge.js";
 import { previewCastMerge } from "../../domain/src/campaign-cast-merge.js";
 import { editAuthoredCastProfileSchema, castFromWorldPreviewQuerySchema, castFromWorldSchema, type EditAuthoredCastProfile, type CastFromWorld, type CastFromWorldPreviewQuery, type CastFromWorldPreview } from "../../contracts/src/campaign-cast-authored.js";
 import { detachCastAttachmentSchema } from "../../contracts/src/campaign-cast.js";
@@ -113,10 +113,8 @@ function protagonistProfile(campaign: Campaign): { name: string; aliases: string
 }
 
 /** Always projects retained authority. A cached profile never hides a corrected source. */
-async function snapshotProjection(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State | null, boundary: CastBoundary,
-  journal?: z.infer<typeof eventSchema>[]): Promise<{
-  snapshot: CastSnapshot; details: CastGenerationSnapshot["details"]; authoredEvidenceByCharacter: Map<string, Map<string, string>>; observationOrder: Map<string, number>; journal: z.infer<typeof eventSchema>[];
-}> {
+async function projectJournal(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State | null, boundary: CastBoundary,
+  journal?: z.infer<typeof eventSchema>[]) {
   assertBoundary(campaign, state, boundary);
   const characterRows = (await client.query("SELECT id,origin,first_observed_turn FROM campaign_cast_characters WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY created_at,id", [scope.campaignId, scope.ownerUserId])).rows.map((row) => characterRowSchema.parse(row));
   const events = journal ?? (await client.query("SELECT id,effective_turn_number,payload,receipt,attachment FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY sequence", [scope.campaignId, scope.ownerUserId])).rows.map((row) => eventSchema.parse(row));
@@ -323,7 +321,58 @@ async function snapshotProjection(client: DatabaseClient, scope: CastScope, camp
     validateCastFiction(person.name);
     person.aliases.forEach(validateCastFiction);
   }
-  return { snapshot: castSnapshotSchema.parse({ revision: state?.revision ?? 0, boundary, characters: [...people.values()] }), details, authoredEvidenceByCharacter, observationOrder: new Map(observations.map((item, index) => [item.id, index])), journal: events };
+  return { people, details, authoredEvidenceByCharacter, observationOrder: new Map(observations.map((item, index) => [item.id, index])), goalCutoffs, journal: events };
+}
+
+async function snapshotProjection(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State | null, boundary: CastBoundary) {
+  const { people, ...projection } = await projectJournal(client, scope, campaign, state, boundary);
+  const snapshot = castSnapshotSchema.parse({ revision: state?.revision ?? 0, boundary, characters: [...people.values()] });
+  return { ...projection, snapshot };
+}
+
+async function previewUnmerge(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State,
+  projection: Awaited<ReturnType<typeof snapshotProjection>>, targetId: string, mergeEventId: string,
+  invalidCode: "cast_invalid_request" | "cast_merge_invalid") {
+  const { snapshot: before, journal } = projection;
+  const target = before.characters.find(person => person.id === targetId);
+  if (target?.removed) throw new CampaignCastError("cast_character_removed");
+  const merge = target?.activeMerges?.find(item => item.mergeEventId === mergeEventId && item.canUndo);
+  const source = before.characters.find(person => person.id === merge?.sourceCharacterId);
+  if (!target || !source || !merge) throw new CampaignCastError(invalidCode);
+  const eventId = randomUUID(), revision = state.revision + 1;
+  const hypothetical = eventSchema.parse({ id: eventId, effective_turn_number: before.boundary.turnNumber,
+    payload: [{ command: { kind: "unmerge", characterId: targetId, mergeEventId } }],
+    receipt: { eventId, revision, characterIds: [], observationIds: [] } });
+  const { people } = await projectJournal(client, scope, campaign, { ...state, revision }, before.boundary, [...journal, hypothetical]);
+  return castUnmergePreviewSchema.parse({ target: people.get(targetId), source: people.get(source.id),
+    revision: before.revision, boundary: before.boundary, expectedCharacterRevision: target.revision, expectedSourceCharacterRevision: source.revision });
+}
+
+function reviewedUndoIdentity(target: CastCharacter, reviewed: string[] | undefined): CastCommand[] {
+  if (!reviewed) {
+    if (target.aliases.length > 20) throw new CampaignCastError("cast_merge_invalid");
+    return [];
+  }
+  const selected = new Set(reviewed.map(normalizeEntityTerm));
+  if (selected.size !== reviewed.length || reviewed.some(alias => !target.aliases.includes(alias))) throw new CampaignCastError("cast_merge_invalid");
+  if (target.aliases.length <= 20) {
+    if (target.aliases.some(alias => !reviewed.includes(alias))) throw new CampaignCastError("cast_merge_invalid");
+    return [];
+  }
+  const identity = { kind: "identity" as const, characterId: target.id, name: target.name };
+  if (!target.activeMerges?.length) return [{ ...identity, aliases: reviewed }];
+  // An earlier active merge may later restore more aliases. Record only these
+  // exclusions, so undoing that merge still replays them independently. Both
+  // the pre-merge target and subsequent edits contribute at most 20 aliases.
+  const commands: CastCommand[] = [];
+  let remaining = target.aliases;
+  const excluded = castAliasDelta(remaining, reviewed).removed;
+  for (let offset = 0; offset < excluded.length; offset += 20) {
+    const aliasChanges = { added: [], removed: excluded.slice(offset, offset + 20) };
+    remaining = applyCastAliasDelta(remaining, aliasChanges);
+    commands.push({ ...identity, aliases: remaining, aliasChanges });
+  }
+  return commands;
 }
 
 async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State | null, boundary: CastBoundary): Promise<CastSnapshot> {
@@ -921,6 +970,41 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
       return (await persistBatch(client, scope, campaign, state, { boundary: request.expectedBoundary, idempotencyKey: request.idempotencyKey, commands }, hash, id, false, undefined, true, eventId)).result!;
     });
   }
+  async function promotionRosterId(client: DatabaseClient, scope: CastScope, worldId: string, person: CastCharacter,
+    journal: z.infer<typeof eventSchema>[], boundary: CastBoundary): Promise<string | undefined> {
+    const seed = person.originProfile;
+    if (seed) {
+      if (seed.evidence.kind !== "world") return;
+      const source = await client.query("SELECT 1 FROM world_versions WHERE id=$1 AND world_id=$2 AND owner_user_id=$3",
+        [seed.worldVersionId, worldId, scope.ownerUserId]);
+      return source.rows.length ? seed.entityId : undefined;
+    }
+    const origin = person.origin;
+    if (origin.kind !== "world") return;
+    const created = journal.find(event => event.payload.some(item => item.command.kind === "create" && item.characterId === person.id));
+    if (!created || projectCastAttachments(journal, boundary.turnNumber).detachedEventIds.has(created.id)) return;
+    const command = created.payload.find(item => item.characterId === person.id && item.command.kind === "create")?.command;
+    if (command?.kind !== "create") return;
+
+    const version = await client.query("SELECT content FROM world_versions WHERE id=$1 AND world_id=$2 AND owner_user_id=$3",
+      [origin.worldVersionId, worldId, scope.ownerUserId]);
+    const source = worldContentSchema.safeParse(version.rows[0]?.content);
+    if (!source.success) return;
+    // A world origin may identify either an entity or a roster entry. Only a
+    // roster reference or an explicit entity link authorizes Replace by ID.
+    const roster = source.data.playableCharacters;
+    const pointer = command.evidence?.kind === "world" ? command.evidence.sourcePath : undefined;
+    const rosterIndex = pointer?.match(/^\/playableCharacters\/(\d+)(?:\/|$)/u);
+    if (rosterIndex) return roster[Number(rosterIndex[1])]?.id === origin.entityId ? origin.entityId : undefined;
+    const entity = source.data.entities.find(item => item && typeof item === "object" && "id" in item && item.id === origin.entityId);
+    if (entity && typeof entity === "object") {
+      return "linkedCharacterId" in entity && typeof entity.linkedCharacterId === "string"
+        && roster.some(entry => entry.id === entity.linkedCharacterId) ? entity.linkedCharacterId : undefined;
+    }
+    if (pointer?.startsWith("/entities/")) return;
+    return roster.find(entry => entry.id === origin.entityId)?.id;
+  }
+
   async function promotionContext(client: DatabaseClient, scope: CastScope, id: string, worldId: string) {
     const campaign = await lockCampaign(client, scope), state = await readState(client, scope) ?? { revision: 0, timeline_revision: 0 };
     const draft = (await client.query(`SELECT w.status, wd.revision, wd.content FROM worlds w JOIN world_drafts wd
@@ -929,7 +1013,8 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
     const boundary = { turnNumber: campaign.active_turn_number, timelineRevision: state.timeline_revision };
     if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2
       AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`, [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
-    const person = (await snapshot(client, scope, campaign, state, boundary)).characters.find(item => item.id === id);
+    const projection = await snapshotProjection(client, scope, campaign, state, boundary);
+    const person = projection.snapshot.characters.find(item => item.id === id);
     if (!person) throw new CampaignCastError("cast_not_found");
     if (person.origin.kind === "protagonist") throw new CampaignCastError("cast_protagonist_read_only");
     if (person.removed || person.mergedIntoCharacterId) throw new CampaignCastError("cast_character_removed");
@@ -961,8 +1046,13 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
     }
     const destinations = [...candidates].map(([path, values]) => ({ path, candidates: values,
       tickedByDefault: path !== "story.goals" && values.length === 1 && !values[0]!.unselectableReason, requiredOnAdd: path === "name" }));
+    const originId = await promotionRosterId(client, scope, worldId, person, projection.journal, boundary);
+    const name = normalizeEntityTerm(person.name);
+    const matches = content.playableCharacters
+      .filter(entry => entry.id === originId || normalizeEntityTerm(entry.name) === name)
+      .map(entry => ({ characterId: entry.id, name: entry.name }));
     const preview: CastPromotionPreview = { worldId, draftRevision: draft.revision, characterRevision: person.revision,
-      castRevision: state.revision, boundary, destinations, matches: content.playableCharacters.filter(item => normalizeEntityTerm(item.name) === normalizeEntityTerm(person.name)).map(item => ({ characterId: item.id, name: item.name })) };
+      castRevision: state.revision, boundary, destinations, matches };
     return { campaign, state, draft, person, content, preview };
   }
   const statusCache = new Map<string, { fingerprint: string; value: Awaited<ReturnType<NonNullable<CampaignCastWritePort["workspaceRead"]>>> }>();
@@ -997,7 +1087,9 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2
           AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`, [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
         const target = request.mode === "replace" ? context.content.playableCharacters.find(item => item.id === request.targetCharacterId) : undefined;
-        if (request.mode === "replace" && !target) throw new CampaignCastError("cast_world_character_unavailable");
+        if (request.mode === "replace" && (!target || !context.preview.matches.some(match => match.characterId === target.id))) {
+          throw new CampaignCastError("cast_world_character_unavailable");
+        }
         const character = target ? structuredClone(target) : { id: randomUUID(), name: "", characterText: "", profile: characterProfileSchema.parse({}), campaignUse: "supporting" as const, startingCastDefault: false, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} };
         const profile = structuredClone(character.profile ?? characterProfileSchema.parse({ unclassifiedNotes: character.characterText })) as Record<string, any>;
         for (const selection of request.selections) {
@@ -1096,7 +1188,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         if (state.revision !== target.revision || campaign.active_turn_number !== target.boundary.turnNumber || state.timeline_revision !== target.boundary.timelineRevision) throw new CampaignCastError("cast_revision_conflict");
         return snapshotProjection(client, scope, campaign, state, target.boundary);
       });
-      return { target, source, ...previewCastMerge(target.character, source.character, target.observations, source.observations, projected.observationOrder) };
+      return { target, source, ...previewCastMerge(target.character, source.character, target.observations, source.observations, projected.observationOrder, projected.goalCutoffs.get(target.character.id)) };
     },
     async unmergePreview(rawScope, rawId, rawEventId) {
       const scope = castScopeSchema.parse(rawScope), id = z.uuid().parse(rawId), eventId = z.uuid().parse(rawEventId);
@@ -1105,17 +1197,8 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         const campaign = await lockCampaign(client, scope), state = await readState(client, scope);
         if (!state) throw new CampaignCastError("cast_not_found");
         const boundary = { turnNumber: campaign.active_turn_number, timelineRevision: state.timeline_revision };
-        const projected = await snapshotProjection(client, scope, campaign, state, boundary), before = projected.snapshot;
-        const target = before.characters.find(person => person.id === id);
-        const merge = target?.activeMerges?.find(item => item.mergeEventId === eventId && item.canUndo);
-        if (!target || !merge) throw new CampaignCastError("cast_invalid_request");
-        const previewId = randomUUID();
-        const hypothetical = eventSchema.parse({ id: previewId, effective_turn_number: boundary.turnNumber,
-          payload: [{ command: { kind: "unmerge", characterId: id, mergeEventId: eventId } }],
-          receipt: { eventId: previewId, revision: state.revision + 1, characterIds: [], observationIds: [] }, attachment: null });
-        const after = (await snapshotProjection(client, scope, campaign, { ...state, revision: state.revision + 1 }, boundary,
-          [...projected.journal, hypothetical])).snapshot;
-        return { target: after.characters.find(person => person.id === id)!, source: after.characters.find(person => person.id === merge.sourceCharacterId)!, revision: before.revision, boundary, expectedCharacterRevision: target.revision, expectedSourceCharacterRevision: before.characters.find(person => person.id === merge.sourceCharacterId)!.revision };
+        const projection = await snapshotProjection(client, scope, campaign, state, boundary);
+        return previewUnmerge(client, scope, campaign, state, projection, id, eventId, "cast_invalid_request");
       });
     },
     async merge(rawScope, rawId, rawRequest) {
@@ -1133,7 +1216,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         if (!target || !source) throw new CampaignCastError("cast_not_found");
         if (target.revision !== request.expectedCharacterRevision || source.revision !== request.expectedSourceCharacterRevision) throw new CampaignCastError("cast_revision_conflict");
         if (id === source.id || target.origin.kind === "protagonist" || source.origin.kind === "protagonist" || target.removed || source.removed || target.mergedIntoCharacterId || source.mergedIntoCharacterId || (!target.originProfile && source.originProfile)) throw new CampaignCastError("cast_merge_invalid");
-        const preview = previewCastMerge(target, source, projection.details.find(item => item.characterId === target.id)?.observations, projection.details.find(item => item.characterId === source.id)?.observations, projection.observationOrder), allowed = new Set(preview.aliasCandidates.map(normalizeEntityTerm));
+        const preview = previewCastMerge(target, source, projection.details.find(item => item.characterId === target.id)?.observations, projection.details.find(item => item.characterId === source.id)?.observations, projection.observationOrder, projection.goalCutoffs.get(target.id)), allowed = new Set(preview.aliasCandidates.map(normalizeEntityTerm));
         const keys = request.reviewedAliases.map(normalizeEntityTerm);
         if (new Set(keys).size !== keys.length || keys.some(key => !allowed.has(key))) throw new CampaignCastError("cast_merge_invalid");
         try { request.reviewedAliases.forEach(validateCastFiction); } catch { throw new CampaignCastError("cast_merge_invalid"); }
@@ -1169,13 +1252,12 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         if (prior) { if (prior.request_hash !== hash) throw new CampaignCastError("cast_idempotency_conflict"); return castBatchReceiptSchema.parse(prior.receipt).result!; }
         if (state.revision !== request.expectedCastRevision || state.timeline_revision !== request.expectedBoundary.timelineRevision || campaign.active_turn_number !== request.expectedBoundary.turnNumber) throw new CampaignCastError("cast_revision_conflict");
         if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`, [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
-        const current = await snapshot(client, scope, campaign, state, request.expectedBoundary), target = current.characters.find(person => person.id === id);
-        const merge = target?.activeMerges?.find(item => item.mergeEventId === request.mergeEventId && item.canUndo);
-        const source = current.characters.find(person => person.id === merge?.sourceCharacterId);
-        if (!target || !source || !merge) throw new CampaignCastError("cast_merge_invalid");
-        if (target.removed) throw new CampaignCastError("cast_character_removed");
-        if (target.revision !== request.expectedCharacterRevision || source.revision !== request.expectedSourceCharacterRevision) throw new CampaignCastError("cast_revision_conflict");
-        return (await persistBatch(client, scope, campaign, state, { boundary: request.expectedBoundary, idempotencyKey: request.idempotencyKey, commands: [{ kind: "unmerge", characterId: id, mergeEventId: request.mergeEventId }] }, hash, id)).result!;
+        const projection = await snapshotProjection(client, scope, campaign, state, request.expectedBoundary);
+        const preview = await previewUnmerge(client, scope, campaign, state, projection, id, request.mergeEventId, "cast_merge_invalid");
+        if (preview.expectedCharacterRevision !== request.expectedCharacterRevision || preview.expectedSourceCharacterRevision !== request.expectedSourceCharacterRevision) throw new CampaignCastError("cast_revision_conflict");
+        const commands: CastCommand[] = [{ kind: "unmerge", characterId: id, mergeEventId: request.mergeEventId },
+          ...reviewedUndoIdentity(preview.target, request.reviewedAliases)];
+        return (await persistBatch(client, scope, campaign, state, { boundary: request.expectedBoundary, idempotencyKey: request.idempotencyKey, commands }, hash, id)).result!;
       });
     },
     async detachAttachment(rawScope, rawCharacterId, rawEventId, rawRequest) {

@@ -1,4 +1,4 @@
-import { castLifecycleChangeSchema, castCharacterSchema, castBoundarySchema, castMergeRequestSchema, castMergePreviewSchema, castUnmergeRequestSchema,
+import { castLifecycleChangeSchema, castMergeRequestSchema, castMergePreviewSchema, castUnmergePreviewSchema, castUnmergeRequestSchema,
   castPromotionPreviewSchema, castPromoteSchema, castPromoteResultSchema, type CastLifecycleChange, type CastMergeRequest,
   type CastUnmergeRequest, type CastPromote } from "@infinite-quest/contracts";
 import { castWorldChoicesSchema } from "@infinite-quest/contracts";
@@ -44,7 +44,7 @@ export function createCampaignCastApi(options: NexusHttpClientOptions = {
       },
       unmergePreview(campaign: string, id: string, eventId: string) {
         return http.request({ method: "GET", path: characterPath(campaign, id) + "/unmerge-preview?" + new URLSearchParams({ mergeEventId: eventId }),
-          responseSchema: z.object({ target: castCharacterSchema, source: castCharacterSchema, expectedCharacterRevision: z.number().int().nonnegative(), expectedSourceCharacterRevision: z.number().int().nonnegative(), revision: z.number().int().nonnegative(), boundary: castBoundarySchema }) });
+          responseSchema: castUnmergePreviewSchema });
       },
       unmerge(campaign: string, id: string, input: CastUnmergeRequest) {
         return http.request({ method: "POST", path: characterPath(campaign, id) + "/unmerge", body: { kind: "json", value: castUnmergeRequestSchema.parse(input) }, responseSchema: castWriteResultSchema });

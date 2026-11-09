@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
+import { applyCastBoundaryChange } from "../../packages/database/src/campaign-cast-lifecycle.js";
+import { exportCampaignCast, importCampaignCast } from "../../packages/database/src/campaign-cast-portability.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { castAuthoredPathSchema } from "../../packages/contracts/src/campaign-cast.js";
+import { castAuthoredPathSchema, portableCampaignCastSchema } from "../../packages/contracts/src/campaign-cast.js";
 import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -94,6 +96,7 @@ integration("cast lifecycle merge", () => {
     expect((await pool.query("SELECT count(*)::int AS n FROM campaign_cast_events WHERE campaign_id=$1", [campaignId])).rows[0].n).toBe(before);
     expect((await repo.current(scope)).revision).toBe(state.revision);
     expect(preview.revision).toBe(state.revision);
+    await expect(repo.unmerge!(scope, target.character.id, { expectedCastRevision: state.revision, expectedBoundary: boundary, idempotencyKey: randomUUID(), expectedCharacterRevision: reentered.character.revision, expectedSourceCharacterRevision: hidden.revision, mergeEventId: eventId, reviewedAliases: ["M"] })).rejects.toMatchObject({ code: "cast_merge_invalid" });
     const undone = await repo.unmerge!(scope, target.character.id, { expectedCastRevision: state.revision, expectedBoundary: boundary, idempotencyKey: randomUUID(), expectedCharacterRevision: reentered.character.revision, expectedSourceCharacterRevision: hidden.revision, mergeEventId: eventId });
     expect(undone.character.aliases).toEqual(["M", "Mary"]);
     expect((await repo.current(scope)).characters.find(person => person.id === source.character.id)?.mergedIntoCharacterId).toBeNull();
@@ -110,7 +113,83 @@ integration("cast lifecycle merge", () => {
     const add = async (characterId: string) => { const preview = await repo.fromWorldPreview!(scope, { characterId }); return repo.fromWorld!(scope, { characterId, expectedWorldVersionId: version, expectedCastRevision: preview.castRevision, expectedBoundary: boundary, previewFingerprint: preview.previewFingerprint, idempotencyKey: randomUUID() }); };
     return { world, version, scope, repo, boundary, add, content };
   }
+  it("reviews overflowing undo aliases, preserves later edits, and replays the decision across import and rewind", async () => {
+    const { repo, scope, boundary } = await seededCampaign([]);
+    const base = { expectedBoundary: boundary, idempotencyKey: randomUUID() };
+    const aliases = Array.from({ length: 20 }, (_, index) => "Port alias " + (index + 1));
+    const target = await repo.create(scope, { ...base, expectedCastRevision: 0, name: "Mara", aliases, profile: {} });
+    const id = target.character.id;
+    const source = await repo.create(scope, { ...base, idempotencyKey: randomUUID(), expectedCastRevision: target.revision, name: "Mary", aliases: [], profile: {} });
+    const merged = await repo.merge!(scope, id, { ...base, idempotencyKey: randomUUID(), expectedCastRevision: source.revision,
+      expectedCharacterRevision: target.character.revision, sourceCharacterId: source.character.id, expectedSourceCharacterRevision: source.character.revision,
+      reviewedAliases: aliases.slice(0, 19), choices: {} });
+    const laterAliases = [...aliases.slice(0, 19), "Harbor guide"];
+    const edited = await repo.edit(scope, id, { ...base, idempotencyKey: randomUUID(), expectedCastRevision: merged.revision,
+      expectedCharacterRevision: merged.character.revision, name: "Captain Mara", aliases: laterAliases, setOverrides: { "story.role": "Navigator" } });
+    const event = merged.character.activeMerges![0]!.mergeEventId;
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [scope.campaignId]);
+    const preview = await repo.unmergePreview!(scope, id, event);
+    expect(preview.target).toMatchObject({ name: "Captain Mara", profile: { "story.role": "Navigator" }, aliases: [...aliases, "Harbor guide"] });
+    const undo = { expectedBoundary: preview.boundary, expectedCastRevision: preview.revision, expectedCharacterRevision: preview.expectedCharacterRevision,
+      expectedSourceCharacterRevision: preview.expectedSourceCharacterRevision, mergeEventId: event, idempotencyKey: randomUUID() };
+    for (const selection of [undefined, ["Invented"], [aliases[0]!, aliases[0]!]]) {
+      await expect(repo.unmerge!(scope, id, { ...undo, reviewedAliases: selection })).rejects.toMatchObject({ code: "cast_merge_invalid" });
+    }
+    await expect(repo.unmerge!(scope, id, { ...undo, reviewedAliases: preview.target.aliases })).rejects.toThrow();
+    expect((await repo.current(scope)).revision).toBe(edited.revision);
+    const reviewedAliases = preview.target.aliases.slice(1);
+    const request = { ...undo, reviewedAliases };
+    const result = await repo.unmerge!(scope, id, request);
+    expect(result.character).toMatchObject({ aliases: reviewedAliases, name: "Captain Mara", profile: { "story.role": "Navigator" }, activeMerges: [] });
+    expect(await repo.unmerge!(scope, id, request)).toEqual(result);
+    await expect(repo.unmerge!(scope, id, { ...request, reviewedAliases: [] })).rejects.toMatchObject({ code: "cast_idempotency_conflict" });
+    const archived = await withTransaction(pool, client => exportCampaignCast(client, scope));
+    expect(archived?.formatVersion).toBe(4);
+    for (const change of [{ aliases: ["Invented"] }, { name: "Unreviewed rename" }, { aliases: [reviewedAliases[0], reviewedAliases[0]] }]) {
+      const forged = structuredClone(archived!);
+      Object.assign(forged.events.at(-1)!.commands[1]!.command, change);
+      expect(portableCampaignCastSchema.safeParse(forged).success).toBe(false);
+    }
+    const dest = await seededCampaign([]);
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [dest.scope.campaignId]);
+    await withTransaction(pool, client => importCampaignCast(client, dest.scope, archived, { worlds: new Map(), turns: new Map() }));
+    expect((await dest.repo.current(dest.scope)).characters.find(person => person.name === "Captain Mara")).toMatchObject({ aliases: reviewedAliases, activeMerges: [] });
+    await withTransaction(pool, async client => {
+      await client.query("UPDATE campaigns SET active_turn_number=0 WHERE id=$1", [scope.campaignId]);
+      await applyCastBoundaryChange(client, scope, { turnNumber: 0, changeKey: randomUUID() });
+    });
+    expect((await repo.detail(scope, id)).character).toMatchObject({ aliases: laterAliases, activeMerges: [{ mergeEventId: event }] });
+  });
   const npc = (id: string, name: string, story: Record<string, string> = {}) => ({ id, name, campaignUse: "supporting", characterText: "", profile: { story } });
+  it("keeps exclusions from a reviewed undo independent of an older merge", async () => {
+    const { repo, scope, boundary } = await seededCampaign([]);
+    const aliases = Array.from({ length: 20 }, (_, index) => "Port alias " + (index + 1));
+    const laterAliases = Array.from({ length: 20 }, (_, index) => "Market alias " + (index + 1));
+    const create = (name: string, aliases: string[], expectedCastRevision: number) => repo.create(scope, {
+      expectedBoundary: boundary, expectedCastRevision, idempotencyKey: randomUUID(), name, aliases, profile: {}
+    });
+    const target = await create("Mara", ["Original", ...aliases.slice(1)], 0);
+    const source = await create(aliases[0]!, [], target.revision), other = await create("Mary", [], source.revision);
+    const id = target.character.id;
+    const merge = (sourceCharacterId: string, expectedSourceCharacterRevision: number, expectedCastRevision: number, expectedCharacterRevision: number, reviewedAliases: string[]) =>
+      repo.merge!(scope, id, { sourceCharacterId, expectedSourceCharacterRevision, expectedCastRevision, expectedCharacterRevision, reviewedAliases,
+        expectedBoundary: boundary, idempotencyKey: randomUUID(), choices: {} });
+    const first = await merge(source.character.id, source.character.revision, other.revision, target.character.revision, aliases);
+    const second = await merge(other.character.id, other.character.revision, first.revision, first.character.revision, []);
+    await repo.edit(scope, id, { expectedBoundary: boundary, expectedCastRevision: second.revision,
+      expectedCharacterRevision: second.character.revision, idempotencyKey: randomUUID(), aliases: laterAliases });
+    const undo = async (mergeEventId: string, reviewedAliases?: string[]) => {
+      const p = await repo.unmergePreview!(scope, id, mergeEventId);
+      return repo.unmerge!(scope, id, { mergeEventId, reviewedAliases, expectedBoundary: p.boundary, expectedCastRevision: p.revision,
+        expectedSourceCharacterRevision: p.expectedSourceCharacterRevision, expectedCharacterRevision: p.expectedCharacterRevision, idempotencyKey: randomUUID() });
+    };
+    const event = second.character.activeMerges!.find(item => item.sourceCharacterId === other.character.id)!.mergeEventId;
+    expect((await repo.unmergePreview!(scope, id, event)).target.aliases).toEqual([...aliases, ...laterAliases]);
+    const kept = laterAliases.slice(0, 2);
+    expect((await undo(event, kept)).character.aliases).toEqual(kept);
+    expect((await undo(first.character.activeMerges![0]!.mergeEventId)).character.aliases).toEqual(["Original", ...kept]);
+    expect((await withTransaction(pool, client => exportCampaignCast(client, scope)))?.formatVersion).toBe(4);
+  });
   async function mergedPair() {
     const f = await seededCampaign([npc("a", "Mara"), npc("b", "Mary")]);
     const target = await f.add("a"), source = await f.add("b");
@@ -126,6 +205,7 @@ integration("cast lifecycle merge", () => {
     const f = await mergedPair();
     const removed = await f.repo.changeRemoval!(f.scope, f.merged.character.id, "remove", { expectedCastRevision: f.merged.revision, expectedBoundary: f.boundary, expectedCharacterRevision: f.merged.character.revision, idempotencyKey: randomUUID() });
     const hidden = (await f.repo.current(f.scope)).characters.find(person => person.id === f.sourceId)!;
+    await expect(f.repo.unmergePreview!(f.scope, removed.character.id, f.merged.character.activeMerges![0]!.mergeEventId)).rejects.toMatchObject({ code: "cast_character_removed" });
     await expect(f.repo.unmerge!(f.scope, removed.character.id, { expectedCastRevision: removed.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID(), expectedCharacterRevision: removed.character.revision, expectedSourceCharacterRevision: hidden.revision, mergeEventId: f.merged.character.activeMerges![0]!.mergeEventId })).rejects.toMatchObject({ code: "cast_character_removed" });
     await pool.query("INSERT INTO world_drafts(world_id,owner_user_id,revision,content) VALUES($1,$2,1,$3::jsonb)", [f.world, ownerUserId, JSON.stringify(f.content)]);
     await expect(f.repo.promotionPreview!(f.scope, removed.character.id, f.world)).rejects.toMatchObject({ code: "cast_character_removed" });

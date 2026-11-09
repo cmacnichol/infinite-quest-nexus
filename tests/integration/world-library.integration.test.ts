@@ -248,9 +248,13 @@ integration("World Library and campaign version integration", () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     const row = await pool.query<{ id: string }>("SELECT id FROM campaigns WHERE world_version_id=$1 AND title=$2", [published.worldVersionId, "Browser cast campaign"]);
     const campaignId = row.rows[0]!.id;
-    await page.goto(`${webOrigin}/nexus/index.html?proof=cast#campaigns?campaignId=${campaignId}`);
-    await browserExpect(page.locator(`#campaignList [data-campaign-id="${campaignId}"]`)).toBeVisible();
-    await page.locator("#editCampaignCharacter").click();
+    async function openCampaignCast(proof: string) {
+      await page.goto(`${webOrigin}/nexus/index.html?proof=${proof}#campaigns?campaignId=${campaignId}`);
+      await browserExpect(page.locator("#nexusVersion")).toHaveText(/^v.+/);
+      await browserExpect(page.locator(`#campaignList [data-campaign-id="${campaignId}"]`)).toBeVisible();
+      await page.locator("#editCampaignCharacter").click();
+    }
+    await openCampaignCast("cast");
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Ally", exact: true }).first().click();
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true }).click();
     await page.locator("#cast-story-role").fill("Campaign guide");
@@ -269,8 +273,7 @@ integration("World Library and campaign version integration", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: resolve(screenshotRoot, "story-deep-link-390.png") });
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(`${webOrigin}/nexus/index.html?proof=return#campaigns?campaignId=${campaignId}`);
-    await page.locator("#editCampaignCharacter").click();
+    await openCampaignCast("return");
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Ally", exact: true }).first().click();
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true }).click();
     await page.screenshot({ path: resolve(screenshotRoot, "reset-restore-controls-1440.png") });
@@ -297,8 +300,7 @@ integration("World Library and campaign version integration", () => {
     const nextVersion = await publishWorld(pool, world.id, worldPublishSchema.parse({ expectedRevision: nextDraft.revision }));
     await migrateCampaignWorld(pool, campaignId, campaignWorldMigrationSchema.parse({ worldVersionId: nextVersion.worldVersionId }));
     await rewindCampaign(pool, campaignId, { targetTurnNumber: 0 });
-    await page.goto(`${webOrigin}/nexus/index.html?proof=migrated#campaigns?campaignId=${campaignId}`);
-    await page.locator("#editCampaignCharacter").click();
+    await openCampaignCast("migrated");
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Ally", exact: true }).first().click();
     await browserExpect(page.locator("#campaignCastDialog")).toContainText("World goal");
     await (await import("node:fs/promises")).mkdir(screenshotRoot, { recursive: true });
@@ -329,12 +331,13 @@ integration("World Library and campaign version integration", () => {
     expect(after.character.id).toBe(manual.character.id);
     expect(after.character.campaignProfile?.story.role).toBe("World keeper");
     expect((await editor.current(scope)).characters.filter(person => person.name === "Browser Keeper")).toHaveLength(1);
-    await page.goto(`${webOrigin}/nexus/index.html?proof=lifecycle#campaigns?campaignId=${campaignId}`);
-    await page.locator("#editCampaignCharacter").click();
+    await openCampaignCast("lifecycle");
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Keeper", exact: true }).first().click();
     const sheet = page.locator("#campaignCastDialog"), lifecycle = page.locator("dialog.cast-lifecycle");
     await sheet.getByRole("button", { name: "Merge with another character" }).click();
     await lifecycle.getByRole("button", { name: "Browser Ally", exact: true }).click();
+    await browserExpect(lifecycle).toContainText("No goal after merge.");
+    await lifecycle.screenshot({ path: resolve(screenshotRoot, "merge-goal-preview.png") });
     await lifecycle.getByRole("button", { name: "Confirm merge" }).click();
     await browserExpect(sheet.getByRole("button", { name: "Undo merge" })).toBeVisible();
     await sheet.getByRole("button", { name: "Undo merge" }).click();
@@ -357,6 +360,21 @@ integration("World Library and campaign version integration", () => {
     const promoted = await getWorld(pool, world.id);
     expect(promoted.draftRevision).toBe(priorDraft.draftRevision! + 1);
     expect(promoted.draftContent?.playableCharacters.at(-1)?.source).toEqual({ type: "campaign-promotion" });
+
+    const renamedContent = structuredClone(promoted.draftContent!);
+    renamedContent.playableCharacters.find(entry => entry.id === "browser-keeper")!.name = "Renamed world keeper";
+    await updateWorldDraft(pool, world.id, worldDraftUpdateSchema.parse({ expectedRevision: promoted.draftRevision, content: renamedContent }));
+    await sheet.getByRole("button", { name: "Add to world draft" }).click();
+    await lifecycle.getByLabel("World draft", { exact: true }).selectOption(world.id);
+    await lifecycle.getByRole("button", { name: "Review fields" }).click();
+    await lifecycle.getByLabel("Destination").selectOption({ label: "Replace Renamed world keeper" });
+    await lifecycle.screenshot({ path: resolve(screenshotRoot, "promotion-renamed-origin.png") });
+    await lifecycle.getByRole("button", { name: "Confirm draft change" }).click();
+    await browserExpect(lifecycle).toHaveCount(0);
+    const replaced = await getWorld(pool, world.id);
+    expect(replaced.draftRevision).toBe(promoted.draftRevision! + 2);
+    expect(replaced.draftContent?.playableCharacters).toHaveLength(renamedContent.playableCharacters.length);
+    expect(replaced.draftContent?.playableCharacters.find(entry => entry.id === "browser-keeper")?.name).toBe("Renamed world keeper");
     await page.unrouteAll({ behavior: "wait" });
   }, 100_000);
 

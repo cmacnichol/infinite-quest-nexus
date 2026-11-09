@@ -1,5 +1,5 @@
 import { castPromotionPreviewSchema, castPromoteSchema, castPromoteResultSchema, type CastPromote } from "@infinite-quest/contracts";
-import { castMergePreviewSchema, castMergeRequestSchema, castUnmergeRequestSchema, type CastMergeRequest, type CastUnmergeRequest } from "@infinite-quest/contracts";
+import { castMergePreviewSchema, castMergeRequestSchema, castUnmergePreviewSchema, castUnmergeRequestSchema, type CastMergeRequest, type CastUnmergeRequest } from "@infinite-quest/contracts";
 import { castWorldChoicesSchema, castFromWorldPreviewQuerySchema, castFromWorldPreviewSchema, castFromWorldSchema, editAuthoredCastProfileSchema,
   type CastFromWorld, type CastFromWorldPreviewQuery, type EditAuthoredCastProfile } from "@infinite-quest/contracts";
 import { reviewCastDetailSchema, reviewCastDetailResultSchema, type ReviewCastDetail } from "@infinite-quest/contracts";
@@ -28,7 +28,7 @@ export function createCampaignCastApplication(repository: CampaignCastWritePort,
     },
     async unmergePreview(scope: CastScope, targetId: string, mergeEventId: string) {
       if (!repository.unmergePreview) throw new CampaignCastError("cast_lifecycle_disabled");
-      return repository.unmergePreview(castScopeSchema.parse(scope), targetId, mergeEventId);
+      return castUnmergePreviewSchema.parse(await repository.unmergePreview(castScopeSchema.parse(scope), targetId, mergeEventId));
     },
     async mergePreview(scope: CastScope, targetId: string, sourceId: string) {
       if (!repository.mergePreview) throw new CampaignCastError("cast_lifecycle_disabled");
