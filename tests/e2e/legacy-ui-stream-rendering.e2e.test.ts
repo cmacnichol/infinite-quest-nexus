@@ -368,13 +368,17 @@ async function attachStreamScreenshot(page: Page, testInfo: TestInfo, name: stri
 
 test("rapid cumulative snapshots batch narration DOM writes to one scheduled render", async ({ page }, testInfo) => {
   const harness = await installStreamHarness(page);
-  await page.evaluate(() => window.__storyStreamFixture?.resetWriteCount());
+  const initialNarration = "Synthetic opening.";
+  await emitSnapshot(page, streamSnapshot(harness, initialNarration));
+  await expect(page.locator(".streaming-narration")).toContainText(initialNarration);
   const snapshots = Array.from({ length: 100 }, (_, index) => streamSnapshot(
     harness,
-    Array.from({ length: index + 1 }, (_, sentence) => `Synthetic sentence ${sentence + 1}.`).join(" ")
+    [initialNarration, ...Array.from({ length: index + 1 }, (_, sentence) => `Synthetic sentence ${sentence + 1}.`)].join(" ")
   ));
   await page.evaluate(frames => {
-    for (const frame of frames) window.__storyStreamFixture?.emit(frame);
+    const stream = window.__storyStreamFixture!;
+    stream.resetWriteCount();
+    for (const frame of frames) stream.emit(frame);
   }, snapshots);
   await waitTwoFrames(page);
 

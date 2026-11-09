@@ -561,6 +561,7 @@ test("a pinned resumed turn supports accepted-neighbor History lookups", async (
 });
 test("a manual scroll cancels a pending exact-turn restore", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });
+  await page.clock.install();
   const instrumentation = await installLegacyUiFixture(page, fixture);
   await seedReaderPosition(page, fixtureUserId(fixture), fixture.campaignId, fixture.turns[11]!);
   await prepareStoryPage(page, fixture.campaignId);
@@ -593,18 +594,23 @@ test("a manual scroll cancels a pending exact-turn restore", async ({ page }) =>
 
   await page.goto(`${origin}/story/${fixture.campaignId}`);
   await lookupStarted;
+  // Observe cancellation before the scroll's 250 ms idle save replaces the old position.
+  await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now()) + 1_000));
   const scrollBeforeIntent = await page.evaluate(() => window.scrollY);
   await page.mouse.move(640, 400);
   await page.mouse.wheel(0, 700);
   await expect.poll(() => page.evaluate(() => window.scrollY)).not.toBe(scrollBeforeIntent);
   await expect.poll(() => page.evaluate(() => window.__readerIntentCalls ?? 0)).toBe(1);
 
-
   releaseLookup();
   await lookupFulfilled;
   await expect(page.locator("#readerTurnCount")).toHaveText("Turn 317 of 317");
   await expect(page.locator("#scene-317")).toBeVisible();
   await expect(page.getByRole("button", { name: "Resume reading" })).toBeVisible();
+  await page.clock.runFor(250);
+  const key = `${fixtureUserId(fixture)}:${fixture.campaignId}`;
+  await expect.poll(() => readStoredReaderPosition(page, key)).toMatchObject({ position: { turnNumber: 317 } });
+  await expect(page.getByRole("button", { name: "Resume reading" })).toBeHidden();
   expect(instrumentation.requests.filter((request) => request.path.includes("/turns?before=")).length).toBe(0);
 });
 
