@@ -85,3 +85,54 @@ it("rejects authored text that cannot be represented in stored JSON", () => {
   expect(castAuthoredValuesSchema.safeParse({ "story.role": "\ud800" }).success).toBe(false);
   expect(castAuthoredValuesSchema.safeParse({ "story.role": "Keeper 🌙" }).success).toBe(true);
 });
+
+it("accepts ordered v4 lifecycle events and rejects earlier format or stale undo", () => {
+  const a = "11111111-1111-4111-8111-111111111111", b = "22222222-2222-4222-8222-222222222222";
+  const ids = ["33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666"];
+  const origin = { kind: "manual" };
+  const payload = { formatVersion: 4, revision: 4, characters: [a,b].map(id => ({ id, origin, firstObservedTurn: 0 })), events: [
+    ...[a,b].map((characterId,i) => ({ id: ids[i], effectiveTurnNumber: 0, revision: i+1, commands: [{ characterId, command: { kind:"create", name: "Mara", aliases: [], origin } }] })),
+    { id: ids[2], effectiveTurnNumber: 0, revision: 3, commands: [{ command: { kind: "merge", characterId:a, sourceCharacterId:b, reviewedAliases: [], choices: {}, aliasChanges: { priorTargetAliases: [], added: [], removed: [] } } }, { command: { kind: "identity", characterId: a, name: "Mara", aliases: [] } }] },
+    { id: ids[3], effectiveTurnNumber: 0, revision: 4, commands: [{ command: { kind: "unmerge", characterId:a, mergeEventId:ids[2] } }] }
+  ] };
+  expect(portableCampaignCastSchema.safeParse(payload).success).toBe(true);
+  expect(portableCampaignCastSchema.safeParse({ ...payload, formatVersion: 3 }).success).toBe(false);
+  expect(portableCampaignCastSchema.safeParse({ ...payload, events: [...payload.events.slice(0,3), { ...payload.events[3], commands: [{ command: { kind: "unmerge", characterId:b, mergeEventId:ids[2] } }] }] }).success).toBe(false);
+  expect(portableCampaignCastSchema.safeParse({ ...payload, events: [...payload.events.slice(0,3), { ...payload.events[3], commands: [{ command: { kind: "remove", characterId:b } }] }] }).success).toBe(false);
+  const mixed = { ...payload.events[2], commands: [...payload.events[2]!.commands, { command: { kind: "identity", characterId: b, name: "Other", aliases: [] } }] };
+  expect(portableCampaignCastSchema.safeParse({ ...payload, events: [...payload.events.slice(0,2), mixed, payload.events[3]] }).success).toBe(false);
+  const identityId = "77777777-7777-4777-8777-777777777777";
+  const edited = { ...payload, revision: 5, events: [...payload.events.slice(0,3),
+    { id: identityId, effectiveTurnNumber: 0, revision: 4, commands: [{ command: { kind: "identity", characterId: a, name: "Mara", aliases: ["M"], aliasChanges: { added: ["M"], removed: [] } } }] },
+    { ...payload.events[3], revision: 5 }] };
+  expect(portableCampaignCastSchema.safeParse(edited).success).toBe(true);
+  const tampered = { ...edited, events: [...edited.events.slice(0, 3), { ...edited.events[3]!, commands: [{ command: { kind: "identity", characterId: a, name: "Mara", aliases: ["M"], aliasChanges: { added: [], removed: [] } } }] }, edited.events[4]!] };
+  expect(portableCampaignCastSchema.safeParse(tampered).success).toBe(false);
+  const afterUndo = { ...edited, revision: 6, events: [...edited.events,
+    { id: "88888888-8888-4888-8888-888888888888", effectiveTurnNumber: 0, revision: 6, commands: [
+      { command: { kind: "merge", characterId: a, sourceCharacterId: b, reviewedAliases: ["M"], choices: {}, aliasChanges: { priorTargetAliases: ["M"], added: [], removed: [] } } },
+      { command: { kind: "identity", characterId: a, name: "Mara", aliases: ["M"] } }
+    ] }] };
+  expect(portableCampaignCastSchema.safeParse(afterUndo).success).toBe(true);
+  const invalidPrior = { ...afterUndo, events: [...afterUndo.events.slice(0, -1), {
+    id: "88888888-8888-4888-8888-888888888888", effectiveTurnNumber: 0, revision: 6, commands: [
+      { command: { kind: "merge", characterId: a, sourceCharacterId: b, reviewedAliases: ["M"], choices: {}, aliasChanges: { priorTargetAliases: [], added: [], removed: [] } } },
+      { command: { kind: "identity", characterId: a, name: "Mara", aliases: ["M"] } }
+    ] }] };
+  expect(portableCampaignCastSchema.safeParse(invalidPrior).success).toBe(false);
+});
+
+it("allows undoing the latest merge while an earlier merge into the same target remains active", () => {
+  const people = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"];
+  const ids = ["44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666", "77777777-7777-4777-8777-777777777777", "88888888-8888-4888-8888-888888888888", "99999999-9999-4999-8999-999999999999"];
+  const origin = { kind: "manual" };
+  const merge = (sourceCharacterId: string) => ({ kind: "merge", characterId: people[0], sourceCharacterId, reviewedAliases: [], choices: {}, aliasChanges: { priorTargetAliases: [], added: [], removed: [] } });
+  const events = people.map((characterId, i) => ({ id: ids[i], effectiveTurnNumber: 0, revision: i + 1, commands: [{ characterId, command: { kind: "create", name: "Mara", aliases: [], origin } }] }));
+  const payload = { formatVersion: 4, revision: 6, characters: people.map(id => ({ id, origin, firstObservedTurn: 0 })), events: [
+    ...events,
+    { id: ids[3], effectiveTurnNumber: 0, revision: 4, commands: [{ command: merge(people[1]!) }, { command: { kind: "identity", characterId: people[0], name: "Mara", aliases: [] } }] },
+    { id: ids[4], effectiveTurnNumber: 0, revision: 5, commands: [{ command: merge(people[2]!) }, { command: { kind: "identity", characterId: people[0], name: "Mara", aliases: [] } }] },
+    { id: ids[5], effectiveTurnNumber: 0, revision: 6, commands: [{ command: { kind: "unmerge", characterId: people[0], mergeEventId: ids[4] } }] }
+  ] };
+  expect(portableCampaignCastSchema.safeParse(payload).success).toBe(true);
+});

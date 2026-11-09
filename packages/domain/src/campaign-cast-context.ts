@@ -42,7 +42,7 @@ export function selectCastContext(input: {
   const matched = (text: string) => new Set(findEntityReferences(text, catalog).map((entry) => entry.id));
   const directIds = matched(direct), threadIds = matched(threads);
   const omitted: CastContextExplanation["omitted"] = snapshot.characters.filter((person) => person.ignored && person.origin.kind !== "protagonist").map((person) => ({ characterId: person.id, reason: "ignored" }));
-  const ranked = snapshot.characters.filter((person) => person.origin.kind !== "protagonist" && !person.ignored).map((person) => {
+  const ranked = snapshot.characters.filter((person) => person.origin.kind !== "protagonist" && !person.ignored && !person.removed && !person.mergedIntoCharacterId).map((person) => {
     const key = `campaign:${person.id}`;
     const reference = catalog.find((entry) => entry.id === key)!;
     const ambiguousOnly = !directIds.has(key) && !threadIds.has(key)
@@ -164,7 +164,7 @@ function selectCastContextV2(snapshot: CastGenerationSnapshot, input: { directio
   // Campaigns without an active seed keep the ordering they had before presets.
   const usesPresets = snapshot.fiction!.some(item => item.fields.some(field => field.source === "authored" || field.source === "campaign_edit"));
   const ranked = snapshot.characters.filter(person => {
-    if (person.origin.kind === "protagonist") return false;
+    if (person.origin.kind === "protagonist" || person.removed || person.mergedIntoCharacterId) return false;
     if (person.ignored) { omitted.push({ characterId: person.id, reason: "ignored" }); return false; }
     return true;
   }).map(person => {

@@ -303,6 +303,19 @@ integration("campaign archive export", () => {
     }
   }
 
+  it("projects campaign promotion provenance without campaign identifiers", async () => {
+    const original = (await pool.query("SELECT content FROM world_versions WHERE id=$1", [sourceWorldVersionId])).rows[0]!.content;
+    const content = structuredClone(original);
+    content.playableCharacters = [{ id: "promoted", name: "Promoted", source: { type: "campaign-promotion", campaignId: "private-promotion-id" } }];
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [sourceWorldVersionId, JSON.stringify(content)]);
+    try {
+      const snapshot = await loadCampaignArchiveExportSnapshot(pool, ownerUserId, campaignId);
+      const projected = campaignArchivePayloads(snapshot);
+      expect(projected.world.content.playableCharacters[0]?.source).toEqual({ type: "campaign-promotion" });
+      expect(JSON.stringify(projected)).not.toContain("private-promotion-id");
+    } finally { await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [sourceWorldVersionId, JSON.stringify(original)]); }
+  });
+
   async function stagedExport() {
     const artifact = await exportCampaign(pool, campaignId, { assetStore: { root }, archiveRoot: root, limits });
     return stageArchiveUpload(Readable.from(await readFile(artifact.absolutePath)), root, limits);

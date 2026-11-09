@@ -12,6 +12,20 @@ export async function refreshCastChronicleMetadata(client: DatabaseClient, rawSc
   if (!campaign) throw new Error("Cast metadata campaign not found.");
   const catalog = buildScopedEntityCatalog({ worldContent: campaign.content, worldVersionId: campaign.world_version_id,
     characterSnapshot: campaign.character_snapshot, characterProfile: campaign.character_profile, campaignCharacters: snapshot.characters });
+  // World IDs represented by campaign cast are derived alongside campaign IDs. Rebuild
+  // them together so a removed or merged world character cannot leave stale metadata.
+  const worldCatalog = buildScopedEntityCatalog({ worldContent: campaign.content, worldVersionId: campaign.world_version_id });
+  const representedWorldIds = new Set<string>();
+  for (const person of snapshot.characters) {
+    const origins = [person.origin.kind === "world" ? person.origin : null, person.originProfile ?? null];
+    for (const origin of origins) {
+      if (!origin || origin.worldVersionId !== campaign.world_version_id) continue;
+      const id = `world:${origin.entityId}`;
+      const entry = worldCatalog.find(item => item.id === id || item.equivalentIds?.includes(id));
+      representedWorldIds.add(id);
+      if (entry) for (const equivalent of [entry.id, ...entry.equivalentIds ?? []]) representedWorldIds.add(equivalent);
+    }
+  }
   // Candidate matching may be broad; full-catalog resolution below retains ambiguity.
   const patterns = [...new Set(catalog.filter((entity) => entity.source === "campaign")
     .flatMap((entity) => historicalFactAliasPatterns([entity], [entity.id])))];
@@ -24,10 +38,10 @@ export async function refreshCastChronicleMetadata(client: DatabaseClient, rawSc
          WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3 AND ${ordinal}<=$4
            AND ($5::uuid IS NULL OR id>$5::uuid)
            AND (EXISTS (SELECT 1 FROM unnest(entity_ids) entity_id WHERE entity_id LIKE 'campaign:%')
-             OR lower(normalize(content,NFKC)) ~ ANY($6::text[]))
-         ORDER BY id LIMIT 250`, [scope.ownerUserId, scope.campaignId, campaign.world_version_id, snapshot.boundary.turnNumber, after, patterns])).rows;
+             OR entity_ids && $7::text[] OR lower(normalize(content,NFKC)) ~ ANY($6::text[]))
+         ORDER BY id LIMIT 250`, [scope.ownerUserId, scope.campaignId, campaign.world_version_id, snapshot.boundary.turnNumber, after, patterns, [...representedWorldIds]])).rows;
       for (const row of rows) {
-        const ids = [...new Set([...row.entity_ids.filter((id) => !id.startsWith("campaign:")), ...resolveEntityMetadata(row.content, catalog).entityIds])].sort();
+        const ids = [...new Set([...row.entity_ids.filter((id) => !id.startsWith("campaign:") && !representedWorldIds.has(id)), ...resolveEntityMetadata(row.content, catalog).entityIds])].sort();
         if (JSON.stringify(ids) === JSON.stringify([...row.entity_ids].sort())) continue;
         // A concurrent source rewrite must not receive metadata derived from old text.
         await client.query(`UPDATE ${table} SET entity_ids=$5::text[] WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$3 AND content=$4 AND world_version_id=$6`,

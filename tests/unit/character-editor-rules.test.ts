@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { castOverrideProfileSchema } from "@infinite-quest/contracts";
+import { castOverrideProfileSchema, castPromotionPreviewSchema } from "@infinite-quest/contracts";
 import { createCastEditor, setCastEditorField } from "../../packages/client-core/src/campaign-cast-editor.js";
 import { createNexusHttpClient } from "../../packages/client-web/src/http-client.js";
 import { createNoopSessionPort } from "../../packages/client-web/src/index.js";
@@ -17,6 +17,17 @@ describe("blank override rule", () => {
     const state = setCastEditorField(createCastEditor(authority), "state.location", "");
     expect(state.setOverrides).toEqual({});
     expect(state.clearOverrides).toEqual(["state.location"]);
+  });
+});
+
+describe("promotion candidates", () => {
+  it("accepts the mechanics reason and nothing else", () => {
+    const base = { worldId: "00000000-0000-4000-8000-000000000001", draftRevision: 1, characterRevision: 1, castRevision: 1,
+      boundary: { turnNumber: 0, timelineRevision: 0 }, matches: [] };
+    const preview = (unselectableReason: string) => ({ ...base, destinations: [{ path: "story.role", tickedByDefault: false, requiredOnAdd: false,
+      candidates: [{ sourcePath: "authored.story.role", value: "Rolls 2d6", unselectableReason }] }] });
+    expect(castPromotionPreviewSchema.safeParse(preview("mechanics_language")).success).toBe(true);
+    expect(castPromotionPreviewSchema.safeParse(preview("other")).success).toBe(false);
   });
 });
 

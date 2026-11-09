@@ -489,11 +489,6 @@ All 109 Chromium tests in the four mapped browser suites passed. The rendered ch
 
 [Screenshot evidence](https://github.com/cmacnichol/infinite-quest-nexus/tree/1006fa714d121db4acdd51cda63fb8ca55459f67/docs/review/assets/unified-character-editor-phase-5) includes Nexus cast suggestions and entity conversion at desktop and phone widths, both Story editors, and Web-Next Supporting generation.
 
-### Publication of phases 1–5
-
-- [x] Include the reviewed fixes for editor locks and field limits, preset and starting-cast eligibility, evidence capture and rewind, and validation of linked world characters during archive preview and import.
-- [x] Keep the first release on cast archive formats 1–3. Migration 0131 is the last migration in this release. The lifecycle writers, format 4 reader and promotion receipt migration ship in the separate phase 6 release.
-
 ## Phase 6 · Release reversible lifecycle operations
 
 Start a separate release branch or PR series from the accepted phase 5 baseline. First distribute the v4 readers. Keep lifecycle writes inactive until all readers are compatible and the operations below have passed their release tests.
@@ -506,9 +501,9 @@ Start a separate release branch or PR series from the accepted phase 5 baseline.
 
 **Interface.** Phase 6 adds portable v4. `mergeEventId`, `sourceCharacterId`, seed references and source evidence must resolve after remapping. Lower-format payloads must continue to round-trip after v4 support is installed.
 
-- [ ] **Regression cases.** Start from v1–v3 fixtures and a lifecycle-only v4 fixture without presets. Test import into the new reader and rejection before mutation by the phase 5 reader. Verify valid command order, both IDs on copy, stale merge references, rewind before/after events, branch, transfer and both archive families.
-- [ ] **Implementation.** Define v4 discriminants merge/unmerge/remove/restore, including merge choices, scope checks and alias provenance. Extend live projection and portable reference remapping. Keep all new writers disabled during reader distribution. Repeat these tests with actual events from 6B–6D before activation.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Start from v1–v3 fixtures and a lifecycle-only v4 fixture without presets. Test import into the new reader and rejection before mutation by the phase 5 reader. Verify valid command order, both IDs on copy, stale merge references, rewind before/after events, branch, transfer and both archive families.
+- [x] **Implementation.** Define v4 discriminants merge/unmerge/remove/restore, including merge choices, scope checks and alias provenance. Extend live projection and portable reference remapping. Keep all new writers disabled during reader distribution. Repeat these tests with actual events from 6B–6D before activation.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/campaign-cast-contract.test.ts
@@ -523,9 +518,9 @@ pnpm exec vitest run --config vitest.integration.config.ts tests/integration/cam
 
 **Interface.** `POST cast/:id/merge` takes the target in the URL, both character revisions, `sourceCharacterId`, `reviewedAliases` and field choices. `unmerge` identifies the original `mergeEventId`.
 
-- [ ] **Regression cases.** Preview 21 candidate aliases, conflicting manual goals and an intentional blank appearance override. Reject a forged alias, wrong target, missing choice or stale source revision. Undo after an independent target edit and alias removal/re-entry. Verify pending candidates, outstanding jobs and detach follow the effective identity, and Resolve does not recreate the source.
-- [ ] **Implementation.** Compute preview from two full detail reads. Submit reviewedAliases and source/target choices, revalidate both records with revision/boundary and generation checks, require the seeded target when only one is seeded and reject the protagonist. Persist manual precedence, earlier alias ownership and merge-owned changes. Resolve chains on projected copies; undo replays independent edits while respecting subsequent active merge dependencies.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Preview 21 candidate aliases, conflicting manual goals and an intentional blank appearance override. Reject a forged alias, wrong target, missing choice or stale source revision. Undo after an independent target edit and alias removal/re-entry. Verify pending candidates, outstanding jobs and detach follow the effective identity, and Resolve does not recreate the source.
+- [x] **Implementation.** Compute preview from two full detail reads. Submit reviewedAliases and source/target choices, revalidate both records with revision/boundary and generation checks, require the seeded target when only one is seeded and reject the protagonist. Persist manual precedence, earlier alias ownership and merge-owned changes. Resolve chains on projected copies; undo replays independent edits while respecting subsequent active merge dependencies.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run tests/unit/campaign-cast-projection.test.ts
@@ -541,9 +536,9 @@ pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts
 
 **Interface.** `remove` and `restore` operate on the supporting character with the standard cast write fences. Use the `removed` list filter and return `cast_character_removed` on stale pending-item resolution.
 
-- [ ] **Regression cases.** Remove with pending identity and resolved-detail items. Resolve from a stale tab, complete a paused job and invalidate one old quote before Restore. Assert 409 on stale resolution, silent valid updates, name held for uniqueness, no context/catalog/attention entry while removed, and only valid pending items on restore. Run catalog assertions for merge/unmerge as well.
-- [ ] **Implementation.** Write turn-gated soft remove/restore events and refresh Chronicle on all four lifecycle commands. Filter read, count and resolve using the current merge-resolved target. Include a Removed roster filter, confirmation, and Restore on duplicate name. Preserve the seed, evidence and valid post-removal updates.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Remove with pending identity and resolved-detail items. Resolve from a stale tab, complete a paused job and invalidate one old quote before Restore. Assert 409 on stale resolution, silent valid updates, name held for uniqueness, no context/catalog/attention entry while removed, and only valid pending items on restore. Run catalog assertions for merge/unmerge as well.
+- [x] **Implementation.** Write turn-gated soft remove/restore events and refresh Chronicle on all four lifecycle commands. Filter read, count and resolve using the current merge-resolved target. Include a Removed roster filter, confirmation, and Restore on duplicate name. Preserve the seed, evidence and valid post-removal updates.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run --config vitest.integration.config.ts tests/integration/campaign-cast-discovery.integration.test.ts tests/integration/campaign-cast-api.integration.test.ts tests/integration/campaign-cast-generation.integration.test.ts
@@ -556,13 +551,13 @@ pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts
 
 **Modify** `packages/contracts/src/campaign-cast.ts`, `services/api/src/campaign-cast-routes.ts`, `packages/client-web/src/campaign-cast-api.ts`, `packages/application/src/campaign-cast/ports.ts`, `packages/database/src/authoring-world-apply-adapter.ts`, `packages/database/src/world-repository.ts`, `packages/database/src/system-archive-export-repository.ts`, `packages/database/src/system-archive-import-repository.ts`, `packages/contracts/src/system-archives.ts`, `packages/application/src/system-archives/portability-registry.ts`, `apps/web/src/campaign-cast-panel.ts`, `docs/player-guide/characters-and-stats.md`.
 
-**Create** `database/migrations/0132_campaign_cast_promotion_receipts.sql` (use the next free number at phase 6 integration).
+**Create** `database/migrations/0132_campaign_cast_promotion_receipts.sql`. Migration 0131 already belongs to selected-character world identity.
 
 **Interface.** `GET cast/:id/promotion-preview?worldId=...` returns destination-keyed candidates. `POST cast/:id/promote` receives the selected source for each destination, both scopes’ revision fences and the idempotency key.
 
-- [ ] **Regression cases.** Target a foreign or archived world, a stale target revision and a protagonist. Verify client and server reject prohibited lifecycle actions. On Add, omit a valid name or supply two sources for one destination. On Replace, send a single approved appearance choice, leave goals unticked and retry the request. Assert one draft revision, immutable published/campaign data and no exported campaign IDs.
-- [ ] **Implementation.** Implement typed promotion-preview and promote. Build destination-keyed choices, require an Add name and resolve authored versus observed appearance explicitly. In one owner-scoped transaction lock the draft and campaign as needed, check revisions/lock, permit only confirmed fields and store an idempotency receipt with the draft write. Preserve target ID, mechanics and use on Replace. Classify receipt as operational, and only the typed campaign-promotion provenance as portable. Add a draft-write receipt migration in the phase 6 release, keyed by owner, destination draft and idempotency key. Compare the request fingerprint on replay, return the original result before checking stale revisions for an identical retry, and reject key reuse with a different payload.
-- [ ] Run the focused verification commands and record the result for each layer.
+- [x] **Regression cases.** Target a foreign or archived world, a stale target revision and a protagonist. Verify client and server reject prohibited lifecycle actions. On Add, omit a valid name or supply two sources for one destination. On Replace, send a single approved appearance choice, leave goals unticked and retry the request. Assert one draft revision, immutable published/campaign data and no exported campaign IDs.
+- [x] **Implementation.** Implement typed promotion-preview and promote. Build destination-keyed choices, require an Add name and resolve authored versus observed appearance explicitly. In one owner-scoped transaction lock the draft and campaign as needed, check revisions/lock, permit only confirmed fields and store an idempotency receipt with the draft write. Preserve target ID, mechanics and use on Replace. Classify receipt as operational, and only the typed campaign-promotion provenance as portable. Add a draft-write receipt migration in the phase 6 release, keyed by owner, destination draft and idempotency key. Compare the request fingerprint on replay, return the original result before checking stale revisions for an identical retry, and reject key reuse with a different payload.
+- [x] Run the focused verification commands and record the result for each layer.
 
 ```powershell
 pnpm exec vitest run --config vitest.integration.config.ts tests/integration/campaign-cast-api.integration.test.ts tests/integration/world-library.integration.test.ts tests/integration/system-archive.integration.test.ts
@@ -570,6 +565,153 @@ pnpm exec playwright test tests/e2e/campaign-cast.e2e.test.ts
 ```
 
 **Phase 6 exit.** Record the reader versions in use by the API, worker, CLI/import and recovery paths. Exercise a no-presets campaign whose first lifecycle write is Remove. Rehearse v4 import, replay and rollback before writer activation. Capture merge/undo, Removed/Restore and promotion screens at both widths. Publish the lifecycle guide and updated cast runbook with this release.
+
+**Phase 6 verification, 2026-11-08.** The separate release branch starts at the Phase 5 commit `1006fa71`. New installations and upgrades start with `CAST_LIFECYCLE_ENABLED=false`. The compatible reader can display removed records while the writer cutoff is in effect.
+
+- The four mapped Linux PostgreSQL archive and lifecycle suites passed all 117 tests. Coverage includes lifecycle-only v4 data, invalid alias deltas before import, rewind, branch, cross-world transfer and both archive families. A separate recovery drill opened a restored pre-boundary database with the exact Phase 5 reader and accounted for the later Remove. [Reader inventory and recovery drill](../../runbooks/deployment.md#cast-lifecycle-reader-rollout-and-rollback)
+- All 426 tests in the 35 affected unit suites passed. Six additional PostgreSQL suites passed 174 tests covering cast API, discovery, generation, repository, merge and world library behavior. The cast browser suite passed 74 checks, and the campaign editor browser suite passed 10.
+- The PostgreSQL-backed campaign-page browser proof merged, previewed undo, restored both identities, removed and restored a supporting character, and promoted selected fields to a world draft. It checked the persisted draft revision and provenance. To repeat, run the World Library integration suite with the opt-in browser settings documented under Phase 4.
+- Story browser checks cover the side-by-side character fields, explicit conflict resolution, alias limits, keyboard cancellation, Removed and Restore, Add and Replace, stale draft refresh and writer cutoff. [Desktop and phone screenshots](https://github.com/cmacnichol/infinite-quest-nexus/tree/695dffd37937b50d5bd1214ae071b4ba23a95c32/docs/review/assets/unified-character-editor-phase-6)
+- The repository checks, client boundary checks and both web builds passed. Production rollout starts with the operator verifying all deployed readers and the installation’s own backup set. [Lifecycle operations](../../runbooks/campaign-cast.md)
+
+## Phase 7 · Remediate review findings
+
+Applies the [round-2 amendments](../specs/2026-11-08-unified-character-editor-and-starting-cast-design.md#round-2-amendments) and the review of the built code. An item is ticked once it is implemented and the affected suites pass. Dedicated regression tests exist for A1, A2, A3, D1, D15, Convert and D13; the other ticked items rely on the existing cast suites. D5, D7, D11, D12 and D14 already matched the decisions in the built code, and D17's name release is covered by the updated merge discovery test.
+
+### 7A · Cast authority and lifecycle
+
+- [x] **A2** Lag-published seeds keep their evidence turn and survive rewind and branch.
+- [x] **A1** Approving a held match writes a suppressing attachment.
+- [x] **A4** Seed lookups exclude merged-away and removed records.
+- [x] **A5** World entities with no roster entry go through plain discovery.
+- [x] **D16** A seed carried from another world does not count as represented.
+- [x] **D18** Not this character is blocked while the target has an active merge.
+- [x] **D19** Undo merge is rejected on a removed target.
+- [x] **D20** Promoted NPCs get `startingCastDefault: false`.
+- [x] A world version referenced by seed evidence cannot be deleted.
+
+### 7B · Narrator context
+
+- [x] **D1** New ordering applies only to campaigns with an active seed.
+- [x] **D2** Goals use the latest observation during gaps.
+- [x] **D3** Goal truncation is recorded.
+- [x] **D4** Legacy guidance is not sent for seeded NPCs.
+- [x] **D6** Linked entity prose is dropped for seeded NPCs when context is on.
+- [x] **A6** Authored fields use the canon semantic role.
+
+### 7C · Clients and settings
+
+- [x] **D13** Only skipped characters interrupt Create and start.
+- [x] **D10** Main-character save needs no guidance in Nexus.
+- [x] **D14** A `failed` generation does not lock character edits.
+- [x] **D15** Local installs can unlock context and editing gates from the panel.
+- [x] **D9** Web-Next's world summary lists selectable characters only.
+- [x] **A3** Removing a Web-Next character clears its entity links.
+- [x] **A7** The preset editor shows legacy source text read-only.
+- [x] Convert writes notes to one editable field.
+- [x] `loadWorldVersionPlayableCharacters` uses the typed client (4.22).
+
+### 7D · Standards and documentation
+
+- [x] **A8** Draft from story validates world content and shares its rules.
+- [x] **D8** The runbook requires replacing all nodes at once.
+
+### 7E · Legacy cleanup
+
+- See [8G](#8g--legacy-cleanup-428) for **4.28**: remove the panel's `renderEditor`, Story's `character-profile-form.ts` use and `CHARACTER_PROFILE_FIELDS`.
+
+**Moved.** 4.28 is broken into ordered steps in [8G](#8g--legacy-cleanup-428).
+
+**Known failures.** Six unit tests fail on the phase-6 commit before this remediation. They are closed in [8A](#8a--restore-a-green-unit-suite).
+
+## Phase 8 · Close remaining open items
+
+Every item left open after phase 7. Tick an item only after its check has passed.
+
+### 8A · Restore a green unit suite
+
+- [x] **8.1** `csp-ui`: the inline-handler guard matches the `onClose =>` parameter in `nexus.js`. Rename the parameter and leave the guard as it is.
+- [x] **8.2** `legacy-provider-modal`: update the assertion to the current `Apply to suggestion` or `Apply to world draft` label.
+- [x] **8.3** `client-web/api-client`: update the `client.worlds` key list to include the added method.
+- [x] **8.4** `probe-structured-output` (3 tests): align the probe's call budget and expected plan with the operations added in phase 5, and fix the synthetic response behind `invalid_json` at call 8.
+
+### 8B · Server rules and contracts
+
+- [x] **8.5** `parseHttpError` keeps a server `message` only for recognized error shapes. Any other JSON body gets the generic message.
+- [x] **8.6** `restoreAuthoredGoals` is rejected with no authored goal (repository), and with any goal override operation (contract).
+- [x] **8.7** An empty `""` on an updating field is rejected by the shared override schema on both the PATCH and the authored-edit routes. Clients send a clear instead. Observed appearance keeps its intentional empty override.
+- [x] **8.8** `generationRouteIds` validates `characterId` as a UUID.
+- [x] **8.9** `skippedStartingCast` is always present and bounded in the campaign response.
+- [x] **8.10** Promote with Replace keeps the replaced character's `source`.
+- [x] **8.11** Promote marks mechanics-like text unselectable and gives the reason.
+- [x] **8.12** The legacy `playableCharacters` reader in `campaign-state-repository.ts` returns selectable characters only.
+- [x] **8.13** Seeded observed appearance: no change. The spec makes it latest-wins and never a conflict (criterion 3.16), which `resolveSeededCastProfile` and the repository's conflict count already do.
+
+### 8C · Client behavior
+
+- [x] **8.14** The "Left blank, this can be filled from the story" text appears only on paths with a discoverable cast field.
+- [x] **8.15** Suggest cast blocks duplicate names within a batch and after a seed is edited, and its cost text states the true provider-call bound.
+
+### 8D · Audit items to confirm or fix
+
+Each item is either confirmed with a pointer to the code or test, or fixed.
+
+- [x] **8.16** The alias textarea has one limit, from one helper.
+- [x] **8.17** The async leave guard covers every exit: Back, Cancel, Close, Escape, story links and page unload all pass through `requestNavigation` or `beforeunload` (`campaign-cast-panel.ts`). No change.
+- [x] **8.18** Story deep links open after the campaign and startup checks. The `character` parameter is now removed before opening, so a reload does not reopen the editor. A failed load shows the panel's own error.
+- [x] **8.19** The main-character list uses `worlds.playableCharacters`, not the cast API. No change.
+- [x] **8.20** Both error branches in `campaign-cast-routes.ts` send `details.fields` and a named code. The panel and world picker read them. No change.
+- [x] **8.21** Restoring a tick above the 30 cap leaves it unticked with a notice (A10).
+- [x] **8.22** Displaced values are returned by the from-world preview as `changes` with an `effect`, and manual overrides are kept. No change.
+- [x] **8.23** The spec has no `activeSeed` field. `originProfile.seedEventId` carries the active seed and the contract validates it. No change.
+- [x] **8.24** `allowedActions` and per-field data are served by the candidate repository and honored by `cast-review-queue.ts`. No change.
+- [x] **8.25** Every error code named in the spec exists in the server code. No change.
+- [x] **8.26** `previewEntityConversions` joins notes and keeps over-limit originals as unconverted data. No change.
+- [x] **8.27** Add from world candidates: `GET cast/from-world` (`worldChoices`) already covers this, under a different route name than the review expected. No change needed.
+
+### 8E · Regression tests
+
+- [x] **8.28** D18: Not this character is blocked while a merge depends on the seed.
+- [x] **8.29** D19: Undo on a removed target and Promote of a removed character are both blocked.
+- [x] **8.30** D6: a seeded NPC's linked entity prose is dropped and the relationship endpoint is kept.
+- [x] **8.31** A12: seed, turn presets off, confirm edit and context still work and from-world routes return 503.
+
+### 8F · Standards
+
+- [x] **8.32** Scope the id-only `UPDATE` in `campaign-cast-candidate-repository.ts` to the owning campaign.
+- [x] **8.33** Key receipt lookups by owner or campaign as well as `job_id`.
+- [x] **8.34** Move the SQL in `cast-draft-preview.ts` into a repository.
+
+### 8G · Legacy cleanup (4.28)
+
+Do these in order, because each step leaves the app working. Web-Next has its own `character-profile-form` and is unaffected.
+
+- [x] **8.35** Moved the module to `apps/web/src/character-editor/campaign-main-form.ts` and repointed `nexus.js`, `story.js` and `campaign-main-editor.test.ts`.
+- [x] **8.36** `createCharacterProfileForm` already built its controls with the shared renderer, so it moved unchanged. `apps/web/src/character-profile-form.ts` no longer exists.
+- [x] **8.37** The panel's field markup now comes from the shared renderer (`createCastTextField`, `renderSupportingEditorFields`). `renderEditor` remains only as the panel's orchestration of duplicate warnings, pin and ignore, conflict recovery and focus.
+- [x] **8.38** Removed `CHARACTER_PROFILE_FIELDS`. `nexus.js` reads `WORLD_PROFILE_FIELDS` directly.
+- [x] **8.39** `index.html` has no static character fields. `#characterDialog` is an empty host that the renderer fills. No change.
+- [x] **8.40** Run client boundaries, both web builds, unit tests, and the campaign-cast, legacy-ui-campaign-edits, authoring-disclosures and unified-character-editor browser suites.
+- [x] **4.28** Tick once 8.35 to 8.40 pass.
+
+## Phase 9 · Final review corrections
+
+- [x] **9.1 · Undo alias overflow (6.3, 6.11).** Preview the restored alias union and let the user resolve a set over 20 before confirming. Verify independent edits, portable replay, and the browser flow.
+- [x] **9.2 · Promotion target identity (6.7).** Offer the original roster entry in its source world after renames, including an unseeded roster origin or explicit entity link. Scope origins to the owned destination world. Recompute eligible Replace targets under lock and reject unrelated entries without changing the draft.
+- [x] **9.3 · Starting cast at capacity (A10).** Preserve all explicit selections when a former protagonist returns to a full checklist. Verify the returning character and the last user-selected character in Chromium.
+- [x] **9.4 · Merged goal preview (6.1).** Use the effective merged goal policy in the preview, including target-only authored fallback and restoration cutoffs. Compare preview with the persisted result.
+- [x] **9.5 · Campaign-page generation lock (A9).** Check at open and save, preserve Story live locking, and cover idle request counts and a generation starting before save.
+- [x] **9.6 · Portable lifecycle validation (D18, D19).** Enforce the live undo and seed-detach restrictions during archive replay, including a lifecycle transition backdated across its prerequisite. Verify rejection before import writes.
+- [x] **9.7 · Converted entity links (5.6, 5.16).** Reject dangling roster references in archived drafts and immutable versions before import, using the world-write link validation.
+- [x] **9.8 · Diff hygiene.** Remove the trailing blank line in the cast context test and check the full change against the original baseline.
+
+**Final review evidence.** The Chromium run passed all 120 cases across the cast, unified editor, campaign creation, campaign edits and authoring disclosures suites. It exercised the 30th selection, campaign lock checks, and explicit alias selection at desktop and phone widths. The separate PostgreSQL-backed browser proof confirmed the predicted goal in the merge dialog and replaced the original renamed roster entry without increasing the roster count. [Screenshots](https://github.com/cmacnichol/infinite-quest-nexus/tree/82febe6b0dcad9d2239c42c5b682a8567e3fadc6/docs/review/assets/unified-character-editor-final-review)
+
+Six PostgreSQL application suites passed 185 tests, including the real browser proof. They cover repository and API writes, discovery, generation, world library behavior, and merge/undo.
+
+Five Linux PostgreSQL archive and lifecycle suites passed 131 tests. Both archive families rejected the invalid transitions before cast import, while a valid late-published mention survived export and import. System Archive rejected dangling links in each world record type. The full unit run passed 5,601 tests with 44 skipped. TypeScript, repository and client boundaries, both web builds, and the diff against the original baseline passed.
+
+Undo keeps the existing v4 journal format. When a valid later edit takes the restored alias set over 20, the user reviews the full set. Confirmation validates the selection under the campaign lock. The PostgreSQL regressions also cover nested merges, idempotent retry, rewind, and portable replay.
 
 ## Release evidence and rollback
 

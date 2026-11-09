@@ -924,7 +924,7 @@ export async function buildServer({
     resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) })
   });
   if (cast) await app.register(registerCampaignCastRoutes, {
-    application: cast, enabled: config.castEditingEnabled === true, presetsEnabled: config.castPresetsEnabled === true,
+    application: cast, enabled: config.castEditingEnabled === true, lifecycleEnabled: config.castLifecycleEnabled === true, presetsEnabled: config.castPresetsEnabled === true,
     resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) })
   });
   if (authoring) {

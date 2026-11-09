@@ -78,7 +78,9 @@ function portableModelMetadata(value: unknown): Record<string, unknown> {
 }
 
 function portableWorldContent(value: unknown): WorldContent {
-  return canonicalizeWorldContent(sanitizePortableValue(value) as WorldContent);
+  const content = canonicalizeWorldContent(sanitizePortableValue(value) as WorldContent);
+  return { ...content, playableCharacters: content.playableCharacters.map(character => character.source.type === "campaign-promotion"
+    ? { ...character, source: { type: "campaign-promotion" } } : character) };
 }
 
 function portableWorldContentHash(value: unknown): string {

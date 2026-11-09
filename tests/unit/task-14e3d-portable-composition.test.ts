@@ -1,4 +1,5 @@
 import { historicalArchivePolicy } from "../../packages/contracts/src/archive-policy.js";
+import { castArchiveLifecycle, invalidCastArchiveSequences } from "../fixtures/cast-archive-lifecycle.js";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import JSZip from "jszip";
@@ -39,7 +40,7 @@ async function archive(files: Readonly<Record<string, string | Uint8Array>>, per
   return zip.generateAsync({ type: "uint8array", platform: "UNIX" });
 }
 
-async function currentCampaignArchive(): Promise<Uint8Array> {
+async function currentCampaignArchive(cast?: ReturnType<typeof castArchiveLifecycle>): Promise<Uint8Array> {
   const contentHash = createHash("sha256").update(PNG_1X1).digest("hex");
   const assetPath = `assets/sha256/${contentHash.slice(0, 2)}/${contentHash}.png`;
   const worldContent = canonicalizeWorldContent({
@@ -56,6 +57,7 @@ async function currentCampaignArchive(): Promise<Uint8Array> {
     turns: [{ id: sourceTurnId, turnNumber: 1, action: "Look", narration: "A restored hall.", imageUrl: `/api/v1/assets/${sourceAssetId}` }],
     archiveRecords: {
       formatVersion: 1,
+      ...(cast ? { cast } : {}),
       characterProfileEdits: [],
       stateEdits: [],
       worldMigrations: [{
@@ -191,6 +193,15 @@ async function* utf8(value: string): AsyncGenerator<Uint8Array> {
 }
 
 describe("Task 14e3d private portable composition contract", () => {
+  it.each([...invalidCastArchiveSequences, "restore-undo-detach", "late-mention"] as const)(
+    "validates the %s cast sequence before issuing a Campaign Archive preview", async sequence => {
+      const cast = castArchiveLifecycle(sequence, { worldVersionId: sourceWorldVersionId, rosterId: "hero", turnId: sourceTurnId,
+        narration: "A restored hall.", narrationRevision: 0 });
+      const bytes = await currentCampaignArchive(cast);
+      const preview = previewAdapter.previewCampaignZip(chunks(bytes, 512), campaignCommand());
+      if (sequence === "restore-undo-detach" || sequence === "late-mention") await expect(preview).resolves.toMatchObject({ projection: { valid: true } });
+      else await expect(preview).rejects.toThrow("Invalid cast archive relationships");
+    });
   it.each(Object.keys(historicalArchivePolicy("campaign").limits) as (keyof ReturnType<typeof historicalArchivePolicy>["limits"])[])("enforces the configured campaign %s during streamed decoding", async (key) => {
     const original = await currentCampaignArchive();
     const zip = await JSZip.loadAsync(original);

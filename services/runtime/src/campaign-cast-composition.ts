@@ -12,11 +12,11 @@ import { createCastBackfillRepository } from "../../../packages/database/src/cam
 import { createApiCastBackfillApplication } from "./campaign-cast-backfill-composition.js";
 import { createCastDraftPreview } from "./cast-draft-preview.js";
 
-export function createApiCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castPresetsEnabled" | "castEditingEnabled" | "castDiscoveryEnabled" | "castBackfillEnabled" | "castAutoMatchEnabled" | "castContextEnabled" | "storyMemoryCapability">,
+export function createApiCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castLifecycleEnabled" | "castPresetsEnabled" | "castEditingEnabled" | "castDiscoveryEnabled" | "castBackfillEnabled" | "castAutoMatchEnabled" | "castContextEnabled" | "storyMemoryCapability">,
   providers?: Pick<ApiGenerationProviderCollaborators, "execution" | "resolution" | "prepareCastDiscoveryExecution" | "authoringTextPlans">) {
   const jobs = createCastDiscoveryJobRepository(pool, () => config.castEditingEnabled === true && config.castDiscoveryEnabled === true);
   const repository = createPostgresCampaignCastRepository(pool, {
-    castPresetsEnabled: config.castPresetsEnabled === true, editingEnabled: config.castEditingEnabled === true, discoveryEnabled: config.castDiscoveryEnabled === true, backfillEnabled: config.castBackfillEnabled === true, castAutoMatchEnabled: config.castAutoMatchEnabled === true, castContextEnabled: config.castContextEnabled === true, storyMemoryCapability: config.storyMemoryCapability ?? null });
+    lifecycleEnabled: config.castLifecycleEnabled === true, castPresetsEnabled: config.castPresetsEnabled === true, editingEnabled: config.castEditingEnabled === true, discoveryEnabled: config.castDiscoveryEnabled === true, backfillEnabled: config.castBackfillEnabled === true, castAutoMatchEnabled: config.castAutoMatchEnabled === true, castContextEnabled: config.castContextEnabled === true, storyMemoryCapability: config.storyMemoryCapability ?? null });
   return createCampaignCastApplication(repository, {
     async retryFailed(scope, id, request) {
       try { return await jobs.retryFailed(scope, id, request); }

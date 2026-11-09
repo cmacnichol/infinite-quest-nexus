@@ -1,5 +1,6 @@
+import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 import { tabTo } from "./helpers/keyboard.js";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { expect, test, type Page, type Route, type Locator } from "@playwright/test";
 
 const campaignId = "11111111-1111-4111-8111-111111111111";
@@ -1137,4 +1138,156 @@ for (const eligible of [false, true]) test(`Story keeps manual editing available
   await dialog.locator("#cast-save").click();
   await expect.poll(() => api.writes.length).toBe(1); expect(api.writes[0].draftEvidenceFences).toBeUndefined();
   expect(previews).toBe(Number(eligible));
+});
+
+
+for (const width of [1280, 390]) test(`lifecycle review, merge, undo, remove and promotion at ${width}`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
+  await fixture(page, false, true);
+  const sourceId = "99999999-9999-4999-8999-999999999999", mergeId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const boundary = { turnNumber: 1, timelineRevision: 0 }, writes: any[] = [];
+  const undoAliases = [...Array.from({ length: 20 }, (_, index) => "Alias " + (index + 1)), "Harbor guide"];
+  let retryUndo = true;
+  let revision = 0, removed = false, merged = false, stale = true, delayPreview = false;
+  let releasePreview: (() => void) | undefined;
+  const previewGate = new Promise<void>(resolve => { releasePreview = resolve; });
+  const person = () => ({ id: candidateId, name: "Mara", aliases: [], origin: { kind: "manual" }, profile: { "story.role": "Guide" }, pinned: false, ignored: false, revision, firstObservedTurn: 1, lastObservedTurn: 1, removed, activeMerges: merged ? [{ mergeEventId: mergeId, sourceCharacterId: sourceId, sourceName: "Sera", canUndo: true }] : [] });
+  const source = () => ({ id: sourceId, name: "Sera", aliases: [], origin: { kind: "manual" }, profile: { "story.role": "Guard" }, pinned: false, ignored: false, removed: false, revision: 0, firstObservedTurn: 1, lastObservedTurn: 1 });
+  const detail = (character: any) => ({ character, revision, boundary, observations: [], overrides: [], autoMatches: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null, capabilities: { castEditing: true, castLifecycle: true } });
+  await page.route("**/api/v1/**", async route => {
+    const req = route.request(), url = new URL(req.url()), path = url.pathname, tail = path.split("/cast/")[1];
+    const send = (json: unknown, status = 200) => route.fulfill({ status, json });
+    if (path === "/api/v1/worlds") return send({ worlds: [{ id: worldId, title: "Fixture world", status: "active" }] });
+    if (path.endsWith("/cast")) {
+      const filter = url.searchParams.get("filter"), people = filter === "removed" ? (removed ? [person()] : []) : [person(), ...(merged ? [] : [source()])].filter(item => !item.removed);
+      return send({ revision, boundary, characters: people, nextCursor: null, capabilities: { castEditing: true, castLifecycle: true } });
+    }
+    if (tail === candidateId) return send(detail(person()));
+    if (tail === sourceId) return send(detail(source()));
+    if (tail === `${candidateId}/merge-preview`) { if (delayPreview) await previewGate; return send({ target: (({ capabilities, ...rest }) => rest)(detail(person())), source: (({ capabilities, ...rest }) => rest)(detail(source())), aliasCandidates: Array.from({ length: 21 }, (_, i) => `Alias ${i + 1}`), fields: [{ path: "story.role", target: "Guide", source: "Guard", choiceRequired: true, defaultChoice: null, allowedChoices: ["target", "source"] }] }); }
+    if (tail === `${candidateId}/unmerge-preview`) return send({ target: { ...person(), aliases: undoAliases }, source: source(), revision, boundary, expectedCharacterRevision: revision, expectedSourceCharacterRevision: 0 });
+    if (tail === `${candidateId}/promotion-preview`) return send({ worldId, draftRevision: stale ? 1 : 2, characterRevision: revision, castRevision: revision, boundary,
+      destinations: [{ path: "name", candidates: [{ sourcePath: "name", value: "Mara" }], tickedByDefault: true, requiredOnAdd: true }, { path: "appearance.otherVisualDetails", candidates: [{ sourcePath: "authored.appearance.otherVisualDetails", value: "Brown coat" }, { sourcePath: "observed.appearance.description", value: "Blue coat" }], tickedByDefault: false, requiredOnAdd: false }, { path: "story.goals", candidates: [{ sourcePath: "observed.story.goals", value: "Find home" }], tickedByDefault: false, requiredOnAdd: false }], matches: [{ characterId: "existing", name: "Mara" }] });
+    if (tail && req.method() === "POST") {
+      const input = req.postDataJSON(); writes.push({ tail, input });
+      if (tail.endsWith("/unmerge") && retryUndo) { retryUndo = false; return send({ code: "unavailable", message: "Try again" }, 503); }
+      if (tail.endsWith("/promote")) { if (stale) { stale = false; return send({ code: "cast_promotion_conflict", message: "Changed" }, 409); } return send({ worldId, draftRevision: 3, characterId: input.targetCharacterId ?? "new" }); }
+      revision++; if (tail.endsWith("/merge")) merged = true; if (tail.endsWith("/unmerge")) merged = false;
+      if (tail.endsWith("/remove")) removed = true; if (tail.endsWith("/restore")) removed = false;
+      return send({ character: person(), revision, boundary });
+    }
+    return route.fallback();
+  });
+  const root = "test-results/review-assets/unified-character-editor-phase-6"; await mkdir(root, { recursive: true });
+  const capture = async (name: string) => page.screenshot({ path: `${root}/${name}-${width}.png` });
+  await open(page); const workspace = page.locator("#campaignCastDialog");
+  await workspace.getByRole("button", { name: "Mara", exact: true }).click();
+  const mergeButton = workspace.getByRole("button", { name: "Merge with another character" });
+  await mergeButton.focus(); await page.keyboard.press("Enter");
+  await expect(page.locator("dialog.cast-lifecycle")).toBeVisible();
+  await page.keyboard.press("Escape"); await expect(mergeButton).toBeFocused();
+  delayPreview = true; await page.keyboard.press("Enter");
+  let dialog = page.locator("dialog.cast-lifecycle"); await dialog.getByRole("button", { name: "Sera", exact: true }).click();
+  await expect(dialog).toContainText("Loading both characters"); await dialog.getByRole("button", { name: "Cancel" }).click();
+  delayPreview = false; releasePreview!(); await expect(dialog).toHaveCount(0); expect(writes).toHaveLength(0);
+  await mergeButton.click(); await dialog.getByRole("button", { name: "Sera", exact: true }).click();
+  await expect(dialog.getByText("Aliases to keep")).toBeVisible(); await capture("merge");
+  await dialog.getByRole("button", { name: "Confirm merge" }).click(); await expect(dialog).toContainText("Select at most 20 aliases"); await capture("merge-validation"); expect(writes).toHaveLength(0);
+  await dialog.getByLabel("Alias 21").uncheck(); await dialog.getByRole("button", { name: "Confirm merge" }).click(); await expect(dialog).toContainText("Choose a value for"); expect(writes).toHaveLength(0);
+  await dialog.locator("select").selectOption("source"); await dialog.getByRole("button", { name: "Confirm merge" }).click();
+  await expect(dialog).toHaveCount(0); expect(writes.at(-1).input.reviewedAliases).toHaveLength(20); expect(writes.at(-1).input.choices["story.role"]).toBe("source");
+  await workspace.getByRole("button", { name: "Undo merge" }).click(); dialog = page.locator("dialog.cast-lifecycle"); await expect(dialog.getByText("Review undo merge")).toBeVisible(); await capture("undo");
+  const confirmUndo = dialog.getByRole("button", { name: "Confirm undo merge" });
+  await expect(confirmUndo).toBeDisabled();
+  await expect(dialog.getByLabel("Harbor guide")).toBeChecked();
+  await expect(dialog.getByText("21 selected (maximum 20)")).toBeVisible();
+  const finalRoot = "test-results/review-assets/unified-character-editor-final-review";
+  await mkdir(finalRoot, { recursive: true });
+  await page.screenshot({ path: `${finalRoot}/undo-alias-selection-${width}.png` });
+  await dialog.getByLabel("Alias 1", { exact: true }).uncheck();
+  await expect(dialog.getByText("20 selected (maximum 20)")).toBeVisible();
+  await confirmUndo.click(); await expect(confirmUndo).toBeEnabled();
+  const attemptedUndo = writes.at(-1).input;
+  expect(attemptedUndo.reviewedAliases).toEqual(undoAliases.slice(1));
+  await confirmUndo.click(); await expect(dialog).toHaveCount(0);
+  expect(writes.at(-1).input).toEqual(attemptedUndo);
+  await workspace.getByRole("button", { name: "Remove from cast" }).click(); dialog = page.locator("dialog.cast-lifecycle"); await capture("removed"); await dialog.getByRole("button", { name: "Confirm remove" }).click();
+  await expect(dialog).toHaveCount(0);
+  await workspace.getByRole("button", { name: "Add character", exact: true }).click();
+  await workspace.getByLabel("Name", { exact: true }).fill("ＭＡＲＡ");
+  await expect(workspace.getByText("A removed character holds this name. Restore them instead.")).toBeVisible();
+  await expect(workspace.locator("#cast-save")).toBeDisabled();
+  await capture("held-name");
+  await workspace.getByLabel("Name", { exact: true }).fill("New person");
+  await workspace.getByLabel("Aliases (one per line)").fill("mara");
+  await expect(workspace.getByText("A removed character holds this name. Restore them instead.")).toBeVisible();
+  await workspace.getByLabel("Aliases (one per line)").fill("");
+  await workspace.getByLabel("Name", { exact: true }).fill("ＭＡＲＡ");
+  await workspace.getByRole("button", { name: "Restore Mara" }).click();
+  const unsaved = workspace.getByRole("alertdialog", { name: "Unsaved character changes" });
+  await expect(unsaved.getByRole("button", { name: "Save changes" })).toBeDisabled();
+  await unsaved.getByRole("button", { name: "Keep editing" }).click();
+  await expect(workspace.getByLabel("Name", { exact: true })).toHaveValue("ＭＡＲＡ");
+  await workspace.getByRole("button", { name: "Restore Mara" }).click();
+  await unsaved.getByRole("button", { name: "Discard changes" }).click();
+  await workspace.getByRole("button", { name: "Restore", exact: true }).click(); dialog = page.locator("dialog.cast-lifecycle"); await capture("restore"); await dialog.getByRole("button", { name: "Restore character" }).click(); await expect(dialog).toHaveCount(0);
+  await workspace.getByRole("button", { name: "Add to world draft" }).click(); dialog = page.locator("dialog.cast-lifecycle"); await dialog.getByRole("button", { name: "Review fields" }).click(); await expect(dialog.getByText("Review world draft fields")).toBeVisible();
+  await expect(dialog.getByLabel("Source for Other visual details").getByRole("option", { name: /Authored profile.*Brown coat/ })).toHaveCount(1);
+  await expect(dialog.getByLabel("Source for Other visual details").getByRole("option", { name: /Observed in story.*Blue coat/ })).toHaveCount(1);
+  await expect(dialog).not.toContainText("observed.story.goals"); await capture("promote");
+  await dialog.getByRole("button", { name: "Confirm draft change" }).click(); await expect(dialog).toContainText("changed"); await capture("promote-stale"); await dialog.getByRole("button", { name: "Refresh preview" }).click();
+  await dialog.getByLabel("Destination").selectOption("existing"); await dialog.getByLabel("Other visual details", { exact: true }).check(); await dialog.getByLabel("Source for Other visual details").selectOption("observed.appearance.description");
+  await dialog.getByRole("button", { name: "Confirm draft change" }).click(); await expect(dialog).toHaveCount(0);
+  expect(writes.at(-1).input).toMatchObject({ mode: "replace", targetCharacterId: "existing", selections: [{ destinationPath: "appearance.otherVisualDetails", sourcePath: "observed.appearance.description" }] });
+  await workspace.getByRole("button", { name: "Add to world draft" }).click(); dialog = page.locator("dialog.cast-lifecycle");
+  await dialog.getByRole("button", { name: "Review fields" }).click();
+  await expect(dialog.getByLabel("Name", { exact: true })).toBeChecked();
+  await expect(dialog.getByLabel("Goals", { exact: true })).not.toBeChecked();
+  await dialog.getByRole("button", { name: "Confirm draft change" }).click(); await expect(dialog).toHaveCount(0);
+  expect(writes.at(-1).input).toMatchObject({ mode: "add", selections: [{ destinationPath: "name", sourcePath: "name" }] });
+});
+
+
+test("campaign settings opens lifecycle actions through the shared character sheet", async ({ page }) => {
+  const data = legacyUiFixture({ turnCount: 1, campaignCount: 1, worldCount: 1 });
+  await installLegacyUiFixture(page, data);
+  const boundary = { turnNumber: 1, timelineRevision: 0 };
+  const person = { id: candidateId, name: "Mara", aliases: [], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 1, lastObservedTurn: 1 };
+  await page.route("**/api/v1/meta", route => route.fulfill({ json: { application: { name: "Nexus", version: "test", commit: null, builtAt: null }, capabilities: { castEditing: true, castLifecycle: true } } }));
+  await page.route("**/cast**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith(`/cast/${candidateId}`)) return route.fulfill({ json: { character: person, revision: 0, boundary, observations: [], overrides: [], autoMatches: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null, capabilities: { castEditing: true, castLifecycle: true } } });
+    if (path.endsWith("/cast")) return route.fulfill({ json: { revision: 0, boundary, characters: [person], nextCursor: null, capabilities: { castEditing: true, castLifecycle: true } } });
+    return route.fallback();
+  });
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/nexus/index.html#campaigns`);
+  await page.locator(`#campaignList [data-campaign-id="${data.campaignId}"]`).click();
+  await page.locator("#editCampaignCharacter").click();
+  const sheet = page.locator("#campaignCastDialog"); await sheet.getByRole("button", { name: "Mara", exact: true }).click();
+  await expect(sheet.getByRole("button", { name: "Merge with another character" })).toBeVisible();
+  await expect(sheet.getByRole("button", { name: "Remove from cast" })).toBeVisible();
+  await expect(sheet.getByRole("button", { name: "Add to world draft" })).toBeVisible();
+});
+
+
+test("rollback keeps Removed readable while lifecycle actions are unavailable", async ({ page }) => {
+  await fixture(page, false, true);
+  const boundary = { turnNumber: 1, timelineRevision: 0 };
+  const person = { id: candidateId, name: "Mara", aliases: [], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false, removed: true, revision: 1, firstObservedTurn: 1, lastObservedTurn: 1 };
+  let writes = 0;
+  await page.route("**/api/v1/**", route => {
+    const req = route.request(), url = new URL(req.url());
+    if (!url.pathname.includes("/cast")) return route.fallback();
+    if (req.method() !== "GET") { writes++; return route.fulfill({ status: 503, json: { code: "cast_lifecycle_disabled" } }); }
+    if (url.pathname.endsWith(`/cast/${candidateId}`)) return route.fulfill({ json: { character: person, revision: 1, boundary, observations: [], overrides: [], autoMatches: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null, capabilities: { castEditing: true, castLifecycle: false } } });
+    if (url.pathname.endsWith("/cast")) return route.fulfill({ json: { revision: 1, boundary, characters: url.searchParams.get("filter") === "removed" ? [person] : [], nextCursor: null, capabilities: { castEditing: true, castLifecycle: false } } });
+    return route.fallback();
+  });
+  await open(page); const sheet = page.locator("#campaignCastDialog");
+  await expect(sheet.getByLabel("Filter").getByRole("option", { name: "Removed" })).toHaveCount(1);
+  await sheet.getByLabel("Filter").selectOption("removed"); await sheet.getByRole("button", { name: "Mara", exact: true }).click();
+  await expect(sheet.getByRole("button", { name: "Restore", exact: true })).toHaveCount(0);
+  await expect(sheet.getByRole("button", { name: "Merge with another character" })).toHaveCount(0);
+  await expect(sheet.getByRole("button", { name: "Edit character" })).toHaveCount(0);
+  expect(writes).toBe(0);
 });

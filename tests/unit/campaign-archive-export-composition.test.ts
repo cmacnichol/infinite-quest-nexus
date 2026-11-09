@@ -55,6 +55,13 @@ const exportedPolicyFieldsSchema = z.object({
 });
 
 describe("campaign archive policy projection", () => {
+  it("exports only typed campaign promotion provenance", () => {
+    const source = structuredClone(snapshot);
+    source.campaign.content = worldContentSchema.parse({ world: { title: "Story world" }, playableCharacters: [{ id: "one", name: "One", source: { type: "campaign-promotion", campaignId: "private-campaign-id" } }] });
+    const payload = campaignArchivePayloads(source);
+    expect(payload.world.content.playableCharacters[0]?.source).toEqual({ type: "campaign-promotion" });
+    expect(JSON.stringify(payload)).not.toContain("private-campaign-id");
+  });
   it("writes v5 with eligibility, the retained setting and safe accepted policy provenance", () => {
     const original = structuredClone(snapshot);
     const payload = campaignArchivePayloads(snapshot).campaign;

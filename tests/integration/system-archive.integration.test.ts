@@ -63,6 +63,7 @@ import {
   withSystemMutationPermit,
 } from "../../services/api/src/system-import-gate.js";
 import { workerMemoryApplication } from "../helpers/memory-applications.js";
+import { castArchiveLifecycle, invalidCastArchiveSequences } from "../fixtures/cast-archive-lifecycle.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -1055,6 +1056,8 @@ integration("deterministic owner-wide System Archive export", () => {
     const content = structuredClone(original.rows[0]!.content);
     const characters = [{ id: "converted-character", name: "New", characterText: "Lore", campaignUse: "supporting", startingCastDefault: false,
       alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: { type: "world-entity", entityId: "converted-npc", private: "omit" } }];
+    characters.push({ id: "promoted-character", name: "Promoted", characterText: "Lore", campaignUse: "supporting", startingCastDefault: false,
+      alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: { type: "campaign-promotion", entityId: "", private: "private-campaign-id" } });
     content.playableCharacters = characters;
     content.entities = [{ id: "converted-npc", name: "Old", kind: "npc", description: "Lore", tags: [], facts: [], linkedCharacterId: characters[0]!.id }];
     await pool.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1", [worldVersionId, JSON.stringify(content)]);
@@ -1065,6 +1068,8 @@ integration("deterministic owner-wide System Archive export", () => {
         .map((entry) => entry.async("string")))).flatMap((entry) => entry.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)));
       const saved = records.find((entry) => entry.sourceId === worldVersionId).record.content;
       expect(saved.playableCharacters[0].source).toEqual({ type: "world-entity", entityId: "converted-npc" });
+      expect(saved.playableCharacters[1].source).toEqual({ type: "campaign-promotion" });
+      expect(JSON.stringify(saved)).not.toContain("private-campaign-id");
       expect(saved.entities[0].linkedCharacterId).toBe(characters[0]!.id);
     } finally {
       await pool.query("UPDATE world_versions SET content=$2::jsonb WHERE id=$1", [worldVersionId, JSON.stringify(original.rows[0]!.content)]);
@@ -2316,16 +2321,19 @@ integration("deterministic owner-wide System Archive export", () => {
       .resolves.toMatchObject({ rows: [{ count: "0" }] });
   });
 
-  it.each(["world-drafts", "world-versions"] as const)(
+  it.each([...invalidCastArchiveSequences, "restore-undo-detach", "world-drafts", "world-versions"] as const)(
     "checks %s relationships during System Archive preview and atomic import", async scenario => {
       const zip = await JSZip.loadAsync(productionImportFixture!.bytes);
       const manifest = JSON.parse(await zip.file("manifest.json")!.async("string")) as MutableSystemManifest;
-      const domain = scenario;
+      const domain = scenario === "world-drafts" || scenario === "world-versions" ? scenario : "campaigns";
       const entry = manifest.entries.find(item => item.path.startsWith(`records/${domain}/`))!;
       const record = systemRecordEnvelopeSchema.parse(JSON.parse((await zip.file(entry.path)!.async("string")).trim()));
       if (record.domain === "world-drafts" || record.domain === "world-versions") {
         record.record.content.entities = [{ id: "guide-entity", name: "Guide", kind: "npc", description: "", tags: [], facts: [],
           linkedCharacterId: "missing-roster-entry" }];
+      } else if (record.domain === "campaigns" && scenario !== "world-drafts" && scenario !== "world-versions") {
+        record.record.cast = castArchiveLifecycle(scenario, { worldVersionId, rosterId: "roundtrip-character", turnId,
+          narration: "The gate opens silently.", narrationRevision: 1 });
       } else throw new Error("Unexpected archive fixture domain.");
       const bytes = Buffer.from(`${JSON.stringify(record)}\n`);
       zip.file(entry.path, bytes);
@@ -2335,7 +2343,8 @@ integration("deterministic owner-wide System Archive export", () => {
       zip.file("manifest.json", JSON.stringify(manifest));
       await withStagedArchive(await zip.generateAsync({ type: "nodebuffer" }), limits, async staged => {
         const inspection = inspectSystemArchiveForPreview(staged, limits);
-        await expect(inspection).rejects.toMatchObject({ code: "archive-world-mismatch" });
+        if (scenario === "restore-undo-detach") await expect(inspection).resolves.toBeDefined();
+        else await expect(inspection).rejects.toMatchObject({ code: domain === "campaigns" ? "archive-json-invalid" : "archive-world-mismatch" });
       });
       await pool.query("TRUNCATE TABLE worlds,provider_profiles,prompt_template_overrides,imports,activity_events RESTART IDENTITY CASCADE");
       await pool.query("DELETE FROM system_archive_jobs");
@@ -2352,9 +2361,15 @@ integration("deterministic owner-wide System Archive export", () => {
         }
       }
       const imported = imports.withAtomicImport(owner, { destination, ignore: {} }, tx => tx.insertLogicalDomains(records));
-      await expect(imported).rejects.toThrow("character link");
-      expect((await pool.query("SELECT (SELECT count(*) FROM worlds)::int worlds, (SELECT count(*) FROM campaign_cast_events)::int events")).rows)
-        .toEqual([{ worlds: 0, events: 0 }]);
+      if (scenario === "restore-undo-detach") {
+        await imported;
+        expect((await pool.query("SELECT count(*)::int AS events FROM campaign_cast_events WHERE campaign_id=$1", [campaignId])).rows)
+          .toEqual([{ events: 8 }]);
+      } else {
+        await expect(imported).rejects.toThrow(domain === "campaigns" ? "Invalid cast archive relationships" : "character link");
+        expect((await pool.query("SELECT (SELECT count(*) FROM worlds)::int worlds, (SELECT count(*) FROM campaign_cast_events)::int events")).rows)
+          .toEqual([{ worlds: 0, events: 0 }]);
+      }
     },
   );
 

@@ -51,6 +51,7 @@ export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
   campaign_canonical_facts: "portable_authority",
   campaign_cast_state: "portable_authority",
   campaign_cast_characters: "portable_authority",
+  campaign_cast_promotion_receipts: "operational",
   campaign_cast_events: "portable_authority",
   campaign_cast_observations: "portable_authority",
   campaign_cast_profiles: "rebuildable",

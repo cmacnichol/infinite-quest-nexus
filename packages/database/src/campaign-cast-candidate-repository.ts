@@ -22,11 +22,13 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
       const scope = castScopeSchema.parse(rawScope), query = castCandidateQuerySchema.parse(input);
       return withTransaction(pool, async (client) => {
         const cast = await initializeCastWithClient(client, scope);
+        const effective = (id: string | null | undefined) => { const person = cast.characters.find(item => item.id === id); return person?.mergedIntoCharacterId ?? id; };
         const hiddenFields: Record<string, string[]> = {};
         for (const person of cast.characters) {
           if (!person.campaignProfile) continue;
           const profile = characterProfileSchema.parse(person.campaignProfile);
           hiddenFields[person.id] = castFieldSchema.options.filter(field => isSeededFixedCandidateHidden(profile, field));
+          for (const historical of cast.characters.filter(item => item.mergedIntoCharacterId === person.id)) hiddenFields[historical.id] = hiddenFields[person.id]!;
         }
         const visiblePending = `${pendingCastDetailSql} AND NOT COALESCE(
           ($11::jsonb -> (p.resolution_receipt #>> '{result,character,id}'))
@@ -43,19 +45,20 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
             AND (p.source->>'timelineRevision')::integer=$4 AND n.turn_number<=$5
             AND n.correction_revision=(p.source->>'narrationRevision')::integer
             AND encode(digest(n.effective_narration,'sha256'),'hex')=p.source->>'sourceHash'
+            AND NOT (COALESCE(p.resolution_receipt #>> '{result,character,id}', p.proposal->>'existingCharacterId', '')=ANY($12::text[]))
           ORDER BY p.id LIMIT $6`, [scope.campaignId, scope.ownerUserId, query.cursor ?? null, cast.boundary.timelineRevision,
-          cast.boundary.turnNumber, query.limit + 1, query.view === "matches", cast.characters.filter(person => person.ignored).map(person => person.id), query.view === "details", query.view === "review", JSON.stringify(hiddenFields)])).rows;
+          cast.boundary.turnNumber, query.limit + 1, query.view === "matches", cast.characters.filter(person => person.ignored).map(person => person.id), query.view === "details", query.view === "review", JSON.stringify(hiddenFields), cast.characters.filter(person => cast.characters.find(target => target.id === effective(person.id))?.removed).map(person => person.id)])).rows;
         const candidates = rows.slice(0, query.limit).map((row) => {
           const saved = row.resolution_receipt ? castCandidateResolutionSchema.parse(row.resolution_receipt.result) : null;
           const pending = saved?.pendingObservations?.filter(item => row.pending_indexes.includes(item.index));
-          const currentCharacter = saved ? cast.characters.find(person => person.id === saved.character.id) : undefined;
-          const exactMatches = query.view === "review" && !saved ? cast.characters.filter(person =>
+          const currentCharacter = saved ? cast.characters.find(person => person.id === effective(saved.character.id)) : undefined;
+          const exactMatches = query.view === "review" && !saved ? cast.characters.filter(person => !person.mergedIntoCharacterId &&
             [person.name, ...person.aliases].some(name => normalizeEntityTerm(name) === normalizeEntityTerm(row.proposal.name))) : [];
-          const suggested = exactMatches.length === 1 && !exactMatches[0]!.ignored
+          const suggested = exactMatches.length === 1 && !exactMatches[0]!.ignored && !exactMatches[0]!.removed
             && (!row.proposal.existingCharacterId || row.proposal.existingCharacterId === exactMatches[0]!.id) ? exactMatches[0]!.id : undefined;
           return { id: row.id, reason: row.reason, ...(suggested ? { suggestedCharacterId: suggested } : {}),
-            proposal: pending ? { ...row.proposal, observations: pending.map(item => row.proposal.observations[item.index]) } : row.proposal,
-            ...(saved ? { resolvedCharacterId: saved.character.id, details: pending?.map(item => ({ observationIndex: item.index,
+            proposal: { ...row.proposal, existingCharacterId: effective(row.proposal.existingCharacterId) ?? null, ...(pending ? { observations: pending.map(item => row.proposal.observations[item.index]) } : {}) },
+            ...(saved ? { resolvedCharacterId: effective(saved.character.id), details: pending?.map(item => ({ observationIndex: item.index,
               field: row.proposal.observations[item.index].field, value: row.proposal.observations[item.index].value,
               quote: row.proposal.observations[item.index].quote, reason: item.reason,
               allowedActions: currentCharacter?.originProfile && !["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(row.proposal.observations[item.index].field)
@@ -87,7 +90,9 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
           return reviewCastDetailResultSchema.parse(prior.result);
         }
         const resolution = row.resolution_receipt ? castCandidateResolutionSchema.parse(row.resolution_receipt.result) : null;
-        const character = cast.characters.find(item => item.id === resolution?.character.id);
+        const original = cast.characters.find(item => item.id === resolution?.character.id);
+        const character = cast.characters.find(item => item.id === (original?.mergedIntoCharacterId ?? original?.id));
+        if (character?.removed) throw new CampaignCastError("cast_character_removed");
         if (!character || !resolution?.pendingObservations?.some(item => item.index === request.observationIndex)
           || decisions.some(item => item.observationIndex === request.observationIndex)) throw new CampaignCastError("cast_invalid_request");
         if (character.origin.kind === "protagonist" && request.action !== "dismiss") throw new CampaignCastError("cast_protagonist_read_only");
@@ -149,19 +154,28 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
           }
           return castCandidateResolutionSchema.parse(row.resolution_receipt.result);
         }
+        const proposedBeforeFence = cast.characters.find(person => person.id === row.proposal.existingCharacterId);
+        const selectedBeforeFence = request.action === "attach" ? cast.characters.find(person => person.id === request.characterId) : undefined;
+        if ([proposedBeforeFence, selectedBeforeFence].some(person => person && cast.characters.find(target => target.id === (person.mergedIntoCharacterId ?? person.id))?.removed)) throw new CampaignCastError("cast_character_removed");
         if (row.status !== "pending" || cast.revision !== request.expectedCastRevision
           || stableStringify(cast.boundary) !== stableStringify(request.expectedBoundary)) throw new CampaignCastError("cast_revision_conflict");
         if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2
           AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`,
         [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
-        const validated = resolveCastDiscoveryEvidence({ source, candidate: row.proposal, knownCharacters: cast.characters,
-          characterId: request.action === "attach" ? request.characterId : null });
+        const requested = request.action === "attach" ? cast.characters.find(person => person.id === request.characterId) : undefined;
+        const resolved = cast.characters.find(person => person.id === (requested?.mergedIntoCharacterId ?? requested?.id));
+        if (request.action === "attach" && !resolved) throw new CampaignCastError("cast_invalid_request");
+        const proposed = cast.characters.find(person => person.id === row.proposal.existingCharacterId);
+        const proposedTarget = cast.characters.find(person => person.id === (proposed?.mergedIntoCharacterId ?? proposed?.id));
+        if (resolved?.removed || proposedTarget?.removed) throw new CampaignCastError("cast_character_removed");
+        const validated = resolveCastDiscoveryEvidence({ source, candidate: { ...row.proposal, existingCharacterId: proposedTarget?.id ?? row.proposal.existingCharacterId }, knownCharacters: cast.characters.filter(person => !person.mergedIntoCharacterId),
+          characterId: resolved?.id ?? null });
         const candidate = validated.candidate;
         if (!candidate) throw new CampaignCastError("cast_invalid_request");
         const evidence = (quote: { paragraphId: string; quote: string }): Extract<CastEvidence, { kind: "turn" }> => ({ kind: "turn",
           turnId: source.turnId, turnNumber: source.turnNumber, narrationRevision: source.narrationRevision, sourceHash: source.sourceHash, ...quote });
         const key = `candidate:${id}:${sha256(request.idempotencyKey)}`;
-        let characterId = request.action === "attach" ? request.characterId : null;
+        let characterId = request.action === "attach" ? resolved?.id ?? null : null;
         if (!characterId) {
           const pinned = (await client.query(`SELECT c.world_version_id,w.world_id,w.content FROM campaigns c JOIN world_versions w ON w.id=c.world_version_id AND w.owner_user_id=c.owner_user_id WHERE c.id=$1 AND c.owner_user_id=$2`, [scope.campaignId, scope.ownerUserId])).rows[0];
           const terms = [candidate.name, ...candidate.aliases].map(normalizeEntityTerm);

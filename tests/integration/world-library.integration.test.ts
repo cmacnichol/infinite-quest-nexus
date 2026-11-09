@@ -207,9 +207,9 @@ integration("World Library and campaign version integration", () => {
     const world = await createWorld(pool, worldCreateSchema.parse({ title, content: authored }));
     const published = await publishWorld(pool, world.id, worldPublishSchema.parse({ expectedRevision: world.draftRevision }));
     const config = { ...runtimeConfigFixture(), databaseUrl: databaseUrl!, role: "api" as const,
-      castEditingEnabled: true, castPresetsEnabled: true, castContextEnabled: true, storyMemoryCapability: "r3" as const,
+      castEditingEnabled: true, castLifecycleEnabled: true, castPresetsEnabled: true, castContextEnabled: true, storyMemoryCapability: "r3" as const,
       legacyWebRoot: resolve("apps/web/dist"), nextWebRoot: resolve("apps/web-next/dist") };
-    const cast = createCampaignCastApplication(createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true, castContextEnabled: true, storyMemoryCapability: "r3" }));
+    const cast = createCampaignCastApplication(createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true, castPresetsEnabled: true, castContextEnabled: true, storyMemoryCapability: "r3" }));
     const server = await buildServer({ ...inertStorageServerOptions({ pool, config,
       worldCampaign: createApiWorldCampaignApplication(pool, { credentialSecret: config.credentialEncryptionKey, castPresetsEnabled: true }) }), cast });
     const origin = await server.listen({ host: "127.0.0.1", port: 0 });
@@ -331,8 +331,52 @@ integration("World Library and campaign version integration", () => {
     expect(after.character.id).toBe(manual.character.id);
     expect(after.character.campaignProfile?.story.role).toBe("World keeper");
     expect((await editor.current(scope)).characters.filter(person => person.name === "Browser Keeper")).toHaveLength(1);
+    await openCampaignCast("lifecycle");
+    await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Keeper", exact: true }).first().click();
+    const sheet = page.locator("#campaignCastDialog"), lifecycle = page.locator("dialog.cast-lifecycle");
+    await sheet.getByRole("button", { name: "Merge with another character" }).click();
+    await lifecycle.getByRole("button", { name: "Browser Ally", exact: true }).click();
+    await browserExpect(lifecycle).toContainText("No goal after merge.");
+    await lifecycle.screenshot({ path: resolve(screenshotRoot, "merge-goal-preview.png") });
+    await lifecycle.getByRole("button", { name: "Confirm merge" }).click();
+    await browserExpect(sheet.getByRole("button", { name: "Undo merge" })).toBeVisible();
+    await sheet.getByRole("button", { name: "Undo merge" }).click();
+    await lifecycle.getByRole("button", { name: "Confirm undo merge" }).click();
+    await browserExpect(sheet.getByRole("button", { name: "Undo merge" })).toHaveCount(0);
+    await sheet.getByRole("button", { name: "Remove from cast" }).click();
+    await lifecycle.getByRole("button", { name: "Confirm remove" }).click();
+    await sheet.locator("#cast-filter").selectOption("removed");
+    await sheet.getByRole("button", { name: "Browser Keeper", exact: true }).click();
+    await sheet.getByRole("button", { name: "Restore", exact: true }).click();
+    await lifecycle.getByRole("button", { name: "Restore character" }).click();
+    await browserExpect(sheet.getByRole("button", { name: "Merge with another character" })).toBeVisible();
+    const priorDraft = await getWorld(pool, world.id);
+    await sheet.getByRole("button", { name: "Add to world draft" }).click();
+    await browserExpect(lifecycle).toContainText("Review fields");
+    await lifecycle.getByLabel("World draft", { exact: true }).selectOption(world.id);
+    await lifecycle.getByRole("button", { name: "Review fields" }).click();
+    await lifecycle.getByRole("button", { name: "Confirm draft change" }).click();
+    await browserExpect(sheet).toContainText("Saved to the world draft");
+    const promoted = await getWorld(pool, world.id);
+    expect(promoted.draftRevision).toBe(priorDraft.draftRevision! + 1);
+    expect(promoted.draftContent?.playableCharacters.at(-1)?.source).toEqual({ type: "campaign-promotion" });
+
+    const renamedContent = structuredClone(promoted.draftContent!);
+    renamedContent.playableCharacters.find(entry => entry.id === "browser-keeper")!.name = "Renamed world keeper";
+    await updateWorldDraft(pool, world.id, worldDraftUpdateSchema.parse({ expectedRevision: promoted.draftRevision, content: renamedContent }));
+    await sheet.getByRole("button", { name: "Add to world draft" }).click();
+    await lifecycle.getByLabel("World draft", { exact: true }).selectOption(world.id);
+    await lifecycle.getByRole("button", { name: "Review fields" }).click();
+    await lifecycle.getByLabel("Destination").selectOption({ label: "Replace Renamed world keeper" });
+    await lifecycle.screenshot({ path: resolve(screenshotRoot, "promotion-renamed-origin.png") });
+    await lifecycle.getByRole("button", { name: "Confirm draft change" }).click();
+    await browserExpect(lifecycle).toHaveCount(0);
+    const replaced = await getWorld(pool, world.id);
+    expect(replaced.draftRevision).toBe(promoted.draftRevision! + 2);
+    expect(replaced.draftContent?.playableCharacters).toHaveLength(renamedContent.playableCharacters.length);
+    expect(replaced.draftContent?.playableCharacters.find(entry => entry.id === "browser-keeper")?.name).toBe("Renamed world keeper");
     await page.unrouteAll({ behavior: "wait" });
-  }, 60_000);
+  }, 100_000);
 
   it("keeps published versions immutable while drafts advance by revision", async () => {
     const first = await publishedWorld("Immutable");

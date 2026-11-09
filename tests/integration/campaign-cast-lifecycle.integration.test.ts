@@ -33,6 +33,71 @@ integration("campaign cast lifecycle", () => {
     const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
     return { scope, repo };
   }
+  it("preserves active v4 merge authority through actual branch and world transfer", async () => {
+    const { scope } = await fixture();
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true });
+    const initial = await repo.current(scope);
+    const target = await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: {} });
+    const source = await repo.create(scope, { expectedCastRevision: target.revision, expectedBoundary: target.boundary, idempotencyKey: randomUUID(), name: "Mary", aliases: [], profile: {} });
+    const merged = await repo.merge!(scope, target.character.id, { expectedCastRevision: source.revision, expectedBoundary: source.boundary,
+      expectedCharacterRevision: target.character.revision, expectedSourceCharacterRevision: source.character.revision,
+      sourceCharacterId: source.character.id, reviewedAliases: ["Mary"], choices: {}, idempotencyKey: randomUUID() });
+    const branch = await branchCampaign(pool, scope.campaignId, { targetTurnNumber: merged.boundary.turnNumber, title: "Merged branch" });
+    const destination = await fixture();
+    const version = (await pool.query("SELECT world_version_id FROM campaigns WHERE id=$1", [destination.scope.campaignId])).rows[0].world_version_id;
+    const request = campaignTransferPreviewRequestSchema.parse({ targetWorldVersionId: version });
+    const preview = await previewCampaignWorldTransfer(pool, scope.campaignId, request);
+    const transfer = await transferCampaignWorld(pool, scope.campaignId, campaignTransferCommitRequestSchema.parse({ ...request, idempotencyKey: randomUUID(),
+      expectedActiveTurnNumber: preview.expectedActiveTurnNumber, expectedStateRevision: preview.expectedStateRevision, sourceFingerprint: preview.sourceFingerprint }));
+    for (const campaignId of [branch.id, transfer.targetCampaignId]) {
+      const copied = await repo.current({ ownerUserId, campaignId });
+      const a = copied.characters.find(person => person.name === "Mara")!, b = copied.characters.find(person => person.name === "Mary")!;
+      expect(b.mergedIntoCharacterId).toBe(a.id);
+      expect(a.activeMerges?.[0]?.sourceCharacterId).toBe(b.id);
+      expect(a.activeMerges?.[0]?.mergeEventId).not.toBe(merged.character.activeMerges?.[0]?.mergeEventId);
+    }
+  });
+  it("replays remove and restore and discards later lifecycle events on rewind with presets disabled", async () => {
+    const { scope } = await fixture();
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true, castPresetsEnabled: false });
+    const initial = await repo.current(scope);
+    const created = await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary,
+      idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: {} });
+    const second = await repo.create(scope, { expectedCastRevision: created.revision, expectedBoundary: created.boundary,
+      idempotencyKey: randomUUID(), name: "Mary", aliases: [], profile: {} });
+    const laterTurn = initial.boundary.turnNumber + 1, turnId = randomUUID();
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,$4,'Mara leaves.')", [turnId, ownerUserId, scope.campaignId, laterTurn]);
+    await pool.query("UPDATE campaigns SET active_turn_number=$2 WHERE id=$1", [scope.campaignId, laterTurn]);
+    const before = await repo.current(scope), person = before.characters.find(item => item.id === created.character.id)!;
+    const remove = { expectedCastRevision: before.revision, expectedBoundary: before.boundary, expectedCharacterRevision: person.revision, idempotencyKey: randomUUID() };
+    const removed = await repo.changeRemoval!(scope, person.id, "remove", remove);
+    expect(removed.character.removed).toBe(true);
+    expect(await repo.changeRemoval!(scope, person.id, "remove", remove)).toEqual(removed);
+    const restore = { expectedCastRevision: removed.revision, expectedBoundary: removed.boundary, expectedCharacterRevision: removed.character.revision, idempotencyKey: randomUUID() };
+    const restored = await repo.changeRemoval!(scope, person.id, "restore", restore);
+    expect(restored.character.removed).toBe(false);
+    expect(await repo.changeRemoval!(scope, person.id, "restore", restore)).toEqual(restored);
+    const current = await repo.current(scope), source = current.characters.find(item => item.id === second.character.id)!;
+    const merge = { expectedCastRevision: current.revision, expectedBoundary: current.boundary, expectedCharacterRevision: restored.character.revision,
+      expectedSourceCharacterRevision: source.revision, sourceCharacterId: source.id, reviewedAliases: ["Mary"], choices: {}, idempotencyKey: randomUUID() };
+    const merged = await repo.merge!(scope, person.id, merge);
+    expect(await repo.merge!(scope, person.id, merge)).toEqual(merged);
+    const hidden = (await repo.current(scope)).characters.find(item => item.id === source.id)!;
+    const undo = { expectedCastRevision: merged.revision, expectedBoundary: merged.boundary, expectedCharacterRevision: merged.character.revision,
+      expectedSourceCharacterRevision: hidden.revision, mergeEventId: merged.character.activeMerges![0]!.mergeEventId, idempotencyKey: randomUUID() };
+    const unmerged = await repo.unmerge!(scope, person.id, undo);
+    expect(await repo.unmerge!(scope, person.id, undo)).toEqual(unmerged);
+    await withTransaction(pool, async client => {
+      await client.query("UPDATE campaigns SET active_turn_number=$2 WHERE id=$1", [scope.campaignId, initial.boundary.turnNumber]);
+      await applyCastBoundaryChange(client, scope, { turnNumber: initial.boundary.turnNumber, changeKey: randomUUID() });
+    });
+    expect((await repo.current(scope)).characters.find(item => item.id === person.id)?.removed).toBe(false);
+    const remaining = (await pool.query("SELECT payload FROM campaign_cast_events WHERE campaign_id=$1", [scope.campaignId])).rows.flatMap(row => row.payload.map((item: { command: { kind: string } }) => item.command.kind));
+    expect(remaining).not.toContain("remove");
+    expect(remaining).not.toContain("restore");
+    expect(remaining).not.toContain("merge");
+    expect(remaining).not.toContain("unmerge");
+  });
   it("retains an automatic attachment independently of candidates and detaches only its evidence", async () => {
     const { scope, repo } = await fixture();
     const initial = await repo.current(scope);
