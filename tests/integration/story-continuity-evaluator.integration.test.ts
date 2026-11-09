@@ -312,5 +312,5 @@ integration("executor-backed continuity evidence", () => {
       await mkdir(dirname(artifactPath), { recursive: true });
       await writeFile(artifactPath, `${JSON.stringify({ version: "story-continuity-private-artifact-v1", report, captures: privateCaptures })}\n`, { encoding: "utf8", flag: "wx" });
     }
-  }, 180_000);
+  }, 360_000); // 120 sequential histories each execute an accepted turn and a replay.
 });

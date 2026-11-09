@@ -376,6 +376,21 @@ export type PostgresPortableNormalizedAssetPublicationRepository = Readonly<{
 export function createPostgresPortableNormalizedAssetPublicationRepository(
   pool: DatabasePool,
 ): PostgresPortableNormalizedAssetPublicationRepository {
+  function withFinalizationOperation(
+    input: PrivatePortableNormalizedPendingFinalization,
+    updateMapping: (database: DatabaseClient) => Promise<void>,
+  ): Promise<void> {
+    return withTransaction(pool, async database => {
+      // Replay locks the operation before its mappings. Take the trigger's parent
+      // lock first here as well, so concurrent finalization follows that order.
+      await database.query(
+        "SELECT 1 FROM portable_import_operations WHERE id=$1 AND owner_user_id=$2 FOR KEY SHARE",
+        [input.operationId, input.ownerUserId],
+      );
+      await updateMapping(database);
+    });
+  }
+
   const loadRows = async (
     where: string,
     parameters: readonly unknown[],
@@ -915,57 +930,61 @@ export function createPostgresPortableNormalizedAssetPublicationRepository(
     },
 
     async recordFinalizationRecoverable(input) {
-      await pool.query(
-        `UPDATE portable_import_normalized_asset_publications
-            SET finalization_attempts=finalization_attempts+1,
-                last_diagnostic='asset_publication_finalization_recoverable',
-                last_attempt_at=clock_timestamp()
-          WHERE operation_id=$1 AND owner_user_id=$2 AND asset_ordinal=$3
-            AND publication_state='committed_finalization_pending'
-            AND finalization_locator=$4 AND safe_result=$5::jsonb`,
-        [
-          input.operationId,
-          input.ownerUserId,
-          input.assetOrdinal,
-          input.finalization,
-          JSON.stringify(input.result)
-        ],
-      );
+      return withFinalizationOperation(input, async database => {
+        await database.query(
+          `UPDATE portable_import_normalized_asset_publications
+              SET finalization_attempts=finalization_attempts+1,
+                  last_diagnostic='asset_publication_finalization_recoverable',
+                  last_attempt_at=clock_timestamp()
+            WHERE operation_id=$1 AND owner_user_id=$2 AND asset_ordinal=$3
+              AND publication_state='committed_finalization_pending'
+              AND finalization_locator=$4 AND safe_result=$5::jsonb`,
+          [
+            input.operationId,
+            input.ownerUserId,
+            input.assetOrdinal,
+            input.finalization,
+            JSON.stringify(input.result)
+          ],
+        );
+      });
     },
 
     async markFinalizationPublished(input) {
-      const updated = await pool.query(
-        `UPDATE portable_import_normalized_asset_publications
-            SET publication_state='published',finalization_attempts=finalization_attempts+1,
-                last_diagnostic=NULL,last_attempt_at=clock_timestamp(),published_at=clock_timestamp()
-          WHERE operation_id=$1 AND owner_user_id=$2 AND asset_ordinal=$3
-            AND publication_state='committed_finalization_pending'
-            AND finalization_locator=$4 AND safe_result=$5::jsonb`,
-        [
-          input.operationId,
-          input.ownerUserId,
-          input.assetOrdinal,
-          input.finalization,
-          JSON.stringify(input.result)
-        ],
-      );
-      if (updated.rowCount === 1) return;
-      const replay = await pool.query(
-        `SELECT 1 FROM portable_import_normalized_asset_publications
-          WHERE operation_id=$1 AND owner_user_id=$2 AND asset_ordinal=$3
-            AND publication_state='published'
-            AND finalization_locator=$4 AND safe_result=$5::jsonb`,
-        [
-          input.operationId,
-          input.ownerUserId,
-          input.assetOrdinal,
-          input.finalization,
-          JSON.stringify(input.result)
-        ],
-      );
-      if (replay.rowCount !== 1) {
-        throw stableError("portable_normalized_publication_finalization_unavailable");
-      }
+      return withFinalizationOperation(input, async database => {
+        const updated = await database.query(
+          `UPDATE portable_import_normalized_asset_publications
+              SET publication_state='published',finalization_attempts=finalization_attempts+1,
+                  last_diagnostic=NULL,last_attempt_at=clock_timestamp(),published_at=clock_timestamp()
+            WHERE operation_id=$1 AND owner_user_id=$2 AND asset_ordinal=$3
+              AND publication_state='committed_finalization_pending'
+              AND finalization_locator=$4 AND safe_result=$5::jsonb`,
+          [
+            input.operationId,
+            input.ownerUserId,
+            input.assetOrdinal,
+            input.finalization,
+            JSON.stringify(input.result)
+          ],
+        );
+        if (updated.rowCount === 1) return;
+        const replay = await database.query(
+          `SELECT 1 FROM portable_import_normalized_asset_publications
+            WHERE operation_id=$1 AND owner_user_id=$2 AND asset_ordinal=$3
+              AND publication_state='published'
+              AND finalization_locator=$4 AND safe_result=$5::jsonb`,
+          [
+            input.operationId,
+            input.ownerUserId,
+            input.assetOrdinal,
+            input.finalization,
+            JSON.stringify(input.result)
+          ],
+        );
+        if (replay.rowCount !== 1) {
+          throw stableError("portable_normalized_publication_finalization_unavailable");
+        }
+      });
     }
   });
 }
