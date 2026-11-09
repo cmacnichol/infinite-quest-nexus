@@ -10,7 +10,7 @@ import {
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 const alternateTurnId = "99999999-9999-4999-8999-999999999999";
-const screenshotDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T11-fix2/screenshots";
+const screenshotDirectory = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T11-fix2/screenshots";
 
 declare global {
   interface Window {

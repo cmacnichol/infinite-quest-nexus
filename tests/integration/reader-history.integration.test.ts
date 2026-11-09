@@ -252,7 +252,7 @@ integration("PostgreSQL exact reader turn lookup", () => {
       [ownerUserId, imported.campaignId, "oldneedle"]
     );
     await writeEvidenceFile(
-      resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T14/explain-2000-turn-search-unmaterialized.json"),
+      resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T14/explain-2000-turn-search-unmaterialized.json"),
       `${JSON.stringify(unmaterializedHistoryPlan.rows[0]?.["QUERY PLAN"], null, 2)}\n`,
       "utf8"
     );
@@ -276,7 +276,7 @@ integration("PostgreSQL exact reader turn lookup", () => {
       [ownerUserId, imported.campaignId, "oldneedle"]
     );
     await writeEvidenceFile(
-      resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T14/explain-2000-turn-search.json"),
+      resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T14/explain-2000-turn-search.json"),
       `${JSON.stringify(historyPlan.rows[0]?.["QUERY PLAN"], null, 2)}\n`,
       "utf8"
     );
@@ -912,7 +912,7 @@ integration("PostgreSQL exact reader turn lookup", () => {
       expect(record.executionTimeMs).toEqual(expect.any(Number));
       expect(record.actualRows).toEqual(expect.any(Number));
     }
-    const explainJsonPath = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T16-scene-window-explain-plans.json";
+    const explainJsonPath = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T16-scene-window-explain-plans.json";
     await writeEvidenceFile(resolve(explainJsonPath), `${JSON.stringify(explainPlanDocuments, null, 2)}\n`, "utf8");
     process.stdout.write(`T16_EXPLAIN_SPARSE_AND_2000 ${JSON.stringify(explainRecords)}\n`);
     process.stdout.write(`T16_EXPLAIN_JSON_PATH ${explainJsonPath}\n`);

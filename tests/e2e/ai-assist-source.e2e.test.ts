@@ -209,11 +209,11 @@ test("evidence review keeps same-name identities separate, joins supporting fact
   await page.locator("[data-fact-disposition='inferred']").selectOption("accepted");
   await page.locator("[data-fact-disposition='rejected']").selectOption("rejected");
   await page.locator("[data-fact-disposition='invented']").selectOption("uncertain");
-  await page.getByRole("button", { name: "Use selected facts" }).click();
+  await page.getByRole("button", { name: "Save fact selections" }).click();
   await expect.poll(() => reviews.length).toBe(1);
   expect(reviews[0]).toMatchObject({ acceptedFactIds: ["iris-a", "iris-support", "iris-b", "inferred"], rejectedFactIds: ["rejected"], uncertainFactIds: ["invented"], selectedCharacterFactIds: ["iris-support"], characterIdentityGroups: [{ representativeFactId: "iris-support", factIds: ["iris-a", "iris-support"] }, { representativeFactId: "iris-b", factIds: ["iris-b"] }] });
   await page.locator("[data-roster-representative='iris-support']").uncheck();
-  await page.getByRole("button", { name: "Use selected facts" }).click();
+  await page.getByRole("button", { name: "Save fact selections" }).click();
   await expect.poll(() => reviews.length).toBe(2);
   expect(reviews[1]!.selectedCharacterFactIds).toEqual([]);
   await page.setViewportSize({ width: 1280, height: 720 }); await page.screenshot({ path: testInfo.outputPath("source-evidence-desktop.png"), fullPage: true });
@@ -234,9 +234,9 @@ test("manual facts remap request-local character identity to server IDs without 
   await page.locator("[name='manual.kind']").selectOption("character"); await page.locator("[name='manual.subject']").fill("Mara"); await page.locator("[name='manual.predicate']").fill("guards"); await page.locator("[name='manual.value']").fill("the gate"); await page.getByRole("button", { name: "Add manual fact" }).click();
   await page.locator("[name='manual.kind']").selectOption("rule"); await page.locator("[name='manual.subject']").fill("Gate"); await page.locator("[name='manual.predicate']").fill("requires"); await page.locator("[name='manual.value']").fill("a key"); await page.getByRole("button", { name: "Add manual fact" }).click();
   await page.locator("[data-identity-fact-id]").click(); await page.locator("[data-roster-representative]").check();
-  await page.getByRole("button", { name: "Use selected facts" }).click(); await expect.poll(() => reviews.length).toBe(1);
+  await page.getByRole("button", { name: "Save fact selections" }).click(); await expect.poll(() => reviews.length).toBe(1);
   const first = reviews[0]!; const firstManual = first.manualFacts as Array<Record<string, unknown>>; expect(firstManual).toHaveLength(2); expect(new Set(firstManual.map((fact) => fact.id)).size).toBe(2); expect(firstManual).toEqual(expect.arrayContaining([expect.objectContaining({ provenance: "manual", citations: [], kind: "character" }), expect.objectContaining({ provenance: "manual", citations: [], kind: "rule" })])); expect(first.acceptedFactIds).toEqual(expect.arrayContaining(firstManual.map((fact) => fact.id))); expect(first.selectedCharacterFactIds).toHaveLength(1);
-  await page.getByRole("button", { name: "Use selected facts" }).click(); await expect.poll(() => reviews.length).toBe(2);
+  await page.getByRole("button", { name: "Save fact selections" }).click(); await expect.poll(() => reviews.length).toBe(2);
   expect(reviews[1]!.manualFacts).toEqual([]); expect(reviews[1]!.acceptedFactIds).toEqual(["server-manual-0", "server-manual-1"]); expect(reviews[1]!.selectedCharacterFactIds).toEqual(["server-manual-0"]); expect(reviews[1]!.characterIdentityGroups).toEqual([{ representativeFactId: "server-manual-0", factIds: ["server-manual-0"] }]); await expect(page.locator("[data-source-fact-id='server-manual-0']")).toHaveAttribute("aria-label", "manual: Mara — guards: the gate"); await expect(page.locator("[data-source-fact-id='server-manual-1']")).toHaveAttribute("aria-label", "manual: Gate — requires: a key"); await page.screenshot({ path: testInfo.outputPath("source-manual-review.png"), fullPage: true });
 });
 
@@ -342,7 +342,7 @@ test("a paused source capability still resumes and saves fact review while synth
   await page.goto(`${base}/app/worlds/new?authoringJob=source-job`);
   await expect(page.locator('[name="creationMethod"][value="source"]')).toBeDisabled();
   await expect(page.getByText("Extraction complete.")).toBeVisible();
-  await page.getByRole("button", { name: "Use selected facts" }).click();
+  await page.getByRole("button", { name: "Save fact selections" }).click();
   await expect.poll(() => reviews).toBe(1);
   await page.getByRole("button", { name: "Generate world draft" }).click();
   await expect(page.locator("[data-source-command-status]")).toContainText("Story-source execution is paused");
@@ -385,7 +385,7 @@ test("a source-review 409 preserves focused local work until explicit compare an
   const before = reads; await expect.poll(() => reads).toBeGreaterThan(before);
   await expect(manual).toHaveValue("Mar");
   await expect(manual).toBeFocused();
-  await page.getByRole("button", { name: "Use selected facts" }).click();
+  await page.getByRole("button", { name: "Save fact selections" }).click();
   await expect(page.locator("[data-source-review-conflict]")).toBeVisible();
   await expect(page.locator("[data-fact-disposition='gate']")).toHaveValue("rejected");
   await page.getByRole("button", { name: "Compare server review" }).click();
@@ -401,7 +401,7 @@ test("a source-review 409 preserves focused local work until explicit compare an
   await expect(page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).resolves.toBe(true);
   await page.screenshot({ path: testInfo.outputPath("source-review-conflict-narrow.png"), fullPage: true });
   await page.getByRole("button", { name: "Keep local decisions on revision 2" }).click();
-  await page.getByRole("button", { name: "Use selected facts" }).click();
+  await page.getByRole("button", { name: "Save fact selections" }).click();
   await expect.poll(() => saves).toBe(2);
   expect(reviews[1]).toMatchObject({ expectedRevision: 2, acceptedFactIds: ["tower"], rejectedFactIds: ["gate"] });
 });
@@ -457,7 +457,7 @@ test("source synthesis requires explicit adoption, preserves edits through polls
   await page.route("**/api/v1/worlds/44444444-4444-4444-8444-444444444444", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ id: "44444444-4444-4444-8444-444444444444", title: "Reviewed Harbor", status: "draft", imageUrl: "", forkedFromWorldId: null, forkedFromWorldVersionId: null, createdAt: "2026-09-07T00:00:00.000Z", updatedAt: "2026-09-07T00:00:00.000Z", draftRevision: 1, draftContent: result, draftBasedOnWorldVersionId: null, draftUpdatedAt: "2026-09-07T00:00:00.000Z", versions: [], campaigns: [] }) }));
 
   await page.goto(`${base}/app/worlds/new?authoringJob=source-job`);
-  await page.getByRole("button", { name: "Use selected facts" }).click();
+  await page.getByRole("button", { name: "Save fact selections" }).click();
   await page.getByRole("button", { name: "Generate world draft" }).click();
   expect(legacyWorldWrites).toBe(0); expect(applyBodies).toHaveLength(0);
   await expect(page.getByRole("button", { name: "Review available results" })).toBeVisible();

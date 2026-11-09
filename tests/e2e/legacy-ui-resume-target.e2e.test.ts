@@ -7,7 +7,7 @@ const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const previousCampaignId = "22222222-2222-4222-8222-222222222222";
 const worldId = "33333333-3333-4333-8333-333333333333";
-const screenshots = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/screenshots";
+const screenshots = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/screenshots";
 
 async function installStoryDocument(page: Page) {
   const html = (await readFile("apps/web/public/story.html", "utf8"))

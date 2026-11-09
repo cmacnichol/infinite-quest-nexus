@@ -113,6 +113,10 @@ async function installFixture(page: Page): Promise<Fixture> {
     if (request.method() === "GET" && path === `/api/v1/generation-jobs/${jobId}/review`) return respond({ ...review().review, narration: "Candidate", choices: [], findings: [], retryDescription: "Retry", retryFailure: null, omittedFindingCount: 0 });
     if (request.method() === "POST" && path === `/api/v1/generation-jobs/${jobId}/discard`) { state.outcome = null; return respond({ id: jobId, status: "discarded", duplicate: false, operationKind: "append", replacementTurnId: null }, 202); }
     if (request.method() === "GET" && path === `/api/v1/generation-jobs/${jobId}/result`) return respond({ ...completed(), turnNumber: 2, inputMode: "scene", inputModeSource: "explicit", narration: "Accepted fixture turn.", choices: [], customActionSuggestion: "", imagePrompt: "", chronicleRetrieval: null, modelMetadata: null, mechanics: null, acceptedAt: timestamp, stateSnapshot: {}, reportedCost: null });
+    if (request.method() === "GET" && path === `/api/v1/campaigns/${fixture.campaignId}/activity`) return respond({
+      version: 1, events: [], nextBefore: null, nextAfter: null, hasMore: false,
+      coverage: { capturedSince: timestamp, retentionDays: 30, oldestAvailableSequence: null, latestPublishedSequence: "0", pendingPublication: false, incomplete: false, resetRequired: false }
+    });
     unhandledApiRoutes.push(`${request.method()} ${path}`);
     return respond({ error: `Missing fixture route: ${request.method()} ${path}` }, 404);
   });
@@ -145,9 +149,9 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(page.locator(ui.recovery)).toBeVisible();
     expect(api.writes).toHaveLength(1);
     expect(api.writes[0]!.body).toMatchObject({ action: "Follow the blue lantern.", requestedInputMode: "scene", resolvedInputMode: "scene" });
-    await page.screenshot({ path: `docs/review/assets/failed-turn-prompt-retention/${surface}-failed-1440.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/failed-turn-prompt-retention/${surface}-failed-1440.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: `docs/review/assets/failed-turn-prompt-retention/${surface}-failed-390.png`, fullPage: true });
+    await page.screenshot({ path: `test-results/review-assets/failed-turn-prompt-retention/${surface}-failed-390.png`, fullPage: true });
     if (surface === "legacy") await expect(page.locator("[data-turn-input-mode='scene']")).toBeChecked();
     else await expect(page.locator("[data-input-mode='scene']")).toHaveAttribute("aria-checked", "true");
     await page.locator(ui.discard).click();

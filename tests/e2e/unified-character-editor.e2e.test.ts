@@ -31,7 +31,7 @@ for (const surface of ["Story", "campaign"] as const) for (const width of [1440,
       if (attempts === 1) {
         expect(body.expectedRevision).toBe(3);
         latest = { ...latest, name: "Concurrent rename", revision: 4 };
-        return route.fulfill({ status: 409, json: { message: "The campaign state changed.", details: { code: "state_revision_changed" } } });
+        return route.fulfill({ status: 409, json: { error: "fixture_error", message: "The campaign state changed.", details: { code: "state_revision_changed" } } });
       }
       expect(body).toMatchObject({ name: "Concurrent rename", expectedRevision: 4, editSource: "manual",
         profile: { identity: { pronouns: "they/them" }, story: { role: "Archivist" } } });

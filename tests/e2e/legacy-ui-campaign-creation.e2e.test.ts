@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T20");
+const evidenceDirectory = resolve("test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T20");
 
 async function installCreationApi(page: Page, worldCount = 1) {
   const fixture = legacyUiFixture({ turnCount: 0, worldCount, campaignCount: 0 });
@@ -30,7 +30,7 @@ async function installCreationApi(page: Page, worldCount = 1) {
       return route.fulfill({ status: 201, json: { id: "00000000-0000-4000-8000-000000000099", title: "A campaign", status: "active", activeTurnNumber: 0, storyLengthProfile: "standard", storyContextBudgetTokens: 32000, worldId: fixture.worlds[0]!.id, worldVersionId: "00000000-0000-4000-8000-000000000098", worldVersionNumber: 1, selectedCharacterId: "fixture-observer", selectedCharacterName: "The Observer", textProviderProfileId: null, imageProviderProfileId: null } });
     }
     if (route.request().method() === "GET" && failCampaignRefresh) {
-      return route.fulfill({ status: 503, json: { message: "Campaign list refresh failed." } });
+      return route.fulfill({ status: 503, json: { error: "fixture_error", message: "Campaign list refresh failed." } });
     }
     return route.fallback();
   });
@@ -343,7 +343,7 @@ test("character loading can be retried without losing the campaign title", async
   await page.route("**/api/v1/world-versions/*/playable-characters", async route => {
     if (!failed && await page.locator("#createCampaignDialog").isVisible()) {
       failed = true;
-      return route.fulfill({ status: 503, json: { message: "Temporary failure" } });
+      return route.fulfill({ status: 503, json: { error: "fixture_error", message: "Temporary failure" } });
     }
     return route.fallback();
   });

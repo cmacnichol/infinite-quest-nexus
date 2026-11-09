@@ -80,7 +80,7 @@ function reply(narration: string, trackerUpdates: Record<string, unknown>[] = []
   return JSON.stringify({ narration, choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: trackerUpdates, image_prompt: "Fixture relay.", continuity_summary: narration, canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
 }
 
-integration("T17 durable continuity review", () => {
+integration("durable continuity review", () => {
   let pool: DatabasePool;
   let server: Server;
   let ownerUserId = "";

@@ -924,7 +924,7 @@ for (const width of [1440, 390]) test(`legacy needs attention routes individual 
   expect(await identity.evaluate((element, later) => Boolean(element.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING), await detail.elementHandle())).toBe(true);
   expect(await detail.evaluate((element, later) => Boolean(element.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING), await conflict.elementHandle())).toBe(true);
   await conflict.focus();
-  await dialog.screenshot({ path: `docs/review/assets/unified-character-editor-phase-2/cast-inbox-${width}.png` });
+  await dialog.screenshot({ path: `test-results/review-assets/unified-character-editor-phase-2/cast-inbox-${width}.png` });
   await identity.focus(); await page.keyboard.press("Enter");
   await expect(dialog).toContainText("Mara waits at the gate.");
   await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
@@ -1099,7 +1099,7 @@ for (const seeded of [false, true]) test(`Story reviews fenced facts in the ${se
   await expect(dialog.getByText("Current: Blank", { exact: true }).first()).toBeVisible();
   if (seeded) await expect(dialog.getByText("Creative guidance: Let the tide set the mood.")).toBeVisible();
   await dialog.getByRole("button", { name: "Apply selected suggestions" }).scrollIntoViewIfNeeded();
-  await page.screenshot({ path: `docs/review/assets/unified-character-editor-phase-5/story-draft-${seeded ? "preset" : "supporting"}.png` });
+  await page.screenshot({ path: `test-results/review-assets/unified-character-editor-phase-5/story-draft-${seeded ? "preset" : "supporting"}.png` });
   await dialog.getByRole("button", { name: "Apply selected suggestions" }).click(); expect(api.writes).toEqual([]);
   await expect(dialog.locator("#cast-story-background")).toHaveValue(value);
   await dialog.locator("#cast-save").click(); await expect(dialog).toContainText("Run Draft from story again");
@@ -1175,7 +1175,7 @@ for (const width of [1280, 390]) test(`lifecycle review, merge, undo, remove and
     }
     return route.fallback();
   });
-  const root = "docs/review/assets/unified-character-editor-phase-6"; await mkdir(root, { recursive: true });
+  const root = "test-results/review-assets/unified-character-editor-phase-6"; await mkdir(root, { recursive: true });
   const capture = async (name: string) => page.screenshot({ path: `${root}/${name}-${width}.png` });
   await open(page); const workspace = page.locator("#campaignCastDialog");
   await workspace.getByRole("button", { name: "Mara", exact: true }).click();

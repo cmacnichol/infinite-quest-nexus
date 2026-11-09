@@ -686,7 +686,7 @@ test("image_failure_does_not_block_acceptance", async ({ page }, testInfo) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path === campaignPath(id, "illustration-config")) {
-      return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Synthetic image status unavailable." }) });
+      return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Synthetic image status unavailable." }) });
     }
     if (request.method() === "POST" && path === campaignPath(id, "generations")) {
       generationWrites.push(request.postDataJSON());

@@ -94,7 +94,7 @@ for (const target of absentTargetCases) {
     await expect(page).toHaveURL(new RegExp(`#world-library\\?worldId=${encodeURIComponent(target.id)}$`, "u"));
     expect(api.writes).toEqual([]);
     if (target.name === "missing") {
-      await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/missing-world-after-stale-response.png", fullPage: false });
+      await page.screenshot({ path: "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T21/missing-world-after-stale-response.png", fullPage: false });
     }
   });
 
@@ -117,7 +117,7 @@ for (const target of absentTargetCases) {
     await expect(page).toHaveURL(new RegExp(`#campaigns\\?campaignId=${encodeURIComponent(target.id)}$`, "u"));
     expect(api.writes).toEqual([]);
     if (target.name === "missing") {
-      await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/missing-campaign-after-stale-response.png", fullPage: false });
+      await page.screenshot({ path: "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T21/missing-campaign-after-stale-response.png", fullPage: false });
     }
   });
 }
@@ -140,7 +140,7 @@ test("missing_world_link_keeps_the_archive_failure_and_both_world_scopes_visible
   await expect(page.locator(`#worldManagementCarousel [data-world-id="${world.id}"]`)).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#worldStatus")).toContainText("World archive status could not be changed.");
   await expect(page.locator("#worldStatus")).toContainText("not available in this library");
-  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/fix2-world-archive-error.png", fullPage: false });
+  await page.screenshot({ path: "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T21/fix2-world-archive-error.png", fullPage: false });
   expect(api.writes.filter(write => write.method === "PATCH")).toHaveLength(1);
 });
 
@@ -163,7 +163,7 @@ test("missing_campaign_link_keeps_the_save_failure_and_both_campaign_scopes_visi
   await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "error");
   await expect(page.locator("#campaignStatusMessage")).toContainText("Campaign settings could not be saved.");
   await expect(page.locator("#campaignStatusMessage")).toContainText("not available in this library");
-  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/fix2-campaign-save-error.png", fullPage: false });
+  await page.screenshot({ path: "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T21/fix2-campaign-save-error.png", fullPage: false });
   expect(api.writes.filter(write => write.method === "PATCH")).toHaveLength(1);
 });
 
@@ -368,7 +368,7 @@ test("committed_campaign_recovery_modal_remains_reachable_during_route_intent", 
     }
     campaignListReads += 1;
     if (campaignListReads > 1) {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Refresh failed after commit." }) });
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture_error", message: "Refresh failed after commit." }) });
       return;
     }
     await route.fallback();
@@ -474,17 +474,17 @@ test("workspace_viewports_capture_worlds_and_campaigns", async ({ page }) => {
   await page.goto(`${origin}/nexus/index.html#world-library`);
   await expect(page.locator("#world-library")).toBeVisible();
   await expect(page.locator("#campaigns")).toBeHidden();
-  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/worlds-desktop.png", fullPage: false });
+  await page.screenshot({ path: "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T21/worlds-desktop.png", fullPage: false });
   await page.goto(`${origin}/nexus/index.html#campaigns`);
   await expect(page.locator("#campaigns")).toBeVisible();
   await expect(page.locator("#world-library")).toBeHidden();
-  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/campaigns-desktop.png", fullPage: false });
+  await page.screenshot({ path: "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T21/campaigns-desktop.png", fullPage: false });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${origin}/nexus/index.html#world-library`);
   await expect(page.locator("#world-library")).toBeVisible();
-  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/worlds-mobile.png", fullPage: false });
+  await page.screenshot({ path: "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T21/worlds-mobile.png", fullPage: false });
   await page.goto(`${origin}/nexus/index.html#campaigns`);
   await expect(page.locator("#campaigns")).toBeVisible();
-  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/campaigns-mobile.png", fullPage: false });
+  await page.screenshot({ path: "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T21/campaigns-mobile.png", fullPage: false });
 });

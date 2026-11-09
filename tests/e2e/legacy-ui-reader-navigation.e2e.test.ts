@@ -2,8 +2,8 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
-const evidence = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T09";
-const fix1Evidence = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T09-fix1";
+const evidence = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T09";
+const fix1Evidence = "test-results/sdd-evidence/legacy-ui-2026-10-03/evidence/T09-fix1";
 const fix1EvidenceRun = process.env.T09_FIX1_EVIDENCE_RUN ?? "local";
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 

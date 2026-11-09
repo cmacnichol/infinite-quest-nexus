@@ -55,7 +55,7 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(page.getByText(/server returned invalid illustration data/)).toHaveCount(0);
     expect(writes).toEqual([]);
     expect(errors).toEqual([]);
-    await mkdir("docs/review/assets/illustration-repair", { recursive: true });
-    await page.screenshot({ path: `docs/review/assets/illustration-repair/${surface}-recovered.png`, fullPage: true });
+    await mkdir("test-results/review-assets/illustration-repair", { recursive: true });
+    await page.screenshot({ path: `test-results/review-assets/illustration-repair/${surface}-recovered.png`, fullPage: true });
   });
 }

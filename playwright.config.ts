@@ -6,6 +6,8 @@ const reuseExistingServer = process.env.PLAYWRIGHT_REUSE_EXISTING_SERVER === "tr
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  // These files need the servers started by their own playwright.*.config.ts.
+  testIgnore: ["quiet-leaf-*.e2e.test.ts", "story-only-campaigns.e2e.test.ts", "story-only-new-ui.e2e.test.ts", "web-awesome-core.e2e.test.ts"],
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
