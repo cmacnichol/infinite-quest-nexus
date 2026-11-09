@@ -121,7 +121,8 @@ integration("story-only campaign ZIP portability", () => {
       const inspected = await inspectArchive(stagedArtifact, limits, "campaign");
       expect(inspected.manifest.formatVersion).toBe(2);
       const exportedCampaign = JSON.parse((await readVerifiedEntry(inspected, "campaign.json", limits.maxJsonEntryBytes)).toString("utf8"));
-      expect(exportedCampaign).toMatchObject({ formatVersion: 4, generationPolicyVersion: 1, settings: { turnControlStyle: "flexible_scene" } });
+      expect(inspected.manifest.payloads).toContainEqual({ kind: "campaign", path: "campaign.json", formatVersion: 5 });
+      expect(exportedCampaign).toMatchObject({ formatVersion: 5, generationPolicyVersion: 1, settings: { turnControlStyle: "flexible_scene" } });
       expect(exportedCampaign.turns[0].portableAcceptedGenerationPolicyProvenance).toEqual({
         version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1",
       });

@@ -10,6 +10,5 @@ export const settingsReleaseMigrations = [
   "0128_cancelled_dispatch_recoveries",
   "0129_character_settings_keys",
   "0130_campaign_first_appearance_eligibility",
-  "0131_selected_character_world",
-  "0132_campaign_cast_promotion_receipts"
+  "0131_selected_character_world"
 ] as const;
