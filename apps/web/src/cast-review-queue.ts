@@ -1,7 +1,7 @@
 import { createReviewSource } from "./character-review-source.js";
 import type { CastCharacter, CastCandidateList } from "@infinite-quest/contracts";
 import { buildReviewQueue, type ReviewItem, type CampaignCastApi } from "@infinite-quest/client-web";
-export function renderCastReview(options: { document: Document; container: HTMLElement; api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle"> & Partial<Pick<CampaignCastApi, "sourceTurn">>; campaign: string; current(): boolean; editing(): boolean; navigate(turn: number): void; back(): void; key(operation: string, value: unknown): string; clearKeys(): void; autoMatch?: boolean | null; initialItem?: string }) {
+export function renderCastReview(options: { document: Document; container: HTMLElement; api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle"> & Partial<Pick<CampaignCastApi, "sourceTurn">>; campaign: string; current(): boolean; editing(): boolean; checkWrite?(): Promise<boolean>; navigate(turn: number): void; back(): void; key(operation: string, value: unknown): string; clearKeys(): void; autoMatch?: boolean | null; initialItem?: string }) {
   const { document, container, api, campaign } = options;
   const drafts = new Map<string, string>();
   const skipped = new Set<string>(); let busy = false; let epoch = 0; let prioritizeCharacter: string | null = null; let initialItem = options.initialItem; let cached: { matches: CastCandidateList; details: CastCandidateList; targets: CastCharacter[] } | null = null;
@@ -55,6 +55,13 @@ export function renderCastReview(options: { document: Document; container: HTMLE
       const section = node("section"), feedback = node("p"); feedback.setAttribute("role", "status");
       const current = () => token === epoch && options.current();
       const locked = () => busy || !current() || !options.editing();
+      async function canSubmit() {
+        if (options.checkWrite && !await options.checkWrite()) {
+          if (current()) feedback.textContent = "Finish or resolve generation before changing this match.";
+          return false;
+        }
+        return current() && options.editing();
+      }
       function failed(error: unknown) {
         if (!current()) return;
         const stale = (error as { statusCode?: number })?.statusCode === 409;
@@ -98,6 +105,7 @@ export function renderCastReview(options: { document: Document; container: HTMLE
           busy = true; feedback.textContent = "Saving…";
           try {
             const decision = action === "attach" ? { action, characterId: select.value } as const : { action } as const;
+            if (!await canSubmit()) return;
             const saved = await api.resolveCandidate(campaign, candidate.id, { ...decision, expectedCastRevision: matches.revision,
               expectedBoundary: matches.boundary, idempotencyKey: options.key("match", [campaign, candidate.id, decision, matches.revision, matches.boundary]) });
             if (!current()) return;
@@ -132,6 +140,7 @@ export function renderCastReview(options: { document: Document; container: HTMLE
             if (locked() || !permits(action)) return;
             busy = true; feedback.textContent = "Saving…";
             try {
+              if (!await canSubmit()) return;
               const signature = JSON.stringify([action, action === "confirm" ? value.value : null]);
               if (!pending || pending.signature !== signature) {
                 const revision = person?.revision ?? (await api.detail(campaign, characterId)).character.revision;
