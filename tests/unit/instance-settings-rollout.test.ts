@@ -23,7 +23,7 @@ it("bounds all live processes, counts only eligible registrations and verifies e
   expect(deploymentSettingsPolicySchema.safeParse({ ...policy, expectedRoles: [...policy.expectedRoles, ...policy.expectedRoles] }).success).toBe(false);
 });
 
-it("builds a conservative policy from all reviewed role seeds and exports only the 42 scalar environment assignments", () => {
+it("builds a conservative policy from all reviewed role seeds and exports only the 43 scalar environment assignments", () => {
   const seed = exportSettingsSeed(bootstrap());
   const policy = createSeedPolicy([seed, seed], runtimePolicy().installationId);
   expect(policy.expectedRoles).toEqual([{ ...seed.role, replicas: 2 }]);
@@ -31,7 +31,8 @@ it("builds a conservative policy from all reviewed role seeds and exports only t
   expect(policy.featureGates.castDiscoveryEnabled).toBe(false);
   expect(() => createSeedPolicy([{ ...seed, digest: "0".repeat(64) }], policy.installationId)).toThrow();
   const entries = exportCompatibilityEnvironment(seed.snapshot);
-  expect(Object.keys(entries)).toHaveLength(42);
+  expect(Object.keys(entries)).toHaveLength(43);
+  expect(entries.CAST_LIFECYCLE_ENABLED).toBe("false");
   expect(entries.CAST_AUTO_MATCH_ENABLED).toBe("false");
   expect(entries.CAMPAIGN_ARCHIVE_MAX_ENTRIES).toBe(String(seed.snapshot.campaignArchiveLimits.maxEntries));
   expect(JSON.stringify(entries)).not.toMatch(/postgres|secret|credential|password/i);
@@ -41,37 +42,42 @@ it("builds a conservative policy from all reviewed role seeds and exports only t
 it("loads an old seed without altering its digest", () => {
   const seed = exportSettingsSeed(bootstrap());
   const oldSnapshot = { ...seed.snapshot } as Partial<typeof seed.snapshot>;
+  delete oldSnapshot.castLifecycleEnabled;
   delete oldSnapshot.castPresetsEnabled;
   delete oldSnapshot.castContextWithoutDiscoveryEnabled;
   const oldSeed = { ...seed, snapshot: oldSnapshot, digest: settingsDigest(oldSnapshot) };
   const policy = createSeedPolicy([oldSeed], "00000000-0000-4000-8000-000000000001");
   const result = reconcileSettingsSeeds([oldSeed], policy);
+  expect(result.castLifecycleEnabled).toBe(false);
   expect(result.castPresetsEnabled).toBe(false);
   expect(result.castContextWithoutDiscoveryEnabled).toBe(false);
 });
 
-it("reconstructs the original local policy digest while permitting the new controls", async () => {
+it.each([1, 2] as const)("reconstructs a v%s local seed policy and preserves the standalone lifecycle setting", async version => {
   const config = { ...bootstrap(), role: "all" as const, instanceSettingsAccessMode: "local-single-user" as const };
   const seed = exportSettingsSeed(config);
   const oldSnapshot = { ...seed.snapshot } as Partial<typeof seed.snapshot>;
-  delete oldSnapshot.castPresetsEnabled;
-  delete oldSnapshot.castContextWithoutDiscoveryEnabled;
+  delete oldSnapshot.castLifecycleEnabled;
   const installationId = "00000000-0000-4000-8000-000000000001";
   const oldPolicy = createLocalSingleUserPolicy(seed.snapshot, installationId, config.databaseMaxConnections);
-  oldPolicy.version = 1;
-  delete oldPolicy.featureGates.castPresetsEnabled;
-  delete oldPolicy.featureGates.castContextWithoutDiscoveryEnabled;
-  oldPolicy.featureGates.castContextEnabled = seed.snapshot.castContextEnabled;
-  oldPolicy.featureGates.castEditingEnabled = seed.snapshot.castEditingEnabled;
+  oldPolicy.version = version;
+  delete oldPolicy.featureGates.castLifecycleEnabled;
+  if (version === 1) {
+    delete oldSnapshot.castPresetsEnabled;
+    delete oldSnapshot.castContextWithoutDiscoveryEnabled;
+    delete oldPolicy.featureGates.castPresetsEnabled;
+    delete oldPolicy.featureGates.castContextWithoutDiscoveryEnabled;
+    oldPolicy.featureGates.castContextEnabled = seed.snapshot.castContextEnabled;
+    oldPolicy.featureGates.castEditingEnabled = seed.snapshot.castEditingEnabled;
+  }
   const digest = settingsDigest(oldPolicy);
   const pool = { query: async (sql: string) => sql.includes("instance_settings_state")
     ? { rows: [{ installation_id: installationId, mode: "database", schema_version: 1, active_revision: "1", requested_revision: "1", activation_epoch: "1", active: oldSnapshot, requested: oldSnapshot, policy_digest: digest }] }
     : { rows: [{ snapshot: oldSnapshot, policy_digest: digest, local_single_user: true }] } };
   const loaded = await loadLocalSingleUserPolicy(pool as never, config);
   expect(settingsDigest(loaded)).toBe(digest);
-  expect(loaded.featureGates.castPresetsEnabled).toBeUndefined();
-  expect(loaded.featureGates.castContextWithoutDiscoveryEnabled).toBeUndefined();
-  expect(Object.keys(loaded.featureGates)).not.toContain("castPresetsEnabled");
+  expect(loaded.featureGates).toEqual(oldPolicy.featureGates);
+  expect(loaded.featureGates.castLifecycleEnabled).toBeUndefined();
 });
 
 it("derives legacy local gates explicitly without changing the v1 policy representation or managed behavior", async () => {
@@ -112,4 +118,11 @@ it("keeps policy versions strict and requires the new gates on v2", () => {
   expect(deploymentSettingsPolicySchema.safeParse(legacy).success).toBe(true);
   expect(deploymentSettingsPolicySchema.safeParse({ ...legacy, version: 2 }).success).toBe(false);
   expect(deploymentSettingsPolicySchema.safeParse({ ...legacy, version: 3 }).success).toBe(false);
+});
+
+it("requires an explicit lifecycle permission on v3 policies and preserves v2 policy digests", () => {
+  const policy = { ...runtimePolicy(), version: 2 as const };
+  delete policy.featureGates.castLifecycleEnabled;
+  expect(deploymentSettingsPolicySchema.parse(policy)).toEqual(policy);
+  expect(deploymentSettingsPolicySchema.safeParse({ ...policy, version: 3 }).success).toBe(false);
 });

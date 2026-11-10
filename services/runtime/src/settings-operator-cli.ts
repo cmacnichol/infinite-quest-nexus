@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { createDatabasePool, initialOwnerId, loadRuntimeConfig } from "../../../packages/database/src/index.js";
 import { createInstanceSettingsRepository } from "../../../packages/database/src/instance-settings-repository.js";
-import { instanceSettingsSchema, settingsRevisionSchema } from "../../../packages/contracts/src/instance-settings.js";
+import { compatibleInstanceSettingsSchema, settingsRevisionSchema } from "../../../packages/contracts/src/instance-settings.js";
 import { recoverRequestAdmission } from "./admission-recovery.js";
 import { loadDeploymentSettingsPolicy, settingsDigest, loadActiveRuntimeSettings, readSettingsRuntimeReports, settingsReportsCompatible } from "./instance-settings.js";
 import { createSettingsActivationGuard } from "./settings-activation.js";
@@ -64,12 +64,12 @@ async function main(args: string[]) {
       output({ status: "ok", mode: "environment" });
       return 0;
     }
-    const repository = createInstanceSettingsRepository(pool, { activationGuard: createSettingsActivationGuard(policy, { implicitLocal: config.instanceSettingsAccessMode === "local-single-user" && !config.instanceSettingsPolicyFile }) });
+    const repository = createInstanceSettingsRepository(pool, { legacyLifecycleEnabled: config.castLifecycleEnabled, activationGuard: createSettingsActivationGuard(policy, { implicitLocal: config.instanceSettingsAccessMode === "local-single-user" && !config.instanceSettingsPolicyFile }) });
     return await runInstanceSettingsCommand(args, {
       config, policy, repository, actor, output, readJson,
       readRevision: async revision => {
         const { rows: [row] } = await pool.query("SELECT snapshot FROM instance_settings_revisions WHERE revision=$1", [settingsRevisionSchema.parse(revision)]);
-        return instanceSettingsSchema.parse({ castPresetsEnabled: false, castContextWithoutDiscoveryEnabled: false, ...row?.snapshot as object });
+        return compatibleInstanceSettingsSchema.parse({ castLifecycleEnabled: config.castLifecycleEnabled === true, ...row?.snapshot as object });
       },
       status: async () => {
         const state = await repository.read();

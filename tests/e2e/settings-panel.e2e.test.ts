@@ -82,7 +82,7 @@ test(`${mode} guards installation drafts before leaving Settings`, async ({ page
   await expect(page).toHaveURL(/section=diagnostics/);
   expect(fixture.patches()).toBe(0);
 });
-test(`${mode} exposes all 42 fields with dependencies and reset preview`, async ({ page }) => {
+test(`${mode} exposes all 43 fields with dependencies and reset preview`, async ({ page }) => {
   await api(page); let count = 0;
   for (const section of ["characters", "sharing", "performance", "diagnostics"]) {
     await page.goto(`${base}/app/settings?section=${section}`); await expect(page.getByRole("button", { name: "Preview safe defaults" })).toBeVisible();
@@ -90,7 +90,7 @@ test(`${mode} exposes all 42 fields with dependencies and reset preview`, async 
     if (section === "sharing") await expect(page.getByText("Permitted: 1 byte – 20 GiB.", { exact: true })).toBeVisible();
     if (section === "sharing") { await expect(page.getByRole("checkbox", { name: "System Archive", exact: true })).toBeDisabled(); await expect(page.getByText("Blocked by deployment policy.", { exact: false }).first()).toBeVisible(); await page.screenshot({ path: `test-results/review-assets/settings-panel/${mode}-sharing-desktop.png`, fullPage: true }); }
   }
-  expect(count).toBe(42);
+  expect(count).toBe(43);
   await page.getByRole("button", { name: "Preview safe defaults" }).click(); await expect(page.getByRole("heading", { name: "Preview safe seeded defaults" })).toBeVisible();
 });
 test(`${mode} conflict keeps draft, operator logout clears it and key is cleared`, async ({ page }) => {
@@ -227,17 +227,19 @@ for (const lockCause of ["expiry", "rejected save"] as const) {
 }
 
 for (const width of [1440, 390]) {
-  test(`${mode} stages both character controls at ${width}px`, async ({ page }) => {
+  test(`${mode} stages character merging and context controls at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 1000 });
     const fixture = await api(page);
     await page.goto(`${base}/app/settings?section=characters`);
+    await page.getByRole("checkbox", { name: "Character editing", exact: true }).check();
+    await page.getByRole("checkbox", { name: "Character merging", exact: true }).check();
     await page.getByRole("checkbox", { name: "Character presets", exact: true }).check();
     await page.getByRole("checkbox", { name: "Character context without discovery", exact: true }).check();
     await page.getByRole("textbox", { name: "Reason for this change" }).fill("Enable character options");
     await page.getByRole("button", { name: "Save section", exact: true }).click();
     await expect(page.getByRole("status")).toHaveText("Saved — restart required");
     expect(fixture.patches()).toBe(1);
-    expect(fixture.lastChanges()).toMatchObject({ castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: true });
+    expect(fixture.lastChanges()).toMatchObject({ castEditingEnabled: true, castLifecycleEnabled: true, castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: true });
     await page.screenshot({ path: `test-results/review-assets/settings-panel/${mode}-character-options-${width}.png`, fullPage: true });
   });
 }

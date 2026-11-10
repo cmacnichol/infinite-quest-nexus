@@ -15,6 +15,11 @@ export function policyFixture(): DeploymentSettingsPolicy {
 }
 
 describe("installation settings policy", () => {
+  it("requires character editing before merging can take effect", () => {
+    const result = resolveInstanceSettings({ ...settingsFixture(), castEditingEnabled: false, castLifecycleEnabled: true }, policyFixture(), workerCapacity);
+    expect(result.ok && result.effective.castLifecycleEnabled).toBe(false);
+    expect(result.ok && result.fields.find(field => field.key === "castLifecycleEnabled")?.lockReason).toBe("dependency_disabled");
+  });
   it("permits context without discovery only with the explicit opt-in and editing", () => {
     const policy = policyFixture();
     const request = { ...settingsFixture(), castEditingEnabled: true, castDiscoveryEnabled: false, castContextEnabled: true, castContextWithoutDiscoveryEnabled: true };
@@ -50,7 +55,7 @@ describe("installation settings policy", () => {
     if (resolved.ok) expect(resolved.effective.systemArchiveEnabled).toBe(false);
   });
 
-  it.each(["castAutoMatchEnabled", "systemArchiveEnabled", "aiAuthoringJobsEnabled", "worldSharingEnabled"] as const)("honors the direct %s emergency gate", (key) => {
+  it.each(["castLifecycleEnabled", "castAutoMatchEnabled", "systemArchiveEnabled", "aiAuthoringJobsEnabled", "worldSharingEnabled"] as const)("honors the direct %s emergency gate", (key) => {
     const policy = policyFixture();
     policy.featureGates[key] = false;
     const requested = { ...settingsFixture(), castEditingEnabled: true, castDiscoveryEnabled: true, [key]: true };
@@ -62,7 +67,7 @@ describe("installation settings policy", () => {
     expect(requested[key]).toBe(true);
   });
   it("maps each reviewed environment control exactly once", () => {
-    expect(INSTANCE_SETTING_FIELDS).toHaveLength(42);
+    expect(INSTANCE_SETTING_FIELDS).toHaveLength(43);
     const names = [
       "LOG_LEVEL",
       "WORKER_POLL_INTERVAL_MS",
@@ -74,6 +79,7 @@ describe("installation settings policy", () => {
       "AI_AUTHORING_JOBS_ENABLED",
       "AI_STORY_SOURCE_AUTHORING_ENABLED",
       "CAST_EDITING_ENABLED",
+      "CAST_LIFECYCLE_ENABLED",
       "CAST_DISCOVERY_ENABLED",
       "CAST_AUTO_MATCH_ENABLED",
       "CAST_CONTEXT_ENABLED",
@@ -108,7 +114,7 @@ describe("installation settings policy", () => {
       "SYSTEM_ARCHIVE_MAX_ORIGINAL_IMAGE_BYTES",
     ];
     expect(INSTANCE_SETTING_FIELDS.map((field) => field.environmentName).sort()).toEqual(names.sort());
-    expect(new Set(INSTANCE_SETTING_FIELDS.map((field) => field.key)).size).toBe(42);
+    expect(new Set(INSTANCE_SETTING_FIELDS.map((field) => field.key)).size).toBe(43);
   });
   it("suppresses deployment-disabled features and dependencies without changing saved preferences", () => {
     const autoMatchOn = { ...settingsFixture(), castEditingEnabled: true, castDiscoveryEnabled: true, castAutoMatchEnabled: true };

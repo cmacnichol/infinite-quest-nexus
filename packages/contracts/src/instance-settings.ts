@@ -15,7 +15,7 @@ const systemArchiveLimitsSchema = z.object({
 }).strict();
 export const settingsFeatureGatesSchema = z.object({
   aiAuthoringJobsEnabled: z.boolean(), aiStorySourceAuthoringEnabled: z.boolean(),
-  castEditingEnabled: z.boolean(), castDiscoveryEnabled: z.boolean(), castAutoMatchEnabled: z.boolean(),
+  castEditingEnabled: z.boolean(), castLifecycleEnabled: z.boolean(), castDiscoveryEnabled: z.boolean(), castAutoMatchEnabled: z.boolean(),
   castContextEnabled: z.boolean(), castPresetsEnabled: z.boolean(), castContextWithoutDiscoveryEnabled: z.boolean(), castBackfillEnabled: z.boolean(), worldSharingEnabled: z.boolean(), systemArchiveEnabled: z.boolean()
 }).strict();
 export const instanceSettingsSchema = z.object({
@@ -31,6 +31,12 @@ export const instanceSettingsSchema = z.object({
   apiConcurrencyProviderRequests: integer(1, 1000), apiConcurrencyImportRequests: integer(1, 1000),
   campaignArchiveLimits: campaignArchiveLimitsSchema, systemArchiveLimits: systemArchiveLimitsSchema
 }).strict();
+// Read older revisions, seed exports, and responses without rewriting their stored representation.
+export const compatibleInstanceSettingsSchema = instanceSettingsSchema.extend({
+  castPresetsEnabled: z.boolean().default(false),
+  castContextWithoutDiscoveryEnabled: z.boolean().default(false),
+  castLifecycleEnabled: z.boolean().default(false)
+});
 export type InstanceSettings = z.infer<typeof instanceSettingsSchema>;
 export type SettingsFeatureKey = keyof z.infer<typeof settingsFeatureGatesSchema>;
 export type SettingsNumericKey = Exclude<keyof InstanceSettings, SettingsFeatureKey | "logLevel" | "campaignArchiveLimits" | "systemArchiveLimits"> | `${"campaignArchiveLimits" | "systemArchiveLimits"}.${keyof InstanceSettings["campaignArchiveLimits"]}`;
@@ -65,14 +71,15 @@ const numericBoundSchema = z.object({ min: integer(1), max: integer(1) }).strict
 export const runtimeRoleCapacitySchema = z.object({ role: z.enum(["all", "api", "worker", "migrate"]), databaseMaxConnections: integer(2, 100) }).strict();
 export type RuntimeRoleCapacity = z.infer<typeof runtimeRoleCapacitySchema>;
 export const deploymentSettingsPolicySchema = z.object({
-  version: z.union([z.literal(1), z.literal(2)]), installationId: z.uuid(), minimumSettingsProtocolVersion: integer(1), featureGates: settingsFeatureGatesSchema.partial({ castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: true }),
+  version: z.union([z.literal(1), z.literal(2), z.literal(3)]), installationId: z.uuid(), minimumSettingsProtocolVersion: integer(1), featureGates: settingsFeatureGatesSchema.partial({ castLifecycleEnabled: true, castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: true }),
   numericBounds: z.record(z.enum(Object.keys(INSTANCE_SETTINGS_NUMERIC_BOUNDS) as [SettingsNumericKey, ...SettingsNumericKey[]]), numericBoundSchema),
   approvedRateTuples: z.array(z.object({ windowSeconds: integer(1, 3600), providerRequests: integer(1, 10000), generationRequests: integer(1, 10000), importRequests: integer(1, 10000) }).strict()).min(1),
   expectedRoles: z.array(runtimeRoleCapacitySchema.extend({
     role: z.enum(["all", "api", "worker"]), replicas: integer(1, 1000), maximumReplicas: integer(1, 1000).optional()
   }).strict().refine(role => (role.maximumReplicas ?? role.replicas) >= role.replicas)).min(1)
     .refine(roles => new Set(roles.map(role => role.role)).size === roles.length), systemArchiveAllowLimitIncrease: z.boolean()
-}).strict().refine(policy => policy.version === 1 || settingsFeatureGatesSchema.safeParse(policy.featureGates).success);
+}).strict().refine(policy => policy.version === 1 || (policy.featureGates.castPresetsEnabled !== undefined
+  && policy.featureGates.castContextWithoutDiscoveryEnabled !== undefined && (policy.version === 2 || policy.featureGates.castLifecycleEnabled !== undefined)));
 export type DeploymentSettingsPolicy = z.infer<typeof deploymentSettingsPolicySchema>;
 export const settingsFieldDescriptorSchema = z.object({
   key: z.enum(["logLevel", ...Object.keys(settingsFeatureGatesSchema.shape), ...Object.keys(INSTANCE_SETTINGS_NUMERIC_BOUNDS)] as [SettingsFieldKey, ...SettingsFieldKey[]]), environmentName: z.string(), label: z.string(), section: z.enum(["characters", "sharing", "performance", "diagnostics"]),
@@ -83,8 +90,8 @@ export const settingsFieldDescriptorSchema = z.object({
 }).strict();
 export type SettingsFieldDescriptor = z.infer<typeof settingsFieldDescriptorSchema> & { key: SettingsFieldKey };
 export const instanceSettingsViewSchema = z.object({
-  activeRevision: settingsRevisionSchema.nullable(), requestedRevision: settingsRevisionSchema.nullable(), active: instanceSettingsSchema,
-  requested: instanceSettingsSchema.nullable(), resetDefaults: instanceSettingsSchema.nullable(), fields: z.array(settingsFieldDescriptorSchema), activationStatus: z.enum(["environment", "active", "restart_required"])
+  activeRevision: settingsRevisionSchema.nullable(), requestedRevision: settingsRevisionSchema.nullable(), active: compatibleInstanceSettingsSchema,
+  requested: compatibleInstanceSettingsSchema.nullable(), resetDefaults: compatibleInstanceSettingsSchema.nullable(), fields: z.array(settingsFieldDescriptorSchema), activationStatus: z.enum(["environment", "active", "restart_required"])
 }).strict();
 export type InstanceSettingsView = z.infer<typeof instanceSettingsViewSchema>;
 export const settingsOperatorSessionRequestSchema = z.object({ managementKey: z.string().min(1).max(4096) }).strict();

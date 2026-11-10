@@ -22,7 +22,7 @@ it.runIf(Boolean(baseline))("restores pre-boundary database copies and detects o
   const connection = (name: string) => { const url = new URL(process.env.TEST_DATABASE_URL!); url.pathname = `/${name}`; return url.toString(); };
   const worldId = randomUUID(), versionId = randomUUID(), campaignId = randomUUID();
   const oldSeed = { ...exportSettingsSeed(bootstrap()).snapshot } as Record<string, unknown>;
-  delete oldSeed.castPresetsEnabled; delete oldSeed.castContextWithoutDiscoveryEnabled;
+  delete oldSeed.castLifecycleEnabled; delete oldSeed.castPresetsEnabled; delete oldSeed.castContextWithoutDiscoveryEnabled;
   let ownerUserId = "";
   try {
     await admin.query(`CREATE DATABASE ${templateName}`);
@@ -43,7 +43,7 @@ it.runIf(Boolean(baseline))("restores pre-boundary database copies and detects o
       for (const pool of pools) await migrateDatabase(pool, resolve("database/migrations"));
       const restoredSeed = (await pools[0]!.query("SELECT snapshot FROM instance_settings_revisions WHERE revision=1")).rows[0].snapshot;
       expect(oldSettings.instanceSettingsSchema.safeParse(restoredSeed).success).toBe(true);
-      const newSeed = instanceSettingsSchema.parse({ ...oldSeed, castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: false });
+      const newSeed = instanceSettingsSchema.parse({ ...oldSeed, castLifecycleEnabled: false, castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: false });
       await pools[0]!.query("INSERT INTO instance_settings_revisions(revision,previous_revision,snapshot,schema_version,actor_user_id,cli_reference,kind,policy_digest) VALUES(2,1,$1,1,$2,'rehearsal','proposal',$3)", [newSeed, ownerUserId, "a".repeat(64)]);
       const savedSeed = (await pools[0]!.query("SELECT snapshot FROM instance_settings_revisions WHERE revision=2")).rows[0].snapshot;
       expect(oldSettings.instanceSettingsSchema.safeParse(savedSeed).success).toBe(false);

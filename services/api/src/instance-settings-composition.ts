@@ -5,7 +5,7 @@ import { createSettingsOperatorRepository } from "../../../packages/database/src
 import { createInstanceSettingsRepository } from "../../../packages/database/src/instance-settings-repository.js";
 import { createSettingsUseCases, SettingsConflictError, type SettingsState } from "../../../packages/application/src/settings/index.js";
 import {
-  instanceSettingsHistorySchema, instanceSettingsPatchSchema, instanceSettingsViewSchema, instanceSettingsSchema,
+  instanceSettingsHistorySchema, instanceSettingsPatchSchema, instanceSettingsViewSchema, compatibleInstanceSettingsSchema,
   settingsFeatureGatesSchema, type DeploymentSettingsPolicy, type InstanceSettings, type SettingsFieldKey, type SettingsFeatureKey
 } from "../../../packages/contracts/src/instance-settings.js";
 import { deriveSettingsPolicyForLocalMode, LOCAL_PANEL_GATES, resolveInstanceSettings, INSTANCE_SETTING_FIELDS } from "../../../packages/domain/src/instance-settings.js";
@@ -30,7 +30,7 @@ export function createInstanceSettingsHttpComposition(
   pool: DatabasePool, bootstrap: RuntimeConfig, running: RuntimeConfig,
   { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest, localPolicy }: SettingsRuntimePorts
 ) {
-  const repository = createInstanceSettingsRepository(pool);
+  const repository = createInstanceSettingsRepository(pool, { legacyLifecycleEnabled: bootstrap.castLifecycleEnabled });
   // Capture the configuration this process actually serves, before any mounted policy changes.
   const runningConfig = structuredClone(running);
   const readPolicy = () => {
@@ -67,7 +67,7 @@ export function createInstanceSettingsHttpComposition(
     return mounted;
   };
   const constrainedPolicy = () => {
-    const mounted = deriveSettingsPolicyForLocalMode(currentPolicy(), bootstrap.instanceSettingsAccessMode === "local-single-user" && !bootstrap.instanceSettingsPolicyFile);
+    const mounted = deriveSettingsPolicyForLocalMode(currentPolicy(), bootstrap.instanceSettingsAccessMode === "local-single-user" && !bootstrap.instanceSettingsPolicyFile, bootstrap.castLifecycleEnabled);
     const gates = Object.fromEntries(Object.keys(settingsFeatureGatesSchema.shape).map(key => [key, mounted.featureGates[key as SettingsFeatureKey]])) as typeof mounted.featureGates;
     for (const key of Object.keys(settingsFeatureGatesSchema.shape) as SettingsFeatureKey[]) {
       gates[key] = gates[key] === true && (bootstrap.instanceSettingsAccessMode === "local-single-user" && LOCAL_PANEL_GATES.has(key) || bootstrap[key] === true);
@@ -103,7 +103,7 @@ export function createInstanceSettingsHttpComposition(
       const { rows: [seed] } = await pool.query<{ snapshot: unknown }>(
         "SELECT snapshot FROM instance_settings_revisions WHERE revision=1 AND kind='seed'"
       );
-      const parsed = instanceSettingsSchema.safeParse({ castPresetsEnabled: false, castContextWithoutDiscoveryEnabled: false, ...seed?.snapshot as object });
+      const parsed = compatibleInstanceSettingsSchema.safeParse(seed?.snapshot);
       resetSource = parsed.success ? parsed.data : null;
     }
     const resetResolution = resetSource ? resolveInstanceSettings(resetSource, constrainedPolicy(), {

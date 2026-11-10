@@ -11,5 +11,6 @@ export const settingsReleaseMigrations = [
   "0129_character_settings_keys",
   "0130_campaign_first_appearance_eligibility",
   "0131_selected_character_world",
-  "0132_campaign_cast_promotion_receipts"
+  "0132_campaign_cast_promotion_receipts",
+  "0133_cast_lifecycle_settings_key"
 ] as const;
