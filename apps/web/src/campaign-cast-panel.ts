@@ -59,11 +59,15 @@ export function createLegacyCastPanel(options: {
   let recovery: Awaited<ReturnType<CampaignCastApi["workspaceStatus"]>>["recovery"];
   let rosterVisible = false; let autoMatch: boolean | null = null;
   let attention: { identities: number | null; details: number | null; conflicts: number | null } | null = null;
+  function attentionSummary() {
+    if (!attention) return "Attention counts are unavailable.";
+    return `Attention — identity matches: ${attention.identities ?? "unavailable"} · details: ${attention.details ?? "unavailable"} · conflicts: ${attention.conflicts ?? "unavailable"}`;
+  }
   const workspace = createCharactersWorkspaceSession<CastEditorState>({ api: options.api, onChange(next) {
     if (!dialog.open || next.campaignId !== campaign) return;
     attention = next.status?.counts ?? null; autoMatch = next.status?.capabilities.autoMatch ?? null;
     const notice = dialog.querySelector<HTMLElement>("[data-cast-attention]");
-    if (notice && attention) { const count = (value: number | null) => value === null ? "unavailable" : String(value); notice.textContent = `Attention — identity matches: ${count(attention.identities)} · details: ${count(attention.details)} · conflicts: ${count(attention.conflicts)}`; }
+    if (notice) notice.textContent = attentionSummary();
     if (editor?.dirty && next.changedWhileEditing && !dialog.querySelector("[data-cast-stale]")) {
       const warning = node("p", "This character changed while you were editing. Your draft is preserved. Compare the latest version before saving."); warning.dataset.castStale = ""; dialog.prepend(warning);
     }
@@ -128,6 +132,10 @@ export function createLegacyCastPanel(options: {
       if (rosterResult.status === "rejected") throw rosterResult.reason;
       const response = rosterResult.value;
       discovery = discoveryResult.status === "fulfilled" ? discoveryResult.value : null;
+      if (workspaceResult.status === "fulfilled") {
+        attention = workspaceResult.value.counts;
+        autoMatch = workspaceResult.value.capabilities.autoMatch;
+      }
       narratorState = workspaceResult.status === "fulfilled" ? workspaceResult.value.narratorState : undefined;
       recovery = workspaceResult.status === "fulfilled" ? workspaceResult.value.recovery : undefined;
       scanData = scanResult.status === "fulfilled" ? scanResult.value : null;
@@ -231,6 +239,7 @@ export function createLegacyCastPanel(options: {
   function loadReview(initialItem?: string) {
     rosterVisible = false; const token = ++epoch; editor = null; shell("Character review");
     renderCastReview({ document, container: dialog, api: options.api, campaign, current: () => current(token),
+      ...(options.campaignPage ? { checkWrite: syncLock } : {}),
       autoMatch, ...(initialItem ? { initialItem } : {}), editing: () => enabled && !options.generationActive(), navigate: turn => { requestClose(); void options.navigateToTurn(turn); },
       back: () => { void loadAttention(); }, key: operationKey, clearKeys: () => operationKeys.clear() });
   }
@@ -256,6 +265,8 @@ export function createLegacyCastPanel(options: {
       if (narrator.href) { const link = node("a", narrator.label); link.href = narrator.href; note.append(" ", link); }
     }
     if (!options.campaignPage) renderStoryTools();
+    status(attentionSummary()).dataset.castAttention = "";
+    dialog.append(button("Needs attention", () => { void loadAttention(); }));
     function renderStoryTools() {
       if (!discovery) status("Character tracking status is unavailable. Saved characters are still available.");
       else {
@@ -299,9 +310,7 @@ export function createLegacyCastPanel(options: {
           dialog.append(retry, feedback);
         }
       }
-      const notice = status("Attention counts are unavailable."); notice.dataset.castAttention = "";
-      if (attention) { const count = (value: number | null) => value === null ? "unavailable" : String(value); notice.textContent = `Attention — identity matches: ${count(attention.identities)} · details: ${count(attention.details)} · conflicts: ${count(attention.conflicts)}`; }
-      dialog.append(button("Refresh characters", () => { void loadRoster(); }), button("Needs attention", () => { void loadAttention(); }), button("Likely included for this input", previewContext));
+      dialog.append(button("Refresh characters", () => { void loadRoster(); }), button("Likely included for this input", previewContext));
       if (scanData && (scanData.capabilities.castBackfill || scanData.scan)) dialog.append(button("Scan earlier story", () => { void loadScan(); }));
     }
     if (list?.capabilities.castPresets && options.api.worldChoices && options.api.fromWorldPreview && options.api.fromWorld) {
@@ -394,7 +403,9 @@ export function createLegacyCastPanel(options: {
       opener.dataset.editProtagonist = ""; dialog.append(opener);
     } else if (!detail.character.mergedIntoCharacterId) {
       const lifecycle = options.api.lifecycle;
-      if (lifecycle && (detail.capabilities ?? list?.capabilities)?.castLifecycle) {
+      const lifecycleEnabled = (detail.capabilities ?? list?.capabilities)?.castLifecycle;
+      if (enabled && lifecycleEnabled === false && !detail.character.removed) status("Character merging is disabled on this server.");
+      if (lifecycle && lifecycleEnabled) {
         const launch = (action: Parameters<typeof showLifecycle>[0], mergeEventId?: string) => showLifecycle(action, {
           api: lifecycle, campaign, detail, list: options.api.list, lock: syncLock, ...(mergeEventId ? { mergeEventId } : {}),
           finished(id, notice) {
@@ -454,10 +465,13 @@ export function createLegacyCastPanel(options: {
       }
     }
     renderFields();
-    if (options.campaignPage) return;
     for (const match of detail.autoMatches) {
       const row = node("section"); row.append(node("p", `${match.basis === "unique_world_name" ? "Unique world name" : "Unique campaign name"} · turn ${match.turnNumber}: “${match.quote}”`));
       row.append(button("Not this character", async () => {
+        if (options.campaignPage && !await syncLock()) {
+          row.append(node("p", "Finish or resolve generation before changing this match."));
+          return;
+        }
         try { await options.api.detachAttachment(campaign, detail.character.id, match.eventId, { expectedCastRevision: detail.revision, expectedBoundary: detail.boundary, expectedCharacterRevision: detail.character.revision, idempotencyKey: operationKey("detach", [campaign, detail.character.id, match.eventId, detail.revision, detail.boundary, detail.character.revision]) }); operationKeys.clear(); await openDetail(detail.character.id); }
         catch { row.append(node("p", "Could not undo this match. Refresh and try again.")); }
       }, !enabled || options.generationActive())); dialog.append(row);

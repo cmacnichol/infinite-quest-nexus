@@ -60,9 +60,13 @@ export function showLifecycle(action: Action, options: {
       return { id: action === "remove" ? "" : result.character.id, message: person.name + (action === "remove" ? " removed. Use the Removed filter to restore them." : " restored.") };
     }, () => { dialog.close(); options.finished(person.id, "Review the latest character before continuing."); })));
   }
-  async function chooseSource() {
+  async function chooseMergeCharacter() {
     screen("Merge with another character"); const token = ++epoch;
-    const search = el("input"), label = el("label", "Find a character"), list = el("div"); label.append(search); body.append(label,list);
+    const keep = el("select"), keepLabel = el("label", "Character to keep");
+    keep.append(new Option(person.name + " (current character)", "current"), new Option("The character I select below", "selected"));
+    keep.value = person.origin.kind === "discovered" ? "selected" : "current";
+    keepLabel.append(keep);
+    const search = el("input"), label = el("label", "Find a character"), list = el("div"); label.append(search); body.append(keepLabel, label, list);
     try {
       const people = []; let cursor: string | undefined;
       do {
@@ -71,10 +75,21 @@ export function showLifecycle(action: Action, options: {
         people.push(...page.characters); cursor = page.nextCursor ?? undefined;
       } while (cursor);
       const eligible = people.filter(row => row.id !== person.id && row.origin.kind !== "protagonist" && !row.removed && !row.mergedIntoCharacterId);
+      const names = new Set<string>(), duplicateNames = new Set<string>();
+      for (const row of [person, ...eligible]) {
+        if (names.has(row.name)) duplicateNames.add(row.name);
+        names.add(row.name);
+      }
       function render() {
         const q = search.value.trim().toLowerCase();
-        list.replaceChildren(...eligible.filter(row => [row.name,...row.aliases].some(term => term.toLowerCase().includes(q))).map(row =>
-          button(row.name, () => void merge(person.id, row.id))));
+        const matches = eligible.filter(row => [row.name, ...row.aliases].some(term => term.toLowerCase().includes(q)));
+        list.replaceChildren(...matches.map(row => {
+          const label = duplicateNames.has(row.name) ? [row.name, row.profile["story.role"], row.id].filter(Boolean).join(" · ") : row.name;
+          return button(label, () => {
+            if (keep.value === "selected") void merge(row.id, person.id);
+            else void merge(person.id, row.id);
+          });
+        }));
         if (!list.childElementCount) list.append(el("p","No matching supporting characters."));
       }
       search.oninput = render; render(); search.focus();
@@ -86,11 +101,14 @@ export function showLifecycle(action: Action, options: {
       const preview = await api.mergePreview(campaign, targetId, sourceId);
       if (token !== epoch || !dialog.open) return;
       renderMerge(preview);
-    } catch (error) { if (token === epoch) { fail(error); footer.prepend(button("Choose another character", () => void chooseSource())); } }
+    } catch (error) { if (token === epoch) { fail(error); footer.prepend(button("Choose another character", () => void chooseMergeCharacter())); } }
   }
   function renderMerge(p: CastMergePreview) {
     const source = p.source.character, target = p.target.character;
-    screen("Review merge"); body.append(el("p", `Merge ${source.name} into ${target.name}. The target keeps its name, origin, pin and ignore settings.`));
+    const sameName = source.name === target.name;
+    const from = sameName ? `${source.name} (${source.id})` : source.name;
+    const into = sameName ? `${target.name} (${target.id})` : target.name;
+    screen("Review merge"); body.append(el("p", `Merge ${from} into ${into}. The target keeps its name, origin, pin and ignore settings.`));
     const group = el("fieldset"); group.append(el("legend", "Aliases to keep (up to 20)"));
     const aliases = p.aliasCandidates.map(alias => {
       const input = el("input"); input.type = "checkbox"; input.checked = true; const label = el("label", alias);
@@ -244,5 +262,5 @@ export function showLifecycle(action: Action, options: {
     }));
   }
   dialog.showModal();
-  if (action === "merge") void chooseSource(); else if (action === "unmerge") void undo(); else if (action === "promote") void worlds(); else removal();
+  if (action === "merge") void chooseMergeCharacter(); else if (action === "unmerge") void undo(); else if (action === "promote") void worlds(); else removal();
 }

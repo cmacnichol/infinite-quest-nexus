@@ -39,7 +39,7 @@ export function resolveRuntimeSettingsState(state:SettingsState, bootstrap:Runti
   if (policy.systemArchiveAllowLimitIncrease && bootstrap.systemArchiveAllowLimitIncrease !== true) throw new Error("settings_deployment_divergence");
   if(!state.active || !state.activeRevision) throw new Error('settings_active_missing');
   if(!policy.expectedRoles.some(r=>r.role===bootstrap.role && r.databaseMaxConnections===bootstrap.databaseMaxConnections)) throw new Error('settings_role_mismatch');
-  const effectivePolicy = deriveSettingsPolicyForLocalMode(policy, bootstrap.instanceSettingsAccessMode === "local-single-user" && !bootstrap.instanceSettingsPolicyFile);
+  const effectivePolicy = deriveSettingsPolicyForLocalMode(policy, bootstrap.instanceSettingsAccessMode === "local-single-user" && !bootstrap.instanceSettingsPolicyFile, bootstrap.castLifecycleEnabled);
   validateSettingsPolicy(state.active,effectivePolicy,resolveInstanceSettings);
   const gates=Object.fromEntries(Object.keys(settingsFeatureGatesSchema.shape).map(key => [key, effectivePolicy.featureGates[key as keyof typeof effectivePolicy.featureGates]])) as typeof policy.featureGates;
   for(const key of Object.keys(settingsFeatureGatesSchema.shape) as (keyof typeof gates)[]) gates[key] = gates[key] === true && (bootstrap.instanceSettingsAccessMode === "local-single-user" && LOCAL_PANEL_GATES.has(key) || bootstrap[key]===true);
@@ -53,7 +53,7 @@ export function resolveRuntimeSettingsState(state:SettingsState, bootstrap:Runti
   return {config,mode:'database',activeRevision:state.activeRevision,policyDigest:settingsDigest(policy),activationEpoch:state.activationEpoch,effectiveDigest:settingsDigest(resolved.effective)};
 }
 export async function loadActiveRuntimeSettings(pool:DatabasePool,bootstrap:RuntimeConfig,policy?:DeploymentSettingsPolicy):Promise<ResolvedRuntimeSettings> {
-  const state=await createInstanceSettingsRepository(pool).read();
+  const state=await createInstanceSettingsRepository(pool, { legacyLifecycleEnabled: bootstrap.castLifecycleEnabled }).read();
   // The requested revision can carry a new policy while the old revision remains active.
   if(state.activeRevision) {
     const {rows:[active]}=await pool.query('SELECT policy_digest FROM instance_settings_revisions WHERE revision=$1',[state.activeRevision]);

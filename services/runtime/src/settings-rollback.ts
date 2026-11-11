@@ -27,7 +27,7 @@ export function verifyRollback(input: unknown, policy: DeploymentSettingsPolicy)
 
 async function lockedExport(client: DatabaseClient, config: RuntimeConfig, policy: DeploymentSettingsPolicy) {
   await lockSettingsState(client);
-  const state = await readSettingsState(client);
+  const state = await readSettingsState(client, config.castLifecycleEnabled);
   if (state.mode !== "database" || !state.activeRevision || !state.requestedRevision) throw new Error("settings_database_mode_required");
   const { rows: [revision] } = await client.query("SELECT policy_digest FROM instance_settings_revisions WHERE revision=$1", [state.activeRevision]);
   const resolved = resolveRuntimeSettingsState({ ...state, policyDigest: revision.policy_digest }, config, policy);

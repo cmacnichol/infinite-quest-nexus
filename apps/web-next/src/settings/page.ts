@@ -17,7 +17,7 @@ const MISSING_REASON = "Enter a reason before saving.";
 const LABELS: Record<string, string> = {
   workerPollIntervalMs: "Queue polling interval", textProviderConcurrency: "Text provider capacity", workerGenerationConcurrency: "Story generation capacity",
   archivePreviewTtlSeconds: "Import preview retention", systemArchiveArtifactTtlSeconds: "Archive download retention", systemArchiveUploadTtlSeconds: "Archive upload retention", systemArchiveChunkBytes: "Archive transfer chunk size",
-  aiAuthoringJobsEnabled: "AI authoring jobs", aiStorySourceAuthoringEnabled: "Story source authoring", castEditingEnabled: "Character editing", castDiscoveryEnabled: "Character discovery", castAutoMatchEnabled: "Automatic character matching", castContextEnabled: "Character context", castPresetsEnabled: "Character presets", castContextWithoutDiscoveryEnabled: "Character context without discovery", castBackfillEnabled: "Character history backfill",
+  aiAuthoringJobsEnabled: "AI authoring jobs", aiStorySourceAuthoringEnabled: "Story source authoring", castEditingEnabled: "Character editing", castLifecycleEnabled: "Character merging", castDiscoveryEnabled: "Character discovery", castAutoMatchEnabled: "Automatic character matching", castContextEnabled: "Character context", castPresetsEnabled: "Character presets", castContextWithoutDiscoveryEnabled: "Character context without discovery", castBackfillEnabled: "Character history backfill",
   worldSharingEnabled: "World share links", systemArchiveEnabled: "System Archive", apiDefaultBodyLimitBytes: "Standard request size", apiImportBodyLimitBytes: "Import request size", apiAssetBodyLimitBytes: "Artwork request size", apiRateLimitWindowSeconds: "Request rate window", apiRateLimitProviderRequests: "Provider requests per window", apiRateLimitGenerationRequests: "Story requests per window", apiRateLimitImportRequests: "Import requests per window", apiConcurrencyProviderRequests: "Concurrent provider requests", apiConcurrencyImportRequests: "Concurrent imports"
 };
 const ARCHIVE_LABELS: Record<string, string> = { maxCompressedBytes: "Compressed size limit", maxUncompressedBytes: "Expanded size limit", maxEntries: "File count limit", maxExpansionRatio: "Expansion ratio limit", maxManifestBytes: "Manifest size limit", maxJsonEntryBytes: "JSON file size limit", maxOriginalImageBytes: "Original image size limit" };
@@ -227,6 +227,7 @@ export function mountSettingsPage(root: HTMLElement, route: SettingsRoute, optio
         } catch (error) { validation = [`${fieldLabel(field)}: ${error instanceof Error ? error.message : "Invalid value."}`]; render(); content.querySelector<HTMLElement>(".settings-validation")?.focus(); }
       });
       const explanations: Record<string, string> = {
+        castLifecycleEnabled: "Requires Character editing. Allows merging and undoing merges, removing and restoring cast members, and promoting characters to a world draft.",
         workerPollIntervalMs: "How often workers look for queued jobs. Shorter intervals increase database polling.",
         textProviderConcurrency: "Shared text-provider slots used when character discovery is enabled. This lane is separate from per-worker story-generation capacity.",
         workerGenerationConcurrency: "Story jobs admitted simultaneously by each worker. More slots increase provider and database load.",

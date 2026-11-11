@@ -16,6 +16,7 @@ export const INSTANCE_SETTING_FIELDS: readonly RegistryField[] = [
   { key: "aiAuthoringJobsEnabled", environmentName: "AI_AUTHORING_JOBS_ENABLED", label: "AI authoring jobs enabled", section: "characters", unit: "boolean", kind: "boolean" },
   { key: "aiStorySourceAuthoringEnabled", environmentName: "AI_STORY_SOURCE_AUTHORING_ENABLED", label: "AI story source authoring enabled", section: "characters", unit: "boolean", kind: "boolean" },
   { key: "castEditingEnabled", environmentName: "CAST_EDITING_ENABLED", label: "Cast editing enabled", section: "characters", unit: "boolean", kind: "boolean" },
+  { key: "castLifecycleEnabled", environmentName: "CAST_LIFECYCLE_ENABLED", label: "Character merging", section: "characters", unit: "boolean", kind: "boolean" },
   { key: "castDiscoveryEnabled", environmentName: "CAST_DISCOVERY_ENABLED", label: "Cast discovery enabled", section: "characters", unit: "boolean", kind: "boolean" },
   { key: "castAutoMatchEnabled", environmentName: "CAST_AUTO_MATCH_ENABLED", label: "Cast auto match enabled", section: "characters", unit: "boolean", kind: "boolean" },
   { key: "castContextEnabled", environmentName: "CAST_CONTEXT_ENABLED", label: "Cast context enabled", section: "characters", unit: "boolean", kind: "boolean" },
@@ -59,14 +60,17 @@ export function valueAt(settings: InstanceSettings, key: SettingsFieldKey): bool
   if (property) return settings[group as "campaignArchiveLimits" | "systemArchiveLimits"][property as keyof InstanceSettings["campaignArchiveLimits"]];
   return settings[key as Exclude<SettingsFieldKey, SettingsNumericKey> | Exclude<SettingsNumericKey, `${string}.${string}`>];
 }
-/** Derive effective gates for the immutable pre-v2 local seed without changing its signed policy. */
-export function deriveSettingsPolicyForLocalMode(policy: DeploymentSettingsPolicy, implicitLocal: boolean): DeploymentSettingsPolicy {
+/** Resolve historical permissions without changing the stored policy or its digest. */
+export function deriveSettingsPolicyForLocalMode(policy: DeploymentSettingsPolicy, implicitLocal: boolean, legacyLifecycleEnabled = false): DeploymentSettingsPolicy {
+  if (policy.version < 3 && policy.featureGates.castLifecycleEnabled === undefined) {
+    policy = { ...policy, featureGates: { ...policy.featureGates, castLifecycleEnabled: implicitLocal || legacyLifecycleEnabled } };
+  }
   if (!implicitLocal || policy.version !== 1 || policy.featureGates.castPresetsEnabled !== undefined
     || policy.featureGates.castContextWithoutDiscoveryEnabled !== undefined) return policy;
   return { ...policy, featureGates: { ...policy.featureGates, castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: true, castContextEnabled: true, castEditingEnabled: true } };
 }
 /** Gates a local single-user install can turn on from the panel alone. */
-export const LOCAL_PANEL_GATES: ReadonlySet<string> = new Set(["castPresetsEnabled", "castContextWithoutDiscoveryEnabled", "castContextEnabled", "castEditingEnabled"]);
+export const LOCAL_PANEL_GATES: ReadonlySet<string> = new Set(["castLifecycleEnabled", "castPresetsEnabled", "castContextWithoutDiscoveryEnabled", "castContextEnabled", "castEditingEnabled"]);
 /** Policy disables capabilities; incompatible numeric preferences reject activation. Inputs stay immutable. */
 export function resolveInstanceSettings(requested: InstanceSettings, policy: DeploymentSettingsPolicy, capacity: RuntimeRoleCapacity): SettingsResolution {
   const parsed = instanceSettingsSchema.safeParse(requested);
@@ -94,7 +98,7 @@ export function resolveInstanceSettings(requested: InstanceSettings, policy: Dep
     if (!allowed) { effective[key as SettingsFeatureKey] = false; locks.set(key as SettingsFeatureKey, "deployment_disabled"); }
   }
   const dependencies: Partial<Record<SettingsFeatureKey, SettingsFeatureKey>> = {
-    castDiscoveryEnabled: "castEditingEnabled", castAutoMatchEnabled: "castDiscoveryEnabled",
+    castLifecycleEnabled: "castEditingEnabled", castDiscoveryEnabled: "castEditingEnabled", castAutoMatchEnabled: "castDiscoveryEnabled",
     castPresetsEnabled: "castEditingEnabled", castContextWithoutDiscoveryEnabled: "castEditingEnabled", castBackfillEnabled: "castDiscoveryEnabled"
   };
   for (const [child, parent] of Object.entries(dependencies)) {

@@ -35,6 +35,6 @@ test("checks the staged or restarted Settings revision through the packaged HTTP
   expect(view.activeRevision).toBe(phase === "stage" ? null : "2");
   expect(view.requested.logLevel).toBe("warn");
   expect(view.active.logLevel).toBe(phase === "stage" ? "info" : "warn");
-  expect(view.fields).toHaveLength(40);
+  expect(view.fields).toHaveLength(43);
   await page.screenshot({ path: "test-results/review-assets/settings-panel/packaged-tls-" + phase + ".png", fullPage: true });
 });

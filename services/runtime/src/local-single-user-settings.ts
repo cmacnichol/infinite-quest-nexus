@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { initialOwnerId, type DatabasePool, type RuntimeConfig } from "../../../packages/database/src/index.js";
 import { createInstanceSettingsRepository } from "../../../packages/database/src/instance-settings-repository.js";
-import { instanceSettingsSchema, type DeploymentSettingsPolicy } from "../../../packages/contracts/src/instance-settings.js";
+import { compatibleInstanceSettingsSchema, type DeploymentSettingsPolicy } from "../../../packages/contracts/src/instance-settings.js";
 import { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest } from "./instance-settings.js";
 import { createLocalSingleUserPolicy } from "./settings-operator.js";
 import { createSettingsActivationGuard } from "./settings-activation.js";
@@ -19,7 +19,11 @@ export async function loadLocalSingleUserPolicy(pool: DatabasePool, bootstrap: R
   const { rows: [seed] } = await pool.query("SELECT snapshot,policy_digest,local_single_user FROM instance_settings_revisions WHERE revision=1 AND kind='seed'");
   if (!seed || seed.local_single_user !== true) throw new Error("settings_local_existing_installation");
   const legacy = !("castPresetsEnabled" in seed.snapshot) && !("castContextWithoutDiscoveryEnabled" in seed.snapshot);
-  const policy = createLocalSingleUserPolicy(instanceSettingsSchema.parse({ castPresetsEnabled: false, castContextWithoutDiscoveryEnabled: false, ...seed.snapshot }), state.installationId, bootstrap.databaseMaxConnections);
+  const policy = createLocalSingleUserPolicy(compatibleInstanceSettingsSchema.parse(seed.snapshot), state.installationId, bootstrap.databaseMaxConnections);
+  if (!("castLifecycleEnabled" in seed.snapshot)) {
+    policy.version = 2;
+    delete policy.featureGates.castLifecycleEnabled;
+  }
   if (legacy) {
     policy.version = 1;
     // The historical policy remains byte-for-byte digestible; effective gates are derived at use sites.
