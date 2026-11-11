@@ -66,7 +66,7 @@ http.createServer((req, res) => {
   if (req.url === "/v1/models") { held = res; req.on("aborted", () => { cancelled = true; }); res.on("close", () => { if (!res.writableFinished) cancelled = true; }); return; }
   res.writeHead(404).end();
 }).listen(9090, "0.0.0.0");`);
-  run("docker", ["run", "-d", "--name", `${local}-provider`, "--network", `${local}-local-backend`, "--network-alias", "proof-provider", "--mount", `type=bind,src=${dir.replaceAll("\\", "/")},dst=/proof,readonly`, "--entrypoint", "node", proofImage, "/proof/provider.mjs"]);
+  run("docker", ["run", "-d", "--name", `${local}-provider`, "--network", `${local}_infinitequest-backend`, "--network-alias", "proof-provider", "--mount", `type=bind,src=${dir.replaceAll("\\", "/")},dst=/proof,readonly`, "--entrypoint", "node", proofImage, "/proof/provider.mjs"]);
   await browserProof({ SETTINGS_PROOF_PROJECT: local, SETTINGS_PROOF_BASE: `http://127.0.0.1:${localPort}`, SETTINGS_PROOF_MODE: "local" });
   await writeFile(join(dir, "key"), key);
   const seed = JSON.parse(compose(protectedFiles, protectedEnv, "run", "--rm", "--no-deps", "--entrypoint", "sh", "infinitequest-app", "-c", `node /app/scripts/ensure-local-credential-encryption-key.mjs && exec node ${cli} export-seed`));

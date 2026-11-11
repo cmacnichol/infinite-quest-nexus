@@ -6,7 +6,9 @@ Compose publishes the application on host port 8080 by default. No TLS proxy is 
 
 ## Application to PostgreSQL
 
-Compose uses service DNS name `postgres` on the private `infinitequest-backend` network. PostgreSQL is not host-published unless the development override is explicitly enabled.
+Compose uses service DNS name `postgres` on the private `infinitequest-backend` network, which Compose names `<project>_infinitequest-backend` (`infinitequest_infinitequest-backend` by default). The base file and the local single-user overlay use the same network name. Test overlays can specify separate networks. PostgreSQL is not host-published unless the development override is explicitly enabled.
+
+When starting the base file alone with `INSTANCE_SETTINGS_ACCESS_MODE=local-single-user`, set `APP_BIND_ADDRESS=127.0.0.1`. The application rejects other bind addresses in this mode. The local single-user overlay configures loopback publishing itself.
 
 ## Worker to providers
 
