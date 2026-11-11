@@ -68,7 +68,7 @@ Keep mechanics and fiction in separate typed prompt paths. Rolls, dice, checks, 
 
 ## Repository Structure and Migration Roadmap
 
-Prefer TypeScript for new application services and shared packages so validated logic can move out of the current JavaScript without maintaining separate implementations. Record system-wide architecture decisions under `docs/architecture/` and context-local decisions under the relevant context's `docs/adr/`, following [Domain docs](docs/agents/domain.md). Do not leave undocumented scripts as the only way to operate the project. Keep JSON import and export as a portable backup and migration format even after the database becomes authoritative.
+Prefer TypeScript for new application services and shared packages so validated logic can move out of the current JavaScript without maintaining separate implementations. Record all architecture decisions in `docs/architecture/`, following [Domain docs](docs/agents/domain.md). Do not leave undocumented scripts as the only way to operate the project. Keep JSON import and export as a portable backup and migration format even after the database becomes authoritative.
 
 Before changing repository layout or planning a legacy-client migration, read [docs/architecture/repository-overview.md](docs/architecture/repository-overview.md#repository-structure).
 
@@ -142,7 +142,7 @@ Before assigning triage labels, read [Triage labels](docs/agents/triage-labels.m
 
 ### Domain docs
 
-Before exploring a domain or changing domain documentation, read [Domain docs](docs/agents/domain.md), then the relevant context map and context documentation.
+Single-context: root `CONTEXT.md` glossary plus ADRs in `docs/architecture/`. Before exploring a domain or changing domain documentation, read [Domain docs](docs/agents/domain.md).
 
 ## Documentation and tools
 
