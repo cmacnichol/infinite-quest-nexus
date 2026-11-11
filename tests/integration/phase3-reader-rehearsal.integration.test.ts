@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { expect, it } from "vitest";
@@ -40,7 +41,10 @@ it.runIf(Boolean(baseline))("restores pre-boundary database copies and detects o
     for (const name of names.slice(1)) await admin.query(`CREATE DATABASE ${name} TEMPLATE ${templateName}`);
     const pools = names.slice(1).map(name => createDatabasePool(connection(name)));
     try {
-      for (const pool of pools) await migrateDatabase(pool, resolve("database/migrations"));
+      for (const pool of pools) {
+        await migrateDatabase(pool, historicalMigrations);
+        await migrateDatabase(pool, resolve("database/migrations"));
+      }
       const restoredSeed = (await pools[0]!.query("SELECT snapshot FROM instance_settings_revisions WHERE revision=1")).rows[0].snapshot;
       expect(oldSettings.instanceSettingsSchema.safeParse(restoredSeed).success).toBe(true);
       const newSeed = instanceSettingsSchema.parse({ ...oldSeed, castLifecycleEnabled: false, castPresetsEnabled: true, castContextWithoutDiscoveryEnabled: false });

@@ -148,13 +148,8 @@ integration("Chronicle retrieval observability", () => {
     }
   });
 
-  it("executes migration 0074 and prunes expired and over-limit campaign runs atomically", async () => {
+  it("prunes expired and over-limit campaign runs atomically", async () => {
     const current = await fixture("observability retention");
-    const migration = await pool.query<{ name: string }>(
-      "SELECT name FROM schema_migrations WHERE name = '0074_chronicle_retrieval_observability'"
-    );
-    expect(migration.rows).toEqual([{ name: "0074_chronicle_retrieval_observability" }]);
-
     const parent = await pool.query<{ id: string }>(
       `INSERT INTO chronicle_memories
          (owner_user_id,campaign_id,world_version_id,memory_kind,ordinal,content,token_estimate)

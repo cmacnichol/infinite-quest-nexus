@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { settingsReleaseMigrations } from "../fixtures/instance-settings-migrations.js";
 import pg from "pg";
 import { request, type IncomingMessage } from "node:http";
@@ -487,7 +488,7 @@ integration("generation job notification delivery", () => {
       try {
         const initiallyApplied = await runner({
           dbClient: client,
-          dir: resolve("database/migrations"),
+          dir: historicalMigrations,
           direction: "up",
           count: 69,
           migrationsTable: "schema_migrations",
@@ -521,7 +522,7 @@ integration("generation job notification delivery", () => {
         await client.query("SET session_replication_role = 'origin'");
         const newerReverted = await runner({
           dbClient: client,
-          dir: resolve("database/migrations"),
+          dir: historicalMigrations,
           direction: "down",
           count: 6,
           migrationsTable: "schema_migrations",
@@ -540,7 +541,7 @@ integration("generation job notification delivery", () => {
         ]);
         await expect(runner({
           dbClient: client,
-          dir: resolve("database/migrations"),
+          dir: historicalMigrations,
           direction: "down",
           count: 1,
           migrationsTable: "schema_migrations",
@@ -560,7 +561,7 @@ integration("generation job notification delivery", () => {
         await client.query("SET session_replication_role = 'origin'");
         await expect(runner({
           dbClient: client,
-          dir: resolve("database/migrations"),
+          dir: historicalMigrations,
           direction: "down",
           count: 2,
           migrationsTable: "schema_migrations",
@@ -586,7 +587,7 @@ integration("generation job notification delivery", () => {
         await client.query("SET session_replication_role = 'origin'");
         await expect(runner({
           dbClient: client,
-          dir: resolve("database/migrations"),
+          dir: historicalMigrations,
           direction: "down",
           count: 2,
           migrationsTable: "schema_migrations",
@@ -604,7 +605,7 @@ integration("generation job notification delivery", () => {
 
         const reverted = await runner({
           dbClient: client,
-          dir: resolve("database/migrations"),
+          dir: historicalMigrations,
           direction: "down",
           count: 12,
           migrationsTable: "schema_migrations",
@@ -640,7 +641,7 @@ integration("generation job notification delivery", () => {
          to_regprocedure('notify_generation_job_changed_v1()')::text AS function_name`
       )).resolves.toMatchObject({ rows: [{ trigger_name: null, function_name: null }] });
 
-      await expect(migrateDatabase(migrationPool, resolve("database/migrations")))
+      await expect(migrateDatabase(migrationPool, historicalMigrations))
         .resolves.toEqual([
           "0052_generation_job_notifications",
           "0053_durable_asset_portable_operations",

@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, copyFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,8 +21,8 @@ let oldMigrations: string;
 beforeAll(async () => {
   pool = createDatabasePool(process.env.TEST_DATABASE_URL!);
   oldMigrations = await mkdtemp(join(tmpdir(), "iq-character-settings-upgrade-"));
-  for (const file of await readdir(resolve("database/migrations"))) {
-    if (file < "0129_") await copyFile(resolve("database/migrations", file), join(oldMigrations, file));
+  for (const file of await readdir(historicalMigrations)) {
+    if (file < "0129_") await copyFile(resolve(historicalMigrations, file), join(oldMigrations, file));
   }
   await migrateDatabase(pool, oldMigrations);
 });
@@ -47,7 +48,7 @@ it("upgrades an active local v1 seed and keeps character preferences across rest
   await pool.query(`INSERT INTO instance_settings_revisions(revision,snapshot,schema_version,actor_user_id,local_single_user,kind,policy_digest) VALUES(1,$1,1,$2,true,'seed',$3)`, [snapshot, owner, policyDigest]);
   await pool.query(`UPDATE instance_settings_state SET installation_id=$1,active_revision=1,requested_revision=1,mode='database',activation_epoch=1,seed_digest=$2`, [installationId, settingsDigest(snapshot)]);
   await pool.query(`INSERT INTO instance_settings_events(kind,revision,actor_user_id,local_single_user,reason_code) VALUES('seed',1,$1,true,'seed_import')`, [owner]);
-  await migrateDatabase(pool, resolve("database/migrations"));
+  await migrateDatabase(pool, historicalMigrations);
   const policy = await loadLocalSingleUserPolicy(pool, config);
   expect(settingsDigest(policy)).toBe(policyDigest);
   const actor = { userId: owner, localSingleUser: true as const };
@@ -118,7 +119,7 @@ it("upgrades a managed v1 policy only after explicit v2 reissue and matching env
     await managed.query(`INSERT INTO instance_settings_revisions(revision,snapshot,schema_version,actor_user_id,local_single_user,cli_reference,kind,policy_digest) VALUES(1,$1,1,$2,false,'upgrade-test','seed',$3)`, [snapshot, owner, oldDigest]);
     await managed.query(`UPDATE instance_settings_state SET installation_id=$1,active_revision=1,requested_revision=1,mode='database',activation_epoch=1,seed_digest=$2`, [installationId, settingsDigest(snapshot)]);
     await managed.query(`INSERT INTO instance_settings_events(kind,revision,actor_user_id,cli_reference,reason_code) VALUES('seed',1,$1,'upgrade-test','seed_import')`, [owner]);
-    await migrateDatabase(managed, resolve("database/migrations"));
+    await migrateDatabase(managed, historicalMigrations);
     const oldRunning = await loadActiveRuntimeSettings(managed, config, oldPolicy);
     const environmentEnabled = await loadActiveRuntimeSettings(managed, { ...config, castLifecycleEnabled: true }, oldPolicy);
     expect(environmentEnabled.config.castLifecycleEnabled).toBe(true);

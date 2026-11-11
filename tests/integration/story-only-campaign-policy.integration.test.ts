@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -32,9 +33,9 @@ integration("story-only campaign policy migration", () => {
     await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
     const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-pre0094-"));
     try {
-      for (const file of await readdir(resolve("database/migrations"))) {
+      for (const file of await readdir(historicalMigrations)) {
         if (file.endsWith(".sql") && file < "0094_") {
-          await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+          await copyFile(join(historicalMigrations, file), join(migrationDirectory, file));
         }
       }
       await migrateDatabase(pool, migrationDirectory);
@@ -81,7 +82,7 @@ integration("story-only campaign policy migration", () => {
          VALUES ($1,$2,$3,$4,2,'Historic job','completed','story-v1','{}'::jsonb)`,
         [ownerUserId, campaign.id, provider.rows[0]!.id, crypto.randomUUID()]
       );
-      await migrateDatabase(pool, resolve("database/migrations"));
+      await migrateDatabase(pool, historicalMigrations);
       expect(await pool.query("SELECT turn_control_style FROM campaigns WHERE id=$1", [campaign.id])).toMatchObject({ rows: [{ turn_control_style: "flexible_action" }] });
       expect(await pool.query("SELECT settings FROM users WHERE id=$1", [foreign.rows[0]!.id])).toMatchObject({ rows: [{ settings: { defaultTurnControlStyle: "flexible_action", retainedPreference: "keep" } }] });
       expect(await pool.query("SELECT trackers,pending_event_triggers,rpg_stats FROM campaign_state WHERE campaign_id=$1", [campaign.id])).toMatchObject({ rows: [{ trackers: [{ id: "tracker", value: "kept" }], pending_event_triggers: [{ id: "pending", value: "kept" }], rpg_stats: [{ id: "stat", value: 7 }] }] });

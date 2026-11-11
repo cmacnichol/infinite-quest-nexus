@@ -816,15 +816,8 @@ integration("deterministic owner-wide System Archive export", () => {
     const canonical = await pool.query<{ name: string }>(
       "SELECT name FROM schema_migrations ORDER BY name DESC LIMIT 1",
     );
-    const skewed = await pool.query<{ name: string; run_on: Date }>(
-      "SELECT name,run_on FROM schema_migrations WHERE name < $1 ORDER BY name DESC LIMIT 1",
-      [canonical.rows[0]!.name],
-    );
-    const originalRunOn = skewed.rows[0]!.run_on;
-    await pool.query(
-      "UPDATE schema_migrations SET run_on='2099-01-01T00:00:00.000Z' WHERE name=$1",
-      [skewed.rows[0]!.name],
-    );
+    const olderName = "0000_archive_test";
+    await pool.query("INSERT INTO schema_migrations(name,run_on) VALUES($1,'2099-01-01')", [olderName]);
     try {
       const exports = createPostgresSystemArchiveExportRepository(pool, {
         pageSize: 2,
@@ -839,10 +832,7 @@ integration("deterministic owner-wide System Archive export", () => {
       expect(sourceMigration).toBe(canonical.rows[0]!.name);
       expect(destination.latestMigration).toBe(canonical.rows[0]!.name);
     } finally {
-      await pool.query("UPDATE schema_migrations SET run_on=$2 WHERE name=$1", [
-        skewed.rows[0]!.name,
-        originalRunOn,
-      ]);
+      await pool.query("DELETE FROM schema_migrations WHERE name=$1", [olderName]);
     }
   });
 

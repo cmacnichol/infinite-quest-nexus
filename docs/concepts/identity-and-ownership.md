@@ -12,7 +12,7 @@ flowchart LR
   Link --> UUID
 ```
 
-Preserve the idempotent `initial-owner` bootstrap in [the initial migration](https://github.com/cmacnichol/infinite-quest-nexus/blob/main/database/migrations/0001_initial_nexus.sql) and the database-retained UUID. Introduce schema changes through new migrations rather than rewriting applied migration history. Until authentication exists, every API and worker request resolves that record on the server.
+Preserve the idempotent `initial-owner` bootstrap in [the schema baseline](https://github.com/cmacnichol/infinite-quest-nexus/blob/main/database/migrations/0133_baseline.sql) and the database-retained UUID. Introduce schema changes through new migrations rather than rewriting applied migration history. Until authentication exists, every API and worker request resolves that record on the server.
 
 Browser-supplied user identifiers, portable export provenance, and a first login do not establish ownership. Future OIDC must explicitly attach the intended `(issuer, subject)` to the existing internal user without rewriting owned data.
 

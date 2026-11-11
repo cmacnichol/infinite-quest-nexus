@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { randomUUID } from "node:crypto";
 import { buildCastDiscoverySource, validateCastDiscovery } from "../../packages/domain/src/campaign-cast-discovery.js";
 import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
@@ -310,7 +311,7 @@ describe("durable cast discovery", () => {
     expect(await accounting.reserve(input)).toBeNull();
     expect((await pool.query("SELECT count(*)::integer n FROM prepared_text_physical_attempts WHERE logical_reservation->>'jobId'=$1 AND dispatched_at IS NOT NULL", [first.id])).rows[0].n).toBe(4);
     await expect(jobs.retryFailed(f.scope, first.id, { ...request, expectedCastRevision: 99 })).rejects.toMatchObject({ code: "cast_idempotency_conflict" });
-    const migration = await readFile(resolve("database/migrations/0108_campaign_cast_discovery_retry.sql"), "utf8");
+    const migration = await readFile(resolve(historicalMigrations, "0108_campaign_cast_discovery_retry.sql"), "utf8");
     await expect(withTransaction(pool, (client) => client.query(migration.split("-- Down Migration")[1]!))).rejects.toThrow(/Retain cast retry generations/);
   });
   it("captures pinned playable identities with fiction hints and preserves their world provenance", async () => {
@@ -873,7 +874,7 @@ describe("durable cast discovery", () => {
     const f = await fixture(3), untracked = await fixture();
     await f.enqueue(1); const discarded = await f.enqueue(2);
     await pool.query("UPDATE campaign_cast_discovery_jobs SET status='cancelled' WHERE id=$1", [discarded]);
-    const migration = await readFile(resolve("database/migrations/0107_campaign_cast_coverage.sql"), "utf8");
+    const migration = await readFile(resolve(historicalMigrations, "0107_campaign_cast_coverage.sql"), "utf8");
     await withTransaction(pool, async (client) => {
       await client.query(migration.split("-- Down Migration")[1]!);
       await client.query(migration.split("-- Down Migration")[0]!);

@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -179,9 +180,9 @@ integration("Task 14e3c asset-publication identities", () => {
     let isolated: DatabasePool | undefined;
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
-      for (const file of await readdir(resolve("database/migrations"))) {
+      for (const file of await readdir(historicalMigrations)) {
         if (file.endsWith(".sql") && file < "0060_asset_publication_identities.sql") {
-          await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+          await copyFile(join(historicalMigrations, file), join(migrationDirectory, file));
         }
       }
       isolated = createDatabasePool(isolatedUrl.toString(), 4);
@@ -195,7 +196,7 @@ integration("Task 14e3c asset-publication identities", () => {
         [owner, "5".repeat(64)],
       );
       await copyFile(
-        resolve("database/migrations/0060_asset_publication_identities.sql"),
+        resolve(historicalMigrations, "0060_asset_publication_identities.sql"),
         join(migrationDirectory, "0060_asset_publication_identities.sql"),
       );
       await expect(migrateDatabase(isolated, migrationDirectory)).resolves.toEqual([

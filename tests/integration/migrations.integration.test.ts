@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { settingsReleaseMigrations } from "../fixtures/instance-settings-migrations.js";
 import { createHash } from "node:crypto";
 import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -44,9 +45,9 @@ integration("standard database migration runner", () => {
     let isolatedPool: DatabasePool | null = null;
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
-      for (const file of await readdir(resolve("database/migrations"))) {
+      for (const file of await readdir(historicalMigrations)) {
         if (file.endsWith(".sql") && file <= "0100_prepared_text_physical_attempts.sql") {
-          await copyFile(join(resolve("database/migrations"), file), join(beforeDirectory, file));
+          await copyFile(join(historicalMigrations, file), join(beforeDirectory, file));
         }
       }
       isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
@@ -137,7 +138,7 @@ integration("standard database migration runner", () => {
         [ownerUserId, campaign.id, turn.id, profile.id, promptJob.id]
       );
 
-      await expect(migrateDatabase(isolatedPool, resolve("database/migrations")))
+      await expect(migrateDatabase(isolatedPool, historicalMigrations))
         .resolves.toEqual(["0101_durable_campaign_physical_attempt_costs", "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity", "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit", "0114_provider_failure_diagnostics", "0115_story_activity", "0116_illustration_art_style_negative_prompt", "0117_cast_attachment_metadata", "0118_cast_detach_review", "0119_cast_detail_decisions", "0120_cast_workspace_revision", ...settingsReleaseMigrations]);
       expect((await isolatedPool.query<{ local_call_id: string; amount: string; category: string }>(
         `SELECT local_call_id::text,amount::text,category FROM provider_cost_events
@@ -155,7 +156,7 @@ integration("standard database migration runner", () => {
       await expect(isolatedPool.query(
         "SELECT count(*)::int AS count FROM provider_cost_events WHERE local_call_id=$1", [oversizedStoryAttempt]
       )).resolves.toMatchObject({ rows: [{ count: 0 }] });
-      await expect(migrateDatabase(isolatedPool, resolve("database/migrations"))).resolves.toEqual([]);
+      await expect(migrateDatabase(isolatedPool, historicalMigrations)).resolves.toEqual([]);
     } finally {
       if (isolatedPool) await isolatedPool.end();
       await dropTestDatabaseWhenIdle(pool, databaseName);
@@ -172,9 +173,9 @@ integration("standard database migration runner", () => {
     let isolatedPool: DatabasePool | null = null;
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
-      for (const file of await readdir(resolve("database/migrations"))) {
+      for (const file of await readdir(historicalMigrations)) {
         if (file.endsWith(".sql") && file <= "0085_prompt_override_compatibility_acknowledgements.sql") {
-          await copyFile(join(resolve("database/migrations"), file), join(beforeDirectory, file));
+          await copyFile(join(historicalMigrations, file), join(beforeDirectory, file));
           predecessorMigrations.push(file.slice(0, -4));
         }
       }
@@ -197,7 +198,7 @@ integration("standard database migration runner", () => {
         [ownerUserId, content, contentHash]
       );
 
-      await expect(migrateDatabase(isolatedPool, resolve("database/migrations")))
+      await expect(migrateDatabase(isolatedPool, historicalMigrations))
         .resolves.toEqual([
           "0086_prompt_override_protocol_acknowledgements",
           "0087_chronicle_query_cache_access_sequence",
@@ -548,7 +549,7 @@ integration("standard database migration runner", () => {
   });
 
   it("validates expanded portable artifact constraints before the short final swap", async () => {
-    const migration = await readFile(resolve("database/migrations/0078_system_archive_jobs.sql"), "utf8");
+    const migration = await readFile(resolve(historicalMigrations, "0078_system_archive_jobs.sql"), "utf8");
     expect(migration.startsWith("-- infinitequest:migration-mode=phased-transactions-v1\n")).toBe(true);
     expect(migration.match(/^-- infinitequest:transaction-boundary$/gmu)).toHaveLength(2);
     const addKind = migration.indexOf("portable_export_artifacts_export_kind_check_system_archive");
@@ -1757,7 +1758,7 @@ END;
     let isolatedPool: DatabasePool | null = null;
     try {
       await copyFile(
-        resolve("database/migrations/0001_initial_nexus.sql"),
+        resolve(historicalMigrations, "0001_initial_nexus.sql"),
         join(migrationDirectory, "0001_initial_nexus.sql")
       );
       await pool.query(`CREATE DATABASE ${databaseName}`);
@@ -1797,9 +1798,9 @@ END;
     let isolatedPool: DatabasePool | null = null;
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
-      for (const file of await readdir(resolve("database/migrations"))) {
+      for (const file of await readdir(historicalMigrations)) {
         if (file.endsWith(".sql") && file < `${migrationName}.sql`) {
-          await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+          await copyFile(join(historicalMigrations, file), join(migrationDirectory, file));
           predecessorMigrations.push(file.slice(0, -4));
         }
       }
@@ -1852,7 +1853,7 @@ END;
         [ownerUserId, previewTokenHash]
       );
 
-      const migrationSql = await readFile(resolve(`database/migrations/${migrationName}.sql`), "utf8");
+      const migrationSql = await readFile(resolve(historicalMigrations, `${migrationName}.sql`), "utf8");
       await writeFile(
         join(failingMigrationDirectory, `${migrationName}.sql`),
         migrationSql.replace("\n-- Down Migration\n", "\nSELECT 1 / 0;\n\n-- Down Migration\n")
@@ -1869,7 +1870,7 @@ END;
       await expect(isolatedPool.query("SELECT name FROM schema_migrations WHERE name = $1", [migrationName]))
         .resolves.toMatchObject({ rows: [] });
 
-      await expect(migrateDatabase(isolatedPool, resolve("database/migrations"))).resolves.toEqual([
+      await expect(migrateDatabase(isolatedPool, historicalMigrations)).resolves.toEqual([
         migrationName,
         "0054_private_filesystem_authority",
         "0055_private_portable_repository_guards",
@@ -1997,7 +1998,7 @@ END;
         staged_archive_path: "staging/legacy.zip"
       }]);
 
-      await expect(migrateDatabase(isolatedPool, resolve("database/migrations"))).resolves.toEqual([]);
+      await expect(migrateDatabase(isolatedPool, historicalMigrations)).resolves.toEqual([]);
       await expect(isolatedPool.query<{ count: string }>(
         "SELECT count(*)::text AS count FROM asset_metadata_backfill_jobs WHERE asset_id = $1",
         [incompleteAsset.rows[0]!.id]
@@ -2153,9 +2154,9 @@ END;
     let isolatedPool: DatabasePool | null = null;
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
-      for (const file of await readdir(resolve("database/migrations"))) {
+      for (const file of await readdir(historicalMigrations)) {
         if (file.endsWith(".sql") && file < "0017_campaign_characters.sql") {
-          await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+          await copyFile(join(historicalMigrations, file), join(migrationDirectory, file));
         }
       }
       isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
@@ -2179,7 +2180,7 @@ END;
         "INSERT INTO campaigns (owner_user_id, world_version_id, title) VALUES ($1,$2,'Existing Campaign') RETURNING id",
         [owner.rows[0]!.id, version.rows[0]!.id]
       );
-      await migrateDatabase(isolatedPool, resolve("database/migrations"));
+      await migrateDatabase(isolatedPool, historicalMigrations);
       const backfilled = await isolatedPool.query<any>(
         "SELECT selected_character_id, character_snapshot FROM campaigns WHERE id = $1",
         [campaign.rows[0]!.id]
@@ -2214,9 +2215,9 @@ END;
     let isolatedPool: DatabasePool | null = null;
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
-      for (const file of await readdir(resolve("database/migrations"))) {
+      for (const file of await readdir(historicalMigrations)) {
         if (file.endsWith(".sql") && file < "0036_structured_character_profiles.sql") {
-          await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+          await copyFile(join(historicalMigrations, file), join(migrationDirectory, file));
         }
       }
       isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
@@ -2254,7 +2255,7 @@ END;
         [owner.rows[0]!.id, version.rows[0]!.id, JSON.stringify(characterSnapshot)]
       );
 
-      await migrateDatabase(isolatedPool, resolve("database/migrations"));
+      await migrateDatabase(isolatedPool, historicalMigrations);
 
       const migrated = await isolatedPool.query<any>(
         `SELECT character_snapshot, character_profile, character_profile_revision
@@ -2294,9 +2295,9 @@ END;
     let isolatedPool: DatabasePool | null = null;
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
-      for (const file of await readdir(resolve("database/migrations"))) {
+      for (const file of await readdir(historicalMigrations)) {
         if (file.endsWith(".sql") && file <= "0071_world_share_links.sql") {
-          await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+          await copyFile(join(historicalMigrations, file), join(migrationDirectory, file));
         }
       }
       isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
@@ -2382,7 +2383,7 @@ END;
       );
 
       await copyFile(
-        resolve(`database/migrations/${migrationName}.sql`),
+        resolve(historicalMigrations, `${migrationName}.sql`),
         join(migrationDirectory, `${migrationName}.sql`)
       );
       await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([migrationName]);
@@ -2410,7 +2411,7 @@ END;
         .digest("hex");
 
       await copyFile(
-        resolve(`database/migrations/${fencingMigrationName}.sql`),
+        resolve(historicalMigrations, `${fencingMigrationName}.sql`),
         join(migrationDirectory, `${fencingMigrationName}.sql`)
       );
       await expect(migrateDatabase(isolatedPool, migrationDirectory)).resolves.toEqual([fencingMigrationName]);
@@ -2811,9 +2812,9 @@ END;
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
       // A database that predates the incremental-indexing work: migrated only through 0075.
-      for (const file of await readdir(resolve("database/migrations"))) {
+      for (const file of await readdir(historicalMigrations)) {
         if (file.endsWith(".sql") && file < "0076_") {
-          await copyFile(join(resolve("database/migrations"), file), join(beforeDirectory, file));
+          await copyFile(join(historicalMigrations, file), join(beforeDirectory, file));
         }
       }
       isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
@@ -2900,7 +2901,7 @@ END;
            FROM chronicle_memory_chunks ORDER BY chunk_kind`
       );
 
-      const applied = await migrateDatabase(isolatedPool, resolve("database/migrations"));
+      const applied = await migrateDatabase(isolatedPool, historicalMigrations);
       expect(applied).toEqual([
         "0076_chronicle_chunk_skip_reasons",
         "0077_chronicle_chunk_processed_signature",

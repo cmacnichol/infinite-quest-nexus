@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runner, type RunnerOption } from "node-pg-migrate";
 import type { DatabasePool } from "./pool.js";
@@ -339,6 +339,30 @@ async function appliedMigrationCount(pool: DatabasePool): Promise<number> {
   }
 }
 
+// SHA-256 of the 133 pre-baseline filenames without .sql, sorted and joined with LF.
+const PRE_BASELINE_LEDGER_DIGEST = "6b09ca49d4bf4669d8d4f799ec991ca856bb3851b99a206dabbe0c76f1dcb714";
+
+async function adoptCompletedBaseline(pool: DatabasePool, migrationDirectory: string): Promise<void> {
+  const files = await readdir(migrationDirectory);
+  if (!files.includes("0133_baseline.sql")) return;
+  if (await appliedMigrationCount(pool) === 0) return;
+
+  // The outer migration lock serializes startup. The single statement commits
+  // the ledger replacement atomically and never runs DDL on tenant tables.
+  await pool.query(`
+    WITH replaced AS (
+      DELETE FROM schema_migrations WHERE (
+        SELECT count(*) = 133 AND
+          encode(sha256(convert_to(string_agg(name, chr(10) ORDER BY name COLLATE "C"), 'UTF8')), 'hex') = $1
+        FROM schema_migrations
+      )
+      RETURNING run_on
+    )
+    INSERT INTO schema_migrations(name, run_on)
+    SELECT '0133_baseline', max(run_on) FROM replaced HAVING count(*) = 133
+  `, [PRE_BASELINE_LEDGER_DIGEST]);
+}
+
 export async function pendingDatabaseMigrations(pool: DatabasePool, migrationDirectory: string): Promise<string[]> {
   return runMigrations(pool, migrationDirectory, true);
 }
@@ -349,6 +373,7 @@ export async function migrateDatabase(
   options: MigrationRunOptions = {}
 ): Promise<string[]> {
   return withMigrationLock(pool, async () => {
+    await adoptCompletedBaseline(pool, migrationDirectory);
     const pending = await pendingDatabaseMigrations(pool, migrationDirectory);
     if (pending.length === 0) return [];
     const maintenance = pending.filter((name) => name.endsWith(MAINTENANCE_SUFFIX));

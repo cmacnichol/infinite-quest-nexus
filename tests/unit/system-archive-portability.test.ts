@@ -14,7 +14,7 @@ async function readCreatedTableNames(directory: string): Promise<string[]> {
     const source = await readFile(join(directory, migration), "utf8");
     const createStatements = source.match(/CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+[^;]+;/gi) ?? [];
     for (const statement of createStatements) {
-      const match = /^CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+([a-z_][a-z0-9_]*)\s*\(/i.exec(statement.trim());
+      const match = /^CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+(?:public\.)?([a-z_][a-z0-9_]*)\s*\(/i.exec(statement.trim());
       if (!match) throw new Error(`Migration ${migration} has a dynamic or unsupported CREATE TABLE identifier.`);
       const table = match[1]!.toLowerCase();
       if (names.has(table)) throw new Error(`Migration inventory contains duplicate CREATE TABLE identifier: ${table}.`);

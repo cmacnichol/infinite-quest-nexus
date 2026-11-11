@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
@@ -104,7 +105,7 @@ integration("Story Memory enrollment", () => {
               review_mode=CASE campaign_id WHEN $3 THEN 'observe' ELSE 'off' END`,
       [standard.campaignId, enhanced.campaignId, observe.campaignId]
     );
-    const migration = await readFile(resolve("database/migrations/0096_campaign_memory_defaults.sql"), "utf8");
+    const migration = await readFile(resolve(historicalMigrations, "0096_campaign_memory_defaults.sql"), "utf8");
     await pool.query(migration.slice(0, migration.indexOf("CREATE FUNCTION")));
     await expect(pool.query<{ capability: string; review_mode: string }>(
       "SELECT capability,review_mode FROM campaign_story_memory_enrollments WHERE campaign_id=ANY($1::uuid[]) ORDER BY campaign_id",
