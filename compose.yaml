@@ -61,8 +61,13 @@ services:
       TEXT_PROVIDER_CONCURRENCY: ${TEXT_PROVIDER_CONCURRENCY:-2}
       PROVIDER_NETWORK_ALLOWLIST: ${PROVIDER_NETWORK_ALLOWLIST:-}
       CSP_IMAGE_ALLOWED_ORIGINS: ${CSP_IMAGE_ALLOWED_ORIGINS:-}
+      # Empty means protected. A database initialized as local-single-user will not boot without
+      # this mode, so it is read from .env and survives `docker compose -f compose.yaml` alone.
+      INSTANCE_SETTINGS_ACCESS_MODE: ${INSTANCE_SETTINGS_ACCESS_MODE:-}
+      COMPOSE_APP_BIND_ADDRESS: ${APP_BIND_ADDRESS:-0.0.0.0}
     ports:
-      - "${APP_PORT:-8080}:8080"
+      # Set APP_BIND_ADDRESS=127.0.0.1 together with local-single-user mode (it has no login).
+      - "${APP_BIND_ADDRESS:-0.0.0.0}:${APP_PORT:-8080}:8080"
     volumes:
       - infinitequest-assets:/var/lib/infinitequest/assets
       - infinitequest-secrets:/var/lib/infinitequest/secrets
@@ -91,5 +96,6 @@ volumes:
   infinitequest-secrets:
 
 networks:
-  infinitequest-backend:
-    name: infinitequest-backend
+  # No fixed `name:`: Compose scopes it as <project>_infinitequest-backend. Overlays must not
+  # rename it, or switching file sets destroys the network under the reused postgres container.
+  infinitequest-backend: {}

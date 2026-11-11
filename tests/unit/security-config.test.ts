@@ -17,6 +17,8 @@ const securitySettingNames = [
   "API_CONCURRENCY_PROVIDER_REQUESTS",
   "API_CONCURRENCY_IMPORT_REQUESTS",
   "TRUST_PROXY_HOPS",
+  "INSTANCE_SETTINGS_ACCESS_MODE",
+  "COMPOSE_APP_BIND_ADDRESS",
   "LEGACY_WEB_ROOT",
   "NEXT_WEB_ROOT",
   "APP_ROLE",
@@ -53,6 +55,18 @@ function minimumEnvironment(): void {
 }
 
 describe("runtime security configuration", () => {
+  it("requires loopback publishing for local single-user Compose deployments", () => {
+    minimumEnvironment();
+    process.env.APP_ROLE = "all";
+    process.env.INSTANCE_SETTINGS_ACCESS_MODE = "local-single-user";
+    process.env.COMPOSE_APP_BIND_ADDRESS = "0.0.0.0";
+    expect(() => loadRuntimeConfig()).toThrow("local-single-user Compose deployments require APP_BIND_ADDRESS=127.0.0.1");
+    process.env.COMPOSE_APP_BIND_ADDRESS = "127.0.0.1";
+    expect(loadRuntimeConfig().instanceSettingsAccessMode).toBe("local-single-user");
+    process.env.INSTANCE_SETTINGS_ACCESS_MODE = "protected";
+    process.env.COMPOSE_APP_BIND_ADDRESS = "0.0.0.0";
+    expect(loadRuntimeConfig().instanceSettingsAccessMode).toBe("protected");
+  });
   it("requires discovery and editing before opting into cast context and history scans", () => {
     minimumEnvironment();
     expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castBackfillEnabled: false, historyCoverageEnabled: true });

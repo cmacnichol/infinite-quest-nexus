@@ -226,6 +226,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
   const accessMode = process.env.INSTANCE_SETTINGS_ACCESS_MODE?.trim() || "protected";
   if (accessMode !== "protected" && accessMode !== "local-single-user") throw new Error("INSTANCE_SETTINGS_ACCESS_MODE must be protected or local-single-user.");
   if (accessMode === "local-single-user" && roleValue !== "all") throw new Error("local-single-user requires APP_ROLE=all.");
+  if (accessMode === "local-single-user" && process.env.COMPOSE_APP_BIND_ADDRESS !== undefined && process.env.COMPOSE_APP_BIND_ADDRESS !== "127.0.0.1") throw new Error("local-single-user Compose deployments require APP_BIND_ADDRESS=127.0.0.1.");
   if (accessMode === "local-single-user" && requiredIntegerSetting("TRUST_PROXY_HOPS", 0, 0, 16) !== 0) throw new Error("local-single-user requires TRUST_PROXY_HOPS=0.");
   const databaseUrl = secretSetting("DATABASE_URL");
   if (!databaseUrl) throw new Error("DATABASE_URL is required.");

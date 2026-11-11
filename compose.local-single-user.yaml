@@ -1,10 +1,8 @@
 services:
   infinitequest-app:
     environment:
+      # Pins the mode for explicit `-f` use; set it in .env too so compose.yaml alone keeps it.
       INSTANCE_SETTINGS_ACCESS_MODE: local-single-user
+      COMPOSE_APP_BIND_ADDRESS: 127.0.0.1
     ports: !override
       - "127.0.0.1:${APP_PORT:-8080}:8080"
-
-networks:
-  infinitequest-backend:
-    name: "${COMPOSE_PROJECT_NAME}-local-backend"
