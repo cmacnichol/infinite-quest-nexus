@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
@@ -25,7 +26,7 @@ describe("campaign story-length settings", () => {
   });
 
   it("backfills the authoritative column from legacy storyLength settings", () => {
-    const migration = readFileSync("database/migrations/0013_campaign_story_length.sql", "utf8");
+    const migration = readFileSync(`${historicalMigrations}/0013_campaign_story_length.sql`, "utf8");
     expect(migration).toContain("legacy_settings->>'storyLength'");
     expect(migration).toContain("DEFAULT 'standard'");
     expect(migration).toContain("'brief', 'standard', 'long', 'extended'");

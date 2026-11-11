@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -34,7 +35,7 @@ describe("durable asynchronous image jobs", () => {
   });
 
   it("persists SDK queue position and ETA while removing obsolete REST filter settings", async () => {
-    const migration = await readFile(resolve("database/migrations/0032_sogni_sdk_provider.sql"), "utf8");
+    const migration = await readFile(resolve(historicalMigrations, "0032_sogni_sdk_provider.sql"), "utf8");
     expect(migration).toContain("'sogni_sdk'");
     expect(migration).toContain("configuration - 'sensitiveContentFilter' - 'workflowSafeContentFilterSupported'");
     expect(migration).toContain("provider_queue_position");
@@ -42,7 +43,7 @@ describe("durable asynchronous image jobs", () => {
   });
 
   it("adds poll scheduling, deadlines, progress, and sanitized provider metadata", async () => {
-    const migration = await readFile(resolve("database/migrations/0029_durable_image_provider_jobs.sql"), "utf8");
+    const migration = await readFile(resolve(historicalMigrations, "0029_durable_image_provider_jobs.sql"), "utf8");
 
     for (const column of [
       "remote_job_id",
@@ -58,7 +59,7 @@ describe("durable asynchronous image jobs", () => {
   });
 
   it("extends the durable queue with an owner-scoped world-cover target", async () => {
-    const migration = await readFile(resolve("database/migrations/0030_world_cover_image_jobs.sql"), "utf8");
+    const migration = await readFile(resolve(historicalMigrations, "0030_world_cover_image_jobs.sql"), "utf8");
     const source = await readFile(resolve("services/runtime/src/illustration-image-job-adapter.ts"), "utf8");
 
     expect(migration).toContain("target_type IN ('turn_illustration', 'world_cover')");
@@ -72,7 +73,7 @@ describe("durable asynchronous image jobs", () => {
   });
 
   it("derives segment-scoped image work without mutating accepted turns", async () => {
-    const migration = await readFile(resolve("database/migrations/0033_segmented_turn_illustrations.sql"), "utf8");
+    const migration = await readFile(resolve(historicalMigrations, "0033_segmented_turn_illustrations.sql"), "utf8");
     const imageService = await readFile(resolve("services/runtime/src/illustration-image-job-adapter.ts"), "utf8");
     const segmentService = await readFile(resolve("services/runtime/src/illustration-segment-job-adapter.ts"), "utf8");
     const publication = await readFile(
@@ -99,11 +100,11 @@ describe("durable asynchronous image jobs", () => {
 
   it("preserves the applied refinement-instructions migration before renaming its column", async () => {
     const appliedMigration = await readFile(
-      resolve("database/migrations/0034_campaign_illustration_refinement_instructions.sql"),
+      resolve(historicalMigrations, "0034_campaign_illustration_refinement_instructions.sql"),
       "utf8"
     );
     const renameMigration = await readFile(
-      resolve("database/migrations/0035_campaign_illustration_refinement_prompt.sql"),
+      resolve(historicalMigrations, "0035_campaign_illustration_refinement_prompt.sql"),
       "utf8"
     );
 

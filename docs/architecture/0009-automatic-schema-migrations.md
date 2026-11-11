@@ -19,6 +19,6 @@ The explicit `APP_ROLE=migrate` command remains available for CI, recovery, and 
 - Normal installation and online upgrades require no migration command from the user.
 - Compose has only the application and PostgreSQL containers in steady state.
 - Swarm replicas coordinate through PostgreSQL rather than process-local state or deployment ordering.
-- Applied migration files are immutable; corrections are new forward migrations.
+- Apply corrections as new forward migrations. The 0133 baseline consolidates the completed initial sequence. The migrator adopts it only for databases with the complete historical ledger. See the [baseline deployment procedure](../runbooks/deployment.md#postgresql-baseline-through-migration-0133).
 - Rolling releases must prefer backward-compatible expand/contract schema changes.
 - A maintenance migration deliberately stops normal startup until an operator has backed up the authoritative database and opted in.

@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { createHash } from "node:crypto";
 import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -24,7 +25,7 @@ async function migrateNormalizedAuthorityDown(pool: DatabasePool): Promise<void>
   try {
     await runner({
       dbClient: client,
-      dir: resolve("database/migrations"),
+      dir: historicalMigrations,
       direction: "down",
       // 0065–0069 now follow 0064; reach the normalized-authority down guard
       // rather than stopping at the later additive private seam migrations.
@@ -46,7 +47,7 @@ async function migrateNormalizedAuthorityUp(pool: DatabasePool, count: number): 
   try {
     const applied = await runner({
       dbClient: client,
-      dir: resolve("database/migrations"),
+      dir: historicalMigrations,
       direction: "up",
       count,
       migrationsTable: "schema_migrations",
@@ -81,9 +82,9 @@ integration("Task 14e3e1b normalized publication migration", () => {
     let isolated: DatabasePool | undefined;
     try {
       await pool.query(`CREATE DATABASE ${databaseName}`);
-      for (const file of await readdir(resolve("database/migrations"))) {
+      for (const file of await readdir(historicalMigrations)) {
         if (file.endsWith(".sql") && file < "0064_normalized_asset_publication_requests.sql") {
-          await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
+          await copyFile(join(historicalMigrations, file), join(migrationDirectory, file));
         }
       }
       isolated = createDatabasePool(databaseUrlValue.toString(), 4);

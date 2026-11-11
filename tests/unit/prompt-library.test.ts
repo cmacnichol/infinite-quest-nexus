@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -173,7 +174,7 @@ describe("Prompt Library catalog", () => {
   });
 
   it("enforces campaign ownership with a composite database relationship", () => {
-    const migration = readFileSync("database/migrations/0038_prompt_library_hardening.sql", "utf8");
+    const migration = readFileSync(`${historicalMigrations}/0038_prompt_library_hardening.sql`, "utf8");
     expect(migration).toContain("FOREIGN KEY (campaign_id, owner_user_id)");
     expect(migration).toContain("REFERENCES campaigns(id, owner_user_id)");
   });

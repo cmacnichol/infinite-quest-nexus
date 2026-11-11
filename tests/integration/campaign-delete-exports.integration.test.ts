@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -205,7 +206,7 @@ integration("campaign deletion after portable export", () => {
   it("upgrades existing export records without changing them and restores the old deletion guard on rollback", async () => {
     const scope = await fixture();
     const artifact = await exported(scope, "cleaned");
-    const migration = await readFile(resolve("database/migrations/0083_cleaned_campaign_export_deletion.sql"), "utf8");
+    const migration = await readFile(resolve(historicalMigrations, "0083_cleaned_campaign_export_deletion.sql"), "utf8");
     const [up, down] = migration.split("-- Down Migration");
     const client = await pool.connect();
     try {

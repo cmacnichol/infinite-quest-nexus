@@ -1,3 +1,4 @@
+import { historicalMigrations } from "../fixtures/historical-migrations.js";
 import { settingsReleaseMigrations } from "../fixtures/instance-settings-migrations.js";
 import { createHash } from "node:crypto";
 import { readFile, mkdtemp, readdir, rm } from "node:fs/promises";
@@ -207,7 +208,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
     try {
       const initiallyApplied = await runner({
         dbClient: migrationClient,
-        dir: resolve("database/migrations"),
+        dir: historicalMigrations,
         direction: "up",
         count: 69,
         migrationsTable: "schema_migrations",
@@ -219,7 +220,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
       expect(initiallyApplied.at(-1)?.name).toBe("0069_import_progress_status");
       const reverted = await runner({
         dbClient: migrationClient,
-        dir: resolve("database/migrations"),
+        dir: historicalMigrations,
         direction: "down",
         count: 15,
         migrationsTable: "schema_migrations",
@@ -278,7 +279,7 @@ integration("Task 14e2c additive adapter contract matrix", () => {
   afterAll(async () => {
     try {
       await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-      await expect(migrateDatabase(pool, resolve("database/migrations"))).resolves.toEqual([
+      await expect(migrateDatabase(pool, historicalMigrations)).resolves.toEqual([
         "0055_private_portable_repository_guards",
         "0056_private_filesystem_current_clock",
         "0057_finalized_asset_delivery_authority",

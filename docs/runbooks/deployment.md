@@ -35,6 +35,14 @@ Do not use the validation override for multi-node production. A future multi-nod
 
 Compose credentials may come from an ignored local environment/secrets file with a committed redacted example. Swarm credentials must use Swarm secrets. The application should support file-based secret inputs so the same image can consume either mechanism without placing credentials in image layers or source control.
 
+## PostgreSQL baseline through migration 0133
+
+Fresh installations apply `0133_baseline.sql` once. Start new migrations at `0134`. The baseline includes the extensions, schema, initial owner and installation Settings singleton.
+
+Before upgrading the existing tenant, take a restorable backup and drain the old services. Run the new migrate or combined role first. Under the normal migration lock it recognizes the complete original ledger by the digest of all 133 names and atomically replaces those rows with `0133_baseline`, using the latest recorded application time. This operation touches only migration metadata. Partially migrated databases must reach 0133 using the prior release first. Workers wait for the migrator to finish. Verify `SELECT name FROM schema_migrations ORDER BY id` shows the baseline on this release, then start the new services. Re-preview pending System Archive imports after the migration watermark changes.
+
+Rolling back to a binary that expects the original ledger requires the matching pre-upgrade backup. Account for intervening writes before restoring it. Historical SQL used by regression tests is packaged only as a test fixture.
+
 ## Deployment and Operations
 
 Provider failure evidence uses the additive nullable physical-attempt diagnostic column. Back up first; deploy the migration, compatible API/workers, then frontend. Retain the column and captured rows on rollback. Validate a naturally occurring failure or an explicitly authorized copied-campaign canary; implementation does not authorize deployment or paid probing. Follow the [provider failure diagnostics runbook](./provider-failure-diagnostics.md) for scoped read-only queries and request-ID correlation.
