@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { refreshCastChronicleMetadata } from "./campaign-cast-chronicle-metadata.js";
 import { castGenerationSnapshotSchema, castGenerationSnapshotFingerprint, type CastGenerationSnapshot } from "../../contracts/src/campaign-cast-context.js";
 import { readCastDiscoveryStatus } from "./campaign-cast-status-repository.js";
+import { createCastReviewDecisionRepository, readActiveReviewDismissals, isReviewDismissed } from "./campaign-cast-review-decision-repository.js";
 import { currentCastReviewCandidates } from "./campaign-cast-current-review.js";
 import { pendingCastDetailSql } from "./campaign-cast-review-sql.js";
 import { createCastCandidateRepository } from "./campaign-cast-candidate-repository.js";
@@ -1325,6 +1326,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
     edit: (scope, id, request) => write(scope, z.uuid().parse(id), request),
     discoveryStatus: (scope) => readCastDiscoveryStatus(pool, scope, options.discoveryEnabled === true),
     ...createCastCandidateRepository(pool, options.editingEnabled === true, options.castPresetsEnabled === true),
+    ...createCastReviewDecisionRepository(pool, options.editingEnabled === true),
     async workspaceRead(rawScope, statusOnly = false) {
       const scope = castScopeSchema.parse(rawScope);
       return withTransaction(pool, async (client) => {
@@ -1333,7 +1335,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         // operational revision; authority and source changes retain their own fences.
         const readFingerprint = async () => {
           const row = (await client.query(`SELECT c.active_turn_number,c.world_version_id,c.character_profile_revision,
-            c.selected_character_id,s.revision,s.timeline_revision,s.workspace_revision,e.capability
+            c.selected_character_id,s.revision,s.timeline_revision,s.workspace_revision,e.capability, (SELECT revision FROM campaign_cast_review_sequences r WHERE r.campaign_id=c.id AND r.owner_user_id=c.owner_user_id) AS review_revision
             FROM campaigns c LEFT JOIN campaign_cast_state s ON s.campaign_id=c.id AND s.owner_user_id=c.owner_user_id
             LEFT JOIN campaign_story_memory_enrollments e ON e.campaign_id=c.id AND e.owner_user_id=c.owner_user_id
             WHERE c.id=$1 AND c.owner_user_id=$2`, [scope.campaignId, scope.ownerUserId])).rows[0];
@@ -1355,11 +1357,11 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
           turnNumber: gap.turnNumber, jobId: gap.jobId, scanId: recoveryJob?.scan_id ?? null, scanStatus: recoveryJob?.scan_status ?? null } : undefined;
         const enrollment = (await client.query("SELECT capability FROM campaign_story_memory_enrollments WHERE campaign_id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows[0];
         const projected = await snapshotProjection(client, scope, campaign, state, boundary);
-        const rows = (await client.query(`SELECT p.proposal,p.resolution_receipt,p.detail_decisions,
+        const rows = (await client.query(`SELECT p.source,p.proposal,p.resolution_receipt,p.detail_decisions,
           ARRAY(SELECT (pending.item->>'index')::integer FROM (${pendingCastDetailSql}) pending) AS pending_indexes FROM campaign_cast_discovery_candidates p
           JOIN effective_turn_narrations n ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
           WHERE p.campaign_id=$1 AND p.owner_user_id=$2 AND p.status='pending'
-            AND (p.source->>'timelineRevision')::integer=$3 AND n.turn_number<=$4
+            AND (p.source->>'timelineRevision')::integer=$3 AND n.turn_number=(p.source->>'turnNumber')::integer AND n.turn_number<=$4
             AND n.correction_revision=(p.source->>'narrationRevision')::integer
             AND encode(digest(n.effective_narration,'sha256'),'hex')=p.source->>'sourceHash'`,
         [scope.campaignId, scope.ownerUserId, boundary.timelineRevision, boundary.turnNumber])).rows;
@@ -1371,12 +1373,14 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         };
         let identities = 0, details = 0, conflicts = 0;
         const byId = new Map(projected.snapshot.characters.map(person => [person.id, person]));
+        const activeReview = await readActiveReviewDismissals(client, scope);
         for (const row of rows) {
+          if (!row.resolution_receipt && isReviewDismissed(activeReview, row.source, { kind: "identity", proposal: row.proposal })) continue;
           let id = row.resolution_receipt?.result?.character?.id ?? row.proposal?.existingCharacterId;
           let person = byId.get(id);
           while (person?.mergedIntoCharacterId) { id = person.mergedIntoCharacterId; person = byId.get(id); }
           if (person?.removed) continue;
-          const pendingIndexes = row.pending_indexes.filter((index: number) => !isSeededFixedCandidateHidden(
+          const pendingIndexes = row.pending_indexes.filter((index: number) => !isReviewDismissed(activeReview, row.source, { kind: "detail", proposal: row.proposal, observation: row.proposal.observations[index] }) && !isSeededFixedCandidateHidden(
             person?.campaignProfile && characterProfileSchema.parse(person.campaignProfile), row.proposal.observations[index].field));
           // Count the same actionable identity proposals that the review list returns.
           if (!row.resolution_receipt && person?.ignored) continue;
@@ -1396,7 +1400,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
           FROM campaign_cast_discovery_candidates p JOIN effective_turn_narrations n
             ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
           WHERE p.campaign_id=$1 AND p.owner_user_id=$2 AND p.status<>'cancelled'
-            AND (p.source->>'timelineRevision')::integer=$3 AND n.turn_number<=$4
+            AND (p.source->>'timelineRevision')::integer=$3 AND n.turn_number=(p.source->>'turnNumber')::integer AND n.turn_number<=$4
             AND n.correction_revision=(p.source->>'narrationRevision')::integer
             AND encode(digest(n.effective_narration,'sha256'),'hex')=p.source->>'sourceHash'`,
         [scope.campaignId, scope.ownerUserId, boundary.timelineRevision, boundary.turnNumber])).rows[0];

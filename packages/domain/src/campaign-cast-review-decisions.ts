@@ -3,18 +3,24 @@ import { normalizeCastAlias } from "../../contracts/src/campaign-cast.js";
 import type { CastDiscoveryCandidate, CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
 
 export type ReviewTarget = { kind: "identity"; proposal: CastDiscoveryCandidate }
-  | { kind: "detail"; observation: CastDiscoveryCandidate["observations"][number] };
+  | { kind: "detail"; proposal: CastDiscoveryCandidate; observation: CastDiscoveryCandidate["observations"][number] };
+
+/** Canonical source and target used for collision-safe comparison, independently of their hash. */
+export function canonicalReviewTarget(source: CastDiscoverySource, target: ReviewTarget): string {
+  const evidence = (item: { paragraphId: string; quote: string }) => [item.paragraphId, item.quote];
+  const proposal = target.proposal;
+  const identity = [normalizeCastAlias(proposal.name), [...new Set(proposal.aliases.map(normalizeCastAlias))].sort(),
+    proposal.existingCharacterId, proposal.identityEvidence.map(evidence).sort((a, b) => JSON.stringify(a) < JSON.stringify(b) ? -1 : JSON.stringify(a) > JSON.stringify(b) ? 1 : 0)];
+  const payload = target.kind === "identity" ? ["identity", identity]
+    : ["detail", identity, target.observation.field, target.observation.value, target.observation.mode,
+      target.observation.speakerCharacterId, ...evidence(target.observation)];
+  return JSON.stringify(["cast-review-v2", source.scope.ownerUserId, source.scope.campaignId,
+    source.turnId, source.narrationRevision, source.sourceHash, payload]);
+}
 
 /** Stable across candidate/job IDs and timeline revisions; retained-source validity is checked separately. */
 export function reviewTargetFingerprint(source: CastDiscoverySource, target: ReviewTarget): string {
-  const evidence = (item: { paragraphId: string; quote: string }) => [item.paragraphId, item.quote];
-  const payload = target.kind === "identity"
-    ? ["identity", normalizeCastAlias(target.proposal.name), [...new Set(target.proposal.aliases.map(normalizeCastAlias))].sort(),
-      target.proposal.existingCharacterId, target.proposal.identityEvidence.map(evidence).sort((a, b) => JSON.stringify(a) < JSON.stringify(b) ? -1 : JSON.stringify(a) > JSON.stringify(b) ? 1 : 0)]
-    : ["detail", target.observation.field, target.observation.value, target.observation.mode,
-      target.observation.speakerCharacterId, ...evidence(target.observation)];
-  return createHash("sha256").update(JSON.stringify(["cast-review-v1", source.scope.ownerUserId, source.scope.campaignId,
-    source.turnId, source.narrationRevision, source.sourceHash, payload])).digest("hex");
+  return createHash("sha256").update(canonicalReviewTarget(source, target)).digest("hex");
 }
 
 /** Fold in sequence order; restores only cancel the dismissal they reference. */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { reviewDecisionRequestSchema } from "../../packages/contracts/src/campaign-cast-review-decisions.js";
-import { activeReviewDismissals, reviewTargetFingerprint } from "../../packages/domain/src/campaign-cast-review-decisions.js";
+import { activeReviewDismissals, canonicalReviewTarget, reviewTargetFingerprint } from "../../packages/domain/src/campaign-cast-review-decisions.js";
 import type { CastDiscoveryCandidate, CastDiscoverySource } from "../../packages/contracts/src/campaign-cast-discovery.js";
 
 const uuid = "00000000-0000-4000-8000-000000000001";
@@ -21,6 +21,12 @@ describe("source-scoped review decisions", () => {
     expect(reviewTargetFingerprint(source, { kind: "identity", proposal: { ...proposal, localKey: other, aliases: [...proposal.aliases].reverse() } })).toBe(original);
     expect(reviewTargetFingerprint({ ...source, sourceHash: "b".repeat(64) }, { kind: "identity", proposal })).not.toBe(original);
   });
+  it("compares canonical targets and source independently of their hashes", () => {
+    const target = { kind: "identity" as const, proposal };
+    expect(canonicalReviewTarget(source, target)).toEqual(canonicalReviewTarget({ ...source, timelineRevision: 5 }, { kind: "identity", proposal: { ...proposal, localKey: other, aliases: [...proposal.aliases].reverse() } }));
+    expect(canonicalReviewTarget(source, target)).not.toEqual(canonicalReviewTarget({ ...source, sourceHash: "b".repeat(64) }, target));
+    expect(canonicalReviewTarget(source, { kind: "detail", proposal, observation: proposal.observations[0]! })).not.toEqual(canonicalReviewTarget(source, { kind: "detail", proposal, observation: { ...proposal.observations[0]!, value: "Captain " } }));
+  });
   it("restores only the referenced dismissal", () => {
     const decisions = [
       { id: "a", action: "dismiss" as const, restoresDecisionId: null },
@@ -31,8 +37,9 @@ describe("source-scoped review decisions", () => {
   });
   it("retains value whitespace and speaker in detail fingerprints", () => {
     const observation = proposal.observations[0]!;
-    const original = reviewTargetFingerprint(source, { kind: "detail", observation });
-    expect(reviewTargetFingerprint(source, { kind: "detail", observation: { ...observation, value: "Captain " } })).not.toBe(original);
-    expect(reviewTargetFingerprint(source, { kind: "detail", observation: { ...observation, speakerCharacterId: other } })).not.toBe(original);
+    const original = reviewTargetFingerprint(source, { kind: "detail", proposal, observation });
+    expect(reviewTargetFingerprint(source, { kind: "detail", proposal: { ...proposal, name: "Bea" }, observation })).not.toBe(original);
+    expect(reviewTargetFingerprint(source, { kind: "detail", proposal, observation: { ...observation, value: "Captain " } })).not.toBe(original);
+    expect(reviewTargetFingerprint(source, { kind: "detail", proposal, observation: { ...observation, speakerCharacterId: other } })).not.toBe(original);
   });
 });

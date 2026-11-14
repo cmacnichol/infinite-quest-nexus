@@ -14,6 +14,7 @@ import { normalizeEntityTerm } from "../../domain/src/entity-references.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import { initializeCastWithClient, applyCastBatchWithClient, seedCampaignCastWithClient } from "./campaign-cast-repository.js";
 import { withTransaction, type DatabasePool } from "./pool.js";
+import { readActiveReviewDismissals, isReviewDismissed, readReviewRevision } from "./campaign-cast-review-decision-repository.js";
 import { pendingCastDetailSql } from "./campaign-cast-review-sql.js";
 
 export function createCastCandidateRepository(pool: DatabasePool, editingEnabled: boolean, castPresetsEnabled = false) {
@@ -31,23 +32,29 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
           for (const historical of cast.characters.filter(item => item.mergedIntoCharacterId === person.id)) hiddenFields[historical.id] = hiddenFields[person.id]!;
         }
         const visiblePending = `${pendingCastDetailSql} AND NOT COALESCE(
-          ($11::jsonb -> (p.resolution_receipt #>> '{result,character,id}'))
+          ($10::jsonb -> (p.resolution_receipt #>> '{result,character,id}'))
           ? (p.proposal->'observations'->((item.value->>'index')::integer)->>'field'), false)`;
-        const rows = (await client.query(`SELECT p.id,p.reason,p.proposal,p.source,p.resolution_receipt,p.detail_decisions,n.effective_narration,
+        const active = await readActiveReviewDismissals(client, scope), reviewRevision = await readReviewRevision(client, scope);
+        const allRows = (await client.query(`SELECT p.id,p.reason,p.proposal,p.source,p.resolution_receipt,p.detail_decisions,n.effective_narration,
           ARRAY(SELECT (pending.item->>'index')::integer FROM (${visiblePending}) pending) AS pending_indexes FROM campaign_cast_discovery_candidates p
           JOIN effective_turn_narrations n ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
           WHERE p.campaign_id=$1 AND p.owner_user_id=$2 AND p.status='pending' AND ($3::uuid IS NULL OR p.id>$3)
             AND (p.resolution_receipt IS NULL OR EXISTS (${visiblePending}))
-            AND ($7::boolean=false OR (p.resolution_receipt IS NULL
-              AND NOT (COALESCE(p.proposal->>'existingCharacterId','')=ANY($8::text[]))))
-            AND ($9::boolean=false OR (p.resolution_receipt IS NOT NULL AND EXISTS (${visiblePending})))
-            AND ($10::boolean=false OR p.resolution_receipt IS NOT NULL OR NOT (COALESCE(p.proposal->>'existingCharacterId','')=ANY($8::text[])))
-            AND (p.source->>'timelineRevision')::integer=$4 AND n.turn_number<=$5
+            AND ($6::boolean=false OR (p.resolution_receipt IS NULL
+              AND NOT (COALESCE(p.proposal->>'existingCharacterId','')=ANY($7::text[]))))
+            AND ($8::boolean=false OR (p.resolution_receipt IS NOT NULL AND EXISTS (${visiblePending})))
+            AND ($9::boolean=false OR p.resolution_receipt IS NOT NULL OR NOT (COALESCE(p.proposal->>'existingCharacterId','')=ANY($7::text[])))
+            AND (p.source->>'timelineRevision')::integer=$4 AND n.turn_number=(p.source->>'turnNumber')::integer AND n.turn_number<=$5
             AND n.correction_revision=(p.source->>'narrationRevision')::integer
             AND encode(digest(n.effective_narration,'sha256'),'hex')=p.source->>'sourceHash'
-            AND NOT (COALESCE(p.resolution_receipt #>> '{result,character,id}', p.proposal->>'existingCharacterId', '')=ANY($12::text[]))
-          ORDER BY p.id LIMIT $6`, [scope.campaignId, scope.ownerUserId, query.cursor ?? null, cast.boundary.timelineRevision,
-          cast.boundary.turnNumber, query.limit + 1, query.view === "matches", cast.characters.filter(person => person.ignored).map(person => person.id), query.view === "details", query.view === "review", JSON.stringify(hiddenFields), cast.characters.filter(person => cast.characters.find(target => target.id === effective(person.id))?.removed).map(person => person.id)])).rows;
+            AND NOT (COALESCE(p.resolution_receipt #>> '{result,character,id}', p.proposal->>'existingCharacterId', '')=ANY($11::text[]))
+          ORDER BY p.id`, [scope.campaignId, scope.ownerUserId, query.cursor ?? null, cast.boundary.timelineRevision,
+          cast.boundary.turnNumber, query.view === "matches", cast.characters.filter(person => person.ignored).map(person => person.id), query.view === "details", query.view === "review", JSON.stringify(hiddenFields), cast.characters.filter(person => cast.characters.find(target => target.id === effective(person.id))?.removed).map(person => person.id)])).rows;
+        const rows = allRows.filter(row => {
+          if (!row.resolution_receipt && isReviewDismissed(active, row.source, { kind: "identity", proposal: row.proposal })) return false;
+          row.pending_indexes = row.pending_indexes.filter((index: number) => !isReviewDismissed(active, row.source, { kind: "detail", proposal: row.proposal, observation: row.proposal.observations[index] }));
+          return !row.resolution_receipt || row.pending_indexes.length > 0;
+        }).slice(0, query.limit + 1);
         const candidates = rows.slice(0, query.limit).map((row) => {
           const saved = row.resolution_receipt ? castCandidateResolutionSchema.parse(row.resolution_receipt.result) : null;
           const pending = saved?.pendingObservations?.filter(item => row.pending_indexes.includes(item.index));
@@ -56,7 +63,8 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
             [person.name, ...person.aliases].some(name => normalizeEntityTerm(name) === normalizeEntityTerm(row.proposal.name))) : [];
           const suggested = exactMatches.length === 1 && !exactMatches[0]!.ignored && !exactMatches[0]!.removed
             && (!row.proposal.existingCharacterId || row.proposal.existingCharacterId === exactMatches[0]!.id) ? exactMatches[0]!.id : undefined;
-          return { id: row.id, reason: row.reason, ...(suggested ? { suggestedCharacterId: suggested } : {}),
+          return { id: row.id, reason: row.reason, reviewRevision,
+            ...(!saved ? { reviewDetails: row.proposal.observations.flatMap((observation: any, observationIndex: number) => isReviewDismissed(active, row.source, { kind: "detail", proposal: row.proposal, observation }) ? [] : [{ observationIndex, observation }]) } : {}), ...(suggested ? { suggestedCharacterId: suggested } : {}),
             proposal: { ...row.proposal, existingCharacterId: effective(row.proposal.existingCharacterId) ?? null, ...(pending ? { observations: pending.map(item => row.proposal.observations[item.index]) } : {}) },
             ...(saved ? { resolvedCharacterId: effective(saved.character.id), details: pending?.map(item => ({ observationIndex: item.index,
               field: row.proposal.observations[item.index].field, value: row.proposal.observations[item.index].value,
