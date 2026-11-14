@@ -45,6 +45,8 @@ describe("System Archive portability registry", () => {
       activity_event_outbox: "operational",
       story_activity_events: "operational",
       campaign_activity_history: "operational",
+      campaign_cast_review_sequences: "operational",
+      campaign_cast_review_decisions: "operational",
       generation_jobs: "operational",
       authoring_jobs: "operational",
       illustration_prompt_jobs: "operational",

@@ -62,6 +62,8 @@ export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
   text_provider_capacity_leases: "operational",
   campaign_cast_discovery_receipts: "operational",
   campaign_cast_discovery_candidates: "operational",
+  campaign_cast_review_sequences: "operational",
+  campaign_cast_review_decisions: "operational",
   campaign_character_profile_edits: "portable_authority",
   campaign_illustration_configs: "portable_authority",
   campaign_memory_configs: "portable_authority",
