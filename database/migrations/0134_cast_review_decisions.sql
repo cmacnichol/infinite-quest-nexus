@@ -36,16 +36,22 @@ CREATE TABLE campaign_cast_review_decisions (
   UNIQUE (id, campaign_id, owner_user_id),
   UNIQUE (campaign_id, owner_user_id, revision),
   UNIQUE (campaign_id, owner_user_id, idempotency_key),
-  FOREIGN KEY (campaign_id, owner_user_id) REFERENCES campaigns(id, owner_user_id),
-  FOREIGN KEY (candidate_id, campaign_id, owner_user_id) REFERENCES campaign_cast_discovery_candidates(id, campaign_id, owner_user_id),
-  FOREIGN KEY (turn_id, campaign_id, owner_user_id) REFERENCES turns(id, campaign_id, owner_user_id),
-  FOREIGN KEY (restores_decision_id, campaign_id, owner_user_id) REFERENCES campaign_cast_review_decisions(id, campaign_id, owner_user_id)
+  FOREIGN KEY (campaign_id, owner_user_id) REFERENCES campaigns(id, owner_user_id) ON DELETE CASCADE,
+  FOREIGN KEY (candidate_id, campaign_id, owner_user_id) REFERENCES campaign_cast_discovery_candidates(id, campaign_id, owner_user_id) ON DELETE CASCADE,
+  FOREIGN KEY (turn_id, campaign_id, owner_user_id) REFERENCES turns(id, campaign_id, owner_user_id) ON DELETE CASCADE,
+  FOREIGN KEY (restores_decision_id, campaign_id, owner_user_id) REFERENCES campaign_cast_review_decisions(id, campaign_id, owner_user_id) ON DELETE CASCADE
 );
 CREATE INDEX cast_review_decisions_fingerprint ON campaign_cast_review_decisions (owner_user_id, campaign_id, target_fingerprint, revision);
 CREATE INDEX cast_review_decisions_restore ON campaign_cast_review_decisions (owner_user_id, campaign_id, restores_decision_id) WHERE restores_decision_id IS NOT NULL;
 CREATE FUNCTION reject_cast_review_decision_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  RAISE EXCEPTION 'cast review decisions are append-only' USING ERRCODE = '55000';
+  IF TG_OP = 'DELETE' AND (
+    NOT EXISTS (SELECT 1 FROM campaigns WHERE id = OLD.campaign_id AND owner_user_id = OLD.owner_user_id)
+    OR NOT EXISTS (SELECT 1 FROM turns WHERE id = OLD.turn_id AND campaign_id = OLD.campaign_id AND owner_user_id = OLD.owner_user_id)
+  ) THEN
+    RETURN OLD;
+  END IF;
+  RAISE EXCEPTION 'cast review decisions are append-only while their source is retained' USING ERRCODE = '55000';
 END $$;
 CREATE TRIGGER cast_review_decision_immutable BEFORE UPDATE OR DELETE ON campaign_cast_review_decisions
   FOR EACH ROW EXECUTE FUNCTION reject_cast_review_decision_mutation();
