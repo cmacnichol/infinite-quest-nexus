@@ -109,6 +109,9 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
         const stillPending = await client.query(`SELECT 1 FROM campaign_cast_discovery_candidates p
           WHERE p.id=$1 AND EXISTS (SELECT 1 FROM (${pendingCastDetailSql}) pending WHERE (pending.item->>'index')::integer=$2)`, [id, request.observationIndex]);
         if (!stillPending.rowCount) throw new CampaignCastError("cast_invalid_request");
+        const activeDismissals = await readActiveReviewDismissals(client, scope);
+        if (isReviewDismissed(activeDismissals, source, { kind: "detail", proposal: row.proposal,
+          observation: row.proposal.observations[request.observationIndex] })) throw new CampaignCastError("cast_invalid_request");
         if ((await client.query("SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1", [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
         const observation = row.proposal.observations[request.observationIndex];
         if (isSeededFixedCandidateHidden(character.campaignProfile && characterProfileSchema.parse(character.campaignProfile), observation.field)) throw new CampaignCastError("cast_fixed_field_override", [{ path: observation.field, code: "fixed_field" }]);

@@ -106,16 +106,20 @@ export function createCastReviewDecisionRepository(pool: DatabasePool, editingEn
       const scope = castScopeSchema.parse(rawScope), query = dismissedReviewQuerySchema.parse(input);
       return withTransaction(pool, async client => {
         const cast = await initializeCastWithClient(client, scope), active = await readActiveReviewDismissals(client, scope);
-        const entries = [];
+        const entries: { decision: Row; row: any }[] = [];
         for (const decision of active.rows) {
+          if (query.cursor && decision.id <= query.cursor) continue;
           const row = (await client.query("SELECT * FROM campaign_cast_discovery_candidates WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3", [decision.candidate_id, scope.campaignId, scope.ownerUserId])).rows[0];
-          if (!row || !await currentSource(client, scope, cast, row)) continue;
-          const target: ReviewTarget = decision.target_payload;
-          entries.push({ decisionId: decision.id, candidateId: row.id, source: decision.source, target: target.kind === "identity" ? target : { kind: "detail", observationIndex: decision.observation_index, observation: target.observation }, canRestore: eligible(row, target, decision.observation_index) && !await alreadyResolved(client, scope, row.source, target) });
+          if (row && await currentSource(client, scope, cast, row)) entries.push({ decision, row });
         }
-        entries.sort((a, b) => a.decisionId.localeCompare(b.decisionId));
-        const filtered = entries.filter(item => !query.cursor || item.decisionId > query.cursor), page = filtered.slice(0, query.limit);
-        return dismissedReviewPageSchema.parse({ reviewRevision: await readReviewRevision(client, scope), revision: cast.revision, boundary: cast.boundary, decisions: page, nextCursor: filtered.length > query.limit ? page.at(-1)!.decisionId : null });
+        entries.sort((a, b) => a.decision.id < b.decision.id ? -1 : a.decision.id > b.decision.id ? 1 : 0);
+        const selected = entries.slice(0, query.limit);
+        const page = [];
+        for (const { decision, row } of selected) {
+          const target: ReviewTarget = decision.target_payload;
+          page.push({ decisionId: decision.id, candidateId: row.id, source: decision.source, target: target.kind === "identity" ? target : { kind: "detail", observationIndex: decision.observation_index, observation: target.observation }, canRestore: eligible(row, target, decision.observation_index) && !await alreadyResolved(client, scope, row.source, target) });
+        }
+        return dismissedReviewPageSchema.parse({ reviewRevision: await readReviewRevision(client, scope), revision: cast.revision, boundary: cast.boundary, decisions: page, nextCursor: entries.length > query.limit ? page.at(-1)!.decisionId : null });
       });
     }
   };

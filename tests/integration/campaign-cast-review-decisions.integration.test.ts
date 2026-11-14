@@ -13,6 +13,34 @@ describe('cast review decisions', () => {
   let pool: DatabasePool, ownerUserId: string;
   beforeAll(async () => { pool = createDatabasePool(process.env.TEST_DATABASE_URL!, 8); await migrateDatabase(pool, resolve('database/migrations')); ownerUserId = await initialOwnerId(pool); }, 60000);
   afterAll(async () => { await pool?.end(); });
+  it('fences stale resolved detail writes after same-source legacy or journal dismissal', async () => {
+    const worldId = randomUUID(), versionId = randomUUID(), campaignId = randomUUID(), turnId = randomUUID();
+    await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Fence')", [worldId, ownerUserId]);
+    await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) VALUES($1,$2,$3,1,'{}')", [versionId, worldId, ownerUserId]);
+    await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title,active_turn_number) VALUES($1,$2,$3,'Fence',1)", [campaignId, ownerUserId, versionId]);
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,1,'Mara has blue eyes.')", [turnId, ownerUserId, campaignId]);
+    const scope = { ownerUserId, campaignId }, repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const initial = await repo.initialize(scope);
+    const created = await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: 'create', name: 'Mara', aliases: [], profile: {} });
+    const source = buildCastDiscoverySource({ scope, turnId, turnNumber: 1, timelineRevision: 0, narrationRevision: 0, narration: 'Mara has blue eyes.' });
+    const proposal = { localKey: 'mara', name: 'Mara', aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: 'p1', quote: 'Mara has blue eyes.' }], observations: [{ field: 'appearance.description', value: 'blue eyes', mode: 'fact', speakerCharacterId: null, paragraphId: 'p1', quote: 'Mara has blue eyes.' }] };
+    const original = randomUUID(), duplicate = randomUUID(), different = randomUUID();
+    for (const [id, name, resolved] of [[original, 'Mara', false], [duplicate, 'Mara', true], [different, 'Other', true]] as const) {
+      const receipt = resolved ? { result: { ...created, candidateId: id, observationIds: [], pendingObservations: [{ index: 0, reason: 'claim_not_fact' }] } } : null;
+      await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason,resolution_receipt) VALUES($1,$2,$3,0,$4,$5,$6,'identity_needs_review',$7)", [id, ownerUserId, campaignId, id, JSON.stringify(source), JSON.stringify({ ...proposal, localKey: id, name }), receipt && JSON.stringify(receipt)]);
+    }
+    const write = { action: 'confirm' as const, expectedCastRevision: created.revision, expectedBoundary: created.boundary, expectedCharacterRevision: created.character.revision, sourceHash: source.sourceHash, observationIndex: 0, idempotencyKey: 'stale-confirm' };
+    const before = await repo.current(scope);
+    await pool.query("UPDATE campaign_cast_discovery_candidates SET detail_decisions=$2 WHERE id=$1", [original, JSON.stringify([{ observationIndex: 0, result: { disposition: 'dismiss' } }])]);
+    for (const action of ['confirm', 'accept'] as const) await expect(repo.resolveDetail!(scope, duplicate, { ...write, action, idempotencyKey: `legacy-${action}` })).rejects.toMatchObject({ code: 'cast_invalid_request' });
+    expect(await repo.current(scope)).toEqual(before);
+    await pool.query("UPDATE campaign_cast_discovery_candidates SET detail_decisions='[]' WHERE id=$1", [original]);
+    await repo.reviewDecision(scope, original, { action: 'dismiss_detail', observationIndex: 0, expectedCastRevision: created.revision, expectedBoundary: created.boundary, expectedReviewRevision: 0, sourceHash: source.sourceHash, idempotencyKey: 'journal-dismiss' });
+    for (const action of ['confirm', 'accept'] as const) await expect(repo.resolveDetail!(scope, duplicate, { ...write, action, idempotencyKey: `journal-${action}` })).rejects.toMatchObject({ code: 'cast_invalid_request' });
+    expect(await repo.current(scope)).toEqual(before);
+    const result = await repo.resolveDetail!(scope, different, { ...write, idempotencyKey: 'different-confirm' });
+    expect(result.disposition).toBe('confirm');
+  });
   it('dismiss_identity_without_creating_cast', async () => {
     const worldId = randomUUID(), versionId = randomUUID(), campaignId = randomUUID(), turnId = randomUUID(), providerProfileId = randomUUID();
     await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Review')", [worldId, ownerUserId]);
@@ -64,6 +92,11 @@ describe('cast review decisions', () => {
     expect(visible.find(x => x.id === another)?.reviewDetails).toHaveLength(1);
     expect((await repo.dismissedReview(scope, {})).decisions[0]?.canRestore).toBe(true);
     const identity = await repo.reviewDecision(scope, id, { ...request, expectedReviewRevision: 3, idempotencyKey: 'dismiss-parent' });
+    const dismissedFirst = await repo.dismissedReview(scope, { limit: 1 });
+    expect(dismissedFirst.nextCursor).not.toBeNull();
+    const dismissedSecond = await repo.dismissedReview(scope, { limit: 1, cursor: dismissedFirst.nextCursor! });
+    expect(new Set([...dismissedFirst.decisions, ...dismissedSecond.decisions].map(item => item.decisionId))).toEqual(new Set([detail.decisionId, identity.decisionId]));
+    expect(dismissedSecond.nextCursor).toBeNull();
     await repo.reviewDecision(scope, id, { action: 'restore', decisionId: identity.decisionId, expectedCastRevision: before.revision, expectedBoundary: before.boundary, sourceHash: job.source.sourceHash, expectedReviewRevision: 4, idempotencyKey: 'restore-parent' });
     expect((await repo.candidates(scope, { view: 'review' })).candidates.find(x => x.id === id)?.reviewDetails).toEqual([]);
     await pool.query("UPDATE campaign_cast_discovery_candidates SET resolution_receipt=$2 WHERE id=$1", [duplicate, JSON.stringify({ result: { pendingObservations: [] } })]);
