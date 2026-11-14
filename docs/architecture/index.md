@@ -56,6 +56,7 @@ See also [Repository Overview](./repository-overview.md) for project-goal/naming
 - [ADR 0019: Cross-world campaign transfer creates an independent copy](./0019-cross-world-campaign-transfer.md)
 - [ADR 0023: Structured world and campaign character profiles](./0023-structured-character-profiles.md)
 - [ADR 0042: Unified character editor and starting cast](./0042-unified-character-editor-and-starting-cast.md)
+- [ADR 0043: Shared campaign cast reference translation](./0043-shared-campaign-cast-reference-translation.md)
 
 ADR 0014 supersedes only the backward-compatibility portions of ADR 0013 that allowed legacy top-level character guidance to remain authoritative. It does not supersede structured rosters or campaign character snapshots.
 
