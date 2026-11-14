@@ -88,7 +88,7 @@ for (const kind of ["main", "supporting"] as const) {
     await save.click();
     if (supporting) await expect(dialog.getByRole("heading", { name: "Draft companion" })).toBeVisible();
     else await expect(dialog).toBeHidden();
-    expect(castWrites + profileWrites().length).toBe(1);
+    await expect.poll(() => castWrites + profileWrites().length).toBe(1);
   });
 }
 
@@ -137,9 +137,14 @@ for (const surface of ["Story", "campaign"] as const) for (const width of [1440,
     const role = dialog.getByRole("textbox", { name: "Role", exact: true });
     const save = dialog.getByRole("button", { name: /^Save (character|campaign)/i });
     await expect(name).toBeFocused();
-    const essentials = dialog.getByRole("group", { name: "Story essentials" });
-    await expect(essentials.getByRole("textbox")).toHaveCount(3);
-    await expect(essentials.getByRole("textbox").nth(1)).toHaveAccessibleName("Background");
+    if (isStory) {
+      const essentials = dialog.getByRole("group", { name: "Story essentials" });
+      await expect(essentials.getByRole("textbox")).toHaveCount(3);
+      await expect(essentials.getByRole("textbox").nth(1)).toHaveAccessibleName("Background");
+    } else {
+      await expect(dialog.locator(".character-workspace")).toBeVisible();
+      await expect(dialog.getByRole("textbox", { name: "Background", exact: true })).toBeVisible();
+    }
     expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
     await capture(page, info, `${surface}-editor-${width}`);
     await page.keyboard.press("Control+a");

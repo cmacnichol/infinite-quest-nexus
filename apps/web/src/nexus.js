@@ -1,6 +1,10 @@
 import { MAX_PLAYABLE_CHARACTERS } from "@infinite-quest/contracts";
 import { openCastSuggestions } from "./character-editor/suggest-cast.js";
 import { createLegacyCastPanel } from "./campaign-cast-panel.js";
+import { mountCharacterWorkspace } from "./character-editor/workspace.js";
+import { mountMainCharacterWorkspace } from "./character-editor/main-workspace.js";
+import { mountQuickCharacterCreate } from "./character-editor/quick-create.js";
+import { createWorldFormSession } from "./character-editor/world-form-session.js";
 import { renderCharacterEditor } from "./character-editor/renderer.js";
 import { buildCampaignProfileUpdate, createCampaignMainController } from "./character-editor/campaign-main-form.js";
 import { settingsBookmarkDestination } from "./settings-bookmark.js";
@@ -8,6 +12,10 @@ import { createCampaignCastApi, createStoryMemoryApi, createNexusApiClient, crea
 import { mountLegacyDeviceProfile } from "../../shared-ui/profile/legacy-device-profile.js";
 import { mountReaderPreferenceFields } from "../../shared-ui/profile/profile-controls.js";
 import {
+  filterWorldCharacters,
+  worldCharacterSummary,
+  editorSectionForPath,
+  summarizeEditorSections,
   previewEntityConversions,
   WORLD_PROFILE_FIELDS,
   castNarratorNotice,
@@ -217,6 +225,13 @@ let playableCharacterLoadSequence = 0;
 let editingCharacterId = "";
 let characterModalWorkingCharacter = null;
 let characterEditorDraft = null;
+let worldCharacterSession = null;
+let campaignCharacterPresentation = null;
+let worldCharacterPresentation = null;
+let worldCharacterPresentationCleanup = null;
+let worldCharacterInvalidControl = null;
+let worldCharacterMechanicsRecovery = false;
+let characterDialogClosedAt = -Infinity;
 let characterModalBusy = false;
 let characterModalScope = "world";
 let campaignCharacterProfileRevision = 0;
@@ -226,6 +241,7 @@ let campaignCharacterOpenEpoch = 0;
 let campaignCharacterLockEpoch = 0;
 let characterProfileOrganizationResult = null;
 const characterRowOriginals = new WeakMap();
+const characterMechanicsInitialValues = new Map();
 const legacyStorageKey = "infiniteQuestNexusClientState.v1";
 let detectedBrowserStory = null;
 let providers = [];
@@ -621,7 +637,7 @@ const modalBaselines = new WeakMap();
 let discardModalTarget = null;
 
 function modalFormSnapshot(dialog) {
-  return [...dialog.querySelectorAll("input, select, textarea")].map((control) => {
+  return [...dialog.querySelectorAll("input, select, textarea")].filter(control => !control.closest(".character-workspace-narrow")).map((control) => {
     if (control instanceof HTMLInputElement && ["checkbox", "radio"].includes(control.type)) {
       return `${control.id}:${control.checked}`;
     }
@@ -629,7 +645,7 @@ function modalFormSnapshot(dialog) {
       return `${control.id}:${Boolean(control.value)}`;
     }
     return `${control.id}:${control.value}`;
-  }).join("\u001f");
+  }).sort().join("\u001f");
 }
 
 function beginEditDialogSession(dialog, returnFocusTo) {
@@ -640,7 +656,7 @@ function beginEditDialogSession(dialog, returnFocusTo) {
     editSession: createEditSession(modalFormSnapshot(dialog), (left, right) => left === right)
   };
   editDialogSessions.set(dialog, state);
-  const dispose = bindEditDialogDismissal(dialog, () => ({
+  const dispose = dialog === elements.characterDialog ? () => {} : bindEditDialogDismissal(dialog, () => ({
     isDirty: () => dialog === elements.characterDialog && characterModalScope === "campaign" && campaignCharacterController ? campaignCharacterController.draft.changedPaths.length > 0 : state.editSession.isDirty(modalFormSnapshot(dialog)),
     isBusy: () => (dialog === elements.worldAuthorDialog && worldAuthorBusy)
       || (dialog === elements.characterDialog && characterModalBusy),
@@ -651,7 +667,7 @@ function beginEditDialogSession(dialog, returnFocusTo) {
       }
       return requestStagedEditDecision(false);
     },
-    ...(dialog === elements.characterDialog && characterModalScope === "campaign"
+    ...(dialog === elements.characterDialog
       ? { save: () => saveCharacterFromModal({ preventDefault() {} }) }
       : {}),
     discard: () => {
@@ -673,7 +689,7 @@ async function requestStagedEditDecision(allowSave = false) {
   elements.discardChangesMessage.textContent = "Your edits have not been saved. Keep editing or discard them and close this window.";
   elements.discardChangesDialog.querySelector('button[value="keep"]').textContent = "Keep editing";
   setCampaignSaveDecisionVisible(allowSave);
-  elements.saveCampaignEditsDecision.textContent = "Save changes";
+  elements.saveCampaignEditsDecision.textContent = characterModalScope === "world" && elements.characterDialog.open ? "Apply and leave" : "Save changes";
   elements.discardChangesDialog.returnValue = "";
   openManagedModal(elements.discardChangesDialog);
   return new Promise((resolve) => {
@@ -705,8 +721,8 @@ function dismissEditDialog(dialog) {
     isDirty: () => state.editSession.isDirty(modalFormSnapshot(dialog)),
     isBusy: () => (dialog === elements.worldAuthorDialog && worldAuthorBusy)
       || (dialog === elements.characterDialog && characterModalBusy),
-    confirm: () => requestStagedEditDecision(dialog === elements.characterDialog && characterModalScope === "campaign"),
-    ...(dialog === elements.characterDialog && characterModalScope === "campaign"
+    confirm: () => requestStagedEditDecision(dialog === elements.characterDialog),
+    ...(dialog === elements.characterDialog
       ? { save: () => saveCharacterFromModal({ preventDefault() {} }) }
       : {}),
     discard: () => {
@@ -756,6 +772,7 @@ function requestModalDismissal(dialog) {
 function installClickAwayModalDismissal() {
   document.querySelectorAll("dialog").forEach((dialog) => {
     dialog.addEventListener("click", (event) => {
+      if (dialog === elements.worldAuthorDialog && performance.now() - characterDialogClosedAt < 500) return;
       if (dialog.open && clickedDialogBackdrop(dialog, event)) requestModalDismissal(dialog);
     });
     dialog.addEventListener("close", () => {
@@ -1091,7 +1108,7 @@ function isManagementRouteHash(hash) {
 }
 
 async function canLeaveManagementRoute(nextRoute) {
-  for (const dialog of [elements.worldAuthorDialog, elements.characterDialog]) {
+  for (const dialog of [elements.characterDialog, elements.worldAuthorDialog]) {
     if (!dialog?.open) continue;
     if (worldAuthorBusy || characterModalBusy) return false;
     await dismissEditDialog(dialog);
@@ -2903,6 +2920,13 @@ function updateCharacterGeneratorAvailability() {
 function setCharacterStatus(message = "", type = "") {
   elements.characterStatus.textContent = message;
   elements.characterStatus.className = `status ${type}${message ? "" : " hidden"}`.trim();
+  worldCharacterPresentation?.refresh?.();
+  campaignCharacterPresentation?.refresh();
+  const extra = elements.characterDialog.querySelector("[data-quick-character-additional]");
+  if (extra && characterEditorDraft) {
+    const count = WORLD_PROFILE_FIELDS.filter(field => !["name", "story.role", "story.personality"].includes(field.path) && String(elements[field.world.id].value || "").trim()).length;
+    extra.hidden = !count; extra.textContent = `${count} additional details retained. Continue in the detailed editor to review the full profile.`;
+  }
 }
 
 function setCharacterProfileOrganizationProgress(active) {
@@ -2931,9 +2955,11 @@ function addCharacterEditorRow(kind, row = {}, readOnly = false) {
     const label = document.createElement("label");
     label.textContent = field.label;
     label.title = field.title;
-    const input = document.createElement("input");
+    const multiline = field.key === "note" || !isStat && field.key !== "name";
+    const input = document.createElement(multiline ? "textarea" : "input");
+    if (multiline) { input.rows = 2; input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = `${input.scrollHeight}px`; }); }
     input.dataset.characterField = field.key;
-    input.type = field.type || "text";
+    if (!multiline) input.type = field.type || "text";
     input.value = String(field.value);
     input.placeholder = field.placeholder;
     if (field.maxlength) input.maxLength = field.maxlength;
@@ -2947,11 +2973,32 @@ function addCharacterEditorRow(kind, row = {}, readOnly = false) {
   remove.type = "button";
   remove.className = "button secondary character-row-remove";
   remove.textContent = "×";
-  remove.setAttribute("aria-label", `Remove ${isStat ? "statistic" : "tracker"}`);
+  const updateRemoveName = () => remove.setAttribute("aria-label", `Remove ${editor.querySelector('[data-character-field="name"]').value || "unnamed"} ${isStat ? "statistic" : "tracker"}`);
+  updateRemoveName(); editor.addEventListener("input", updateRemoveName);
   remove.disabled = readOnly;
-  remove.addEventListener("click", () => editor.remove());
+  remove.addEventListener("click", () => {
+    if (characterModalScope !== "world" || !worldCharacterSession) { editor.remove(); return; }
+    captureWorldCharacterForm(); worldCharacterSession.removeMechanic(kind, editor.dataset.worldRowId); editor.remove();
+    let undo = elements.characterMechanics.querySelector(".character-mechanic-undo");
+    if (!undo) {
+      undo = document.createElement("button"); undo.type = "button"; undo.className = "button secondary character-mechanic-undo"; undo.textContent = "Undo removal";
+      undo.addEventListener("click", () => {
+        captureWorldCharacterForm();
+        if (worldCharacterSession.undoRemoval()) {
+          const state = worldCharacterSession.read();
+          for (const [rowKind, rows, target] of [["stat", state.statRows, elements.characterStats], ["tracker", state.trackerRows, elements.characterTrackers]]) {
+            target.replaceChildren();
+            for (const saved of rows) { addCharacterEditorRow(rowKind, { ...(saved.original || {}), ...saved }); const node = target.lastElementChild; node.dataset.worldRowId = saved.rowId; characterRowOriginals.set(node, saved.original); }
+          }
+        }
+        undo.remove(); worldCharacterPresentation?.refresh?.();
+      }); elements.characterMechanics.append(undo);
+    }
+    worldCharacterPresentation?.refresh?.();
+  });
   editor.append(remove);
   container.append(editor);
+  if (characterModalScope === "world") worldCharacterPresentation?.refresh?.();
 }
 
 function emptyCharacterProfile() {
@@ -3013,6 +3060,7 @@ function populateCharacterForm(character, readOnly = false) {
   elements.characterTrackers.replaceChildren();
   for (const stat of Array.isArray(character.rpgStats) ? character.rpgStats : []) addCharacterEditorRow("stat", stat, readOnly);
   for (const tracker of Array.isArray(character.defaultTriggers) ? character.defaultTriggers : []) addCharacterEditorRow("tracker", tracker, readOnly);
+  for (const kind of ["stat", "tracker"]) characterMechanicsInitialValues.set(kind, characterMechanicsFormValues(kind));
 }
 
 function setCharacterModalControls(readOnly, busy = false) {
@@ -3024,10 +3072,10 @@ function setCharacterModalControls(readOnly, busy = false) {
   const organizationAvailable = !suggestionApply && (characterModalScope === "campaign" || worldAuthorMode === "edit");
   elements.organizeCharacterProfile.disabled = readOnly || busy || !organizationAvailable;
   elements.organizeCharacterProfile.classList.toggle("hidden", characterModalScope === "world" && !organizationAvailable);
-  elements.characterDialog.querySelectorAll(".character-profile-section input, .character-profile-section textarea").forEach((control) => {
+  elements.characterDialog.querySelectorAll("[data-character-profile-path]").forEach((control) => {
     control.disabled = readOnly || busy;
   });
-  elements.characterDialog.querySelectorAll(".character-edit-row input, .character-row-remove").forEach((control) => {
+  elements.characterDialog.querySelectorAll(".character-edit-row input, .character-edit-row textarea, .character-row-remove").forEach((control) => {
     control.disabled = readOnly || busy;
   });
   elements.characterDialog.querySelectorAll("details > summary").forEach((summary) => {
@@ -3083,7 +3131,12 @@ function openCharacterDialog(characterId = "", preview = null, apply = null) {
   elements.characterPlayableContext.hidden = false;
   elements.characterWorldGuidanceHint.hidden = false;
   characterProfileOrganizationResult = null;
+  elements.characterMechanics.querySelector(".character-mechanic-undo")?.remove();
   const initial = character || { id: "", name: "", characterText: "", rpgStats: [], defaultTriggers: [], source: { type: "world-library-editor" } };
+  worldCharacterPresentationCleanup?.();
+  initial.id = initial.id || opaqueCharacterId();
+  elements.characterDialog.dataset.characterDraftId = initial.id;
+  worldCharacterSession = createWorldFormSession(initial);
   populateCharacterForm(initial, readOnly);
   elements.characterUseLabel.hidden = Boolean(preview);
   elements.characterCampaignUse.value = initial.campaignUse || "playable";
@@ -3107,19 +3160,150 @@ function openCharacterDialog(characterId = "", preview = null, apply = null) {
   elements.characterDialog.querySelector(".eyebrow").textContent = "World Library";
   setCharacterStatus();
   setCharacterModalControls(readOnly);
-  elements.characterGenerator.open = !character && updateCharacterGeneratorAvailability();
+  updateCharacterGeneratorAvailability();
+  elements.characterGenerator.open = false;
   openEditDialog(elements.characterDialog);
+  mountWorldCharacterPresentation(Boolean(character));
   if (elements.characterGenerator.open) elements.characterGeneratorPrompt.focus();
   else if (!readOnly) elements.characterName.focus();
+}
+
+/** Capture raw values before any presentation transition, without validation. */
+function captureWorldCharacterForm() {
+  if (!worldCharacterSession || !characterEditorDraft) return;
+  profileFromForm();
+  const rows = (kind) => [...(kind === "stat" ? elements.characterStats : elements.characterTrackers).querySelectorAll(".character-edit-row")].map(row => {
+    row.dataset.worldRowId ||= opaqueCharacterId();
+    return { rowId: row.dataset.worldRowId, ...Object.fromEntries([...row.querySelectorAll("[data-character-field]")].map(control => [control.dataset.characterField, control.value])), original: characterRowOriginals.get(row) || null };
+  });
+  worldCharacterSession.capture({ profileDraft: characterEditorDraft, name: elements.characterName.value, guidance: elements.characterGuidance.value,
+    campaignUse: elements.characterCampaignUse.value, startingCastDefault: elements.characterStartingCastDefault.checked,
+    alwaysInContext: elements.characterAlwaysInContext.checked, statRows: rows("stat"), trackerRows: rows("tracker") });
+}
+
+function mountWorldCharacterPresentation(detailed) {
+  worldCharacterMechanicsRecovery = false;
+  const form = elements.characterForm;
+  const storage = document.createElement("div"); storage.className = "character-presentation-storage";
+  while (form.firstChild) storage.append(form.firstChild);
+  form.append(storage);
+  const origins = new Map();
+  const move = (node, destination) => { const marker = document.createComment("world-character-control"); node.before(marker); origins.set(node, marker); destination.append(node); };
+  const sections = new Map(summarizeEditorSections("world-draft", characterEditorDraft.values, []).map(section => {
+    const node = document.createElement("div"); node.dataset.worldEditorSection = section.id; node.hidden = true; form.append(node); return [section.id, node];
+  }));
+  for (const control of form.querySelectorAll("[data-character-profile-path]")) {
+    const section = editorSectionForPath(control.dataset.characterProfilePath, "world-draft");
+    if (section && sections.has(section)) move(control.closest("label"), sections.get(section));
+  }
+  move(elements.characterUseLabel, sections.get("overview"));
+  const supporting = document.createElement("details"), supportingSummary = document.createElement("summary"); supportingSummary.textContent = "Supporting character options";
+  supporting.append(supportingSummary); supporting.hidden = elements.characterCampaignUse.value === "playable"; sections.get("overview").append(supporting); move(elements.characterSupportingOptions, supporting);
+  move(elements.characterMechanics, sections.get("mechanics"));
+  move(elements.characterImportedGuidance, sections.get("notes"));
+  move(elements.characterGenerator, sections.get("overview"));
+  move(elements.characterGeneratorUnavailable, sections.get("overview"));
+  move(elements.characterStatus, sections.get("overview"));
+  move(elements.deleteCharacter, sections.get("overview"));
+  move(elements.characterWorldGuidanceHint, sections.get("overview"));
+  elements.characterStatus.removeAttribute("role"); elements.characterStatus.removeAttribute("aria-live");
+  let presentation;
+  const port = {
+    flush: captureWorldCharacterForm,
+    snapshot() {
+      const state = editDialogSessions.get(elements.characterDialog);
+      const errors = worldCharacterInvalidControl ? [worldCharacterInvalidControl.dataset.characterProfilePath || "rpgStats"] : [];
+      return { name: elements.characterName.value, destination: suggestionApply ? "World draft: cast suggestion" : `World draft: ${elements.worldTitle.value || "Untitled world"}`,
+        status: elements.characterStatus.textContent || "Changes not applied to world draft", dirty: Boolean(state?.editSession.isDirty(modalFormSnapshot(elements.characterDialog))),
+        busy: characterModalBusy, locked: false, readOnly: elements.characterDialog.dataset.readOnly === "true",
+        sections: summarizeEditorSections("world-draft", characterEditorDraft.values, errors, { statistics: elements.characterStats.children.length, trackers: elements.characterTrackers.children.length }).filter(section => section.id !== "mechanics" || elements.characterCampaignUse.value !== "supporting" || worldCharacterMechanicsRecovery) };
+    },
+    async commit() {
+      const applied = await saveCharacterFromModal({ preventDefault() {} });
+      if (!applied && worldCharacterInvalidControl) {
+        const control = worldCharacterInvalidControl;
+        requestAnimationFrame(() => { if (elements.characterDialog.open && control.isConnected) worldCharacterPresentation?.reveal?.(editorSectionForPath(control.dataset.characterProfilePath || "", "world-draft") || "mechanics", control); });
+      }
+      return applied ? "applied" : "blocked";
+    },
+    async requestClose() { return await dismissEditDialog(elements.characterDialog) === "dismissed"; }
+  };
+  const attachActionIds = () => {
+    elements.saveCharacter.id = "legacySaveCharacter"; elements.cancelCharacter.id = "legacyCancelCharacter";
+    const root = form.querySelector(".character-workspace, .character-quick-create");
+    const buttons = [...root.querySelectorAll("footer button")];
+    if (suggestionApply) buttons.find(button => button.classList.contains("primary"))?.replaceChildren(document.createTextNode("Apply to suggestion"));
+    buttons.find(button => button.classList.contains("primary"))?.setAttribute("id", "saveCharacter");
+    buttons.find(button => button.textContent === "Cancel")?.setAttribute("id", "cancelCharacter");
+  };
+  const showDetailed = () => {
+    presentation?.dispose();
+    presentation = mountCharacterWorkspace(form, port, { sections, preview() {
+      const preview = document.createElement("div");
+      for (const field of WORLD_PROFILE_FIELDS) { const value = elements[field.world.id].value; if (!value.trim()) continue; const p = document.createElement("p"); p.textContent = `${field.world.label}: ${value}`; preview.append(p); }
+      return preview;
+    } });
+    worldCharacterPresentation = presentation; attachActionIds();
+  };
+  let quickFields = null;
+  if (detailed) showDetailed();
+  else {
+    quickFields = document.createElement("div"); form.append(quickFields);
+    const quickOrigins = new Map();
+    for (const node of [elements.characterName.closest("label"), elements.characterUseLabel, elements.characterRole.closest("label"), elements.characterPersonality.closest("label"), supporting, elements.characterGeneratorUnavailable, elements.characterWorldGuidanceHint, elements.characterStatus]) {
+      const marker = document.createComment("quick-world-control"); node.before(marker); quickOrigins.set(node, marker); quickFields.append(node);
+    }
+    const extra = document.createElement("p"); extra.className = "field-note"; extra.dataset.quickCharacterAdditional = ""; extra.hidden = true; quickFields.append(extra);
+    const continueDetailed = () => {
+      presentation.dispose(); for (const [node, marker] of quickOrigins) marker.replaceWith(node); quickFields.remove(); quickFields = null; showDetailed();
+    };
+    presentation = mountQuickCharacterCreate(form, { context: "world-draft", port, fields: quickFields, aiTools: elements.characterGenerator, onContinue: continueDetailed });
+    worldCharacterPresentation = presentation; attachActionIds();
+  }
+  const captureInput = (event) => {
+    if (event.target.closest(".character-workspace-narrow")) return;
+    worldCharacterInvalidControl?.removeAttribute("aria-invalid");
+    worldCharacterInvalidControl = null;
+    captureWorldCharacterForm();
+    worldCharacterPresentation?.refresh?.();
+  };
+  form.addEventListener("input", captureInput);
+  worldCharacterPresentationCleanup = () => {
+    presentation?.dispose(); worldCharacterPresentation = null;
+    form.removeEventListener("input", captureInput);
+    quickFields?.remove();
+    for (const [node, marker] of origins) marker.replaceWith(node);
+    for (const node of sections.values()) node.remove();
+    while (storage.firstChild) form.append(storage.firstChild); storage.remove();
+    elements.saveCharacter.id = "saveCharacter"; elements.cancelCharacter.id = "cancelCharacter";
+    elements.characterStatus.setAttribute("role", "status"); elements.characterStatus.setAttribute("aria-live", "polite");
+    worldCharacterInvalidControl = null; worldCharacterPresentationCleanup = null;
+  };
 }
 
 function updateCharacterUseControls() {
   const supporting = elements.characterCampaignUse.value === "supporting";
   elements.characterSupportingOptions.hidden = elements.characterCampaignUse.value === "playable";
+  const supportingDisclosure = elements.characterSupportingOptions.closest("details");
+  if (supportingDisclosure) supportingDisclosure.hidden = elements.characterCampaignUse.value === "playable";
   elements.characterPlayableContext.textContent = supporting ? "Supporting character · Available as a campaign companion." : elements.characterCampaignUse.value === "both" ? "Both · Available as a main character or companion." : "Playable character · Available as a main character.";
-  elements.characterMechanics.classList.toggle("hidden", supporting);
+  elements.characterMechanics.classList.toggle("hidden", supporting && !worldCharacterMechanicsRecovery);
   elements.characterWorldGuidanceHint.textContent = supporting ? "A name is required. Story details are optional." : "Start with a name and at least one story detail. Everything else is optional.";
   updateCharacterGeneratorAvailability();
+}
+
+function characterMechanicsFormValues(kind) {
+  const container = kind === "stat" ? elements.characterStats : elements.characterTrackers;
+  return JSON.stringify([...container.querySelectorAll(".character-edit-row")].map(row =>
+    [...row.querySelectorAll("[data-character-field]")].map(input => input.value)));
+}
+
+function characterMechanicsFromForm(kind, characterId, original) {
+  // Preserve untouched hidden mechanics exactly, including imported extensions.
+  // Edits made before switching use still belong to the current draft.
+  if (elements.characterCampaignUse.value === "supporting"
+    && characterMechanicsFormValues(kind) === characterMechanicsInitialValues.get(kind)) return copyJsonValue(original || []);
+  return characterRowsFromForm(kind, characterId);
 }
 
 function characterRowsFromForm(kind, characterId) {
@@ -3188,24 +3372,45 @@ function characterFromForm({ forOrganization = false } = {}) {
       ? { startingCastDefault: elements.characterStartingCastDefault.checked } : {}),
     ...(!editingCharacterId || base.alwaysInContext !== undefined || elements.characterAlwaysInContext.checked
       ? { alwaysInContext: elements.characterAlwaysInContext.checked } : {}),
-    rpgStats: elements.characterCampaignUse.value === "supporting" ? copyJsonValue(base.rpgStats || []) : characterRowsFromForm("stat", id),
-    defaultTriggers: elements.characterCampaignUse.value === "supporting" ? copyJsonValue(base.defaultTriggers || []) : characterRowsFromForm("tracker", id),
+    rpgStats: characterMechanicsFromForm("stat", id, base.rpgStats),
+    defaultTriggers: characterMechanicsFromForm("tracker", id, base.defaultTriggers),
     source: base.source && typeof base.source === "object" ? base.source : {}
   };
 }
 
 function renderPlayableCharacterRoster(characters = []) {
   const roster = Array.isArray(characters) ? characters : [];
-  elements.playableCharacterRoster.replaceChildren();
-  if (!roster.length) {
+  const host = elements.playableCharacterRoster;
+  let controls = host.previousElementSibling;
+  if (!controls?.classList.contains("character-roster-controls")) {
+    controls = document.createElement("div"); controls.className = "character-roster-controls";
+    const searchLabel = document.createElement("label"); searchLabel.textContent = "Search characters";
+    const search = document.createElement("input"); search.type = "search"; search.setAttribute("aria-label", "Search characters"); searchLabel.append(search);
+    const useLabel = document.createElement("label"); useLabel.textContent = "Use";
+    const use = document.createElement("select"); use.setAttribute("aria-label", "Filter character use");
+    for (const value of ["all", "playable", "supporting", "both"]) { const option = document.createElement("option"); option.value = value; option.textContent = value[0].toUpperCase() + value.slice(1); use.append(option); }
+    useLabel.append(use);
+    const clear = document.createElement("button"); clear.type = "button"; clear.className = "button secondary"; clear.textContent = "Clear filters";
+    const rerender = () => renderPlayableCharacterRoster(playableCharactersFromContent(worldAuthorWorkingContent));
+    search.addEventListener("input", rerender); use.addEventListener("change", rerender);
+    clear.addEventListener("click", () => { search.value = ""; use.value = "all"; rerender(); search.focus(); });
+    controls.append(searchLabel, useLabel, clear); host.before(controls);
+  }
+  const query = controls.querySelector("input").value, useFilter = controls.querySelector("select").value;
+  const filtered = Boolean(query.trim()) || useFilter !== "all";
+  const visible = filterWorldCharacters(roster, { query, use: useFilter });
+  host.replaceChildren();
+  if (filtered) { const hint = document.createElement("p"); hint.className = "muted"; hint.textContent = "Clear filters to reorder characters in authored order."; host.append(hint); }
+  if (!visible.length) {
     const empty = document.createElement("span");
     empty.className = "muted";
-    empty.textContent = "No playable characters yet. This draft can be saved, but it is not campaign-ready.";
+    empty.textContent = roster.length ? "No characters match these filters." : "No characters yet. Add a character to this world draft.";
     elements.playableCharacterRoster.append(empty);
     return;
   }
-  for (const [index, character] of roster.entries()) {
-    const wrapper = document.createElement("div");
+  for (const character of visible) {
+    const index = roster.indexOf(character);
+    const wrapper = document.createElement("div"); wrapper.className = "character-roster-row"; wrapper.dataset.characterId = character.id;
     const card = document.createElement("button");
     card.type = "button";
     card.className = "character-roster-card";
@@ -3217,18 +3422,19 @@ function renderPlayableCharacterRoster(characters = []) {
     const trackers = Array.isArray(character.defaultTriggers) ? character.defaultTriggers.length : 0;
     const use = character.campaignUse || "playable";
     const complete = Boolean(character.characterText || profileHasGuidance(character.profile || {}));
-    detail.textContent = `${use[0].toUpperCase() + use.slice(1)} · ${character.profile?.role || "No role"} · ${complete ? "Story details added" : "Needs story details"} · ${stats} RPG stat${stats === 1 ? "" : "s"} · ${trackers} starting tracker${trackers === 1 ? "" : "s"}`;
+    detail.textContent = `${use[0].toUpperCase() + use.slice(1)} · ${character.profile?.story?.role || "No role"} · ${complete ? "Story details added" : "Needs story details"} · ${stats} RPG stat${stats === 1 ? "" : "s"} · ${trackers} starting tracker${trackers === 1 ? "" : "s"}`;
     const description = document.createElement("span");
-    description.textContent = String(character.characterText || "").slice(0, 260) || "No character description.";
+    description.textContent = worldCharacterSummary(character) || (complete ? "Story details added." : use === "supporting" ? "Optional details can be added." : "No story details added.");
     card.append(name, detail, description);
     card.addEventListener("click", () => openCharacterDialog(character.id));
     wrapper.append(card);
     for (const [label, action, disabled] of [
-      ["Duplicate", "duplicate", false], ["Move up", "up", index === 0], ["Move down", "down", index === roster.length - 1]
+      ["Duplicate", "duplicate", false], ["Move up", "up", filtered || index === 0], ["Move down", "down", filtered || index === roster.length - 1]
     ]) {
-      const button = document.createElement("button"); button.type = "button"; button.textContent = label; button.disabled = disabled;
+      const button = document.createElement("button"); button.type = "button"; button.className = "button secondary"; button.textContent = label; button.disabled = disabled;
       button.setAttribute("aria-label", `${label} ${character.name || "character"}`);
       button.addEventListener("click", () => {
+        if (action === "duplicate" && roster.length >= MAX_PLAYABLE_CHARACTERS) { worldMessage("The world roster is full. Remove a character before duplicating.", "error"); return; }
         const next = roster.map((item) => copyJsonValue(item));
         if (action === "duplicate") next.splice(index + 1, 0, { ...copyJsonValue(character), id: opaqueCharacterId(), name: `${character.name} copy` });
         else { const target = index + (action === "up" ? -1 : 1); [next[index], next[target]] = [next[target], next[index]]; }
@@ -3383,6 +3589,9 @@ async function selectWorld(worldId, selectionOptions = {}) {
   const committedAuthorRefresh = selectionOptions.committedAuthorSession
     && editDialogSessions.get(elements.worldAuthorDialog) === selectionOptions.committedAuthorSession
     && worldAuthorBusy;
+  if (elements.characterDialog.open && characterModalScope === "world" && !committedAuthorRefresh) {
+    if (await dismissEditDialog(elements.characterDialog) !== "dismissed") return;
+  }
   if (elements.worldAuthorDialog.open && !committedAuthorRefresh) {
     const dismissal = await dismissEditDialog(elements.worldAuthorDialog);
     if (dismissal !== "dismissed" || elements.worldAuthorDialog.open) return;
@@ -4119,6 +4328,9 @@ async function generateCharacterFromPrompt() {
   const hasAuthoredContent = [...elements.characterDialog.querySelectorAll("input:not([type=checkbox]):not([type=hidden]), textarea")]
     .some((control) => control !== elements.characterGeneratorPrompt && String(control.value || "").trim());
   if (hasAuthoredContent && !window.confirm("Replace the current character fields with an AI draft? Your current entries will be replaced. Nothing is saved until you apply the draft.")) return;
+  const generationSession = editDialogSessions.get(elements.characterDialog);
+  const generationOwner = worldSelectionEpoch;
+  const isCurrentGeneration = () => elements.characterDialog.open && editDialogSessions.get(elements.characterDialog) === generationSession && worldSelectionEpoch === generationOwner;
   const previousName = elements.characterName.value;
   const previousGuidance = elements.characterGuidance.value;
   const previousProfile = profileFromForm();
@@ -4129,6 +4341,7 @@ async function generateCharacterFromPrompt() {
       content: worldContentFromForm(), prompt, ...(elements.characterCampaignUse.value === "supporting" ? { campaignUse: "supporting" } : {}),
       ...(editingCharacterId ? { characterId: editingCharacterId } : {})
     });
+    if (!isCurrentGeneration()) return;
     const candidate = result?.character;
     if (!candidate || typeof candidate !== "object" || !String(candidate.name || "").trim() || !candidate.profile) {
       throw new Error("The text model did not return a complete character.");
@@ -4138,12 +4351,13 @@ async function generateCharacterFromPrompt() {
       ...base,
       ...candidate,
       ...(elements.characterCampaignUse.value === "supporting" ? { rpgStats: base.rpgStats || [], defaultTriggers: base.defaultTriggers || [] } : {}),
-      id: editingCharacterId || String(candidate.id || base.id || opaqueCharacterId()),
+      id: editingCharacterId || String(base.id || opaqueCharacterId()),
       ...(editingCharacterId ? { source: base.source, campaignUse: base.campaignUse, startingCastDefault: base.startingCastDefault, alwaysInContext: base.alwaysInContext } : {})
     };
     populateCharacterForm(merged, false);
     setCharacterStatus("Character generated. Review every field, then add it to the world form.", "success");
   } catch (error) {
+    if (!isCurrentGeneration()) return;
     // Fields are populated only after a complete response has passed the client boundary checks.
     elements.characterName.value = previousName;
     elements.characterGuidance.value = previousGuidance;
@@ -4153,7 +4367,7 @@ async function generateCharacterFromPrompt() {
     }
     setCharacterStatus(characterAdmissionError(error), "error");
   } finally {
-    setCharacterModalControls(false, false);
+    if (isCurrentGeneration()) { setCharacterModalControls(false, false); worldCharacterPresentation?.refresh?.(); }
   }
 }
 
@@ -4203,6 +4417,11 @@ async function organizeCharacterProfile() {
   } catch (error) {
     setCharacterStatus(characterAdmissionError(error), "error");
     const control = error.control;
+    worldCharacterInvalidControl = control;
+    if (control instanceof HTMLElement) {
+      control.setAttribute("aria-invalid", "true");
+      worldCharacterPresentation?.reveal?.(editorSectionForPath(control.dataset.characterProfilePath || "", "world-draft") || "mechanics", control);
+    }
     if (control instanceof HTMLElement) {
       const disclosure = control.closest("details");
       if (disclosure) disclosure.open = true;
@@ -4371,8 +4590,12 @@ async function openCampaignCharacterDialog() {
         setCharacterModalControls(locked);
         elements.recheckCampaignCharacterGeneration.hidden = !locked || controller.saving;
         elements.recheckCampaignReviewGeneration.hidden = !locked || controller.saving;
+        campaignCharacterPresentation?.refresh();
       },
-      focus() { elements.characterName.focus(); },
+      focus() {
+        const visible = [...elements.characterForm.querySelectorAll(".character-workspace-fields input, .character-workspace-fields textarea")].find(control => control.getClientRects().length && !control.disabled);
+        (visible || elements.characterName).focus();
+      },
       fieldControl(path) {
         return elements[WORLD_PROFILE_FIELDS.find((field) => field.path === path)?.world.id] ?? elements.characterName;
       }
@@ -4416,6 +4639,19 @@ async function openCampaignCharacterDialog() {
     campaignCharacterLocked = campaignCharacterGenerationLocked(status);
     controller.setLocked(campaignCharacterLocked);
     setCampaignCharacterReviewLock();
+    campaignCharacterPresentation = mountMainCharacterWorkspace(elements.characterForm, {
+      flush() { profileFromForm(); },
+      snapshot() {
+        const errors = [...elements.characterForm.querySelectorAll('[aria-invalid="true"]')].map(control => control.dataset.characterProfilePath || "name");
+        return { name: elements.characterName.value, destination: `Campaign: ${selectedCampaign?.title || "Current campaign"}`,
+          status: elements.characterStatus.textContent || (characterEditorDraft.changedPaths.length ? "Unsaved campaign changes" : "No unsaved changes"),
+          dirty: characterEditorDraft.changedPaths.length > 0 && !characterEditorDraft.conflict,
+          busy: characterModalBusy || controller.saving, locked: campaignCharacterLocked, readOnly: false,
+          sections: summarizeEditorSections("campaign-main", characterEditorDraft.values, errors) };
+      },
+      async commit() { await controller.save(); return elements.characterDialog.open ? "blocked" : "saved"; },
+      async requestClose() { controller.requestClose(); return !elements.characterDialog.open; }
+    });
     if (campaignCharacterLocked) setCharacterStatus("Finish or resolve generation before saving the character profile.");
     elements.characterName.focus();
   } catch (error) {
@@ -4426,14 +4662,29 @@ async function openCampaignCharacterDialog() {
 
 async function saveCharacterFromModal(event) {
   event.preventDefault();
-  if ((worldAuthorBusy && characterModalScope === "world") || characterModalBusy) return;
+  if ((worldAuthorBusy && characterModalScope === "world") || characterModalBusy || !elements.characterDialog.open) return false;
   if (characterModalScope === "campaign") { await campaignCharacterController?.save(); return; }
   let character;
   try {
     character = characterFromForm();
+    if (worldCharacterSession) {
+      captureWorldCharacterForm();
+      const projected = worldCharacterSession.projectForCommit();
+      for (const key of ["campaignUse", "startingCastDefault", "alwaysInContext"]) if (!(key in character)) delete projected[key];
+      character = { ...characterModalWorkingCharacter, ...projected, source: characterModalWorkingCharacter.source };
+    }
   } catch (error) {
     setCharacterStatus(error.message || String(error), "error");
     const control = error.control;
+    worldCharacterInvalidControl = control;
+    if (control instanceof HTMLElement && control.closest("#characterStats, #characterTrackers")) {
+      worldCharacterMechanicsRecovery = true;
+      updateCharacterUseControls();
+    }
+    if (control instanceof HTMLElement) {
+      control.setAttribute("aria-invalid", "true");
+      worldCharacterPresentation?.reveal?.(editorSectionForPath(control.dataset.characterProfilePath || "", "world-draft") || "mechanics", control);
+    }
     if (control instanceof HTMLElement) {
       const disclosure = control.closest("details");
       if (disclosure) disclosure.open = true;
@@ -4445,8 +4696,10 @@ async function saveCharacterFromModal(event) {
   if (!worldAuthorWorkingContent || (worldAuthorMode === "edit" && selectedWorld?.status === "archived")) return;
   if (suggestionApply) {
     suggestionApply(character);
+    worldCharacterSession?.markApplied(character);
+    characterDialogClosedAt = performance.now();
     elements.characterDialog.close("saved");
-    return;
+    return true;
   }
   const roster = playableCharactersFromContent(worldAuthorWorkingContent).map((item) => copyJsonValue(item));
   if (editingCharacterId) {
@@ -4462,11 +4715,24 @@ async function saveCharacterFromModal(event) {
       setCharacterStatus("The generated character ID conflicts with an existing character. Generate again or reopen the modal.", "error");
       return;
     }
+    if (roster.length >= MAX_PLAYABLE_CHARACTERS) { setCharacterStatus("The world roster is full. Remove a character before adding another; your changes are kept.", "error"); return false; }
     roster.push(character);
   }
   updateWorldAuthorCharacters(roster);
+  worldCharacterSession?.markApplied(character);
+  characterDialogClosedAt = performance.now();
   elements.characterDialog.close("saved");
   setWorldAuthorStatus(`${character.name} ${editingCharacterId ? "updated" : "added"}. Save the world form to persist this change.`, "success");
+  requestAnimationFrame(() => {
+    if (!elements.worldAuthorDialog.open || elements.characterDialog.open) return;
+    const row = [...elements.playableCharacterRoster.querySelectorAll("[data-character-id]")].find(node => node.dataset.characterId === character.id);
+    const target = row?.querySelector(".character-roster-card") || elements.playableCharacterRoster.parentElement.querySelector(".character-roster-heading strong");
+    if (target) {
+      if (!row) target.tabIndex = -1;
+      target.focus();
+    }
+  });
+  return true;
 }
 
 async function deleteCharacterFromModal() {
@@ -7802,6 +8068,7 @@ elements.cancelCharacterProfileReview.addEventListener("click", () => {
 elements.applyCharacterProfileReview.addEventListener("click", applyCharacterProfileReview);
 const campaignCastApi = createCampaignCastApi();
 const campaignCastPanel = createLegacyCastPanel({
+  editorPresentation: "workspace",
   api: campaignCastApi, campaignPage: true, campaignId: () => selectedCampaign?.id ?? null,
   generationActive: () => false,
   checkLock: async id => campaignCharacterGenerationLocked(await characterApi.generation.syncStatus(id)),
@@ -7817,6 +8084,12 @@ elements.editCampaignCharacter.addEventListener("click", () => {
   else void openCampaignCharacterDialog();
 });
 elements.characterDialog.addEventListener("close", () => {
+  characterDialogClosedAt = performance.now();
+  worldCharacterPresentationCleanup?.();
+  campaignCharacterPresentation?.dispose();
+  campaignCharacterPresentation = null;
+  worldCharacterSession = null;
+  delete elements.characterDialog.dataset.characterDraftId;
   suggestionApply = null;
   ++campaignCharacterOpenEpoch;
   ++campaignCharacterLockEpoch;
@@ -7933,7 +8206,8 @@ elements.contextForm.addEventListener("submit", previewContext);
 elements.reindexMemory.addEventListener("click", rebuildMemory);
 elements.reindexEmbeddings.addEventListener("click", reindexSemanticRetrieval);
 window.addEventListener("beforeunload", (event) => {
-  if (!campaignEditGuard.isDirty(campaignSettingsSnapshot())) return;
+  const unsavedDialog = [elements.worldAuthorDialog, elements.characterDialog].some(dialog => dialog.open && editDialogSessions.get(dialog)?.editSession.isDirty(modalFormSnapshot(dialog)));
+  if (!unsavedDialog && !campaignEditGuard.isDirty(campaignSettingsSnapshot())) return;
   event.preventDefault();
   event.returnValue = "";
 });

@@ -46,73 +46,65 @@ async function openNewWorld(page: Page, writes: Array<{ method: string; path: st
   await page.locator('[data-world-author-step="character"]').click();
 }
 
-test("new character offers manual fallback and notes while keeping empty imported source hidden", async ({ page }) => {
+test("new character offers manual fallback and detailed notes while keeping empty imported source hidden", async ({ page }) => {
   await openNewWorld(page);
   await page.locator("#addPlayableCharacter").click();
-  await expect(page.locator("#characterDialog")).toBeVisible();
-  await expect(page.locator(".character-playable-context")).toBeVisible();
-  await expect(page.locator("#characterGuidance")).toBeAttached();
+  await expect(page.locator(".character-quick-create")).toBeVisible();
+  await expect(page.locator("#characterName")).toBeVisible();
+  await expect(page.locator("#characterRole")).toBeVisible();
+  await expect(page.locator("#characterPersonality")).toBeVisible();
   await expect(page.locator("#characterGuidance")).toBeHidden();
   await expect(page.locator("#characterGeneratorUnavailable")).toContainText("Provider Setup");
   await expect(page.locator("#characterGenerator")).toBeHidden();
+  await page.getByRole("button", { name: "Continue in detailed editor" }).click();
+  await worldSection(page, "History and notes");
   await expect(page.locator("#characterUnclassifiedNotes")).toBeVisible();
-  await expect(page.locator("#characterMotivations")).toBeHidden();
-  const guidance = page.locator(".character-profile-section > .field-note");
-  const roleLabel = page.locator("label").filter({ has: page.locator("#characterRole") });
-  const guidanceBox = await guidance.boundingBox();
-  const roleBox = await roleLabel.boundingBox();
-  expect(guidanceBox && roleBox && guidanceBox.y + guidanceBox.height <= roleBox.y).toBe(true);
-  await page.screenshot({ path: resolve(evidenceDirectory, "new-character-basic.png") });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.locator("#characterGeneratorUnavailable").scrollIntoViewIfNeeded();
-  await expect(page.locator("#characterGeneratorUnavailable")).toBeVisible();
-  expect(await page.locator("#characterDialog").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: resolve(evidenceDirectory, "new-character-mobile-fallback.png") });
-  await page.locator("#characterUnclassifiedNotes").scrollIntoViewIfNeeded();
-  await expect(page.locator("#characterUnclassifiedNotes")).toBeVisible();
+  expect(await page.locator("#characterDialog").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: resolve(evidenceDirectory, "new-character-mobile-notes.png") });
-  await page.locator("#characterAppearance > summary").click();
-  await page.locator("#characterAppearance > summary").click();
   await page.locator("#cancelCharacter").click();
   await expect(page.locator("#characterDialog")).toBeHidden();
   await expect(page.locator("#discardChangesDialog")).toBeHidden();
 });
 
-test("closed character disclosures preserve appearance, mechanics, and imported metadata through Apply and parent Save", async ({ page }) => {
+test("section changes preserve appearance, mechanics, and imported metadata through Apply and parent Save", async ({ page }) => {
   const writes: Array<{ method: string; path: string; body: unknown }> = [];
   await openNewWorld(page, writes);
   await page.locator("#addPlayableCharacter").click();
-  await expect(page.locator("#characterDialog")).toBeVisible();
-  await page.locator("#characterAppearance").locator("summary").click();
+  await page.locator("#characterName").fill("Mira Vale");
+  await page.locator("#characterRole").fill("Guide");
+  await page.getByRole("button", { name: "Continue in detailed editor" }).click();
+  await worldSection(page, "Appearance");
   await page.locator("#characterClothing").fill("Blue travel coat");
+  await worldSection(page, "Mechanics");
   await page.locator("#characterMechanics").evaluate((element: HTMLDetailsElement) => { element.open = true; });
   await page.locator("#addCharacterStat").click();
   const row = page.locator("#characterStats .character-edit-row").last();
   await row.locator('[data-character-field="name"]').fill("Resolve");
   await row.locator('[data-character-field="value"]').fill("17");
+  await worldSection(page, "History and notes");
   await page.locator("#characterUnclassifiedNotes").fill("Unsorted imported-era note");
-  await page.locator("#characterName").fill("Mira Vale");
-  await page.locator("#characterRole").fill("Guide");
-  await page.locator("#characterIdentityDetails > summary").click();
+  await worldSection(page, "Identity");
   await page.locator("#characterAliases").fill("Wren, the Keeper\nNorth Star");
-  for (const selector of ["#characterAppearance > summary", "#characterMechanics > summary"]) await page.locator(selector).click();
   await page.locator("#saveCharacter").click();
   await expect(page.locator("#playableCharacterRoster")).toContainText("Mira Vale");
   await page.getByRole("button", { name: "Edit Mira Vale" }).click();
-  await page.locator("#characterIdentityDetails > summary").click();
+  await worldSection(page, "Identity");
   await expect(page.locator("#characterAliases")).toHaveValue("Wren, the Keeper\nNorth Star");
   await page.locator("#cancelCharacter").click();
   expect(writes).toEqual([]);
   await page.locator("#saveWorldDraft").click();
   await expect(page.locator("#worldAuthorDialog")).toBeHidden();
-  expect(writes.filter((write) => write.method === "POST" && write.path === "/api/v1/worlds")).toHaveLength(1);
-  const posted = writes.find((write) => write.path === "/api/v1/worlds")?.body as { content?: { playableCharacters?: Array<Record<string, any>> } };
-  const character = posted.content?.playableCharacters?.[0];
-  expect(character).toMatchObject({ name: "Mira Vale", profile: { story: { role: "Guide" }, appearance: { clothing: "Blue travel coat" }, unclassifiedNotes: "Unsorted imported-era note" } });
-  expect(character?.rpgStats).toEqual([expect.objectContaining({ name: "Resolve", value: 17 })]);
-  expect(character?.profile.identity.aliases).toEqual(["Wren, the Keeper", "North Star"]);
-  await page.screenshot({ path: resolve(evidenceDirectory, "closed-character-fields-saved.png") });
+  const posted = writes.find(write => write.path === "/api/v1/worlds")?.body as any;
+  expect(posted.content.playableCharacters[0]).toMatchObject({ name: "Mira Vale", profile: { story: { role: "Guide" }, appearance: { clothing: "Blue travel coat" }, unclassifiedNotes: "Unsorted imported-era note", identity: { aliases: ["Wren, the Keeper", "North Star"] } }, rpgStats: [expect.objectContaining({ name: "Resolve", value: 17 })] });
 });
+
+async function worldSection(page: Page, name: string) {
+  await expect(page.locator(".character-workspace")).toBeVisible();
+  const select = page.getByRole("combobox", { name: "Section", exact: true });
+  if (await select.isVisible()) await select.selectOption({ label: await select.locator("option").filter({ hasText: name }).first().textContent() as string });
+  else await page.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: new RegExp(`^${name} ·`) }).click();
+}
 
 test("deleting an existing character edits only the open World draft", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 0, worldCount: 1, campaignCount: 0 });
@@ -127,7 +119,7 @@ test("deleting an existing character edits only the open World draft", async ({ 
   await expect(page.locator("#characterDialog")).toBeVisible();
   page.once("dialog", dialog => dialog.accept());
   await page.locator("#deleteCharacter").click();
-  await expect(page.locator("#playableCharacterRoster")).toContainText("No playable characters");
+  await expect(page.locator("#playableCharacterRoster")).toContainText("No characters yet");
   expect(api.writes).toHaveLength(0);
 });
 
@@ -146,8 +138,9 @@ for (const width of [1440, 390]) test(`campaign aliases and reviewed Organize pr
   await page.goto(`${origin}/nexus/index.html#campaigns`);
   await page.locator(`#campaignList [data-campaign-id="${fixture.campaignId}"]`).click();
   await page.locator("#editCampaignCharacter").click();
-  await page.locator("#characterIdentityDetails > summary").click();
+  await worldSection(page, "Identity");
   await page.locator("#characterAliases").fill("Wren, the Keeper\nNorth Star");
+  await worldSection(page, "History and notes");
   await page.locator("#organizeCharacterProfile").click();
   await expect(page.locator("#characterProfileReviewList")).toContainText("blue cloak");
   expect(await page.locator("#characterProfileReviewDialog").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
@@ -162,10 +155,12 @@ for (const width of [1440, 390]) test(`campaign aliases and reviewed Organize pr
     profile: { identity: { aliases: ["Wren, the Keeper", "North Star"] }, appearance: { clothing: "blue cloak" } }
   });
   await page.locator("#editCampaignCharacter").click();
-  await page.locator("#characterIdentityDetails > summary").click();
+  await worldSection(page, "Identity");
   await expect(page.locator("#characterAliases")).toHaveValue("Wren, the Keeper\nNorth Star");
+  await worldSection(page, "History and notes");
   await page.locator("#organizeCharacterProfile").click();
   await page.locator("#cancelCharacterProfileReview").click();
+  await worldSection(page, "Overview");
   await page.locator("#characterRole").fill("Archivist");
   await page.locator("#saveCharacter").click();
   await expect(page.locator("#characterDialog")).toBeHidden();
@@ -180,6 +175,8 @@ test("invalid hidden mechanics field opens its disclosure before focus", async (
   await expect(page.locator("#characterDialog")).toBeVisible();
   await page.locator("#characterName").fill("Mira Vale");
   await page.locator("#characterRole").fill("Guide");
+  await page.getByRole("button", { name: "Continue in detailed editor" }).click();
+  await worldSection(page, "Mechanics");
   await page.locator("#characterMechanics summary").click();
   await page.locator("#addCharacterStat").click();
   await page.locator('#characterStats [data-character-field="name"]').last().fill("Resolve");
@@ -276,7 +273,9 @@ test("character organization busy state freezes disclosure navigation and restor
   await page.getByRole("button", { name: "Edit The Observer" }).click();
   await page.locator("#characterRole").fill("Synthetic guide");
   const mechanicsSummary = page.locator("#characterMechanics > summary");
+  await worldSection(page, "Mechanics");
   await mechanicsSummary.click();
+  await worldSection(page, "History and notes");
   await page.locator("#organizeCharacterProfile").click();
   await requestStarted;
   await expect(mechanicsSummary).toHaveAttribute("aria-disabled", "true");
@@ -292,17 +291,17 @@ test("character organization busy state freezes disclosure navigation and restor
   await page.screenshot({ path: resolve(evidenceDirectory, "character-organization-error-retains-form.png") });
 });
 
-test("character disclosures support keyboard navigation and remain usable at 200 percent zoom", async ({ page }) => {
+test("character sections support keyboard navigation and narrow zoom-equivalent layout", async ({ page }) => {
   await openNewWorld(page);
   await page.locator("#addPlayableCharacter").click();
-  await expect(page.locator("#characterDialog")).toBeVisible();
-  const appearanceSummary = page.locator("#characterAppearance > summary");
-  await appearanceSummary.focus();
-  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Continue in detailed editor" }).click();
+  const appearance = page.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: /^Appearance ·/ });
+  await appearance.focus(); await page.keyboard.press("Enter");
   await expect(page.locator("#characterClothing")).toBeVisible();
-  await page.evaluate(() => { document.documentElement.style.zoom = "2"; });
-  await expect(appearanceSummary).toBeVisible();
-  await page.screenshot({ path: resolve(evidenceDirectory, "character-appearance-keyboard-200-percent.png"), fullPage: false });
+  await page.setViewportSize({ width: 640, height: 400 });
+  await expect(page.getByRole("combobox", { name: "Section", exact: true })).toBeVisible();
+  await expect(page.locator("#saveCharacter")).toBeInViewport();
+  await page.screenshot({ path: resolve(evidenceDirectory, "character-appearance-keyboard-200-percent.png") });
 });
 
 test("existing imported advanced character round-trips source, unknown fields, and mechanic metadata unchanged", async ({ page }) => {
@@ -328,7 +327,8 @@ test("existing imported advanced character round-trips source, unknown fields, a
   await page.locator("#editWorldDraft").click();
   await page.locator('[data-world-author-step="character"]').click();
   await page.getByRole("button", { name: "Edit Imported Mira" }).click();
-  for (const selector of ["#characterAppearance > summary", "#characterMechanics > summary"]) await expect(page.locator(selector)).toBeVisible();
+  await expect(page.locator(".character-workspace")).toBeVisible();
+  await worldSection(page, "History and notes");
   await expect(page.locator("#characterGuidance")).toHaveValue("Preserved source");
   await expect(page.locator("#characterGuidance")).toBeVisible();
   await page.locator("#saveCharacter").click();
@@ -363,6 +363,7 @@ test("campaign Organize review survives generation lock and profile conflict", a
   await page.goto(`${origin}/nexus/index.html#campaigns`);
   await page.locator(`#campaignList [data-campaign-id="${fixture.campaignId}"]`).click();
   await page.locator("#editCampaignCharacter").click();
+  await worldSection(page, "History and notes");
   await page.locator("#organizeCharacterProfile").click();
   const review = page.locator("#characterProfileReviewDialog"), apply = page.locator("#applyCharacterProfileReview");
   await expect(review).toContainText("blue cloak"); await expect(apply).toBeEnabled();
@@ -386,4 +387,53 @@ test("campaign Organize review survives generation lock and profile conflict", a
   await expect(editor).toBeHidden();
   expect(saves()).toHaveLength(1);
   expect(saves()[0]!.body).toMatchObject({ editSource: "ai_organized", organizerProtocolVersion: "fixture-organizer-v1", profile: { appearance: { clothing: "blue cloak" } } });
+});
+
+for (const operation of ["Generate", "Organize"] as const) for (const succeeds of [true, false]) test(`detailed ${operation} ${succeeds ? "success" : "failure"} retains editing and retry`, async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 0, worldCount: 1, campaignCount: 0 });
+  await installLegacyUiFixture(page, fixture);
+  let requests = 0;
+  const path = operation === "Generate" ? "**/api/v1/worlds/playable-characters/generate-preview" : "**/api/v1/worlds/*/draft/playable-characters/organize";
+  await page.route(path, route => {
+    requests++;
+    if (!succeeds) return route.fulfill({ status: 503, json: { error: "unavailable", message: "Synthetic detailed AI failure." } });
+    const profile = characterProfileSchema.parse({ story: { role: "Generated guide" }, appearance: { eyes: "Green" } });
+    return route.fulfill({ json: operation === "Generate" ? { character: { id: "provider-character", name: "Mira", characterText: "Guide", profile, rpgStats: [], defaultTriggers: [], source: {} } } : { candidate: profile, evidence: [], conflicts: [], warnings: [], unassignedText: [], protocolVersion: "fixture-organizer" } });
+  });
+  await page.goto(`${origin}/nexus/index.html#world-library`);
+  await page.locator(`#worldManagementCarousel [data-world-id="${fixture.worldId}"]`).click();
+  await page.locator("#editWorldDraft").click();
+  await page.locator('[data-world-author-step="character"]').click();
+  await page.getByRole("button", { name: "Edit The Observer", exact: true }).click();
+  await expect(page.locator(".character-workspace")).toBeVisible();
+  await page.locator("#characterRole").fill("Supplied guide facts");
+  const invoke = async () => {
+    await worldSection(page, operation === "Generate" ? "Overview" : "History and notes");
+    if (operation === "Generate") {
+      await page.locator("#characterGenerator").evaluate((node: HTMLDetailsElement) => { node.open = true; });
+      await page.locator("#characterGeneratorPrompt").fill("A patient guide");
+      page.once("dialog", confirm => confirm.accept());
+      await page.locator("#generateCharacter").click();
+    } else await page.locator("#organizeCharacterProfile").click();
+  };
+  const finishReview = async () => {
+    if (operation === "Organize" && succeeds) {
+      await expect(page.locator("#characterProfileReviewDialog")).toBeVisible();
+      await page.locator("#characterProfileReviewDialog").evaluate((node: HTMLDialogElement) => node.close());
+    }
+    await expect(page.locator("#characterStatus")).toContainText(succeeds ? operation === "Generate" ? "Character generated" : "Review the evidence" : "Synthetic detailed AI failure");
+  };
+  await invoke(); await finishReview();
+  await worldSection(page, "Overview");
+  await expect(page.locator("#characterName")).toBeEnabled();
+  await page.locator("#characterName").fill("Authored after AI");
+  await expect(page.locator("#characterRole")).toBeEnabled();
+  await page.locator("#characterRole").fill("Edited after AI");
+  await worldSection(page, "Appearance");
+  await page.locator("#characterClothing").fill("Authored coat");
+  await invoke(); await finishReview();
+  expect(requests).toBe(2);
+  await worldSection(page, "Overview");
+  await expect(page.locator("#characterName")).toBeEnabled();
+  await page.locator("#characterName").fill("Still editable after retry");
 });

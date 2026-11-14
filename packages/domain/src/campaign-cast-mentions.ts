@@ -18,13 +18,16 @@ function sentenceInitial(text: string, start: number): boolean {
 
 /** Text references only: no identity, portrayal, location or encounter assertions. */
 export function findCastMentions(source: CastDiscoverySource, characters: readonly CastCharacter[]): CastMention[] {
+  // Merge targets already carry the reviewed names. Historical source names must
+  // neither receive new mentions nor make a retained or reused name ambiguous.
+  const identities = characters.filter(character => !character.mergedIntoCharacterId);
   const owners = new Map<string, Set<string>>();
-  for (const character of characters) for (const term of [character.name, ...character.aliases]) {
+  for (const character of identities) for (const term of [character.name, ...character.aliases]) {
     const key = term.normalize("NFKC").toLocaleLowerCase("en-US");
     const ids = owners.get(key) ?? new Set<string>(); ids.add(character.id); owners.set(key, ids);
   }
   const found: CastMention[] = [], seen = new Set<string>();
-  for (const character of characters) {
+  for (const character of identities) {
     if (character.origin.kind === "protagonist" || character.ignored) continue;
     for (const term of new Set([character.name, ...character.aliases])) {
       if (!term || term.length > 1000 || generic.test(term) || owners.get(term.normalize("NFKC").toLocaleLowerCase("en-US"))?.size !== 1) continue;

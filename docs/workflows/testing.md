@@ -25,12 +25,24 @@ The root package scripts provide `pnpm test:unit`, `pnpm test:integration` (the 
 If this checkout contains nested worktrees, the root unit script can discover their tests. Use this explicit exclusion until test discovery is constrained in code:
 
 ```sh
-pnpm test:unit --exclude '**/.worktrees/**' --exclude '**/.codex/**'
+pnpm test:unit --exclude '**/.worktrees/**' --exclude '**/.codex/**' --exclude '**/.claude/**'
 ```
 
 For focused database tests, pass `--config vitest.integration.config.ts`; it provisions the dedicated test database and installs per-file isolation. Direct Vitest invocation without that configuration may exit successfully while skipping database cases when `TEST_DATABASE_URL` is absent. The full `pnpm test:integration` runner selects that configuration automatically.
 
 Report passed, failed, and skipped checks separately, including reasons for skips. Unit tests do not establish real PostgreSQL, browser, or live-provider behavior. A skipped integration or browser check is not a pass.
+
+## Nexus character workspace
+
+The focused UI suites are `nexus-character-workspace`, `nexus-protagonist-workspace`, `nexus-roster-mechanics`, and `nexus-character-native-zoom` under `tests/e2e/`. Run them alongside character authoring, unified editor, campaign cast, authoring disclosures, campaign edits and campaign creation after changing shared character presentation. Set `CAST_SCREENSHOT_ROOT` to an evidence directory when capturing artifacts. The native-zoom proof uses a disposable Chromium profile and extension to set and verify tab zoom; CSS zoom or a smaller viewport is separate evidence.
+
+The composed PostgreSQL/browser proof remains in `tests/integration/world-library.integration.test.ts`. Start a task-owned legacy Vite server on an unused port, set `PLAYWRIGHT_LEGACY_PORT` to that port and `NEXUS_CAST_BROWSER_PROOF=1`, then run:
+
+```powershell
+node node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts tests/integration/world-library.integration.test.ts
+```
+
+Confirm that the opt-in browser case ran. Use the integration configuration's isolated database, and stop only the Vite process you started. [Acceptance evidence](../review/nexus-character-workspace-acceptance.md) distinguishes database, fixture-browser, native-zoom and physical-keyboard verification.
 
 ## Generation rejection review verification
 

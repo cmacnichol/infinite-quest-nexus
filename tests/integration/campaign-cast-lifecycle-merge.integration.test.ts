@@ -7,12 +7,45 @@ import { exportCampaignCast, importCampaignCast } from "../../packages/database/
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { castAuthoredPathSchema, portableCampaignCastSchema } from "../../packages/contracts/src/campaign-cast.js";
 import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { recordAcceptedTurnCastMentions } from "../../packages/database/src/campaign-cast-mentions.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 integration("cast lifecycle merge", () => {
   let pool: DatabasePool, ownerUserId: string;
   beforeAll(async () => { pool = createDatabasePool(process.env.TEST_DATABASE_URL!, 8); await migrateDatabase(pool, resolve("database/migrations")); ownerUserId = await initialOwnerId(pool); }, 60_000);
   afterAll(async () => { await pool?.end(); });
+  it.each([true, false])("records new mentions only against reviewed merge names (retain alias: %s)", async retainAlias => {
+    const world = randomUUID(), version = randomUUID(), campaignId = randomUUID(), scope = { ownerUserId, campaignId };
+    await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Mentions')", [world, ownerUserId]);
+    await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) VALUES($1,$2,$3,1,'{}')", [version, world, ownerUserId]);
+    await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title) VALUES($1,$2,$3,'Mentions')", [campaignId, ownerUserId, version]);
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true });
+    const boundary = { turnNumber: 0, timelineRevision: 0 };
+    const target = await repo.create(scope, { expectedCastRevision: 0, expectedBoundary: boundary, idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: {} });
+    const source = await repo.create(scope, { expectedCastRevision: target.revision, expectedBoundary: boundary, idempotencyKey: randomUUID(), name: "Mary", aliases: [], profile: {} });
+    await repo.merge!(scope, target.character.id, { expectedCastRevision: source.revision, expectedBoundary: boundary,
+      expectedCharacterRevision: target.character.revision, expectedSourceCharacterRevision: source.character.revision,
+      sourceCharacterId: source.character.id, reviewedAliases: retainAlias ? ["Mary"] : [], choices: {}, idempotencyKey: randomUUID() });
+    const mention = async (number: number) => withTransaction(pool, async client => {
+      const turnId = randomUUID();
+      await client.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,$4,'Mary waits.')", [turnId, ownerUserId, campaignId, number]);
+      await client.query("UPDATE campaigns SET active_turn_number=$2 WHERE id=$1", [campaignId, number]);
+      await recordAcceptedTurnCastMentions(client, scope, turnId, error => { throw error; });
+      await recordAcceptedTurnCastMentions(client, scope, turnId, error => { throw error; });
+    });
+    await mention(1);
+    let cast = await repo.current(scope);
+    expect(cast.characters.find(person => person.id === target.character.id)?.lastMentionedTurn).toBe(retainAlias ? 1 : null);
+    expect(cast.characters.find(person => person.id === source.character.id)?.lastMentionedTurn).toBeNull();
+    if (!retainAlias) {
+      const replacement = await repo.create(scope, { expectedCastRevision: cast.revision, expectedBoundary: cast.boundary,
+        idempotencyKey: randomUUID(), name: "Mary", aliases: [], profile: {} });
+      await mention(2);
+      cast = await repo.current(scope);
+      expect(cast.characters.find(person => person.id === replacement.character.id)?.lastMentionedTurn).toBe(2);
+      expect(cast.characters.find(person => person.id === target.character.id)?.lastMentionedTurn).toBeNull();
+    }
+  });
   it("reserves removed names and aliases for restore even when lifecycle writes are disabled", async () => {
     const world = randomUUID(), version = randomUUID(), campaignId = randomUUID(), scope = { ownerUserId, campaignId };
     await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Names')", [world, ownerUserId]);

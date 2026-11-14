@@ -1488,7 +1488,7 @@ describe("Nexus management UI contracts", () => {
   it("lets organization use notes before story fields are completed, while save targets missing fields", () => {
     const elements = { characterName: { value: "Mira" }, characterGuidance: { value: "" }, characterRole: {}, characterUnclassifiedNotes: {}, characterCampaignUse: { value: "playable" }, characterStartingCastDefault: { checked: true }, characterAlwaysInContext: { checked: false } };
     const profile = { story: { role: "" }, unclassifiedNotes: "A patient guide" };
-    const { characterFromForm } = managementFunctions<{ characterFromForm: (options?: { forOrganization: boolean }) => unknown }>(["characterFromForm"], {
+    const { characterFromForm } = managementFunctions<{ characterFromForm: (options?: { forOrganization: boolean }) => unknown }>(["characterFromForm", "characterMechanicsFromForm"], {
       elements, profileFromForm: () => profile, profileHasGuidance: () => false, characterModalScope: "world", editingCharacterId: "",
       characterModalWorkingCharacter: { id: "mira", extension: "preserved" }, opaqueCharacterId: () => "new", characterRowsFromForm: () => []
     });
@@ -1555,6 +1555,7 @@ describe("Nexus management UI contracts", () => {
       elements, document, HTMLElement: document.defaultView!.HTMLElement, selectedCampaign: { id: "campaign" }, characterApi: { campaigns: { getCharacterProfile: async () => ({ name: "Mira", profile: {} }) }, generation: { syncStatus: async () => ({ pendingGeneration: null, generationRecovery: null }) } },
       campaignProfileEditorRecord: (profile: unknown) => profile, setCampaignCharacterReviewLock: () => {},
       createCampaignMainController: () => ({ setLocked: () => {} }),
+      mountMainCharacterWorkspace: () => ({ refresh() {}, dispose() {} }), campaignCharacterPresentation: null,
       campaignCharacterController: null, campaignCharacterLocked: false, campaignCharacterOpenEpoch: 0, campaignCharacterGenerationLocked: () => false,
       characterModalScope: "world", campaignCharacterProfileRevision: 0, editingCharacterId: "",
       characterProfileOrganizationResult: null,
@@ -2829,9 +2830,10 @@ it("shows the admission message and reference for Generate and Organize", async 
   const { document } = parseHTML(managementHtml);
   const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, HTMLInputElement & HTMLDetailsElement>;
   elements.characterGeneratorPrompt!.value = "A traveler";
+  Object.defineProperty(elements.characterDialog, "open", { value: true });
   const error = Object.assign(new Error("Too many requests"), { correlationId: "ref-123" });
   const status = document.createElement("div");
-  const common = {
+  const common = { editDialogSessions: new Map(), worldSelectionEpoch: 1, worldCharacterPresentation: null,
     elements, worldAuthorBusy: false, characterModalScope: "world", worldAuthorWorkingContent: {}, characterModalBusy: false,
     configuredDefaultTextProvider: () => ({}), window: { confirm: () => true }, WORLD_PROFILE_FIELDS: [],
     profileFromForm: () => ({}), setCharacterModalControls: () => {}, setCharacterStatus: (message: string) => { status.textContent = message; },
@@ -3003,4 +3005,32 @@ it("does not apply proposals after a stale status check", async () => {
   await applyCharacterProfileReview();
   expect(stage).not.toHaveBeenCalled();
   expect(close).not.toHaveBeenCalled();
+});
+
+for (const outcome of ["success", "failure"] as const) it(`rejects late AI ${outcome} after changing world selection`, async () => {
+  const { document } = parseHTML(managementHtml);
+  const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map(element => [element.id, element])) as any;
+  Object.defineProperty(elements.characterDialog, "open", { value: true });
+  elements.characterGeneratorPrompt.value = "A traveler";
+  elements.characterName.value = "Keep current input";
+  const response = deferred<any>(), populate = vi.fn(), status = vi.fn(), controls = vi.fn();
+  const start = managementScript.indexOf("async function generateCharacterFromPrompt(");
+  const end = managementScript.indexOf("\nfunction renderCharacterProfileReview", start);
+  const bindings = { elements, worldAuthorBusy: false, characterModalScope: "world", worldAuthorWorkingContent: {}, characterModalBusy: false,
+    configuredDefaultTextProvider: () => ({}), window: { confirm: () => true }, profileFromForm: () => ({}),
+    setCharacterModalControls: controls, setCharacterStatus: status, worldContentFromForm: () => ({}), editingCharacterId: "",
+    editDialogSessions: new Map(), worldSelectionEpoch: 1, worldCharacterPresentation: null,
+    characterApi: { worlds: { generateCharacterPreview: () => response.promise } }, populateCharacterForm: populate,
+    characterAdmissionError: (error: Error) => error.message, WORLD_PROFILE_FIELDS: [], characterModalWorkingCharacter: { id: "original-id" }
+  };
+  const harness = Function(...Object.keys(bindings), `${managementScript.slice(start, end)}; return { generateCharacterFromPrompt, changeSelection() { worldSelectionEpoch++; } };`)(...Object.values(bindings));
+  const generating = harness.generateCharacterFromPrompt();
+  harness.changeSelection();
+  if (outcome === "success") response.resolve({ character: { id: "replacement-id", name: "Late generated", profile: {} } });
+  else response.reject(new Error("Late failure"));
+  await generating;
+  expect(populate).not.toHaveBeenCalled();
+  expect(status).toHaveBeenCalledTimes(1);
+  expect(controls).toHaveBeenCalledTimes(1);
+  expect(elements.characterName.value).toBe("Keep current input");
 });

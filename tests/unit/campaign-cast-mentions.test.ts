@@ -9,6 +9,16 @@ const source = (narration: string) => buildCastDiscoverySource({ scope: { ownerU
   turnId: uuid(10), turnNumber: 1, narrationRevision: 0, timelineRevision: 0, narration });
 describe("lexical cast mentions", () => {
   it.each([
+    { label: "retained duplicate name", text: "Mara waits.", target: person(1, "Mara"), oldName: "Mara", extra: [], expected: [uuid(1)] },
+    { label: "retained alias", text: "Mary waits.", target: person(1, "Mara", ["Mary"]), oldName: "Mary", extra: [], expected: [uuid(1)] },
+    { label: "omitted name", text: "Mary waits.", target: person(1, "Mara"), oldName: "Mary", extra: [], expected: [] },
+    { label: "reused omitted name", text: "Mary waits.", target: person(1, "Mara"), oldName: "Mary", extra: [person(3, "Mary")], expected: [uuid(3)] }
+  ])("uses effective merge identities for $label", ({ text, target, oldName, extra, expected }) => {
+    const merged = { ...person(2, oldName), mergedIntoCharacterId: target.id };
+    expect(findCastMentions(source(text), [target, merged, ...extra]).map(item => item.characterId)).toEqual(expected);
+  });
+
+  it.each([
     ["Mara sees Mara.", [person(1, "Mara")], ["Mara", "Mara"]],
     ["I hope so. Hope waits.", [person(1, "Hope")], []],
     ["They said Hope would come.", [person(1, "Hope")], ["Hope"]],

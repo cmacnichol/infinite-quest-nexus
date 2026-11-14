@@ -1,0 +1,46 @@
+import { expect, test } from "@playwright/test";
+import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
+
+const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}`;
+for (const width of [1440, 390]) test(`protagonist workspace retains sections and guards unsaved profile at ${width}px`, async ({ page }, info) => {
+  const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+  const fixture = legacyUiFixture({ turnCount: 1, campaignCount: 1, worldCount: 1 });
+  const api = await installLegacyUiFixture(page, fixture);
+  await page.setViewportSize({ width, height: 900 });
+  await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await expect(page).toHaveTitle(/Nexus/);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  await page.locator(`#campaignList [data-campaign-id="${fixture.campaignId}"]`).click();
+  await page.locator("#editCampaignCharacter").click();
+  const dialog = page.locator("#characterDialog");
+  await expect(dialog.locator(".character-workspace")).toBeVisible();
+  await expect(dialog).toContainText("Campaign: Fixture Campaign 1");
+  await expect(dialog.locator("#saveCharacter")).toBeDisabled();
+  const select = async (id: string, label: string) => {
+    if (width < 700) await dialog.getByRole("combobox", { name: "Section", exact: true }).selectOption(id);
+    else await dialog.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: new RegExp(`^${label}`) }).click();
+  };
+  await select("appearance", "Appearance");
+  await dialog.locator("#characterEyes").fill("Silver eyes");
+  await dialog.getByRole("button", { name: "Preview sheet", exact: true }).click();
+  await expect(dialog.locator(".character-workspace-preview")).toContainText("Silver eyes");
+  await dialog.getByRole("button", { name: "Return to editing" }).click();
+  await expect(dialog.locator("#characterEyes")).toHaveValue("Silver eyes");
+  await page.keyboard.press("Escape");
+  await expect(dialog.getByRole("button", { name: "Keep editing", exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Keep editing", exact: true }).click();
+  await expect(dialog.locator("#characterEyes")).toBeVisible();
+  await page.screenshot({ path: process.env.CAST_SCREENSHOT_ROOT ? `${process.env.CAST_SCREENSHOT_ROOT}/protagonist-workspace-${width}.png` : info.outputPath(`protagonist-workspace-${width}.png`) });
+  await select("overview", "Overview");
+  await dialog.locator("#characterName").fill("");
+  await dialog.locator("#saveCharacter").click();
+  await expect(dialog.locator("#characterName")).toBeFocused();
+  await expect(dialog.locator("#characterName")).toHaveAttribute("aria-invalid", "true");
+  await dialog.locator("#characterName").fill("Edited protagonist");
+  await dialog.locator("#saveCharacter").click();
+  await expect(dialog).toBeHidden();
+  const writes = api.writes.filter(write => write.method === "PUT" && write.path.endsWith("/character-profile"));
+  expect(writes).toHaveLength(1);
+  expect(writes[0]?.body).toMatchObject({ name: "Edited protagonist", profile: { appearance: { eyes: "Silver eyes" } } });
+  expect(errors).toEqual([]);
+});

@@ -42,6 +42,12 @@ Use **Likely included for this input** to estimate which characters fit the curr
 
 In Nexus, open the campaign and choose **Edit characters…**. Search for a character, open their sheet, and choose **Edit character**. The main character has its own profile editor. **Open in Story** opens the same character in the Story panel, where you can inspect sources and review matches.
 
+Nexus opens existing characters in a full-screen editor. Navigate by section in the left rail, or use the **Section** selector and previous/next buttons on a narrow screen. **Preview sheet** shows your local values without making a model request. The character name, destination and save action remain visible. Story keeps its existing panel presentation.
+
+Creating a manual supporting character starts with a quick form for Name, Role and Personality. **Continue in detailed editor** retains those entries and opens the existing supporting profile fields without creating a record. **Create campaign character** performs the explicit create. Supporting characters keep their current smaller field set; world-seeded characters retain their full authored profile and field-authority controls.
+
+**Save character** writes only to this campaign. An unchanged existing character has Save disabled. Cancel, Back and Escape offer a decision for unsaved edits. If saving fails, keep the editor open and retry or compare the latest version; reapply preserves your changes against that version. Manual drafts do not survive a browser reload or crash.
+
 For a supporting character copied from the world, **World canon** marks a value that the story cannot replace. Editing it affects only this campaign. **Reset to world value** restores the original copy. Resetting the character’s identity restores the roster name and aliases together. A field labeled **Added for this campaign** can be cleared so the story can fill it again.
 
 Goals, location, condition and current clothing update with the story. **Use discovered value** releases a hand edit. **Restore authored goals** returns to the world goals until a later observation changes them. **Observed in story** is separate from the authored appearance. Clearing that line hides it until you release the override.
@@ -49,6 +55,8 @@ Goals, location, condition and current clothing update with the story. **Use dis
 When presets are enabled, **Add from world** shows eligible characters in the campaign’s pinned world version. Review the proposed changes before adding a new character or applying a profile to an existing one. A detached match can receive a fresh copy on the same cast record. The Sources and edit history section keeps earlier edits.
 
 Save and reset actions are available again after pending or recoverable generation is resolved. Keep the editor open to retain your draft.
+
+On the Nexus campaign page, **Check generation status** refreshes a lock. Sources and history contain evidence review and campaign options. Reset, Clear, Restore authored goals and Use discovered value change the local draft; save explicitly to commit them. Entering a lifecycle preview from a dirty editor requires saving or explicitly discarding those edits first; **Keep editing** retains them.
 
 ## Draft a character from story evidence
 
