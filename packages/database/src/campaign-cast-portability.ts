@@ -1,10 +1,11 @@
 import { buildCastDiscoverySource } from "../../domain/src/campaign-cast-discovery.js";
 import { randomUUID } from "node:crypto";
 import { castBatchReceiptSchema, castStoredCommandSchema, portableCampaignCastSchema, type CastScope, type PortableCampaignCast,
-  type CastEvidence, type CastBatchReceipt } from "../../contracts/src/campaign-cast.js";
+  type CastBatchReceipt } from "../../contracts/src/campaign-cast.js";
 import type { DatabaseClient } from "./pool.js";
 import { rebuildCastWithClient } from "./campaign-cast-repository.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
+import { createCastReferenceTranslator, type CastReferenceRules } from "../../domain/src/campaign-cast-references.js";
 import { validateCastFiction } from "../../domain/src/campaign-cast.js";
 
 export async function exportCampaignCast(client: DatabaseClient, scope: CastScope): Promise<PortableCampaignCast | undefined> {
@@ -66,68 +67,36 @@ export async function importCampaignCast(client: DatabaseClient, scope: CastScop
     if (!mapped) throw new Error("cast_archive_reference_invalid");
     return mapped;
   };
-  type WorldEvidence = Extract<CastEvidence, { kind: "world" | "historical_world" }>;
-  const worldEvidence = (source: WorldEvidence): WorldEvidence => {
-    if (source.kind === "world") return maps.worlds.has(source.worldVersionId)
-      ? { ...source, worldVersionId: requireId(maps.worlds, source.worldVersionId) }
-      : { kind: "historical_world", sourceWorldVersionId: source.worldVersionId, sourcePath: source.sourcePath };
-    return source;
+  const rules: CastReferenceRules = {
+    origin: origin => origin.kind === "world" ? maps.worlds.has(origin.worldVersionId)
+      ? { ...origin, worldVersionId: requireId(maps.worlds, origin.worldVersionId) }
+      : { kind: "historical_world", sourceWorldVersionId: origin.worldVersionId, entityId: origin.entityId } : origin,
+    worldEvidence: evidence => evidence.kind === "world" ? maps.worlds.has(evidence.worldVersionId)
+      ? { ...evidence, worldVersionId: requireId(maps.worlds, evidence.worldVersionId) }
+      : { kind: "historical_world", sourceWorldVersionId: evidence.worldVersionId, sourcePath: evidence.sourcePath } : evidence,
+    turnEvidence: evidence => evidence.invalidated ? evidence : { ...evidence, turnId: requireId(maps.turns, evidence.turnId) },
+    invalidReference: () => new Error("cast_archive_reference_invalid")
   };
-  const evidence = (source: CastEvidence): CastEvidence => {
-    if (source.kind === "turn") return source.invalidated ? source : { ...source, turnId: requireId(maps.turns, source.turnId) };
-    if (source.kind === "world" || source.kind === "historical_world") return worldEvidence(source);
-    throw new Error("cast_archive_reference_invalid");
-  };
-  const people = payload.characters.map((person) => ({ ...person, id: requireId(characterIds, person.id),
-    origin: person.origin.kind === "world" ? maps.worlds.has(person.origin.worldVersionId)
-      ? { ...person.origin, worldVersionId: requireId(maps.worlds, person.origin.worldVersionId) }
-      : { kind: "historical_world" as const, sourceWorldVersionId: person.origin.worldVersionId, entityId: person.origin.entityId }
-      : person.origin }));
-  const remapReceipt = (receipt: CastBatchReceipt): CastBatchReceipt => {
-    const result = receipt.result;
-    const person = result?.character;
-    const seed = person?.originProfile;
-    const seedEvidence = seed && worldEvidence(seed.evidence);
-    return { eventId: requireId(eventIds, receipt.eventId), revision: receipt.revision,
-      characterIds: receipt.characterIds.map(id => requireId(characterIds, id)),
-      observationIds: receipt.observationIds.map(id => requireId(observationIds, id)),
-      ...(result && person ? { result: { ...result, character: { ...person, id: requireId(characterIds, person.id),
-        origin: people.find(row => row.id === requireId(characterIds, person.id))!.origin,
-        ...(person.mergedIntoCharacterId ? { mergedIntoCharacterId: requireId(characterIds, person.mergedIntoCharacterId) } : {}),
-        ...(person.activeMerges ? { activeMerges: person.activeMerges.map(merge => ({ ...merge,
-          mergeEventId: requireId(eventIds, merge.mergeEventId), sourceCharacterId: requireId(characterIds, merge.sourceCharacterId) })) } : {}),
-        ...(seed && seedEvidence ? { originProfile: { ...seed, seedEventId: requireId(eventIds, seed.seedEventId),
-          worldVersionId: seedEvidence.kind === "world" ? seedEvidence.worldVersionId : seed.worldVersionId, evidence: seedEvidence } } : {}) } } } : {}) };
-  };
-  const events = payload.events.map((event) => ({ ...event, id: requireId(eventIds, event.id), receipt: event.receipt && remapReceipt(event.receipt),
-    attachment: event.attachment ? { ...event.attachment, eventId: requireId(eventIds, event.attachment.eventId),
-      characterId: requireId(characterIds, event.attachment.characterId), observationIds: event.attachment.observationIds.map((id) => requireId(observationIds, id)),
-      sourceRanges: event.attachment.sourceRanges.map((range) => ({ ...range, turnId: requireId(maps.turns, range.turnId) })) } : undefined,
-    commands: event.commands.map((item) => {
-    const command = item.command;
-    if (command.kind === "create" || command.kind === "identity") { validateCastFiction(command.name); command.aliases.forEach(validateCastFiction); }
-    if (command.kind === "observe" || command.kind === "override") validateCastFiction(command.value);
-    if (command.kind === "seed_profile") {
-      validateCastFiction(command.rosterName);
-      command.rosterAliases.forEach(validateCastFiction);
+  const people = payload.characters.map(person => ({ ...person, id: requireId(characterIds, person.id), origin: rules.origin(person.origin) }));
+  const translator = createCastReferenceTranslator({ characters: characterIds, events: eventIds, observations: observationIds, turns: maps.turns }, rules);
+  const events = payload.events.map(event => {
+    for (const { command } of event.commands) {
+      if (command.kind === "create" || command.kind === "identity") { validateCastFiction(command.name); command.aliases.forEach(validateCastFiction); }
+      if (command.kind === "observe" || command.kind === "override") validateCastFiction(command.value);
+      if (command.kind === "seed_profile") {
+        validateCastFiction(command.rosterName);
+        command.rosterAliases.forEach(validateCastFiction);
+      }
+      if (command.kind === "edit_authored_profile") {
+        for (const value of Object.values(command.set)) (Array.isArray(value) ? value : [value]).forEach(validateCastFiction);
+      }
+      if ((command.kind === "create" || command.kind === "observe") && command.evidence?.kind === "user") {
+        throw new Error("cast_archive_reference_invalid");
+      }
     }
-    if (command.kind === "edit_authored_profile") {
-      for (const value of Object.values(command.set)) (Array.isArray(value) ? value : [value]).forEach(validateCastFiction);
-    }
-    return castStoredCommandSchema.parse({
-      ...(item.characterId ? { characterId: requireId(characterIds, item.characterId) } : {}),
-      ...(item.observationId ? { observationId: requireId(observationIds, item.observationId) } : {}),
-      command: command.kind === "create" ? { ...command, origin: people.find((person) => person.id === requireId(characterIds, item.characterId!))!.origin,
-        ...(command.evidence ? { evidence: evidence(command.evidence) } : {}) }
-        : { ...command, characterId: requireId(characterIds, command.characterId), ...(command.kind === "seed_profile" ? {
-          evidence: evidence(command.evidence), worldVersionId: command.evidence.kind === "world" ? maps.worlds.get(command.worldVersionId) ?? command.worldVersionId : command.worldVersionId
-        } : command.kind === "merge" ? { sourceCharacterId: requireId(characterIds, command.sourceCharacterId) } : command.kind === "unmerge" ? { mergeEventId: requireId(eventIds, command.mergeEventId) } : command.kind === "edit_authored_profile" ? { seedEventId: requireId(eventIds, command.seedEventId) } : command.kind === "detach" ? { eventId: requireId(eventIds, command.eventId) } : command.kind === "observe" ? {
-          evidence: evidence(command.evidence), speakerCharacterId: command.speakerCharacterId ? requireId(characterIds, command.speakerCharacterId) : null,
-          supersedesObservationId: command.supersedesObservationId ? requireId(observationIds, command.supersedesObservationId) : null
-        } : command.kind === "mention" ? { evidence: evidence(command.evidence), ...(command.sourceRange ? { sourceRange: { ...command.sourceRange, turnId: command.evidence.invalidated
-          ? command.sourceRange.turnId : requireId(maps.turns, command.sourceRange.turnId) } } : {}) } : {}) }
-    });
-  }) }));
+    const translated = translator.event(event);
+    return { ...translated, commands: translated.commands.map(command => castStoredCommandSchema.parse(command)) };
+  });
   // Validate all mapped sources against destination scope before the first cast write.
   const campaign = (await client.query("SELECT active_turn_number,selected_character_id FROM campaigns WHERE id=$1 AND owner_user_id=$2 FOR UPDATE", [scope.campaignId, scope.ownerUserId])).rows[0];
   if (!campaign) throw new Error("cast_archive_reference_invalid");

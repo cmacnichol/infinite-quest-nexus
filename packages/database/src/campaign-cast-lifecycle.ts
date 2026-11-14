@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { castCommandSchema, castBatchReceiptSchema, castOriginSchema, type CastScope } from "../../contracts/src/campaign-cast.js";
+import { castCommandSchema, castStoredCommandSchema, castObservationSchema, castBatchReceiptSchema, castOriginSchema, type CastScope } from "../../contracts/src/campaign-cast.js";
+import { createCastReferenceTranslator, type CastReferenceRules } from "../../domain/src/campaign-cast-references.js";
 import type { DatabaseClient } from "./pool.js";
 import { rebuildCastWithClient } from "./campaign-cast-repository.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
@@ -72,29 +73,21 @@ export async function copyCampaignCast(client: DatabaseClient, source: CastScope
       && (!row.speaker_character_id || characterIds.has(row.speaker_character_id)));
   const observationIds = new Map(observations.map((row) => [row.id, randomUUID()]));
   const eventIds = new Map(events.map((row) => [row.id, randomUUID()]));
-  const remap = (value: any, key = ""): any => {
-    if (["profile", "campaignProfile", "set"].includes(key)) return value;
-    if (crossWorld && value?.kind === "world" && key === "evidence")
-      return { kind: "historical_world", sourceWorldVersionId: value.worldVersionId, sourcePath: value.sourcePath };
-    if (crossWorld && value?.kind === "world" && key === "origin")
-      return { kind: "historical_world", sourceWorldVersionId: value.worldVersionId, entityId: value.entityId };
-    if (key === "evidence" && value?.kind === "turn" && (value.invalidated || !turnIds.has(value.turnId))) return { ...value, invalidated: true };
-    if (Array.isArray(value)) return value.map((item) => remap(item, key === "characterIds" ? "characterId" : key === "observationIds" ? "observationId" : key));
-    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, remap(item, name)]));
-    if (typeof value !== "string") return value;
-    const mapping = ["characterId", "sourceCharacterId", "mergedIntoCharacterId", "speakerCharacterId"].includes(key) ? characterIds
-      : ["observationId", "supersedesObservationId"].includes(key) ? observationIds
-      : ["eventId", "editId", "seedEventId", "mergeEventId"].includes(key) ? eventIds : key === "turnId" ? turnIds : null;
-    if (!mapping) return value;
-    const mapped = mapping.get(value);
-    if (!mapped) throw new Error(`Invalid retained cast reference: ${key}`);
-    return mapped;
+  const rules: CastReferenceRules = {
+    origin: origin => crossWorld && origin.kind === "world"
+      ? { kind: "historical_world", sourceWorldVersionId: origin.worldVersionId, entityId: origin.entityId } : origin,
+    worldEvidence: evidence => crossWorld && evidence.kind === "world"
+      ? { kind: "historical_world", sourceWorldVersionId: evidence.worldVersionId, sourcePath: evidence.sourcePath } : evidence,
+    turnEvidence: evidence => evidence.invalidated || !turnIds.has(evidence.turnId)
+      ? { ...evidence, invalidated: true } : { ...evidence, turnId: turnIds.get(evidence.turnId)! },
+    invalidReference: field => new Error(`Invalid retained cast reference: ${field}`)
   };
+  const translator = createCastReferenceTranslator({ characters: characterIds, events: eventIds, observations: observationIds, turns: turnIds }, rules);
   // Inherit forward enrollment, never operational jobs or an assertion that copied history was scanned.
   await client.query("INSERT INTO campaign_cast_state(owner_user_id,campaign_id,revision,coverage_start_turn) VALUES($1,$2,$3,$4)",
     [destination.ownerUserId, destination.campaignId, state.revision, state.coverage_start_turn === null ? null : throughTurn + 1]);
   for (const person of people) {
-    let origin = castOriginSchema.parse(remap(person.origin, "origin"));
+    let origin = rules.origin(castOriginSchema.parse(person.origin));
     if (origin.kind === "protagonist") {
       const row = (await client.query("SELECT selected_character_id FROM campaigns WHERE id=$1 AND owner_user_id=$2", [destination.campaignId, destination.ownerUserId])).rows[0];
       origin = { kind: "protagonist", selectedCharacterId: row.selected_character_id };
@@ -122,25 +115,26 @@ export async function copyCampaignCast(client: DatabaseClient, source: CastScope
     if (!payload.length) continue;
     if (payload.some((item: { command: { kind: string; eventId?: string } }) => item.command.kind === "detach" && !copiedEvents.has(item.command.eventId!)))
       throw new Error("Invalid retained cast detach reference.");
-    const attachment = copyableAttachments.has(event.id) ? remap(event.attachment) : null;
     const receipt = castBatchReceiptSchema.parse(event.receipt);
     if (event.effective_turn_number > throughTurn || payload.length !== event.payload.length) delete receipt.result;
-    else if (receipt.result) receipt.result.character.id = characterIds.get(receipt.result.character.id)!;
     receipt.characterIds = receipt.characterIds.filter((id) => characterIds.has(id));
     receipt.observationIds = receipt.observationIds.filter((id) => observationIds.has(id));
-    const mapped = remap(payload);
+    const mapped = translator.event({ id: event.id, commands: payload.map((item: unknown) => castStoredCommandSchema.parse(item)), receipt,
+      ...(copyableAttachments.has(event.id) ? { attachment: event.attachment } : {}) });
     await client.query(`INSERT INTO campaign_cast_events(id,owner_user_id,campaign_id,effective_turn_number,timeline_revision,idempotency_key,request_hash,payload,receipt,attachment)
       VALUES($1,$2,$3,$4,0,$5,$6,$7,$8,$9)`, [eventIds.get(event.id), destination.ownerUserId, destination.campaignId,
-      Math.min(event.effective_turn_number, throughTurn), `copy:${eventIds.get(event.id)}`, sha256(stableStringify(mapped)), JSON.stringify(mapped), JSON.stringify(remap(receipt)), attachment ? JSON.stringify(attachment) : null]);
+      Math.min(event.effective_turn_number, throughTurn), `copy:${mapped.id}`, sha256(stableStringify(mapped.commands)), JSON.stringify(mapped.commands), JSON.stringify(mapped.receipt), mapped.attachment ? JSON.stringify(mapped.attachment) : null]);
     copiedEvents.add(event.id);
   }
   for (const row of observations) {
     if (!copiedEvents.has(row.event_id)) continue;
+    const mapped = translator.observation(castObservationSchema.parse({ id: row.id, characterId: row.character_id,
+      field: row.field, value: row.value, mode: row.mode, speakerCharacterId: row.speaker_character_id,
+      evidence: row.evidence, supersedesObservationId: row.supersedes_observation_id }));
     await client.query(`INSERT INTO campaign_cast_observations(id,owner_user_id,campaign_id,character_id,event_id,field,value,mode,speaker_character_id,evidence,supersedes_observation_id)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [observationIds.get(row.id), destination.ownerUserId, destination.campaignId,
-      characterIds.get(row.character_id), eventIds.get(row.event_id), row.field, row.value, row.mode,
-      row.speaker_character_id ? characterIds.get(row.speaker_character_id) : null, JSON.stringify(remap(row.evidence, "evidence")),
-      row.supersedes_observation_id ? observationIds.get(row.supersedes_observation_id) : null]);
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [mapped.id, destination.ownerUserId, destination.campaignId,
+      mapped.characterId, eventIds.get(row.event_id), mapped.field, mapped.value, mapped.mode,
+      mapped.speakerCharacterId, JSON.stringify(mapped.evidence), mapped.supersedesObservationId]);
   }
   await rebuildCastWithClient(client, destination);
 }

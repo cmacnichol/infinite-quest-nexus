@@ -33,6 +33,44 @@ integration("campaign cast lifecycle", () => {
     const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
     return { scope, repo };
   }
+  it.each(["branch", "transfer"] as const)("keeps invalidated lexical evidence and its range together through %s and archive restore", async operation => {
+    const { scope } = await fixture();
+    const { exportCampaignCast, importCampaignCast } = await import("../../packages/database/src/campaign-cast-portability.js");
+    const turnId = (await pool.query("SELECT id FROM turns WHERE campaign_id=$1 AND turn_number=1", [scope.campaignId])).rows[0].id;
+    const characterId = randomUUID();
+    const sourceHash = sha256("Mara waits.");
+    // A supported archive may retain invalidated evidence even when that turn still exists.
+    const archive = { formatVersion: 2, revision: 2,
+      characters: [{ id: characterId, origin: { kind: "manual" }, firstObservedTurn: 1 }],
+      events: [
+        { id: randomUUID(), effectiveTurnNumber: 1, revision: 1,
+          commands: [{ characterId, command: { kind: "create", name: "Mara", aliases: [], origin: { kind: "manual" } } }] },
+        { id: randomUUID(), effectiveTurnNumber: 1, revision: 2,
+          commands: [{ command: { kind: "mention", characterId, kindOfMention: "lexical",
+            evidence: { kind: "turn", turnId, turnNumber: 1, invalidated: true, narrationRevision: 0, sourceHash, paragraphId: "p1", quote: "Mara" },
+            sourceRange: { turnId, narrationRevision: 0, sourceHash, paragraphId: "p1", start: 0, end: 4 } } }] }
+      ] };
+    await withTransaction(pool, client => importCampaignCast(client, scope, archive, { turns: new Map(), worlds: new Map() }));
+    let campaignId: string;
+    if (operation === "branch") {
+      campaignId = (await branchCampaign(pool, scope.campaignId, { targetTurnNumber: 1, title: "Historical mention branch" })).id;
+    } else {
+      const destination = await fixture();
+      const version = (await pool.query("SELECT world_version_id FROM campaigns WHERE id=$1", [destination.scope.campaignId])).rows[0].world_version_id;
+      const request = campaignTransferPreviewRequestSchema.parse({ targetWorldVersionId: version });
+      const preview = await previewCampaignWorldTransfer(pool, scope.campaignId, request);
+      const transfer = await transferCampaignWorld(pool, scope.campaignId, campaignTransferCommitRequestSchema.parse({ ...request, idempotencyKey: randomUUID(),
+        expectedActiveTurnNumber: preview.expectedActiveTurnNumber, expectedStateRevision: preview.expectedStateRevision, sourceFingerprint: preview.sourceFingerprint }));
+      campaignId = transfer.targetCampaignId;
+    }
+    const copied = await withTransaction(pool, client => exportCampaignCast(client, { ownerUserId, campaignId }));
+    const mention = copied!.events.flatMap(event => event.commands).find(item => item.command.kind === "mention")!.command;
+    expect(mention).toMatchObject({ evidence: { turnId, invalidated: true }, sourceRange: { turnId } });
+    const destination = await fixture();
+    await withTransaction(pool, client => importCampaignCast(client, destination.scope, copied, { turns: new Map(), worlds: new Map() }));
+    const restored = await destination.repo.current(destination.scope);
+    expect(restored.characters.find(person => person.name === "Mara")?.lastMentionedTurn).toBeNull();
+  });
   it("preserves active v4 merge authority through actual branch and world transfer", async () => {
     const { scope } = await fixture();
     const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true });
