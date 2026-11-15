@@ -1,9 +1,12 @@
 import { createReviewSource } from "./character-review-source.js";
 import type { CastCharacter, CastCandidateList } from "@infinite-quest/contracts";
 import { buildReviewQueue, type ReviewItem, type CampaignCastApi } from "@infinite-quest/client-web";
-export function renderCastReview(options: { document: Document; container: HTMLElement; api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle"> & Partial<Pick<CampaignCastApi, "sourceTurn">>; campaign: string; current(): boolean; editing(): boolean; checkWrite?(): Promise<boolean>; navigate(turn: number): void; back(): void; key(operation: string, value: unknown): string; clearKeys(): void; autoMatch?: boolean | null; initialItem?: string }) {
+type CandidateForReview = CastCandidateList["candidates"][number];
+export function renderCastReview(options: { document: Document; container: HTMLElement; api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle" | "reviewDecision" | "dismissedReview"> & Partial<Pick<CampaignCastApi, "sourceTurn" | "reviewDecision" | "dismissedReview">>; campaign: string; current(): boolean; editing(): boolean; checkWrite?(): Promise<boolean>; navigate(turn: number): void; back(): void; key(operation: string, value: unknown): string; clearKeys(): void; autoMatch?: boolean | null; initialItem?: string; reviewReadVersion?: 1 | undefined; reviewWrites?: boolean | undefined }) {
   const { document, container, api, campaign } = options;
   const drafts = new Map<string, string>();
+  let undo: { candidateId: string; decisionId: string; sourceHash: string; reviewRevision: number; revision: number; boundary: CastCandidateList["boundary"] } | null = null;
+  let view: "pending" | "dismissed" = "pending"; let announcement = ""; let dismissedCursor: string | undefined;
   const skipped = new Set<string>(); let busy = false; let epoch = 0; let prioritizeCharacter: string | null = null; let initialItem = options.initialItem; let cached: { matches: CastCandidateList; details: CastCandidateList; targets: CastCharacter[] } | null = null;
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => { const el = document.createElement(tag); el.textContent = text; return el; };
   const button = (text: string, action: () => void, disabled = false) => { const el = node("button", text); el.type = "button"; el.disabled = disabled; el.addEventListener("click", action); return el; };
@@ -12,6 +15,33 @@ export function renderCastReview(options: { document: Document; container: HTMLE
   async function load(reuse = false) {
     const token = ++epoch; if (!options.current()) return; container.replaceChildren(node("h2", "Character review"), node("p", "Loading review…"));
     try {
+      if (view === "dismissed" && options.reviewReadVersion === 1 && api.dismissedReview) {
+        const page = await api.dismissedReview(campaign, { limit: 20, ...(dismissedCursor ? { cursor: dismissedCursor } : {}) });
+        if (!options.current() || token !== epoch) return;
+        container.replaceChildren(node("h2", "Character review"), button("Back to characters", options.back), button("Pending", () => { view = "pending"; void load(); }), node("h3", "Dismissed"), node("p", "Dismissals made with this review workflow are listed here. Earlier dismissals are not available for undo."));
+        const heading = container.querySelector<HTMLElement>("h2"); if (heading) { heading.tabIndex = -1; heading.focus(); }
+        const status = node("p", announcement); status.setAttribute("role", "status"); container.append(status); announcement = "";
+        if (!page.decisions.length) container.append(node("p", "No dismissals on this page."));
+        for (const decision of page.decisions) {
+          const row = node("section"); const target = decision.target;
+          row.append(node("h4", target.kind === "identity" ? `Discovery: ${target.proposal.name}` : `Detail: ${labelField(target.observation.field)} — ${target.observation.value}`), node("p", `Source turn ${decision.source.turnNumber}`), node("blockquote", target.kind === "identity" ? target.proposal.identityEvidence[0]?.quote ?? "" : target.observation.quote));
+          row.append(button("Undo", () => { void (async () => {
+            if (busy || !options.editing() || !options.reviewWrites || !api.reviewDecision) return;
+            busy = true; status.textContent = "Restoring…";
+            try {
+              if (options.checkWrite && !await options.checkWrite()) { status.textContent = "Finish or resolve generation before changing review."; return; }
+              if (!options.current() || token !== epoch || !options.editing()) return;
+              const request = { action: "restore" as const, decisionId: decision.decisionId, sourceHash: decision.source.sourceHash, expectedReviewRevision: page.reviewRevision, expectedCastRevision: page.revision, expectedBoundary: page.boundary, idempotencyKey: options.key("review", [campaign, decision.decisionId, page.reviewRevision, page.revision, page.boundary]) };
+              await api.reviewDecision(campaign, decision.candidateId, request); if (!options.current() || token !== epoch) return;
+              options.clearKeys(); undo = null; announcement = "Dismissal undone."; dismissedCursor = undefined; cached = null; await load();
+            } catch (error) { status.replaceChildren(node("span", (error as { statusCode?: number }).statusCode === 409 ? "The source or review changed. Reload before deciding." : "Could not restore this dismissal."), button("Reload review", () => { void load(); })); }
+            finally { busy = false; }
+          })(); }, !decision.canRestore || !options.reviewWrites || !options.editing())); container.append(row);
+        }
+        if (dismissedCursor) container.append(button("First page", () => { dismissedCursor = undefined; void load(); }));
+        if (page.nextCursor) container.append(button("Next page", () => { dismissedCursor = page.nextCursor ?? undefined; void load(); }));
+        return;
+      }
       async function pages(view: "matches" | "details" | "review") {
         const first = await api.candidates(campaign, { view, limit: 50 } as Parameters<typeof api.candidates>[1]); let cursor = first.nextCursor;
         while (cursor) { const page = await api.candidates(campaign, { view, limit: 50, cursor } as Parameters<typeof api.candidates>[1]); if (page.revision !== first.revision || JSON.stringify(page.boundary) !== JSON.stringify(first.boundary)) throw new Error("The story or cast changed. Reload review."); first.candidates.push(...page.candidates); cursor = page.nextCursor; }
@@ -49,6 +79,29 @@ export function renderCastReview(options: { document: Document; container: HTMLE
       }
       if (prioritizeCharacter) queue.sort((a, b) => Number(b.kind === "detail" && b.characterId === prioritizeCharacter) - Number(a.kind === "detail" && a.characterId === prioritizeCharacter));
       container.replaceChildren(node("h2", "Character review"), button("Back to characters", options.back));
+      if (options.reviewReadVersion === 1 && api.dismissedReview) container.append(button("Pending", () => {} , true), button("Dismissed", () => { view = "dismissed"; dismissedCursor = undefined; void load(); }));
+      if (announcement) { const notice = node("p", announcement); notice.setAttribute("role", "status"); container.append(notice); announcement = ""; }
+      if (undo && api.reviewDecision) {
+        const receipt = undo;
+        const undoButton = button("Undo", () => { void (async () => {
+          if (busy || !options.reviewWrites || !options.editing() || !api.reviewDecision) return;
+          busy = true;
+          try {
+            if (options.checkWrite && !await options.checkWrite()) return;
+            if (!options.current() || token !== epoch || !options.editing()) return;
+            await api.reviewDecision(campaign, receipt.candidateId, { action: "restore", decisionId: receipt.decisionId, sourceHash: receipt.sourceHash, expectedReviewRevision: receipt.reviewRevision, expectedCastRevision: receipt.revision, expectedBoundary: receipt.boundary, idempotencyKey: options.key("review-undo", [campaign, receipt]) });
+            if (!options.current() || token !== epoch) return; undo = null; cached = null; options.clearKeys(); announcement = "Dismissal undone."; await load();
+          } catch (error) {
+            if (options.current() && token === epoch) {
+              const stale = (error as { statusCode?: number }).statusCode === 409;
+              const notice = node("p", stale ? "The source or review changed. Reload before deciding." : "Could not confirm the undo. Retry it or reload the review."); notice.setAttribute("role", "status");
+              if (stale) { undoButton.disabled = true; notice.append(button("Reload review", () => { undo = null; cached = null; void load(); })); }
+              container.append(notice);
+            }
+          } finally { busy = false; }
+        })(); }, !options.reviewWrites || !options.editing()); container.append(undoButton); undoButton.focus();
+      }
+      if (!undo) { const heading = container.querySelector<HTMLElement>("h2"); if (heading) { heading.tabIndex = -1; heading.focus(); } }
       if (!queue.length) { container.append(node("p", skipped.size ? "Review complete for this pass." : "Nothing needs review.")); return; }
       if (options.autoMatch != null) container.append(node("p", options.autoMatch ? "Unique-name matching is on; ambiguous names still need review." : "Automatic name matching is off; exact matches are suggested here."));
       const item = queue[0]!; container.append(node("p", `${queue.length} ${queue.length === 1 ? "item" : "items"} remaining in this pass.`));
@@ -67,11 +120,27 @@ export function renderCastReview(options: { document: Document; container: HTMLE
         const stale = (error as { statusCode?: number })?.statusCode === 409;
         feedback.replaceChildren(node("span", stale ? "The story or cast changed. Reload before deciding." : "Could not confirm this decision. Retry it or reload the review."), button("Reload review", () => { void load(); }));
       }
+      async function dismiss(candidate: CandidateForReview, action: "dismiss_identity" | "dismiss_detail", observationIndex?: number) {
+        if (locked() || !options.reviewWrites || !api.reviewDecision || candidate.reviewRevision === undefined || !candidate.source.sourceHash) return;
+        busy = true; feedback.textContent = "Saving…";
+        try {
+          if (!await canSubmit()) return;
+          const target = action === "dismiss_detail" ? { action, observationIndex: observationIndex! } as const : { action } as const;
+          const receipt = await api.reviewDecision(campaign, candidate.id, { ...target, sourceHash: candidate.source.sourceHash, expectedReviewRevision: candidate.reviewRevision, expectedCastRevision: matches.revision, expectedBoundary: matches.boundary, idempotencyKey: options.key("review", [campaign, candidate.id, target, candidate.reviewRevision, matches.revision, matches.boundary]) });
+          if (!current()) return; undo = { candidateId: candidate.id, decisionId: receipt.decisionId, sourceHash: candidate.source.sourceHash!, reviewRevision: receipt.reviewRevision, revision: receipt.revision, boundary: receipt.boundary }; options.clearKeys(); announcement = "Dismissed."; cached = null; await load();
+        } catch (error) { failed(error); } finally { busy = false; }
+      }
       const skip = () => { if (busy) return; skipped.add(itemKey(item)); void load(true); };
       if (item.kind === "identity") {
         const candidate = item.candidate; section.append(node("h3", `Identity: ${candidate.proposal.name}`), createReviewSource(document, campaign, candidate.source, candidate.proposal.identityEvidence[0]?.quote ?? "", api.sourceTurn, options.current, options.navigate));
         for (const evidence of candidate.proposal.identityEvidence) section.append(node("blockquote", evidence.quote));
-        for (const detail of candidate.proposal.observations) section.append(node("p", `Proposed ${labelField(detail.field)}: ${detail.value}`), node("blockquote", detail.quote));
+        const reviewDetails = candidate.reviewDetails ?? candidate.proposal.observations.map((observation, observationIndex) => ({ observation, observationIndex }));
+        for (const { observation: detail, observationIndex } of reviewDetails) {
+          const row = node("section"); row.append(node("p", `Proposed ${labelField(detail.field)}: ${detail.value}`), node("blockquote", detail.quote));
+          if (options.reviewReadVersion === 1 && api.reviewDecision && candidate.reviewRevision !== undefined && candidate.source.sourceHash) row.append(button("Dismiss detail", () => { void dismiss(candidate, "dismiss_detail", observationIndex); }, !options.reviewWrites || !options.editing()));
+          section.append(row);
+        }
+        if (options.reviewReadVersion === 1 && api.reviewDecision && candidate.reviewRevision !== undefined && candidate.source.sourceHash) section.append(node("p", "Dismiss this discovery and its proposed details for this source. New evidence may appear again."), button("Dismiss discovery", () => { void dismiss(candidate, "dismiss_identity"); }, !options.reviewWrites || !options.editing()));
         const select = node("select"); select.setAttribute("aria-label", "Existing character"); const blank = node("option", "Choose a character"); blank.value = ""; select.append(blank);
         const normalize = (s: string) => s.trim().toLocaleLowerCase(); const name = normalize(candidate.proposal.name);
         const exact = targets.filter(person => !person.ignored && [person.name, ...person.aliases].some(value => normalize(value) === name));
@@ -107,7 +176,7 @@ export function renderCastReview(options: { document: Document; container: HTMLE
             const decision = action === "attach" ? { action, characterId: select.value } as const : { action } as const;
             if (!await canSubmit()) return;
             const saved = await api.resolveCandidate(campaign, candidate.id, { ...decision, expectedCastRevision: matches.revision,
-              expectedBoundary: matches.boundary, idempotencyKey: options.key("match", [campaign, candidate.id, decision, matches.revision, matches.boundary]) });
+              expectedBoundary: matches.boundary, ...(candidate.reviewRevision !== undefined ? { expectedReviewRevision: candidate.reviewRevision } : {}), idempotencyKey: options.key("match", [campaign, candidate.id, decision, candidate.reviewRevision, matches.revision, matches.boundary]) });
             if (!current()) return;
             prioritizeCharacter = saved.character.id; options.clearKeys(); await load();
           } catch (error) { failed(error); } finally { busy = false; }
@@ -147,8 +216,8 @@ export function renderCastReview(options: { document: Document; container: HTMLE
                 if (!current() || !options.editing()) return;
                 const decision = action === "confirm" ? { action, confirmedValue: value.value } as const : { action } as const;
                 const request = { ...decision, expectedCastRevision: matches.revision, expectedBoundary: matches.boundary,
-                  expectedCharacterRevision: revision, observationIndex: detail.observationIndex, sourceHash: detail.sourceHash,
-                  idempotencyKey: options.key("detail", [campaign, candidate.id, detail.observationIndex, detail.sourceHash, decision, matches.revision, matches.boundary, revision]) };
+                  expectedCharacterRevision: revision, ...(candidate.reviewRevision !== undefined ? { expectedReviewRevision: candidate.reviewRevision } : {}), observationIndex: detail.observationIndex, sourceHash: detail.sourceHash,
+                  idempotencyKey: options.key("detail", [campaign, candidate.id, detail.observationIndex, detail.sourceHash, decision, candidate.reviewRevision, matches.revision, matches.boundary, revision]) };
                 pending = { signature, request };
               }
               await api.resolveDetail(campaign, candidate.id, pending.request);
@@ -161,10 +230,10 @@ export function renderCastReview(options: { document: Document; container: HTMLE
             button("Apply and next", () => { void decide("accept"); }, !options.editing()));
           else if (permits("confirm")) row.append(node("p", "This suggestion cannot be saved as an observed fact. Set an override only if you want to choose the value yourself."));
           if (permits("confirm")) disclosure.append(button("Keep as override", () => { void decide("confirm"); }, !options.editing()));
-          if (permits("dismiss")) row.append(button("Dismiss detail", () => { void decide("dismiss"); }, !options.editing())); section.append(row);
+          if (permits("dismiss")) row.append(button("Dismiss detail", () => { if (options.reviewReadVersion === 1 && candidate.source.sourceHash && candidate.reviewRevision !== undefined && api.reviewDecision) void dismiss(candidate, "dismiss_detail", detail.observationIndex); else void decide("dismiss"); }, !options.editing() || (options.reviewReadVersion === 1 && !options.reviewWrites))); section.append(row);
         }
       }
-      section.append(button("Skip for this pass", skip), feedback); container.append(section);
+      section.append(node("p", "Skip for now leaves this item pending for a later review."), button("Skip for now", skip), feedback); container.append(section);
     } catch (error) { if (!options.current() || token !== epoch) return; container.replaceChildren(node("h2", "Character review"), node("p", error instanceof Error ? error.message : "Could not load review."), button("Retry", () => { void load(); }), button("Back to characters", options.back)); }
   }
   void load();

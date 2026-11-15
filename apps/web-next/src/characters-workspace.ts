@@ -44,6 +44,8 @@ export function createCharactersWorkspace(document: Document, generationActive: 
       dialog.append(node("p", `Last observed turn ${detail.character.lastObservedTurn}${detail.character.lastMentionedTurn != null ? ` · Last mentioned turn ${detail.character.lastMentionedTurn}` : ""}`));
       if (detail.character.origin.kind === "protagonist") dialog.append(button("Edit main character", () => { if (protagonist && state.campaignId) renderProfileEditor(state.campaignId, protagonist); }, generationActive() || !protagonist));
       else dialog.append(button("Edit character", () => { editor = createCastEditor(detail, detail); session.setDraft(editor); renderEditor(); }, state.status.capabilities.editing !== true || generationActive()));
+      if (detail.character.origin.kind !== "protagonist" && !detail.character.mergedIntoCharacterId && detail.capabilities.castLifecycle === false) dialog.append(node("p", "Removing and restoring characters is disabled on this server."));
+      else if (detail.character.origin.kind !== "protagonist" && state.status.capabilities.editing !== true) dialog.append(node("p", "Removing and restoring characters is unavailable while character editing is disabled."));
       for (const section of sheet.sections) { const group = node("section"); group.append(node("h3", section.name)); for (const field of section.fields) { const value = Array.isArray(field.value) ? field.value.join(", ") : field.value; group.append(node("p", `${field.label}: ${value || (field.origin === "conflicted" ? "Conflicting observations" : field.origin === "claim" ? "Unverified claim" : "Unknown")} ${field.origin === "unknown" ? "" : `· ${field.origin}`}`)); } dialog.append(group); }
       const sources = node("details"); sources.append(node("summary", "Sources and edit history"));
       for (const observation of detail.observations) {
@@ -141,6 +143,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
   async function review(_view: "matches" | "details") {
     if (!state.campaignId) return; const campaign = state.campaignId, epoch = openEpoch, tool = ++toolEpoch; reviewing = true; dialog.classList.remove("characters-sheet-layout");
     renderCastReview({ document, container: dialog, api, campaign, current: () => reviewing && tool === toolEpoch && state.campaignId === campaign && epoch === openEpoch && dialog.open,
+      reviewReadVersion: state.status?.capabilities.reviewDecisionReadVersion, reviewWrites: state.status?.capabilities.reviewDecisions,
       autoMatch: state.status?.capabilities.autoMatch, editing: () => state.status?.capabilities.editing === true && !generationActive(), navigate: turn => { close(); navigateToTurn(turn); },
       back: () => { reviewing = false; toolEpoch++; render(); }, key: operationKey, clearKeys: () => operationKeys.clear() });
   }

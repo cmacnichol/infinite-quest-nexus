@@ -279,10 +279,11 @@ test("replacement cast recovers a new character draft after a revision conflict"
   expect(api.characters.filter(person => person.name === "New guide")).toHaveLength(1);
 });
 
-async function fixture(page: Page, deferredDetails = false, conflictFixture = false, presetFixture = false, applyFixture = false, seededFixture = false, deepLink = false, eligible = false) {
+async function fixture(page: Page, deferredDetails = false, conflictFixture = false, presetFixture = false, applyFixture = false, seededFixture = false, deepLink = false, eligible = false, reviewFixture = false) {
   let stalePreset = presetFixture;
   let liveLock = false;
   let revision = 0, enabled = true, conflict = false, trackingComplete = false, trackingUnavailable = false, pendingMatch = true;
+  let reviewDismissed = false; let reviewRevision = 0;
   let resolvedCharacterId: string | undefined;
   const characters: any[] = [{ id: protagonistId, name: "Iven", aliases: [], origin: { kind: "protagonist", selectedCharacterId: null },
     profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 0, lastObservedTurn: 1 }];
@@ -323,17 +324,19 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
         if (!applyFixture) characters.push(person); revision++; return send(route, { character: person, revision, boundary });
       }
       if (id === "context-preview") return send(route, { mode: "estimate", boundary, castRevision: revision, budgetTokens: 500, usedTokens: 25, coverage: { fromTurn: 1, throughTurn: 1, baseTurn: 1, current: true }, selected: [{ characterId: protagonistId, name: "Iven", reason: "pinned" }], omitted: [{ characterId: candidateId, reason: "budget" }], disabledReason: null });
-      if (id === "workspace-status") return send(route, { revision, boundary, capabilities: { editing: enabled, discovery: true, autoMatch: true, backfill: true, context: true }, contextDisabledReason: null, counts: { identities: pendingMatch ? 1 : 0, details: 0, conflicts: 1 }, tracking: { enabled: true, state: trackingComplete ? "complete" : "catching_up", activeTurnNumber: 1, coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: pendingMatch ? 1 : 0, firstGap: trackingComplete ? null : { turnNumber: 1, jobId: null, status: "missing", diagnosticCode: null } } });
+      if (id === "workspace-status") return send(route, { revision, boundary, capabilities: { editing: enabled, discovery: true, autoMatch: true, backfill: true, context: true, ...(reviewFixture ? { reviewDecisions: true, reviewDecisionReadVersion: 1 } : {}) }, contextDisabledReason: null, counts: { identities: pendingMatch ? 1 : 0, details: 0, conflicts: 1 }, tracking: { enabled: true, state: trackingComplete ? "complete" : "catching_up", activeTurnNumber: 1, coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: pendingMatch ? 1 : 0, firstGap: trackingComplete ? null : { turnNumber: 1, jobId: null, status: "missing", diagnosticCode: null } } });
       if (id === "discovery") return trackingUnavailable ? send(route, {}, 503) : send(route, {
         enabled: true, state: trackingComplete ? "complete" : "catching_up", activeTurnNumber: 1,
         coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: pendingMatch ? 1 : 0,
         firstGap: trackingComplete ? null : { turnNumber: 1, jobId: null, status: "missing", diagnosticCode: null } });
-      if (id === "candidates") return send(route, { revision, boundary, nextCursor: null, candidates: pendingMatch && !(url.searchParams.get("view") === "matches" && resolvedCharacterId) ? [{ id: candidateId,
+      if (reviewFixture && id === "review-decisions") return send(route, { revision, boundary, reviewRevision, nextCursor: null, decisions: reviewDismissed ? [{ decisionId: versionId, candidateId, canRestore: true, source: { scope: { campaignId, ownerUserId: worldId }, turnId: turn.id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), timelineRevision: 0, paragraphs: [{ id: "p1", text: turn.narration }] }, target: { kind: "identity", proposal: { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote: turn.narration }], observations: [] } } }] : [] });
+      if (reviewFixture && id === `candidates/${candidateId}/review-decisions`) { const input = request.postDataJSON(); writes.push(input); reviewDismissed = input.action !== "restore"; reviewRevision++; return send(route, { decisionId: versionId, candidateId, reviewRevision, revision, boundary, disposition: input.action }); }
+      if (id === "candidates") return send(route, { revision, boundary, nextCursor: null, candidates: pendingMatch && !reviewDismissed && !(url.searchParams.get("view") === "matches" && resolvedCharacterId) ? [{ id: candidateId,
         ...(resolvedCharacterId ? { resolvedCharacterId, details: [{ observationIndex: 0, field: "story.role", value: "gatekeeper", quote: turn.narration, reason: "claim_not_fact", sourceHash: "a".repeat(64) }] } : {}),
-        reason: "identity_needs_review", proposal: { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null,
+        reason: "identity_needs_review", ...(reviewFixture ? { reviewRevision, reviewDetails: [] } : {}), proposal: { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null,
           identityEvidence: [{ paragraphId: "p1", quote: turn.narration }], observations: deferredDetails ? [{ field: "story.role", value: "gatekeeper",
             mode: "fact", speakerCharacterId: null, paragraphId: "p1", quote: turn.narration }] : [] },
-        source: { turnId: turn.id, turnNumber: 1, narrationRevision: 0 } }] : [] });
+        source: { turnId: turn.id, turnNumber: 1, narrationRevision: 0, ...(reviewFixture ? { sourceHash: "a".repeat(64) } : {}) } }] : [] });
       if (id === `candidates/${candidateId}/resolve`) {
         const input = request.postDataJSON(); writes.push(input);
         if (!enabled) return send(route, { code: "cast_editing_disabled" }, 503);
@@ -367,7 +370,7 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
       if (id) {
         const person = characters.find((c) => c.id === id);
         if (conflictFixture && id === candidateId) return send(route, { character: person, draftFromStoryEligible: eligible, revision, boundary, capabilities: { castEditing: enabled }, observations: ["guide", "guard"].map((value, index) => ({ id: index ? "77777777-7777-4777-8777-777777777778" : "77777777-7777-4777-8777-777777777777", characterId: id, field: "story.role", value, mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: turn.id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: turn.narration } })), overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null });
-        return send(route, { character: person, revision, boundary, capabilities: { castEditing: enabled }, observations: id === protagonistId ? [] : [{
+        return send(route, { character: person, revision, boundary, capabilities: { castEditing: enabled, ...(reviewFixture ? { castLifecycle: false } : {}) }, observations: id === protagonistId ? [] : [{
           id: "77777777-7777-4777-8777-777777777777", characterId: id, field: "story.role", value: "gatekeeper", mode: "claim",
           speakerCharacterId: protagonistId, supersedesObservationId: null,
           evidence: { kind: "turn", turnId: turn.id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: turn.narration }
@@ -380,7 +383,7 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
       const cursor = url.searchParams.get("cursor"), offset = cursor ? matches.findIndex((person) => person.id === cursor) + 1 : 0;
       const page = matches.slice(offset, offset + 2);
       return send(route, { revision, boundary, characters: page, attention: page.filter((person) => person.id === protagonistId).map((person) => ({ characterId: person.id, review: true, conflict: true, reviewCount: 2, conflictCount: 1 })),
-        nextCursor: offset + page.length < matches.length ? page.at(-1).id : null, capabilities: { castEditing: enabled, castPresets: presetFixture } });
+        nextCursor: offset + page.length < matches.length ? page.at(-1).id : null, capabilities: { castEditing: enabled, castPresets: presetFixture, ...(reviewFixture ? { castReviewDecisions: true, castReviewDecisionReadVersion: 1 } : {}) } });
     }
     if (path === "/api/v1/session") return send(route, { user: { id: worldId, displayName: "Fixture owner", settings: { autoSubmitTurnChoices: true, continuousReading: false, defaultTurnControlStyle: "flexible_action" } }, authentication: "deferred" });
     if (path === "/api/v1/meta") return send(route, { application: { name: "Nexus", version: "test", commit: null, builtAt: null }, capabilities: { castEditing: enabled, systemArchive: false } });
@@ -884,7 +887,7 @@ for (const surface of ["legacy", "next"] as const) test(`review paginates and gr
   await dialog.getByRole("button", { name: "Source turn 1", exact: true }).click();
   await expect(dialog.locator("mark")).toHaveText("Earlier evidence."); await expect(dialog).toContainText("Before. Earlier evidence. After.");
   await expect(dialog).toContainText("1 item remaining"); await expect(dialog.getByRole("button", { name: "Open full turn in story" })).toBeVisible();
-  const count = requests.length; await dialog.getByRole("button", { name: "Skip for this pass", exact: true }).click();
+  const count = requests.length; await dialog.getByRole("button", { name: "Skip for now", exact: true }).click();
   await expect(dialog).toContainText("Review complete for this pass."); expect(requests).toHaveLength(count); expect(writes).toHaveLength(0);
 });
 
@@ -1511,4 +1514,30 @@ test('Nexus adjacent section navigation survives conflict and reapply rerenders 
   await expect(selector).toHaveValue('sources');
   await dialog.getByRole('button', { name: 'Reapply my changes', exact: true }).click();
   await expect(selector).toHaveValue('sources');
+});
+
+
+for (const surface of ["legacy", "next"] as const) for (const width of [1440, 390]) test(`recoverable review dismissal ${surface} ${width}`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 900 });
+  const api = await fixture(page, false, false, false, false, false, false, false, true);
+  api.characters.push({ id: candidateId, name: "Supporting", aliases: [], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 1, lastObservedTurn: 1 });
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace");
+  await dialog.getByRole("button", { name: "Supporting", exact: true }).click();
+  await expect(dialog).toContainText("Removing and restoring characters is disabled on this server.");
+  await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
+  await openReview(dialog);
+  await expect(dialog.getByRole("button", { name: "Dismiss discovery" })).toBeVisible();
+  await dialog.screenshot({ path: info.outputPath(`pending-${surface}-${width}.png`) });
+  await dialog.getByRole("button", { name: "Dismiss discovery" }).click();
+  await expect(dialog.getByText("Dismissed.", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Undo", exact: true })).toBeFocused();
+  await dialog.screenshot({ path: info.outputPath(`dismissed-${surface}-${width}.png`) });
+  await dialog.getByRole("button", { name: "Dismissed", exact: true }).click();
+  await expect(dialog).toContainText("Dismissals made with this review workflow");
+  await dialog.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(dialog).toContainText("Dismissal undone.");
+  await dialog.getByRole("button", { name: "Pending", exact: true }).click();
+  await expect(dialog).toContainText("Identity: Mara");
+  expect(api.writes.map((write: any) => write.action)).toEqual(["dismiss_identity", "restore"]);
 });

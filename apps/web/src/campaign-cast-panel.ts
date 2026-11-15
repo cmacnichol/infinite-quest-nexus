@@ -21,7 +21,7 @@ export function mainProfileSourceLabel(profile: { inheritedFromSnapshot?: boolea
 }
 type List = Awaited<ReturnType<CampaignCastApi["list"]>>;
 export function createLegacyCastPanel(options: {
-  api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle"> & Partial<Pick<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle">>; campaignId(): string | null; generationActive(): boolean;
+  api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle" | "reviewDecision" | "dismissedReview"> & Partial<Pick<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle" | "reviewDecision" | "dismissedReview">>; campaignId(): string | null; generationActive(): boolean;
   campaignPage?: boolean;
   editorPresentation?: "panel" | "workspace";
   checkLock?(campaign: string): Promise<boolean>;
@@ -247,6 +247,7 @@ export function createLegacyCastPanel(options: {
     rosterVisible = false; const token = ++epoch; editor = null; shell("Character review");
     renderCastReview({ document, container: dialog, api: options.api, campaign, current: () => current(token),
       ...(options.campaignPage ? { checkWrite: syncLock } : {}),
+      reviewReadVersion: list?.capabilities.castReviewDecisionReadVersion, reviewWrites: list?.capabilities.castReviewDecisions,
       autoMatch, ...(initialItem ? { initialItem } : {}), editing: () => enabled && !options.generationActive(), navigate: turn => { requestClose(); void options.navigateToTurn(turn); },
       back: () => { void loadAttention(); }, key: operationKey, clearKeys: () => operationKeys.clear() });
   }
@@ -411,7 +412,8 @@ export function createLegacyCastPanel(options: {
     } else if (!detail.character.mergedIntoCharacterId) {
       const lifecycle = options.api.lifecycle;
       const lifecycleEnabled = (detail.capabilities ?? list?.capabilities)?.castLifecycle;
-      if (enabled && lifecycleEnabled === false && !detail.character.removed) status("Character merging is disabled on this server.");
+      if (lifecycleEnabled === false) status("Removing and restoring characters is disabled on this server. Character merging is disabled on this server.");
+      else if (!enabled) status("Removing and restoring characters is unavailable while character editing is disabled.");
       if (lifecycle && lifecycleEnabled) {
         const launch = (action: Parameters<typeof showLifecycle>[0], mergeEventId?: string) => showLifecycle(action, {
           api: lifecycle, campaign, detail, list: options.api.list, lock: syncLock, ...(mergeEventId ? { mergeEventId } : {}),
