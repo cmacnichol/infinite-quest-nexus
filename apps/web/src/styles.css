@@ -13,3 +13,14 @@
 .cast-roster-badges { display: flex; flex-wrap: wrap; gap: .35rem; }
 .cast-badge { border: 1px solid currentColor; border-radius: 1rem; padding: .15rem .5rem; }
 .cast-roster-add-reason { flex-basis: 100%; margin: 0; }
+
+.character-sheet-view { display: grid; gap: 1rem; min-width: 0; }
+.character-sheet-view section { display: grid; gap: .75rem; min-width: 0; }
+.character-sheet-view h3 { margin: 0; }
+.character-sheet-field { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; min-width: 0; border-bottom: 1px solid var(--border, #ccc); padding: .5rem 0; }
+.character-sheet-field > strong, .character-sheet-field > p, .character-sheet-field > label, .character-sheet-field > input, .character-sheet-field > textarea, .character-sheet-confirm { flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; }
+.character-sheet-field p { margin: 0; white-space: pre-wrap; }
+.character-sheet-view button, .character-sheet-view input, .character-sheet-view textarea { min-height: 44px; max-width: 100%; }
+.character-sheet-view button { min-width: 44px; }
+.character-sheet-toggles { display: flex; flex-wrap: wrap; gap: .5rem; }
+.character-sheet-toggles p { flex-basis: 100%; }
