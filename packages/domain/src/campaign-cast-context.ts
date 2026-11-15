@@ -1,6 +1,6 @@
 import { CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../contracts/src/story-prompt.js";
 import { castContextFictionFieldSchema, castGenerationSnapshotSchema, type CastGenerationSnapshot } from "../../contracts/src/campaign-cast-context.js";
-import { castFieldSchema, type CastEvidence, type CastField } from "../../contracts/src/campaign-cast.js";
+import { castFieldSchema, stateEditReplacement, type CastEvidence, type CastField } from "../../contracts/src/campaign-cast.js";
 import { castEvidenceOrder, projectCastProfile, validateCastFiction } from "./campaign-cast.js";
 import { buildScopedEntityCatalog, findEntityReferences } from "./entity-references.js";
 import { estimateTokens } from "./text.js";
@@ -85,7 +85,8 @@ export function selectCastContext(input: {
     }
     const supported = observations.filter((entry) => ids.has(entry.id));
     const superseded = new Set(supported.flatMap((entry) => entry.supersedesObservationId ? [entry.supersedesObservationId] : []));
-    const profile = projectCastProfile({ observations: supported, overrides, ...(retractedObservationIds ? { retractedObservationIds } : {}) });
+    const v3 = input.contextProtocol === CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION || input.contextProtocol === HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION;
+    const profile = projectCastProfile({ observations: supported, overrides, stateEditPrecedence: v3 ? "yield" : "locked", ...(retractedObservationIds ? { retractedObservationIds } : {}) });
     // New captures retain the already-resolved seeded appearance policy; older v1 captures replay unchanged.
     if (snapshot.retractedObservationIds && person.campaignProfile && person.fieldSources?.["appearance.description"] === "observation") {
       const value = person.profile["appearance.description"];
@@ -101,7 +102,7 @@ export function selectCastContext(input: {
           || castEvidenceOrder(b.evidence)[1] - castEvidenceOrder(a.evidence)[1]).at(0);
       if (!override && (!current || observation?.evidence.kind === "historical_world")
         && (field.startsWith("state.") || field === "story.goals")) { omittedFieldCount++; continue; }
-      if (override?.evidence.kind === "user") fields.push({ field, value, authority: "user", evidenceId: override.evidence.editId, evidence: override.evidence });
+      if (override?.evidence.kind === "user" && (!v3 || !stateEditReplacement(override, supported, retractedObservationIds))) fields.push({ field, value, authority: "user", evidenceId: override.evidence.editId, evidence: override.evidence });
       else if (observation) fields.push({ field, value, authority: "observation", evidenceId: observation.id, evidence: observation.evidence });
     }
     fields.sort((a, b) => Number(b.authority === "user") - Number(a.authority === "user"));

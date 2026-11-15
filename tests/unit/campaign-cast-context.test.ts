@@ -245,3 +245,20 @@ it.each(["current", "pending", "failed", "off"] as const)("selects frozen notice
     expect(run(CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION)).toBe(expectedOld);
   }
 });
+
+it.each(["state.location", "state.condition", "state.clothing", "story.goals"] as const)("attributes %s to the effective evidence across tracking gaps", (field) => {
+  const input = fixture();
+  const observation = { ...input.details[0]!.observations[1]!, field, value: "the palace", evidence: { ...input.details[0]!.observations[1]!.evidence, turnNumber: 20 } };
+  const edit = { field, value: "the docks", evidence: { kind: "user" as const, editId: id(50), effectiveTurnNumber: 12 } };
+  const snapshot = { ...input, boundary: { turnNumber: 21, timelineRevision: 0 }, trackedThroughTurn: 20, discoveryStatus: "pending" as const,
+    details: [{ characterId: id(1), observations: [observation], overrides: [edit] }] };
+  const run = (value: unknown, protocol: string) => selectCastContext({ snapshot: castGenerationSnapshotSchema.parse(value), contextProtocol: protocol, direction: "Mara", currentScene: "", openThreads: [], budgetTokens: 3000 });
+  const v3 = (value: unknown) => run(value, CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+  expect(v3(snapshot).records[0]!.fields).toContainEqual(expect.objectContaining({ field, value: "the palace", authority: "observation", evidenceId: observation.id }));
+  expect(run(snapshot, CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION).records[0]!.fields).toContainEqual(expect.objectContaining({ field, value: "the docks", authority: "user" }));
+  expect(v3({ ...snapshot, retractedObservationIds: [observation.id] }).records[0]!.fields).toContainEqual(expect.objectContaining({ field, value: "the docks", authority: "user" }));
+  expect(v3({ ...snapshot, details: [{ ...snapshot.details[0], overrides: [{ ...edit, evidence: { ...edit.evidence, effectiveTurnNumber: 21 } }] }] }).records[0]!.fields).toContainEqual(expect.objectContaining({ field, value: "the docks", authority: "user" }));
+  const unedited = v3({ ...snapshot, details: [{ ...snapshot.details[0], overrides: [] }] });
+  expect(unedited.records[0]!.fields).not.toContainEqual(expect.objectContaining({ field }));
+  expect(unedited.omittedFieldCount).toBe(1);
+});

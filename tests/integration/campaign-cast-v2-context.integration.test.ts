@@ -5,6 +5,7 @@ import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool 
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { captureCastGenerationSnapshotWithClient, createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
 import { sha256 } from "../../packages/domain/src/text.js";
+import { CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
 
 let pool: DatabasePool;
@@ -73,4 +74,16 @@ it("keeps v1 replay stable and captures only bounded v2 fiction with discovery o
   expect((await repository.detail(scope, created.character.id)).character.originProfile?.profile.story.role).toBe(role);
   const captured = JSON.stringify(modern.snapshot);
   expect(captured).not.toMatch(/PRIVATE_REASONING_CANARY|PRIVATE_EXTENSION_CANARY|PRIVATE_APPEARANCE_CANARY|1d20/);
+
+  // Capture pins the old precedence while V3 yields to later accepted evidence.
+  await repository.applyBatch(scope, { boundary: changed.boundary, idempotencyKey: "location-edit", commands: [{ kind: "override", characterId: created.character.id, field: "state.location", value: "the docks" }] });
+  const laterTurn = randomUUID(), laterNarration = "Mara waits at the palace.";
+  await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [campaignId]);
+  await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,2,$4)", [laterTurn, ownerUserId, campaignId, laterNarration]);
+  await repository.applyBatch(scope, { boundary: { turnNumber: 2, timelineRevision: 0 }, idempotencyKey: "location-observation", commands: [{ kind: "observe", characterId: created.character.id, field: "state.location", value: "the palace", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: laterTurn, turnNumber: 2, narrationRevision: 0, sourceHash: sha256(laterNarration), paragraphId: "p1", quote: laterNarration } }] });
+  for (const [contextProtocol, value, source] of [[CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, "the docks", "override"], [CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, "the palace", "observation"]] as const) {
+    const result = await withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled: false, version: "cast-context-v2", contextProtocol }));
+    expect(result.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields).toContainEqual(expect.objectContaining({ field: "state.location", value, source }));
+  }
+
 });
