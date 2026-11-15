@@ -139,4 +139,3 @@ export function mountCharacterWorkspace(host: HTMLElement, port: EditorPresentat
     root.remove(); if (returnFocus?.isConnected) returnFocus.focus();
   } };
 }
-

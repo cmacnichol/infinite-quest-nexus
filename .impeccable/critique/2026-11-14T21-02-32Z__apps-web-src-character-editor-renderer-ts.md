@@ -2,7 +2,7 @@
 target: Nexus character editor UI and functionality
 total_score: 25
 max_score: 40
-na_heuristics: 
+na_heuristics:
 p0_count: 0
 p1_count: 1
 timestamp: 2026-11-14T21-02-32Z

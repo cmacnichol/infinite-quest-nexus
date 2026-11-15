@@ -273,4 +273,3 @@ test("workspace lock preserves adapter disabled policies without caching transie
   await expect(page.locator("#fixture-name")).toBeEnabled();
   await expect(page.locator("#fixture-policy")).toBeDisabled();
 });
-
