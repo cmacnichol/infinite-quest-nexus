@@ -95,7 +95,12 @@ export function resolveSeededCastProfile(input: ProjectCastProfileInput & {
     else if (field === "story.goals" && input.profile.story.goals.trim()) { profile[field] = input.profile.story.goals; sources[field] = "authored"; }
   }
   for (const override of input.overrides) {
-    if (input.stateEditPrecedence !== "locked" && stateEditReplacement(override, input.observations, input.retractedObservationIds)) continue;
+    const excluded = override.field === "story.goals" && input.restoreGoalsAfterTurn !== undefined
+      ? new Set([...input.retractedObservationIds ?? [], ...input.observations
+        .filter((item) => castEvidenceOrder(item.evidence)[0] <= input.restoreGoalsAfterTurn!)
+        .map((item) => item.id)])
+      : input.retractedObservationIds;
+    if (input.stateEditPrecedence !== "locked" && stateEditReplacement(override, input.observations, excluded)) continue;
     if (!(override.field in profile) && !["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(override.field)) continue;
     if (["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(override.field)) {
       profile[override.field] = validateCastFiction(override.value); sources[override.field] = "override";

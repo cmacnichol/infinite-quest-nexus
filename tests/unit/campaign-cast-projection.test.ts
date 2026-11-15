@@ -206,3 +206,18 @@ it("ADR 0045 replaces State Edits only with valid strictly later facts, retainin
   expect(stateEditReplacement(correction, [observation(20, "Smith", { field: correction.field })])).toBeNull();
   expect(projectCastProfile({ observations: [observation(20, "Smith", { field: correction.field })], overrides: [correction] })[correction.field]).toBe("docks");
 });
+
+
+it("ADR 0045 keeps a seeded State Edit when its replacement predates restored goals", async () => {
+  const { resolveSeededCastProfile } = await import("../../packages/domain/src/campaign-cast.js");
+  const { characterProfileSchema } = await import("../../packages/contracts/src/world-library.js");
+  const profile = characterProfileSchema.parse({ story: { goals: "Authored" } });
+  const edit: CastOverride = { field: "story.goals", value: "Edited", evidence: { kind: "user", editId: uuid(1000), effectiveTurnNumber: 12 } };
+  const prior = observation(20, "Earlier", { field: "story.goals" });
+  const superseding = observation(24, "Superseding", { field: "story.goals", supersedesObservationId: prior.id });
+  const input = { profile, overrides: [edit], observations: [prior, superseding], restoreGoalsAfterTurn: 25 };
+  expect(resolveSeededCastProfile(input)).toMatchObject({ profile: { "story.goals": "Edited" }, sources: { "story.goals": "override" } });
+  const later = observation(26, "Later", { field: "story.goals", supersedesObservationId: superseding.id });
+  expect(resolveSeededCastProfile({ ...input, observations: [...input.observations, later] })).toMatchObject({ profile: { "story.goals": "Later" }, sources: { "story.goals": "observation" } });
+  expect(resolveSeededCastProfile({ ...input, observations: [...input.observations, later], retractedObservationIds: new Set([later.id]) })).toMatchObject({ profile: { "story.goals": "Edited" }, sources: { "story.goals": "override" } });
+});
