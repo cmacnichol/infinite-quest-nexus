@@ -57,6 +57,30 @@ describe("legacy cast panel", () => {
     expect(focused).toBe(row.querySelector(".character-sheet-choice button"));
     panel.requestClose(); vi.unstubAllGlobals();
   });
+  it("ignores an older conflict navigation after a newer character opens", async () => {
+    const { document, window } = parseHTML("<html><body></body></html>");
+    vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
+    const boundary = { turnNumber: 2, timelineRevision: 0 }, capabilities = { castEditing: true }, authority = { revision: 1, boundary, capabilities };
+    const people = ["Marin", "Mara"].map((name, i) => ({ id: i ? "22222222-2222-4222-8222-222222222222" : "11111111-1111-4111-8111-111111111111", name, aliases: [], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 2, lastMentionedTurn: null }));
+    const details = people.map(character => ({ ...authority, character, observations: ["story.role", "story.motivations"].flatMap(field => ["First", "Second"].map(value => ({ id: crypto.randomUUID(), characterId: character.id, field, value, mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "world", worldVersionId: character.id, sourcePath: "/characters/0" } }))), overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null }));
+    let defer = false; const pending = new Map<string, (value: typeof details[number]) => void>();
+    const api = { list: async () => ({ ...authority, characters: people, nextCursor: null }), detail: async (_campaign: string, id: string) => defer ? await new Promise<typeof details[number]>(resolve => pending.set(id, resolve)) : details.find(item => item.character.id === id)!, candidates: async () => ({ ...authority, candidates: [], nextCursor: null }), discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} });
+    const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    await panel.open(); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Needs attention")!.click();
+    await vi.waitFor(() => expect(dialog.textContent).toContain("Mara · Motivations"));
+    const first = [...dialog.querySelectorAll("button")].find(button => button.textContent === "Marin · Role")!;
+    const second = [...dialog.querySelectorAll("button")].find(button => button.textContent === "Mara · Motivations")!;
+    defer = true; first.click(); second.click();
+    await vi.waitFor(() => expect(pending.size).toBe(2));
+    pending.get(people[1]!.id)!(details[1]!);
+    await vi.waitFor(() => expect(dialog.querySelector('[data-path="story.motivations"] .character-sheet-choice')).not.toBeNull());
+    pending.get(people[0]!.id)!(details[0]!); await new Promise(resolve => setTimeout(resolve, 0));
+    expect(dialog.querySelector("#cast-title")?.textContent).toBe("Mara");
+    expect(dialog.querySelector('[data-path="story.motivations"] .character-sheet-choice')).not.toBeNull();
+    expect(dialog.querySelector('[data-path="story.role"] .character-sheet-choice')).toBeNull();
+    panel.requestClose(); vi.unstubAllGlobals();
+  });
   it("offers an inline edit on an Added Character sheet", async () => {
     const { document, window } = parseHTML("<html><body></body></html>");
     vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);

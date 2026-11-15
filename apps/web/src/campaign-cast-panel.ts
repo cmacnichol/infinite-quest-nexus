@@ -250,8 +250,8 @@ export function createLegacyCastPanel(options: {
     } catch { if (current(token)) results.textContent = "Could not load conflicts. Refresh and try again."; }
   }
   async function openConflict(id: string, field: string) {
-    await openDetail(id);
-    sheetView?.revealField(field, "conflict");
+    const token = await openDetail(id);
+    if (token !== undefined && current(token)) sheetView?.revealField(field, "conflict");
   }
   function loadReview(initialItem?: string) {
     rosterVisible = false; const token = ++epoch; editor = null; shell("Character review");
@@ -374,6 +374,7 @@ export function createLegacyCastPanel(options: {
       if (detail.character.origin.kind === "protagonist" && options.getProfile) profile = await options.getProfile(campaign).catch(() => null);
       if (!current(token)) return; renderSheet(detail, profile);
       const heading = dialog.querySelector<HTMLElement>("#cast-title"); if (heading) { heading.tabIndex = -1; heading.focus(); }
+      return token;
     } catch (error) {
       if (!current(token)) return;
       shell("Character"); status(`Could not load this character: ${message(error)}`);
