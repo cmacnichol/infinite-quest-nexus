@@ -1,3 +1,4 @@
+import "./styles.css";
 import { MAX_PLAYABLE_CHARACTERS } from "@infinite-quest/contracts";
 import { openCastSuggestions } from "./character-editor/suggest-cast.js";
 import { createLegacyCastPanel } from "./campaign-cast-panel.js";

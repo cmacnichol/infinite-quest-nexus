@@ -12,6 +12,11 @@ const protagonistId = "66666666-6666-4666-8666-666666666666";
 const candidateId = "88888888-8888-4888-8888-888888888888";
 const screenshotRoot = process.env.CAST_SCREENSHOT_ROOT;
 
+async function openTrackingTools(dialog: Locator) {
+  const details = dialog.locator(".cast-roster-tools");
+  if (await details.count() && !await details.evaluate(el => (el as HTMLDetailsElement).open)) await details.locator("summary").click();
+}
+
 async function selectEditorSection(dialog: Locator, id: string) {
   await expect(dialog.locator(".character-workspace")).toBeVisible();
   const selector = dialog.getByRole("combobox", { name: "Section", exact: true });
@@ -21,7 +26,7 @@ async function selectEditorSection(dialog: Locator, id: string) {
 
 async function openReview(dialog: Locator) {
   if (await dialog.getAttribute("id") === "campaignCastDialog") {
-    await dialog.getByRole("button", { name: "Needs attention", exact: true }).click();
+    await dialog.getByRole("button", { name: /^Needs attention(?: \(\d+\))?$/ }).click();
     await expect(dialog.getByText("Loading identity questions…")).toHaveCount(0);
     await dialog.getByRole("button", { name: "Review identity questions and details", exact: true }).click();
   } else await dialog.getByRole("button", { name: "Review character changes", exact: true }).click();
@@ -62,6 +67,8 @@ for (const width of [1280, 390]) test(`legacy previews and controls an explicit 
   await open(page);
   await expect(page).toHaveURL(new RegExp(`/story/${campaignId}$`));
   const dialog = page.locator("#campaignCastDialog");
+  await openTrackingTools(dialog);
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/roster-${width}.png` });
   await dialog.getByRole("button", { name: "Scan earlier story", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "Start scan", exact: true })).toHaveCount(0);
   await dialog.getByRole("button", { name: "Preview scan", exact: true }).click();
@@ -105,6 +112,7 @@ for (const surface of ["legacy", "next"]) test(`history scan updates progress an
     await page.locator("[data-tool-action='open-characters']").click();
   }
   const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace");
+  await openTrackingTools(dialog);
   await dialog.getByRole("button", { name: "Scan earlier story", exact: true }).click();
   await expect(dialog).toContainText("processing turn 9");
   await expect(dialog).toContainText("8 queued · 1 waiting to retry · 2 failed · 4 complete");
@@ -136,10 +144,13 @@ test("legacy retains a failed scan retry key and keeps cancellation available af
   });
   await open(page);
   const dialog = page.locator("#campaignCastDialog");
+  await openTrackingTools(dialog);
   await dialog.getByRole("button", { name: "Scan earlier story", exact: true }).click();
   await expect(dialog).toContainText("2 character matches need review");
   const retry = dialog.getByRole("button", { name: "Retry turn 1", exact: true });
+  await openTrackingTools(dialog);
   await retry.click(); await expect(dialog).toContainText("Could not update the scan");
+  await openTrackingTools(dialog);
   await retry.click(); await expect(dialog).toContainText("Could not update the scan");
   expect(retries).toHaveLength(2); expect(retries[0]).toEqual(retries[1]);
   enabled = false;
@@ -165,11 +176,14 @@ test("legacy discovery retry requires refresh after conflict and respects editin
   });
   await open(page);
   const dialog = page.locator("#campaignCastDialog"), retry = dialog.getByRole("button", { name: "Retry character tracking", exact: true });
+  await openTrackingTools(dialog);
   await retry.click(); await expect(retry).toBeDisabled();
   await expect(dialog).toContainText("Refresh characters before retrying");
   if (screenshotRoot) await page.screenshot({ path: `${screenshotRoot}/retry-conflict-desktop.png`, fullPage: true });
+  await openTrackingTools(dialog);
   await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click(); await expect(retry).toBeEnabled();
   api.disable();
+  await openTrackingTools(dialog);
   await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click(); await expect(retry).toBeDisabled();
   expect(requests).toBe(1);
 });
@@ -194,8 +208,10 @@ test("legacy retries character discovery only and retains the request key after 
   await open(page);
   const dialog = page.locator("#campaignCastDialog"), retry = dialog.getByRole("button", { name: "Retry character tracking", exact: true });
   await expect(dialog).toContainText("Your story is saved");
+  await openTrackingTools(dialog);
   await retry.click(); await expect(dialog).toContainText("Check the text provider settings");
   if (screenshotRoot) await page.screenshot({ path: `${screenshotRoot}/retry-recovery-390.png`, fullPage: true });
+  await openTrackingTools(dialog);
   await retry.click(); await expect(dialog).toContainText("Character tracking is catching up");
   expect(retries).toHaveLength(2); expect(retries[0]).toEqual(retries[1]);
   expect(retries[0]).toMatchObject({ expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 } });
@@ -451,6 +467,7 @@ test("legacy renders completed discovery and preserves edited and ignored charac
   const dialog = page.locator("#campaignCastDialog");
   await expect(dialog.getByRole("button", { name: "Mara", exact: true })).toHaveCount(0);
   api.publishDiscovery();
+  await openTrackingTools(dialog);
   await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click();
   await expect(dialog).toContainText("Character tracking is up to date");
   await dialog.getByRole("button", { name: "Mara", exact: true }).click();
@@ -478,10 +495,12 @@ for (const width of [1440, 390]) test(`legacy cast add, edit, reset, conflict an
   const dialog = page.locator("#campaignCastDialog");
   await expect(dialog).toContainText("Character tracking is catching up");
   await expect(dialog).toContainText("1 character match needs review");
+  await openTrackingTools(dialog);
   await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click();
   await expect(dialog).toContainText("Tracking starts at turn 1");
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/tracking-${width}.png` });
   api.finishTracking();
+  await openTrackingTools(dialog);
   await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click();
   await expect(dialog).toContainText("Character tracking is up to date");
   await expect(dialog).toContainText("Tracked turns 1–1");
@@ -667,6 +686,7 @@ for (const surface of ["legacy", "next"] as const) for (const width of [1440, 39
   await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toBeVisible();
   if (surface === "next") await expect(dialog).toContainText("Needs review (2)");
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/roster-${surface}-${width}.png` });
+  await openTrackingTools(dialog);
   await dialog.getByRole("button", { name: "Likely included for this input", exact: true }).click();
   await dialog.getByRole("button", { name: "Refresh estimate", exact: true }).click(); await expect(dialog).toContainText("Estimate at turn 1");
   await expect(dialog).toContainText("Estimated usage: 25 of 500 tokens");
@@ -769,7 +789,7 @@ for (const surface of ["legacy", "next"] as const) test(`conflict field can be c
   if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
   const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
   if (surface === "legacy") {
-    await dialog.getByRole("button", { name: "Needs attention", exact: true }).click();
+    await dialog.getByRole("button", { name: /^Needs attention(?: \(\d+\))?$/ }).click();
     await dialog.getByRole("button", { name: "Mara · Role", exact: true }).click();
     await expect(dialog.getByLabel("Role", { exact: true })).toBeFocused();
   } else {
@@ -792,6 +812,7 @@ test("legacy exposes recovery for a failed tracking gap", async ({ page }) => {
   await open(page);
   const dialog = page.locator("#campaignCastDialog");
   await expect(dialog).toContainText("The text provider timed out.");
+  await openTrackingTools(dialog);
   await dialog.getByRole("button", { name: "Open tracking recovery", exact: true }).click();
   await expect(dialog).toContainText("First tracking gap: turn 1");
   await expect(dialog.getByRole("button", { name: "Retry turn 1", exact: true })).toBeEnabled();
@@ -831,6 +852,7 @@ for (const surface of ["legacy", "next"] as const) test(`starting another scan f
   }
   const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace");
   const button = (name: string) => dialog.getByRole("button", { name, exact: true });
+  await openTrackingTools(dialog);
   await button("Open tracking recovery").click();
   await button("Cancel scan").click();
   await button("Preview scan").click();
@@ -862,10 +884,12 @@ for (const kind of ["forward", "scan"] as const) test(`next routes ${kind} recov
   const dialog = page.locator("dialog.characters-workspace");
   if (kind === "forward") {
     await expect(dialog.getByRole("button", { name: "Open tracking recovery" })).toHaveCount(0);
+  await openTrackingTools(dialog);
     await dialog.getByRole("button", { name: "Retry character tracking" }).click();
     await expect.poll(() => retries).toBe(1);
   } else {
     await expect(dialog.getByRole("button", { name: "Retry character tracking" })).toHaveCount(0);
+  await openTrackingTools(dialog);
     await dialog.getByRole("button", { name: "Open tracking recovery" }).click();
     await expect(dialog.getByRole("button", { name: "Retry turn 1" })).toBeEnabled();
     expect(retries).toBe(0);
@@ -919,8 +943,10 @@ test("replacement character tools ignore a scan response after closing and reope
   await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`);
   const openWorkspace = async () => { await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); };
   await openWorkspace(); const dialog = page.locator("dialog.characters-workspace");
+  await openTrackingTools(dialog);
   await dialog.getByRole("button", { name: "Scan earlier story", exact: true }).click(); await received;
   await page.keyboard.press("Escape"); await expect(dialog).not.toBeVisible(); await openWorkspace();
+  await openTrackingTools(dialog);
   await dialog.getByRole("button", { name: "Likely included for this input", exact: true }).click();
   const response = page.waitForResponse(value => value.url().includes("/cast/scans")); release(); await response;
   await expect(dialog.getByRole("heading", { name: "Likely included for this input" })).toBeVisible();
@@ -961,7 +987,7 @@ for (const width of [1440, 390]) test(`legacy needs attention routes individual 
   });
   await open(page);
   const dialog = page.locator("#campaignCastDialog");
-  const attention = dialog.getByRole("button", { name: "Needs attention", exact: true });
+  const attention = dialog.getByRole("button", { name: /^Needs attention(?: \(\d+\))?$/ });
   await attention.focus(); await page.keyboard.press("Enter");
   await expect(dialog.getByRole("heading", { name: "Identity questions (1)" })).toBeVisible();
   await expect(dialog.getByRole("heading", { name: "Withheld details (1)" })).toBeVisible();

@@ -1,4 +1,3 @@
-import "./styles.css";
 import { renderCastRoster } from "./character-editor/cast-roster-view.js";
 import { renderObservationReview } from "./character-editor/observation-review.js";
 import { mountCampaignPresentation } from "./character-editor/campaign-presentation.js";
@@ -285,19 +284,11 @@ export function createLegacyCastPanel(options: {
     function renderStoryTools() {
       if (!discovery) toolStatus("Character tracking status is unavailable. Saved characters are still available.");
       else {
-        const messages = { disabled: "Automatic character tracking is disabled.", not_enrolled: "Character tracking starts with the next accepted turn.",
-          catching_up: "Character tracking is catching up.", failed: `Character tracking stopped at turn ${discovery.firstGap?.turnNumber}. Your story is saved.`,
-          complete: "Character tracking is up to date." };
-        toolStatus(messages[discovery.state]);
-        if (discovery.coverageStartTurn !== null) toolStatus(discovery.trackedThroughTurn! >= discovery.coverageStartTurn
-          ? `Tracked turns ${discovery.coverageStartTurn}–${discovery.trackedThroughTurn}. Earlier turns are not included.`
-          : `Tracking starts at turn ${discovery.coverageStartTurn}; no turns in this range are complete yet.`);
         if (discovery.firstGap) {
           const reason = castScanRecovery(discovery, list!.boundary.turnNumber).diagnostic;
           toolStatus(`First tracking gap: turn ${discovery.firstGap.turnNumber} (${discovery.firstGap.status.replaceAll("_", " ")}).${reason ? ` ${reason}` : ""}`);
           if (recovery?.kind === "scan" && recovery.scanId && recovery.scanStatus !== "cancelled") tools.append(button("Open tracking recovery", () => { void loadScan(recovery!.scanId!); }));
         }
-        if (discovery.unresolvedCount) toolStatus(`${discovery.unresolvedCount} character ${discovery.unresolvedCount === 1 ? "match needs" : "matches need"} review.`);
 
         if (discovery.state === "failed" && discovery.firstGap?.diagnosticCode === "source_requires_manual_scan") {
           toolStatus("This turn exceeds automatic tracking limits. Review or add its characters manually.");
@@ -344,7 +335,7 @@ export function createLegacyCastPanel(options: {
     if (list?.capabilities.castLifecycle !== undefined) filters.push(["removed", "Removed"]);
     const host = node("div"); dialog.append(host);
     const counts = attention && Object.values(attention).every(value => value !== null) ? Object.values(attention).reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
-    rosterView = renderCastRoster(host, { characters: list!.characters, attention: Object.fromEntries((list!.attention ?? []).map(item => [item.characterId, item])),
+    rosterView = renderCastRoster(host, { characters: list!.characters, attention: Object.fromEntries((list!.attention ?? []).map(item => [item.characterId, { review: item.review, conflict: item.conflict, ...(item.reviewCount === undefined ? {} : { reviewCount: item.reviewCount }), ...(item.conflictCount === undefined ? {} : { conflictCount: item.conflictCount }) }])),
       tracking: discovery, attentionTotal: counts, filters, filter, query, secondaryActions, tools: [tools],
       canAdd: enabled && (options.campaignPage || !locked()),
       addDisabledReason: !enabled ? "Character editing is disabled. Saved characters remain available to read." : "Finish or resolve the current generation before editing characters.",
