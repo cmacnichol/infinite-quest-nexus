@@ -1,3 +1,4 @@
+import { authoringJobLabel } from "../../packages/client-core/src/characters/section-refine.js";
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
 import type { PlayableCharacter } from "../../packages/contracts/src/world-library.js";
@@ -794,13 +795,16 @@ it("cancel leaves a recovered workspace even when its local session is gone", as
 
 it.each([false, true])("P27-F4 character list reaches page two with an unrelated first page (missing session %s)", async missing => {
   const { root, document } = fixture();
-  const list = vi.fn().mockResolvedValueOnce({ jobs: [{ id: "other-world", kind: "world_concept", status: "applied" }], nextCursor: "characters-page-two" }).mockResolvedValueOnce({ jobs: [{ id: "saved-character", kind: "character", status: "awaiting_review" }] });
+  const job = { id: "saved-character", kind: "character", status: "awaiting_review", target: { kind: "new_world" as const }, expiresAt: "2026-11-20T10:00:00.000Z" };
+  const list = vi.fn().mockResolvedValueOnce({ jobs: [{ id: "other-world", kind: "world_concept", status: "applied" }], nextCursor: "characters-page-two" }).mockResolvedValueOnce({ jobs: [job] });
   const mounted = mountCharacterWorkspacePage(root, "local", { sessionStore: store(missing ? null : session()), authoringJobsApi: { loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["character"] }), listAuthoringJobs: list } as never });
   if (!missing) { await settle(); click(document, '[data-action="list-character-jobs"]'); }
   await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(1));
   const more = document.querySelector<HTMLButtonElement>('[data-action="more-character-jobs"]'); expect(more).not.toBeNull(); expect(more!.hidden).toBe(false);
   more!.click();
-  await vi.waitFor(() => expect(root.textContent).toContain("saved-character"));
+  await vi.waitFor(() => expect(root.textContent).toContain(authoringJobLabel(job)));
+  const proposal = document.querySelector<HTMLElement>(missing ? "[data-recovery-list] button" : "[data-character-jobs] a")!;
+  expect(proposal.textContent).toBe(authoringJobLabel(job)); expect(proposal.textContent).not.toContain(job.id); expect(proposal.title).toBe(job.id);
   expect(list).toHaveBeenLastCalledWith("characters-page-two", expect.any(AbortSignal)); expect(more!.hidden).toBe(true);
   expect(root.textContent).not.toContain("other-world"); mounted.dispose();
 });

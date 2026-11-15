@@ -1,3 +1,4 @@
+import { authoringJobLabel } from "../../../packages/client-core/src/characters/section-refine";
 import { createNexusApiClient, createNoopSessionPort } from "@infinite-quest/client-web";
 import { renderOrganizePanel } from "./character-organize-panel";
 import { WORLD_EDITOR_FIELDS } from "../../../packages/client-core/src/characters/profile-fields";
@@ -221,7 +222,7 @@ export function mountCharacterWorkspacePage(
       if (reset) { list.replaceChildren(); listedCharacterIds.clear(); }
       for (const job of page.jobs.filter(job => job.kind === "character" && !listedCharacterIds.has(job.id))) {
         listedCharacterIds.add(job.id);
-        const item = document.createElement("li"); const link = document.createElement("a"); link.href = `/app/characters/resume?authoringJob=${encodeURIComponent(job.id)}`; link.textContent = `${job.id} \u00b7 ${job.status.replaceAll("_", " ")}`; item.append(link); list.append(item);
+        const item = document.createElement("li"); const link = document.createElement("a"); link.href = `/app/characters/resume?authoringJob=${encodeURIComponent(job.id)}`; link.textContent = authoringJobLabel(job); link.title = job.id; item.append(link); list.append(item);
       }
       characterListCursor = page.nextCursor === cursor ? undefined : page.nextCursor;
       more.hidden = !characterListCursor;
@@ -1069,7 +1070,7 @@ function mountCharacterRecovery(root: HTMLElement, sessionKey: string, resumeJob
       const list = required<HTMLElement>(root, "[data-recovery-list]");
       for (const job of page.jobs.filter(job => job.kind === "character" && !listedIds.has(job.id))) {
         listedIds.add(job.id);
-        const button = document.createElement("button"); button.textContent = `${job.id} \u00b7 ${job.status.replaceAll("_", " ")}`;
+        const button = document.createElement("button"); button.textContent = authoringJobLabel(job); button.title = job.id;
         button.addEventListener("click", () => { void load(job.id).catch(failed); });
         const item = document.createElement("li"); item.append(button); list.append(item);
       }

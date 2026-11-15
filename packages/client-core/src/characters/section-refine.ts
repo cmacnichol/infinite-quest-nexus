@@ -49,15 +49,12 @@ export function sectionRefineRequest(content: WorldContent, current: PlayableCha
 }
 export function authoringJobLabel(job: { status: string; target: { kind: "new_world" } | { kind: "world_draft"; characterId?: string }; expiresAt: string }, locale?: string): string {
   const kind = job.target.kind === "world_draft" && job.target.characterId ? "Edit existing character" : "New character";
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(job.expiresAt);
-  if (!match) throw new Error("Invalid proposal expiration timestamp.");
-  let year = Number(match[1]); const month = Number(match[2]); const day = Number(match[3]);
-  year -= month <= 2 ? 1 : 0;
-  const era = Math.floor(year / 400); const yearOfEra = year - era * 400;
-  const shiftedMonth = month + (month > 2 ? -3 : 9);
-  const days = era * 146097 + yearOfEra * 365 + Math.floor(yearOfEra / 4) - Math.floor(yearOfEra / 100) + Math.floor((153 * shiftedMonth + 2) / 5) + day - 1 - 719468;
-  const zone = match[7]!; const offset = zone === "Z" ? 0 : (zone[0] === "+" ? 1 : -1) * (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6)));
-  const timestamp = ((days * 24 + Number(match[4])) * 60 + Number(match[5]) - offset) * 60000 + Number(match[6]) * 1000;
-  const date = new Intl.DateTimeFormat(locale, { timeZone: "UTC" }).format(timestamp);
+  const match = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(job.expiresAt);
+  const timestamp = Date.parse(job.expiresAt);
+  if (!match || !Number.isFinite(timestamp)) throw new Error("Invalid proposal expiration timestamp.");
+  const calendarDate = new Date(0);
+  calendarDate.setUTCFullYear(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (calendarDate.getUTCFullYear() !== Number(match[1]) || calendarDate.getUTCMonth() !== Number(match[2]) - 1 || calendarDate.getUTCDate() !== Number(match[3])) throw new Error("Invalid proposal expiration timestamp.");
+  const date = new Intl.DateTimeFormat(locale).format(timestamp);
   return `${kind} · ${job.status.replaceAll("_", " ")} · expires ${date}`;
 }

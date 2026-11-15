@@ -32,5 +32,8 @@ describe("section refinement", () => {
   it("labels proposals", () => {
     expect(authoringJobLabel({ status: "awaiting_review", target: { kind: "new_world" }, expiresAt: "2026-11-20T10:00:00.000Z" }, "en-US")).toBe("New character · awaiting review · expires 11/20/2026");
     expect(authoringJobLabel({ status: "queued", target: { kind: "world_draft", characterId: "hero" }, expiresAt: "2026-11-20T10:00:00.000Z" }, "en-US")).toMatch(/^Edit existing character · /);
+    const instant = "2026-11-20T00:30:00.000Z";
+    expect(authoringJobLabel({ status: "queued", target: { kind: "new_world" }, expiresAt: instant }, "en-US")).toContain(new Intl.DateTimeFormat("en-US").format(new Date(instant)));
+    for (const expiresAt of ["invalid", "2026-02-30T10:00:00.000Z"]) expect(() => authoringJobLabel({ status: "queued", target: { kind: "new_world" }, expiresAt })).toThrow("Invalid proposal expiration timestamp.");
   });
 });
