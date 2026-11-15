@@ -158,6 +158,30 @@ describe("legacy cast panel", () => {
     if (scenario === "refresh fails") { await vi.waitFor(() => expect(dialog.textContent).toContain("Saved Role. Could not refresh this character.")); expect([...dialog.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(false); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Reload")!.click(); await vi.waitFor(() => expect([...dialog.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(true)); expect(edit).toHaveBeenCalledTimes(1); }
     panel.requestClose();
   });
+  it("clears the refresh-failure notice after Reload once Undo is gone", async () => {
+    const { document, window } = parseHTML("<html><body></body></html>");
+    vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
+    const boundary = { turnNumber: 0, timelineRevision: 0 }, capabilities = { castEditing: true };
+    const person = { id: "11111111-1111-4111-8111-111111111111", name: "Marin", aliases: [], origin: { kind: "manual" as const }, profile: { "story.role": "Guard" }, pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0, lastMentionedTurn: null };
+    let detail = { revision: 1, boundary, capabilities, character: person, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null }, reads = 0;
+    // Read 1 opens the sheet, read 2 follows the save, read 3 follows Undo and fails, read 4 is Reload.
+    const read = vi.fn(async () => { reads++; if (reads === 3) throw new Error("offline"); return detail; });
+    const edit = vi.fn(async () => { const revision = detail.revision + 1; detail = { ...detail, revision, character: { ...person, revision } }; return { revision, boundary, character: detail.character }; });
+    const api = { list: async () => ({ revision: 1, boundary, capabilities, characters: [person], nextCursor: null }), detail: read, edit, discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} });
+    const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    const buttons = () => [...dialog.querySelectorAll("button")];
+    await panel.open(); buttons().find(button => button.textContent?.includes("Marin"))!.click(); await new Promise(resolve => setTimeout(resolve, 0));
+    buttons().find(button => button.textContent === "Edit Role")!.click(); const input = dialog.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!; input.value = "Captain"; input.dispatchEvent(new window.Event("input"));
+    buttons().find(button => button.textContent === "Save")!.click();
+    await vi.waitFor(() => expect(buttons().some(button => button.textContent === "Undo")).toBe(true));
+    buttons().find(button => button.textContent === "Undo")!.click();
+    await vi.waitFor(() => expect(dialog.textContent).toContain("Undone. Could not refresh this character."));
+    buttons().find(button => button.textContent === "Reload")!.click();
+    await vi.waitFor(() => expect(dialog.textContent).not.toContain("Could not refresh this character."));
+    expect(buttons().some(button => button.textContent === "Reload")).toBe(false); expect(reads).toBe(4);
+    panel.requestClose();
+  });
   it("uses the authored-profile endpoint for a Starting Cast Character", async () => {
     const { document, window } = parseHTML("<html><body></body></html>"); vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
     const id = "11111111-1111-4111-8111-111111111111", boundary = { turnNumber: 0, timelineRevision: 0 }, capabilities = { castEditing: true };

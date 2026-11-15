@@ -95,6 +95,18 @@ describe("shared roster", () => {
     await vi.waitFor(() => expect(api.list.mock.calls.length).toBe(initial + 1));
     expect((api.list.mock.calls.at(-1) as any)[1].query).toBe("Mara"); workspace.dispose();
   });
+  it("never lets an older search response replace a newer one", async () => {
+    const pending = new Map<string, (value: typeof page) => void>();
+    const list = vi.fn((_campaign: string, options?: { query?: string }) => options?.query ? new Promise<typeof page>(resolve => { pending.set(options.query!, resolve); }) : Promise.resolve(page));
+    const { document, workspace } = setup({ list }); workspace.open("one");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Mara"));
+    const search = document.querySelector<HTMLInputElement>('input[type="search"]')!;
+    search.value = "Old"; search.dispatchEvent(new document.defaultView!.Event("input")); await vi.waitFor(() => expect(pending.has("Old")).toBe(true));
+    search.value = "New"; search.dispatchEvent(new document.defaultView!.Event("input")); await vi.waitFor(() => expect(pending.has("New")).toBe(true));
+    pending.get("New")!({ ...page, characters: [{ ...person, name: "Newer result" }] }); await vi.waitFor(() => expect(document.body.textContent).toContain("Newer result"));
+    pending.get("Old")!({ ...page, characters: [{ ...person, name: "Older result" }] }); await new Promise(resolve => setTimeout(resolve, 0));
+    expect(document.body.textContent).toContain("Newer result"); expect(document.body.textContent).not.toContain("Older result"); workspace.dispose();
+  });
 });
 
 describe("world picker", () => {
@@ -408,6 +420,10 @@ it("groups supporting fields by registry section with associated labels", async 
   await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Add character");
   await vi.waitFor(() => expect(document.querySelector("form")).not.toBeNull());
   expect([...document.querySelectorAll("[data-cast-group] summary")].map(el => el.textContent)).toEqual([...new Set(SUPPORTING_FIELDS.map(field => field.section))]);
+  const identity = document.querySelector('[data-cast-group="Identity"]')!;
+  expect(identity.contains(document.getElementById("characters-name"))).toBe(true); expect(identity.contains(document.getElementById("characters-aliases"))).toBe(true);
+  expect(document.querySelector<HTMLTextAreaElement>("#characters-story-goals")!.maxLength).toBe(20000);
+  expect(document.querySelector<HTMLTextAreaElement>("#characters-story-role")!.maxLength).toBe(2000);
   for (const field of SUPPORTING_FIELDS) {
     const id = `characters-${field.path.replace(".", "-")}`;
     expect(document.querySelector(`label[for="${id}"]`)).not.toBeNull();

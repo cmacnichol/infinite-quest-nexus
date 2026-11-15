@@ -16,6 +16,13 @@ function setup(generate: any, available = true) {
 }
 
 describe("section refine panel", () => {
+  it("treats trailing whitespace in the unsaved candidate as unchanged", async () => {
+    const generate = vi.fn(async (current) => { const result = structuredClone(current); result.profile.story.role = "Sailor"; return result; });
+    const t = setup(generate); const raw = t.current() as any; raw.name = "Hero "; raw.profile.story.role = "Guide\n";
+    t.instruction(); t.click('[data-refine-generate]'); await flush();
+    expect(t.host.textContent).not.toContain("This character changed"); expect(t.host.querySelector('[data-refine-apply]')).not.toBeNull();
+    t.click('[data-refine-apply]'); expect(t.applied).toHaveBeenCalledTimes(1); expect(t.current().profile!.story.role).toBe("Sailor");
+  });
   it("captures unsaved candidate, reviews section differences and applies only that section", async () => {
     const generate = vi.fn(async (current) => { const result = structuredClone(current); result.name = "Changed"; result.profile.story.role = "Sailor"; result.profile.appearance.eyes = "Red"; result.rpgStats = []; return result; });
     const t = setup(generate); t.current().profile!.story.role = "Unsaved";

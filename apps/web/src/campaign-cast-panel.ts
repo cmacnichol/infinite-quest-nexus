@@ -1,5 +1,5 @@
 import { renderCharacterSheetView, type SheetFeedback } from "./character-editor/character-sheet-view.js";
-import { sheetRequest, sheetUndoOperation, sheetSavedMessage, sheetUndoRequest, sheetMatchesFence, retractionRequest, type SheetTarget, type SheetUndo, type SheetWriteFence, type SheetChange } from "@infinite-quest/client-core";
+import { sheetRequest, sheetUndoOperation, sheetSavedMessage, sheetFieldLimit, sheetUndoRequest, sheetMatchesFence, retractionRequest, type SheetTarget, type SheetUndo, type SheetWriteFence, type SheetChange } from "@infinite-quest/client-core";
 import { renderCastRoster } from "./character-editor/cast-roster-view.js";
 import { renderObservationReview } from "./character-editor/observation-review.js";
 import { mountCampaignPresentation } from "./character-editor/campaign-presentation.js";
@@ -450,10 +450,10 @@ export function createLegacyCastPanel(options: {
         const nextProfile = main && options.getProfile ? await options.getProfile(campaign) : null;
         if (!stillCurrent()) return;
         const nextTarget: SheetTarget | null = main ? (nextProfile ? { kind: "main", profile: nextProfile } : null) : { kind: "cast", detail: next };
-        if (sheetFeedback?.undo && sheetFeedback.fence && nextTarget) {
+        if (sheetFeedback) {
           sheetFeedback.refreshFailed = false;
           sheetFeedback.message = sheetFeedback.message.replace(/\. Could not refresh this character\.$/, ".");
-          if (!sheetMatchesFence(nextTarget, sheetFeedback.fence)) { sheetFeedback.message += " Undo expired: the character was updated after your save."; delete sheetFeedback.undo; }
+          if (sheetFeedback.undo && sheetFeedback.fence && nextTarget && !sheetMatchesFence(nextTarget, sheetFeedback.fence)) { sheetFeedback.message += " Undo expired: the character was updated after your save."; delete sheetFeedback.undo; }
         }
         enabled = next.capabilities.castEditing; editor = createCastEditor(next, next); renderSheet(next, nextProfile);
       } catch {
@@ -486,7 +486,7 @@ export function createLegacyCastPanel(options: {
         }
       } } : {}) } : undefined;
     sheetView = renderCharacterSheetView(host, {
-      sheet, kind: main ? "main" : "supporting", editable: canEdit, lockedReason: null,
+      sheet, kind: main ? "main" : "supporting", editable: canEdit, lockedReason: null, limit: path => sheetFieldLimit(target, path),
       ...(!main && canEdit() ? { toggles: { pinned: detail.character.pinned, ignored: detail.character.ignored } } : {}),
       ...(feedback ? { feedback } : {}), onEditStart: clearSheetFeedback, showEmpty, onShowEmpty(value) { showEmpty = value; renderSheet(detail, profile); dialog.querySelector<HTMLElement>("[data-show-empty-toggle]")?.focus(); },
       compareLabel: main ? "Load latest version" : "Compare latest", onCompareLatest() { void refresh(); },

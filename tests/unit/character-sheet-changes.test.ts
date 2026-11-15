@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { characterProfileSchema, type CastDetail, type CastObservation } from "../../packages/contracts/src/index.js";
 import { buildCharacterSheet } from "../../packages/client-core/src/characters/sheet.js";
-import { sheetRequest, sheetUndoOperation, sheetUndoRequest, sheetMatchesFence, conflictChoices, retractionRequest, clearEditLabel, sheetSavedMessage } from "../../packages/client-core/src/characters/sheet-changes.js";
+import { sheetRequest, sheetUndoOperation, sheetUndoRequest, sheetMatchesFence, conflictChoices, retractionRequest, clearEditLabel, sheetSavedMessage, sheetFieldLimit, castOverrideLimit } from "../../packages/client-core/src/characters/sheet-changes.js";
 
 const id = "10000000-0000-4000-8000-000000000001";
 const detail = (): CastDetail => ({ character: { id, name: "Mira", aliases: ["M"], origin: { kind: "manual" }, profile: {}, revision: 3, pinned: false, ignored: false, firstObservedTurn: 0, lastObservedTurn: 0, lastMentionedTurn: null }, revision: 4, boundary: { turnNumber: 20, timelineRevision: 0 }, observations: [], overrides: [], identityEvents: [], autoMatches: [], unresolvedCandidateIds: [], editorDestination: null });
@@ -96,6 +96,16 @@ describe("sheet writes", () => {
     expect(clearEditLabel({ ...f, path: "state.location" }, "plain")).toBe("Use story value");
     expect(clearEditLabel({ ...f, observations: [] }, "plain")).toBe("Clear my edit");
     expect(clearEditLabel({ ...f, observations: f.observations.filter(item => item.mode === "claim") }, "plain")).toBe("Clear my edit");
+  });
+  it("limits each field to what its write path accepts", () => {
+    expect(castOverrideLimit("story.goals")).toBe(20000); expect(castOverrideLimit("story.role")).toBe(2000);
+    expect(sheetFieldLimit(null, "identity.aliases")).toEqual({ maxLength: 200, maxItems: 20 });
+    expect(sheetFieldLimit({ kind: "cast", detail: detail() }, "story.role").maxLength).toBe(2000);
+    expect(sheetFieldLimit({ kind: "cast", detail: detail() }, "story.goals").maxLength).toBe(20000);
+  });
+  it("clears a current-state edit saved empty instead of sending an empty override", () => {
+    const request = sheetRequest({ kind: "cast", detail: detail() }, { kind: "field", path: "state.location", value: "" }, "k");
+    expect(request.body).toMatchObject({ clearOverrides: ["state.location"] }); expect(request.body).not.toHaveProperty("setOverrides");
   });
   it("reads toggle feedback as the new state", () => {
     expect(sheetSavedMessage({ kind: "field", path: "story.role", value: "Guide" }, "Role")).toBe("Saved Role.");

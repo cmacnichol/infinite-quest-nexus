@@ -23,6 +23,11 @@ export function mountSectionRefine(host: HTMLElement, options: Options): { dispo
   panel.append(label, generate, cancel, status, results);
   host.replaceChildren(open, panel);
   if (!options.available) { open.disabled = true; const reason = doc.createElement("p"); reason.textContent = options.unavailableText; host.append(reason); }
+  // Compare the same validated (trimmed) form that was captured, so ordinary whitespace never looks like an edit.
+  function currentFingerprint(): string {
+    const parsed = playableCharacterSchema.safeParse(structuredClone(options.current()));
+    return parsed.success ? fingerprint(parsed.data) : "invalid";
+  }
   function invalidate(): void { epoch++; controller?.abort(); controller = null; results.replaceChildren(); }
   function stale(): void { invalidate(); status.textContent = "This character changed. Generate a new section proposal."; generate.disabled = !instruction.value.trim(); }
   open.addEventListener("click", () => { if (!disposed && options.available) panel.hidden = false; });
@@ -37,7 +42,7 @@ export function mountSectionRefine(host: HTMLElement, options: Options): { dispo
       const capturedFingerprint = fingerprint(captured);
       const proposal = playableCharacterSchema.parse(await options.generate(structuredClone(captured), instruction.value.trim(), signal));
       if (disposed || signal.aborted || requestEpoch !== epoch) return;
-      if (fingerprint(options.current()) !== capturedFingerprint) { stale(); return; }
+      if (currentFingerprint() !== capturedFingerprint) { stale(); return; }
       controller = null; generate.disabled = !instruction.value.trim(); status.textContent = "Review the proposed changes before applying them.";
       const changes = refinedSectionDiff(captured, proposal, options.section);
       if (!changes.length) { const empty = doc.createElement("p"); empty.textContent = "No changes proposed for this section."; results.append(empty); }
@@ -47,7 +52,7 @@ export function mountSectionRefine(host: HTMLElement, options: Options): { dispo
         results.append(row);
       }
       const apply = doc.createElement("button"); apply.type = "button"; apply.dataset.refineApply = ""; apply.textContent = "Apply";
-      apply.addEventListener("click", () => { if (disposed || requestEpoch !== epoch) return; if (fingerprint(options.current()) !== capturedFingerprint) { stale(); return; } invalidate(); options.onApply(applyRefinedSection(captured, proposal, options.section)); });
+      apply.addEventListener("click", () => { if (disposed || requestEpoch !== epoch) return; if (currentFingerprint() !== capturedFingerprint) { stale(); return; } invalidate(); options.onApply(applyRefinedSection(captured, proposal, options.section)); });
       results.append(apply);
     } catch {
       if (disposed || signal.aborted || requestEpoch !== epoch) return;

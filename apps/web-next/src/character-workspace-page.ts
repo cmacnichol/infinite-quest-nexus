@@ -529,9 +529,11 @@ export function mountCharacterWorkspacePage(
       const label = document.createElement("summary"); label.textContent = "Retained guidance (source only)";
       const guidance = document.createElement("p"); guidance.textContent = "This text is preserved as source material. Add any facts you want to use to the structured story fields above; it is not promoted automatically.";
       const text = document.createElement("p"); text.textContent = state.candidate.characterText;
-      const panel = document.createElement("div"); panel.dataset.organizePanel = "";
-      source.append(label, guidance, text, panel); form.append(source); mountOrganize(panel);
+      source.append(label, guidance, text); form.append(source);
     }
+    // Organize works on the whole profile (notes, retained guidance and world lore), so Story always offers it.
+    const organizeHost = document.createElement("div"); organizeHost.dataset.organizePanel = "";
+    form.append(organizeHost); mountOrganize(organizeHost);
     stage.append(form); canvas.replaceChildren(stage, actions()); bindCandidateInputs();
   }
 

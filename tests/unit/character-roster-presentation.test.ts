@@ -13,9 +13,9 @@ describe("cast roster presentation", () => {
   it("orders badges with counts", () => {
     expect(castRosterRow(person({ origin: origin("protagonist"), pinned: true, ignored: true, removed: true }), { review: true, reviewCount: 3, conflict: true, conflictCount: 1 }).badges.map(b => b.label)).toEqual(["Main", "Pinned", "Ignored", "Removed", "Needs review (3)", "Conflict (1)"]);
   });
-  it("truncates a role to 120 code points and an ellipsis", () => {
+  it("truncates a role to at most 120 code points including the ellipsis", () => {
     const summary = castRosterRow(person({ profile: { "story.role": "🜂".repeat(130) } })).summary;
-    expect(Array.from(summary)).toHaveLength(121); expect(summary.endsWith("…")).toBe(true);
+    expect(Array.from(summary)).toHaveLength(120); expect(summary.endsWith("…")).toBe(true);
   });
   it("reports the later observed or mentioned turn", () => {
     expect(castRosterRow(person({ lastMentionedTurn: 9 })).lastSeen).toBe("Last seen turn 9");

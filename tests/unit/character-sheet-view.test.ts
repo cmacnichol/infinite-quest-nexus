@@ -14,6 +14,27 @@ function setup(extra: Partial<Parameters<typeof renderCharacterSheetView>[1]> = 
   return { host, options, view, click, Event };
 }
 describe("character sheet view", () => {
+  it("applies list limits per entry and validates them on save", async () => {
+    const onChange = vi.fn().mockResolvedValue({ ok: true });
+    const { host, click, Event } = setup({ onChange, limit: path => path === "identity.aliases" ? { maxLength: 5, maxItems: 2 } : { maxLength: 2000 } });
+    click("Edit Aliases"); const area = host.querySelector("textarea") as HTMLTextAreaElement;
+    // linkedom leaves maxLength undefined unless it was set; a browser reports -1.
+    expect(area.maxLength === undefined || area.maxLength < 0).toBe(true);
+    area.value = "One\nTwo\nThree"; area.dispatchEvent(new Event("input", { bubbles: true })); click("Save"); await Promise.resolve();
+    expect(onChange).not.toHaveBeenCalled(); expect(host.textContent).toContain("Aliases can have at most 2 entries.");
+    area.value = "One\nToolong"; click("Save"); await Promise.resolve();
+    expect(onChange).not.toHaveBeenCalled(); expect(host.textContent).toContain("Each Aliases entry can be at most 5 characters.");
+    area.value = "One\nTwo"; click("Save"); await Promise.resolve();
+    expect(onChange).toHaveBeenCalledWith({ kind: "field", path: "identity.aliases", value: ["One", "Two"] });
+  });
+  it("asks before Escape discards a dirty inline edit", () => {
+    const confirmDiscard = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
+    const { host, click, Event } = setup({ confirmDiscard });
+    click("Edit Pronouns"); const input = host.querySelector("input:not([type=checkbox])") as HTMLInputElement; input.value = "changed"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    const escape = () => { const event = new Event("keydown", { bubbles: true }) as any; event.key = "Escape"; input.dispatchEvent(event); };
+    escape(); expect(confirmDiscard).toHaveBeenCalledTimes(1); expect(host.querySelector("input:not([type=checkbox])")).toBe(input);
+    escape(); expect(confirmDiscard).toHaveBeenCalledTimes(2); expect(host.querySelector("input:not([type=checkbox])")).toBeNull();
+  });
   it("edits with descriptor controls and preserves text on conflict", async () => {
     const onChange = vi.fn().mockResolvedValue({ ok: false, conflict: true, message: "stale" });
     const { host, click, Event } = setup({ onChange });

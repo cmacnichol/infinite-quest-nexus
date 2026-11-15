@@ -39,6 +39,22 @@ A whole-branch review against the spec found that V3 capture omitted unedited cu
 
 Verification after these fixes: `pnpm check` passed. Twelve focused unit files passed, 307 tests (cast context, V3 readers, provider composition, sheet changes and view, both cast controllers, projection, provenance, continuity adapter, planner, prompt library). Real PostgreSQL suites passed: `campaign-cast-v2-context` (1), `campaign-cast-generation` (13), `story-continuity-review` (116; one assertion updated from omission to inclusion), `campaign-cast-repository` (35) and `story-memory-enrollment` (14). The fixture-browser suites `web-next-characters-sheet`, `unified-character-editor` and `campaign-cast` passed, 132 cases. The full `pnpm test:integration`, the native-zoom suites and the opt-in composed proof were not rerun.
 
+## Second review corrections (2026-11-15)
+
+A fresh spec review found, and this pass fixed:
+
+- **B23:** Web-Next refine compared a trimmed captured candidate with the raw unsaved one. Any trailing whitespace made every proposal stale. Both sides now compare the validated form.
+- **B7:** list fields put the per-entry limit on the whole textarea. Limits now apply per entry, with a maximum entry count, and are checked on Save.
+- **B7:** Escape on a dirty inline editor now asks before discarding.
+- **B7 and constraints:** sheet inputs use the limit of the character's write path. Campaign edits accept 2,000 characters (goals 20,000); authored Starting Cast fields keep their registry limit. The Web-Next editor uses the same limits.
+- **B8:** in Nexus, Reload now clears "Could not refresh this character." even after Undo is gone.
+- **B4:** roster summaries are at most 120 code points, including the ellipsis.
+- **B14:** in the Web-Next editor, Name and Aliases sit inside the Identity group.
+- **B21:** the Web-Next button reads "Organize notes with AI…". Story always offers it for a saved world, not only when retained guidance exists.
+- **Constraints:** `seededCharacterFieldPolicy` uses the contracts `isCastStateField` instead of a second copy of the list.
+
+New tests cover each item, plus an older-search-response race in Web-Next and the existing clear-on-empty behavior for current-state edits. Six of the new tests failed against the previous code; the race and the empty-state tests were coverage gaps only. Verification: `pnpm check` and `pnpm check:client-boundaries` passed. Sixteen unit files passed, 219 tests. The fixture-browser suites for both sheets, the Web-Next editor and workspaces, and the Nexus character workspace passed, 164 cases. PostgreSQL, native-zoom and composed suites were not rerun; this pass changed no server code.
+
 ## Results and release boundary
 
 - **Passed before review fixes (`63cf1618`):** `pnpm check`, `pnpm check:client-boundaries`, `pnpm build:web:legacy`, `pnpm build:web:next`; the Next build retains unresolved-at-build-time font and large-chunk warnings.

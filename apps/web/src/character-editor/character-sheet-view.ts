@@ -19,6 +19,8 @@ export type CharacterSheetViewOptions = {
   onCompareLatest(): void; compareLabel: "Compare latest" | "Load latest version";
   showEmpty: boolean; onShowEmpty(value: boolean): void;
   confirmDiscard(): boolean; isCurrent(): boolean;
+  /** Write-path limits for a field; defaults to the registry descriptor. List limits apply per entry. */
+  limit?(path: string): { maxLength: number; maxItems?: number };
 };
 
 let viewSequence = 0;
@@ -66,10 +68,10 @@ export function renderCharacterSheetView(host: HTMLElement, options: CharacterSh
         }
         if (!options.editable(field.path)) continue;
         if (activePath === field.path && mode === "edit") {
-          const descriptor = CHARACTER_FIELD_DESCRIPTORS.find(item => item.path === field.path); const label = el("label", field.label); const input = descriptor?.input === "text" ? el("input") : el("textarea"); input.id = `${idPrefix}-${field.path.replace(/[^a-zA-Z0-9_-]/g, "-")}`; label.htmlFor = input.id; input.value = Array.isArray(field.value) ? field.value.join("\n") : field.value ?? ""; if (descriptor) input.maxLength = descriptor.maxLength;
+          const descriptor = CHARACTER_FIELD_DESCRIPTORS.find(item => item.path === field.path); const label = el("label", field.label); const input = descriptor?.input === "text" ? el("input") : el("textarea"); input.id = `${idPrefix}-${field.path.replace(/[^a-zA-Z0-9_-]/g, "-")}`; label.htmlFor = input.id; input.value = Array.isArray(field.value) ? field.value.join("\n") : field.value ?? ""; const limit = options.limit?.(field.path) ?? { maxLength: descriptor?.maxLength ?? 20000, ...(descriptor?.maxItems ? { maxItems: descriptor.maxItems } : {}) }; if (descriptor?.input !== "list") input.maxLength = limit.maxLength;
           editor = { path: field.path, input, initial: input.value }; row.append(label, input);
-          input.addEventListener("keydown", event => { if ((event as KeyboardEvent).key === "Escape") { event.stopPropagation(); activePath = null; editor = null; render(); focusField(field.path, "button"); options.onInteractionEnd?.(field.path); } });
-          row.append(button("Save", () => { const raw = input.value; const next = descriptor?.input === "list" ? raw.split(/\r?\n/).map(item => item.trim()).filter(Boolean) : raw.trim(); void run(() => options.onChange({ kind: "field", path: field.path, value: next })); }), button("Cancel", () => { if (dirty() && !options.confirmDiscard()) return; activePath = null; editor = null; render(); focusField(field.path, "button"); options.onInteractionEnd?.(field.path); }));
+          input.addEventListener("keydown", event => { if ((event as KeyboardEvent).key === "Escape") { event.stopPropagation(); if (dirty() && !options.confirmDiscard()) return; activePath = null; editor = null; render(); focusField(field.path, "button"); options.onInteractionEnd?.(field.path); } });
+          row.append(button("Save", () => { const raw = input.value; const next = descriptor?.input === "list" ? raw.split(/\r?\n/).map(item => item.trim()).filter(Boolean) : raw.trim(); const invalid = Array.isArray(next) ? limit.maxItems !== undefined && next.length > limit.maxItems ? `${field.label} can have at most ${limit.maxItems} entries.` : next.some(item => item.length > limit.maxLength) ? `Each ${field.label} entry can be at most ${limit.maxLength} characters.` : null : null; if (invalid) { host.querySelector(".character-sheet-error")?.replaceChildren(el("span", invalid)); input.focus(); return; } void run(() => options.onChange({ kind: "field", path: field.path, value: next })); }), button("Cancel", () => { if (dirty() && !options.confirmDiscard()) return; activePath = null; editor = null; render(); focusField(field.path, "button"); options.onInteractionEnd?.(field.path); }));
         } else {
           row.append(button(`Edit ${field.label}`, () => open(field.path, "edit")));
           if (options.kind === "supporting" && field.origin === "user" && field.editTurn !== null && field.path !== "name" && field.path !== "identity.aliases") row.append(button(field.storyDiffers ? "Use story value" : clearEditLabel(field, field.override ? "plain" : "startingCast"), () => { if (allowRefresh()) void run(() => options.onChange({ kind: "field", path: field.path, value: null })); }));

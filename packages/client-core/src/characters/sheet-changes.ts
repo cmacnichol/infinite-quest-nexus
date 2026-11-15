@@ -3,7 +3,7 @@ import { castEvidenceOrder, castFieldSchema, observationDecisionRequestSchema, s
   type EditAuthoredCastProfile, type EditCastCharacter, type ObservationDecisionRequest } from "@infinite-quest/contracts";
 import { changeCastEditor, createCastEditor, prepareCastSubmission, setCastEditorField } from "../campaign-cast-editor.js";
 import { buildPresetRequest, changePresetField, createPresetDraft, presetField } from "./preset-editor.js";
-import { buildProfileUpdate, createProfileDraft, seededCharacterFieldPolicy, setProfileDraftField } from "./profile-fields.js";
+import { CHARACTER_FIELD_DESCRIPTORS, buildProfileUpdate, createProfileDraft, seededCharacterFieldPolicy, setProfileDraftField } from "./profile-fields.js";
 import { activeRetractedIds, type CharacterField } from "./sheet.js";
 
 export type SheetChange = { kind: "field"; path: string; value: string | string[] | null } | { kind: "toggle"; key: "pinned" | "ignored"; value: boolean };
@@ -113,4 +113,17 @@ export function sheetSavedMessage(change: SheetChange, fieldLabel: string): stri
   if (change.kind === "field") return `Saved ${fieldLabel}.`;
   if (change.key === "pinned") return change.value ? "Pinned." : "Unpinned.";
   return change.value ? "Ignored." : "No longer ignored.";
+}
+/** Character limit the server accepts for a campaign edit (override) of a cast field. */
+export function castOverrideLimit(path: string): number {
+  const descriptor = CHARACTER_FIELD_DESCRIPTORS.find(item => item.path === path);
+  return path === "story.goals" ? descriptor?.maxLength ?? 20_000 : Math.min(descriptor?.maxLength ?? 2_000, 2_000);
+}
+/** Limits for a sheet field on its write path. List limits apply per entry. */
+export function sheetFieldLimit(target: SheetTarget | null, path: string): { maxLength: number; maxItems?: number } {
+  const descriptor = CHARACTER_FIELD_DESCRIPTORS.find(item => item.path === path);
+  const base = { maxLength: descriptor?.maxLength ?? 2_000, ...(descriptor?.maxItems ? { maxItems: descriptor.maxItems } : {}) };
+  if (!target || target.kind === "main" || path === "name" || path === "identity.aliases") return base;
+  if (target.detail.character.originProfile && seededCharacterFieldPolicy(path) === "fixed") return base;
+  return { ...base, maxLength: castOverrideLimit(path) };
 }

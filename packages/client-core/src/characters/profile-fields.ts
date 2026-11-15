@@ -1,4 +1,4 @@
-import { campaignCharacterProfileUpdateSchema, type CampaignCharacterProfile, type CampaignCharacterProfileUpdate } from "@infinite-quest/contracts";
+import { campaignCharacterProfileUpdateSchema, isCastStateField, type CampaignCharacterProfile, type CampaignCharacterProfileUpdate } from "@infinite-quest/contracts";
 
 export type CharacterSectionName = "Identity" | "Personality and voice" | "Appearance" | "Current situation" | "History" | "Mechanics";
 export type ProfileFieldDescriptor = { path: string; label: string; section: CharacterSectionName; input: "text" | "textarea" | "list" };
@@ -550,7 +550,7 @@ export function buildProfileUpdate(draft: ProfileDraft, expectedRevision: number
 export function seededCharacterFieldPolicy(path: string): "identity" | "fixed" | "updating" | "observed" | "unknown" {
   if (path === "name" || path === "identity.aliases") return "identity";
   if (path === "appearance.description") return "observed";
-  if (["story.goals", "state.location", "state.condition", "state.clothing"].includes(path)) return "updating";
+  if (isCastStateField(path)) return "updating";
   if (path === "unclassifiedNotes" || path.startsWith("identity.") || path.startsWith("story.") || path.startsWith("appearance.")) return "fixed";
   return "unknown";
 }

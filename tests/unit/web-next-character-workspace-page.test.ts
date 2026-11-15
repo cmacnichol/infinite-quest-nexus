@@ -830,6 +830,15 @@ it("organizes the current unsaved candidate and invalidates stale results on edi
   mounted.dispose();
 });
 
+it("offers Organize notes with AI… even without retained guidance", () => {
+  const { document, root } = fixture();
+  const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session({ ...generatedCharacter, characterText: "" })), organizeCharacter: vi.fn() });
+  click(document, '[data-character-stage="story"]');
+  expect(document.querySelector('[data-character-source]')).toBeNull();
+  expect(document.querySelector('[data-organize-panel] button')?.textContent).toBe("Organize notes with AI…");
+  mounted.dispose();
+});
+
 it("explains that Organize requires a saved world", () => {
   const { document, root } = fixture();
   const created = { ...session(generatedCharacter), origin: "world-creation" as const, parentRoute: "/app/worlds/new", expectedWorldRevision: null };

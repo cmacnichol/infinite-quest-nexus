@@ -6,7 +6,7 @@ export function renderOrganizePanel(host: HTMLElement, options: { organize(signa
   const doc = host.ownerDocument;
   const controller = new AbortController();
   let disposed = false;
-  const button = doc.createElement("button"); button.type = "button"; button.textContent = "Organize notes with AI";
+  const button = doc.createElement("button"); button.type = "button"; button.textContent = "Organize notes with AI…";
   const status = doc.createElement("p"); status.setAttribute("role", "status");
   const results = doc.createElement("div");
   host.replaceChildren(button, status, results);

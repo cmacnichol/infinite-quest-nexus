@@ -7,7 +7,7 @@ import { renderCharacterSheetView, type SheetFeedback } from "../../web/src/char
 import { renderObservationReview } from "../../web/src/character-editor/observation-review.js";
 import { castScanRecovery } from "./campaign-cast-scan-panel";
 import { createCharacterProfileForm } from "./character-profile-form";
-import { buildCharacterSheet, createCastEditor, recentFilterLabel, sheetRequest, sheetUndoOperation, sheetSavedMessage, sheetUndoRequest, sheetMatchesFence, retractionRequest, type SheetTarget, type SheetUndo, type SheetWriteFence, type SheetChange, type CastEditorState } from "@infinite-quest/client-core";
+import { buildCharacterSheet, createCastEditor, recentFilterLabel, sheetRequest, sheetUndoOperation, sheetSavedMessage, sheetFieldLimit, sheetUndoRequest, sheetMatchesFence, retractionRequest, type SheetTarget, type SheetUndo, type SheetWriteFence, type SheetChange, type CastEditorState } from "@infinite-quest/client-core";
 import { createCampaignCastApi, createCharactersWorkspaceSession, type CharactersWorkspaceState, type CampaignCastApi, type CharactersWorkspaceSessionOptions } from "@infinite-quest/client-web";
 import type { CampaignCharacterProfile, CampaignCharacterProfileUpdate, CharacterFilter } from "@infinite-quest/contracts";
 
@@ -134,7 +134,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
         catch (error) { if (!current()) return { ok: true as const }; if ((error as { statusCode?: number }).statusCode === 409) { clearSheetFeedback(); sheetFeedback = { message: "Could not undo. The character changed; review the latest values.", deadline: 0, key: "" }; render(); return { ok: true as const }; } return { ok: false as const, conflict: false, message: "Could not undo. Please try again." }; }
       } } : {}) } : undefined;
       const host = node("div"); dialog.append(host);
-      sheetView = renderCharacterSheetView(host, { sheet, kind: main ? "main" : "supporting", editable, lockedReason: null,
+      sheetView = renderCharacterSheetView(host, { sheet, kind: main ? "main" : "supporting", editable, lockedReason: null, limit: path => sheetFieldLimit(target, path),
         ...(!main && editable() ? { toggles: { pinned: detail.character.pinned, ignored: detail.character.ignored } } : {}),
         ...(feedback ? { feedback } : {}),
         onEditStart(path, mode) {

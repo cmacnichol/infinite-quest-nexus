@@ -1,7 +1,7 @@
 import { createStoryDraftReview } from "../../web/src/character-editor/story-draft.js";
 import { renderStoryDraftPanel } from "../../web/src/character-editor/story-draft-panel.js";
 import { createCastTextField, renderSupportingEditorFields } from "../../web/src/character-editor/renderer.js";
-import { changeCastEditor, setCastEditorField, canSaveCastEditor, prepareCastSubmission, failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, SUPPORTING_FIELDS, type CastEditorState } from "@infinite-quest/client-core";
+import { castOverrideLimit, changeCastEditor, setCastEditorField, canSaveCastEditor, prepareCastSubmission, failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, SUPPORTING_FIELDS, type CastEditorState } from "@infinite-quest/client-core";
 import { createCharactersWorkspaceSession, type CharactersWorkspaceState, type CampaignCastApi } from "@infinite-quest/client-web";
 import type { CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
 export type CastEditorContext = { document: Document; api: CampaignCastApi; session: ReturnType<typeof createCharactersWorkspaceSession<CastEditorState>>; getState(): CharactersWorkspaceState<CastEditorState>; getEditor(): CastEditorState | null; setEditor(next: CastEditorState | null): void; generationActive(): boolean; epoch(): number; confirm(message: string): boolean; saved(id: string, name: string): void; navigate(turn: number): void };
@@ -18,12 +18,12 @@ export function renderCastEditor(dialog: HTMLDialogElement, context: CastEditorC
     form.append(node("p", holder.editor.characterId ? "Saved facts are filled in. Edit only what needs changing." : "Only a name is required. Add details you know, or review story matches to fill characters from evidence."));
     const syncSave = () => { save.disabled = !canSaveCastEditor(holder.editor!) || generationActive() || context.getState().changedWhileEditing; };
     const input = (label: string, value: string, change: (value: string) => void, multiline = true) => { const wrap = node("label", label), control = multiline ? node("textarea") : node("input"); control.id = label === "Name" ? "characters-name" : "characters-aliases"; wrap.setAttribute("for", control.id); control.value = value; control.maxLength = label === "Name" ? 200 : label.startsWith("Aliases") ? 4020 : 2000; control.setAttribute("aria-label", label); control.disabled = generationActive() || holder.editor!.saving; control.addEventListener("input", () => { change(control.value); syncSave(); }); wrap.append(control); form.append(wrap); return wrap; };
-    input("Name", holder.editor.draft.name, value => { holder.editor = changeCastEditor(holder.editor!, { name: value }); }, false);
-    input("Aliases (one per line)", holder.editor.draft.aliases.join("\n"), value => { holder.editor = changeCastEditor(holder.editor!, { aliases: value.split("\n").map(v => v.trim()).filter(Boolean) }); });
+    const nameField = input("Name", holder.editor.draft.name, value => { holder.editor = changeCastEditor(holder.editor!, { name: value }); }, false);
+    const aliasesField = input("Aliases (one per line)", holder.editor.draft.aliases.join("\n"), value => { holder.editor = changeCastEditor(holder.editor!, { aliases: value.split("\n").map(v => v.trim()).filter(Boolean) }); });
     renderSupportingEditorFields(form, { expanded, existing: Boolean(holder.editor.characterId), field(pathValue, label) {
       const field = SUPPORTING_FIELDS.find(item => item.path === pathValue)!;
       const path = pathValue as Parameters<typeof setCastEditorField>[1];
-      const wrap = createCastTextField(document, { label, id: `characters-${path.replace(".", "-")}`, value: holder.editor!.draft.profile[path] ?? "", maxLength: 2000, multiline: field.input !== "text", disabled: generationActive() || holder.editor!.saving, onInput(value) { holder.editor = setCastEditorField(holder.editor!, path, value); syncSave(); } });
+      const wrap = createCastTextField(document, { label, id: `characters-${path.replace(".", "-")}`, value: holder.editor!.draft.profile[path] ?? "", maxLength: castOverrideLimit(path), multiline: field.input !== "text", disabled: generationActive() || holder.editor!.saving, onInput(value) { holder.editor = setCastEditorField(holder.editor!, path, value); syncSave(); } });
       const fieldStatus = node("span"); wrap.append(fieldStatus);
       function syncFieldStatus() {
         const overriding = Object.hasOwn(holder.editor!.setOverrides, path) || holder.editor!.loaded?.overrides.some(override => override.field === path);
@@ -35,6 +35,8 @@ export function renderCastEditor(dialog: HTMLDialogElement, context: CastEditorC
       wrap.querySelector("textarea, input")!.addEventListener("input", syncFieldStatus); syncFieldStatus();
       return wrap;
     } });
+    // Name and aliases belong to the Identity group, matching the sheet's sections.
+    form.querySelector<HTMLDetailsElement>('[data-cast-group="Identity"]')?.querySelector("summary")?.after(nameField, aliasesField);
     const detail = holder.editor.loaded, campaign = context.getState().campaignId;
     if (detail && campaign && detail.character.origin.kind !== "protagonist" && api.draftPreview) {
       renderStoryDraftPanel(form, { detail, campaign, draftPreview: api.draftPreview, review,

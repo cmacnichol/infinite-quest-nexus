@@ -18,7 +18,7 @@ export function castRosterRow(person: CastCharacter, attention?: CastAttention):
   if (attention?.conflict) badges.push({ kind: "conflict", label: `Conflict${attention.conflictCount != null ? ` (${attention.conflictCount})` : ""}` });
   const role = person.profile["story.role"];
   const points = Array.from(typeof role === "string" ? role : "");
-  return { id: person.id, name: person.name, summary: points.length > 120 ? `${points.slice(0, 120).join("")}…` : points.join(""),
+  return { id: person.id, name: person.name, summary: points.length > 120 ? `${points.slice(0, 119).join("")}…` : points.join(""),
     provenance: characterProvenanceLabel(person), badges, lastSeen: `Last seen turn ${Math.max(person.lastObservedTurn, person.lastMentionedTurn ?? 0)}` };
 }
 
