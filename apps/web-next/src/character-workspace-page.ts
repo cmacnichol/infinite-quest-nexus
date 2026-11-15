@@ -170,6 +170,7 @@ export function mountCharacterWorkspacePage(
   let state = createCharacterWorkspaceState({
     roster,
     candidate: activeSession.candidate ?? undefined,
+    mode: activeSession.mode,
     method: candidateMethod(activeSession) ?? "ai"
   });
   let prompt = "";
@@ -369,7 +370,7 @@ export function mountCharacterWorkspacePage(
   }
 
   function renderMethod(): void {
-    canvas.innerHTML = `<div class="character-stage character-method-stage"><header><h2>Start with a character idea</h2><p>Describe your character and generate an editable draft, or choose Manual to write it yourself.</p></header>
+    canvas.innerHTML = `<div class="character-stage character-method-stage"><header><h2>${activeSession.mode === "edit" ? "Regenerate with AI" : "Start with a character idea"}</h2><p>${activeSession.mode === "edit" ? "Describe changes and generate a replacement draft for review, or return to Review." : "Describe your character and generate an editable draft, or choose Manual to write it yourself."}</p></header>
       <label class="character-field"><span>Character use</span><select data-character-use><option value="playable">Playable</option><option value="supporting">Supporting</option><option value="both">Both</option></select></label>
       <fieldset class="character-method-controls"><legend>Character method</legend><label class="character-method-control"><input type="radio" name="characterMethod" value="manual"><span>Manual</span></label><label class="character-method-control"><input type="radio" name="characterMethod" value="ai"><span>AI-assisted</span></label></fieldset>
       <section class="character-prompt-authoring" data-character-ai-prompt hidden><div class="character-prompt-heading"><div><h3>Character concept</h3><p>Describe this character's role, personality, history, and visual identity.</p></div><div class="character-prompt-tools"><button type="button" data-action="copy-character-prompt" aria-label="Copy character concept">${copyIcon}</button><button type="button" data-action="paste-character-prompt" aria-label="Paste character concept">${pasteIcon}</button><button type="button" data-action="expand-character-prompt">${expandIcon}<span>Expand</span></button></div></div>

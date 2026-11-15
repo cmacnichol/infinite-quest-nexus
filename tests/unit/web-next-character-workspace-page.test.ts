@@ -102,12 +102,30 @@ function key(window: Window, value: string, shiftKey = false): Event {
 }
 
 describe("Character Workspace page", () => {
+  it("opens an existing character on Review with unlocked stages and edit-specific Method copy", () => {
+    const { document, root } = fixture();
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(generatedCharacter)) });
+    expect(document.querySelector("[data-character-review]")).not.toBeNull();
+    expect([...document.querySelectorAll<HTMLButtonElement>("[data-character-stage]")].every((button) => !button.disabled)).toBe(true);
+    click(document, '[data-character-stage="method"]');
+    expect(root.textContent).toContain("Regenerate with AI");
+    expect(root.textContent).toContain("Describe changes and generate a replacement draft for review, or return to Review.");
+  });
+
+  it("focuses the missing story field when accepting an incomplete existing character", () => {
+    const { document, root } = fixture();
+    const candidate = { ...generatedCharacter, profile: { ...generatedCharacter.profile!, story: { ...generatedCharacter.profile!.story, role: "", personality: "" } } };
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(candidate)) });
+    expect(document.querySelector("[data-character-review]")?.textContent).toContain("story");
+    click(document, '[data-action="accept-character"]');
+    expect(document.activeElement).toBe(document.querySelector('[name="candidate.profile.story.role"]'));
+  });
+
   it("opens optional story details when validation targets a hidden field", () => {
     const { document, root } = fixture();
     const candidate = { ...generatedCharacter, profile: { ...generatedCharacter.profile!, story: { ...generatedCharacter.profile!.story, goals: "x".repeat(200_001) } } };
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(candidate)) });
-    click(document, '[data-action="continue-character"]'); click(document, '[data-action="continue-character"]');
-    click(document, '[data-action="continue-character"]');
+    click(document, '[data-action="accept-character"]');
     const goals = document.querySelector('[name="candidate.profile.story.goals"]');
     expect(goals?.closest('details')?.hasAttribute('open')).toBe(true);
     expect(document.activeElement).toBe(goals);
@@ -164,7 +182,7 @@ describe("Character Workspace page", () => {
     const { document, root } = fixture();
     const sessionStore = store(session(generatedCharacter));
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore, navigate: vi.fn() });
-    for (let index = 0; index < 4; index += 1) click(document, '[data-action="continue-character"]');
+    click(document, '[data-character-stage="mechanics"]');
     expect(document.querySelector('[data-action="remove-character-mechanic"]')).not.toBeNull();
     click(document, '[data-action="remove-character-mechanic"]');
     click(document, '[data-action="continue-character"]'); click(document, '[data-action="accept-character"]');
@@ -234,6 +252,7 @@ describe("Character Workspace page", () => {
       loadGenerationProgress: vi.fn().mockResolvedValue({ status: "processing", phase: "generating", progressPercent: 35, message: "Generating" }),
       generationPollIntervalMs: 1
     });
+    click(document, '[data-character-stage="method"]');
     const ai = document.querySelector<HTMLInputElement>('[value="ai"]')!;
     ai.checked = true;
     ai.dispatchEvent(new window.Event("change", { bubbles: true }));
@@ -511,7 +530,7 @@ describe("Character Workspace page", () => {
     const edited = session(generatedCharacter);
     edited.worldContext.playableCharacters = [generatedCharacter];
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(edited) });
-    click(document, '[data-action="continue-character"]');
+    click(document, '[data-character-stage="identity"]');
     expect(document.querySelector('[name="candidate.id"]')?.getAttribute("aria-invalid")).toBeNull();
     click(document, '[data-action="continue-character"]');
     expect(document.querySelector('[name="candidate.profile.story.role"]')).not.toBeNull();
@@ -524,7 +543,7 @@ describe("Character Workspace page", () => {
       rpgStats: Array.from({ length: 10_001 }, (_, index) => ({ name: `Stat ${index}`, value: index }))
     });
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(overfull) });
-    for (let index = 0; index < 4; index += 1) click(document, '[data-action="continue-character"]');
+    click(document, '[data-character-stage="mechanics"]');
     click(document, '[data-action="continue-character"]');
     const target = document.querySelector<HTMLButtonElement>('[data-mechanics-collection="rpgStats"]');
     const error = document.querySelector<HTMLElement>('[data-field-error="candidate.rpgStats"]');
@@ -548,7 +567,7 @@ describe("Character Workspace page", () => {
     const { document, window, root } = fixture();
     const edited = { ...generatedCharacter, source: {}, profile: { ...generatedCharacter.profile!, story: { ...generatedCharacter.profile!.story, personality: "" } } };
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(edited)) });
-    for (const stage of ["identity", "story", "appearance", "mechanics"] as const) click(document, '[data-action="continue-character"]');
+    click(document, '[data-character-stage="mechanics"]');
     expect(document.querySelector(".character-mechanics-master")).not.toBeNull();
     expect(document.querySelector(".character-mechanics-detail")).not.toBeNull();
     click(document, '[data-action="continue-character"]');
@@ -589,6 +608,7 @@ describe("Character Workspace page", () => {
     const sessionStore = store(session(generatedCharacter));
     const navigate = vi.fn();
     const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore, navigate });
+    click(document, '[data-character-stage="method"]');
     const ai = document.querySelector<HTMLInputElement>('[value="ai"]')!;
     ai.checked = true;
     ai.dispatchEvent(new window.Event("change", { bubbles: true }));

@@ -25,6 +25,7 @@ export interface CharacterWorkspaceState {
 
 export interface CreateCharacterWorkspaceOptions {
   roster: readonly PlayableCharacter[];
+  mode?: "create" | "edit";
   candidate?: PlayableCharacter;
   method?: CharacterMethod | null;
   idFactory?: () => string;
@@ -198,8 +199,8 @@ export function createCharacterWorkspaceState(options: CreateCharacterWorkspaceO
     : emptyCandidate(createTrustedId(roster, options.idFactory ?? (() => crypto.randomUUID())));
   if (candidate.profile === undefined) candidate.profile = characterProfileSchema.parse({});
   return {
-    stage: "method",
-    furthestStageIndex: 0,
+    stage: options.mode === "edit" ? "review" : "method",
+    furthestStageIndex: options.mode === "edit" ? CHARACTER_STAGES.length - 1 : 0,
     method: options.method ?? null,
     candidate,
     roster
