@@ -188,3 +188,4 @@ export * from "./settings-session.js";
 export * from "./characters/editor-model.js";
 export * from "./characters/entity-conversion.js";
 export * from "./characters/authoring-presentation.js";
+export * from "./characters/roster-presentation.js";

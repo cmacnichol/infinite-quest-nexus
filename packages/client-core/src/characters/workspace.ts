@@ -34,5 +34,5 @@ export function matchesLocalCharacterFilter(person: CastCharacter, filter: Chara
 
 /** Short provenance label shared by both roster renderers. */
 export function characterProvenanceLabel(person: Pick<CastCharacter, "origin">): string {
-  return person.origin.kind === "protagonist" ? "Main character" : person.origin.kind === "manual" ? "Added by you" : "Discovered";
+  return person.origin.kind === "protagonist" ? "Main character" : person.origin.kind === "manual" ? "Added by you" : person.origin.kind === "world" ? "From world" : "Discovered";
 }
