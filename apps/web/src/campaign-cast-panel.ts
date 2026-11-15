@@ -271,6 +271,9 @@ export function createLegacyCastPanel(options: {
       } } catch { result.replaceChildren(node("p", "Estimate unavailable.")); } }), result);
   }
   function renderRoster() {
+    const activeSearch = dialog.querySelector<HTMLInputElement>("#cast-search");
+    const selection = activeSearch && document.activeElement === activeSearch
+      ? { start: activeSearch.selectionStart, end: activeSearch.selectionEnd, direction: activeSearch.selectionDirection } : null;
     shell("Characters");
     const tools = node("div");
     const toolStatus = (text: string) => { const p = node("p", text); p.setAttribute("role", "status"); tools.append(p); return p; };
@@ -346,6 +349,10 @@ export function createLegacyCastPanel(options: {
     });
     const search = host.querySelector<HTMLInputElement>('input[type="search"]')!; search.id = "cast-search"; search.maxLength = 200;
     host.querySelector<HTMLSelectElement>("select")!.id = "cast-filter";
+    if (selection) {
+      search.focus({ preventScroll: true });
+      if (selection.start !== null && selection.end !== null) search.setSelectionRange(selection.start, selection.end, selection.direction ?? undefined);
+    }
     if (list!.nextCursor) dialog.append(button("Load more characters", () => { void loadRoster(list!.nextCursor!); }));
   }
   async function openDetail(id: string) {

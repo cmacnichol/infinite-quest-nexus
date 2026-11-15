@@ -462,6 +462,26 @@ async function openNexusCampaignCharacters(page: Page) {
   await page.locator("#editCampaignCharacter").click();
 }
 
+test("legacy cast search keeps keyboard focus and caret after results", async ({ page }) => {
+  await fixture(page); await open(page);
+  const search = page.locator("#campaignCastDialog #cast-search");
+  await search.focus(); await search.evaluate(el => { el.dataset.renderMarker = "first"; }); await page.keyboard.type("Iven");
+  await expect.poll(async () => page.locator("#campaignCastDialog #cast-search").evaluate(el => el === document.activeElement)).toBe(true);
+  await expect(page.locator("#campaignCastDialog .cast-roster-row")).toHaveCount(1);
+  // Wait for the debounced response and rendered replacement, then edit at a nonterminal caret.
+  await page.waitForResponse(response => response.url().includes("/cast?") && response.url().includes("Iven"));
+  await expect(search).not.toHaveAttribute("data-render-marker", "first");
+  await expect(search).toBeFocused();
+  await search.evaluate((el: HTMLInputElement) => { el.setSelectionRange(2, 2); el.dataset.renderMarker = "second"; });
+  await page.keyboard.type("x");
+  await expect(search).toHaveValue("Ivxen");
+  await page.waitForResponse(response => response.url().includes("/cast?") && response.url().includes("Ivxen"));
+  await expect(search).not.toHaveAttribute("data-render-marker", "second");
+  await expect(search).toBeFocused();
+  expect(await search.evaluate((el: HTMLInputElement) => el.selectionStart)).toBe(3);
+  await page.keyboard.type("y"); await expect(search).toHaveValue("Ivxyen");
+});
+
 test("legacy renders completed discovery and preserves edited and ignored characters on refresh", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 1000 });
   const api = await fixture(page); await open(page);
