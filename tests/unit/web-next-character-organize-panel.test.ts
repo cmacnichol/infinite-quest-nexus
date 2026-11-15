@@ -36,3 +36,15 @@ it("reports authoring failures and aborts pending work on disposal", async () =>
   panel.dispose();
   expect(signal?.aborted).toBe(true);
 });
+
+
+it("ignores a response that arrives after disposal even if the provider ignores abort", async () => {
+  const { document } = parseHTML('<div id="host"></div>'); const host = document.querySelector<HTMLElement>("#host")!;
+  const current = playableCharacterSchema.parse({ id: "hero", name: "Hero" }); const onApply = vi.fn();
+  let resolve!: (value: any) => void;
+  const panel = renderOrganizePanel(host, { current, onApply, organize: () => new Promise(done => { resolve = done; }) });
+  host.querySelector<HTMLButtonElement>("button")!.click(); panel.dispose();
+  resolve({ candidate: characterProfileSchema.parse({ story: { role: "Guide" } }), evidence: [], unassignedText: [], conflicts: [], warnings: [], protocolVersion: "v3" });
+  await Promise.resolve(); await Promise.resolve();
+  expect(host.querySelector('[data-action="apply-organize"]')).toBeNull(); expect(onApply).not.toHaveBeenCalled();
+});

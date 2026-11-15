@@ -1,4 +1,5 @@
-import { authoringJobLabel } from "../../../packages/client-core/src/characters/section-refine";
+import { mountSectionRefine } from "../../web/src/character-editor/section-refine";
+import { authoringJobLabel, sectionRefineRequest, type RefineSection } from "../../../packages/client-core/src/characters/section-refine";
 import { createNexusApiClient, createNoopSessionPort } from "@infinite-quest/client-web";
 import { renderOrganizePanel } from "./character-organize-panel";
 import { WORLD_EDITOR_FIELDS } from "../../../packages/client-core/src/characters/profile-fields";
@@ -10,6 +11,7 @@ import { renderAuthoringComparison } from "./authoring-comparison";
 import { mountAppShell } from "./app-shell-lifecycle";
 import {
   generateCharacterPreview as generateCharacterPreviewRequest,
+  sanitizeCharacterGenerationContent,
   loadCharacterGenerationProgress as loadCharacterGenerationProgressRequest,
   CharacterWorkspaceApiError
 } from "./character-workspace-api";
@@ -194,6 +196,7 @@ export function mountCharacterWorkspacePage(
   let candidateDirty = activeSession.candidate !== null;
   let candidateEdited = false;
   let disposed = false;
+  let refinePanel: { dispose(): void } | null = null;
   let organizePanel: { dispose(): void } | null = null;
   let completed = false;
   let generationSequence = 0;
@@ -286,6 +289,7 @@ export function mountCharacterWorkspacePage(
     prompt = job.request?.prompt ?? prompt;
     if (pageView.location?.href) { const url = new URL(pageView.location.href); url.searchParams.set("authoringJob", job.id); pageView.history.replaceState(null, "", `${url.pathname}${url.search}`); }
     resumePanel.hidden = false; durableSession.startPolling(); renderDurable();
+    if (refinePanel) render();
   }
   function reviewDurable(): void {
     const snapshot = durableSession?.state();
@@ -423,9 +427,28 @@ export function mountCharacterWorkspacePage(
     if (state.method !== null) canvas.append(actions());
   }
 
+  function mountRefine(stage: HTMLElement, section: RefineSection): void {
+    const host = document.createElement("div"); host.dataset.refinePanel = "";
+    stage.querySelector("header")!.append(host);
+    refinePanel = mountSectionRefine(host, {
+      section, current: () => state.candidate,
+      available: !durableSession && !generationController,
+      unavailableText: "Finish or cancel the current AI proposal to refine a section.",
+      generate: async (current, instruction, signal) => {
+        const progressKey = `${activeSession.key}:refine:${Date.now()}`.slice(0, 512);
+        return (await generatePreview(sectionRefineRequest(sanitizeCharacterGenerationContent(activeSession.worldContext), current, section, instruction, progressKey), signal)).character;
+      },
+      onApply: next => {
+        if (disposed) return;
+        state = { ...state, candidate: next }; candidateEdited = true; candidateDirty = true; markDirty(); render();
+      }
+    });
+  }
+
   function renderIdentity(): void {
     const stage = document.createElement("div"); stage.className = "character-stage";
     stage.innerHTML = "<header><h2>Identity</h2><p>Name the character and record the identity readers will recognize.</p></header>";
+    mountRefine(stage, "identity");
     const form = document.createElement("div"); form.className = "character-fields";
     const id = textControl(document, "candidate.id", "Character ID", state.candidate.id);
     required<HTMLInputElement>(id, "input").readOnly = true;
@@ -489,6 +512,7 @@ export function mountCharacterWorkspacePage(
   function renderStory(): void {
     const stage = document.createElement("div"); stage.className = "character-stage";
     stage.innerHTML = "<header><h2>Story</h2><p>Add at least one story detail. You can leave the rest blank.</p></header>";
+    mountRefine(stage, "story");
     const form = document.createElement("div"); form.className = "character-fields";
     const optional = document.createElement("details");
     const summary = document.createElement("summary"); summary.textContent = "More story details (optional)";
@@ -514,6 +538,7 @@ export function mountCharacterWorkspacePage(
     const stage = document.createElement("div"); stage.className = "character-stage";
     stage.innerHTML = "<header><h2>Appearance</h2><p>Record concrete visual facts without requiring a portrait.</p></header>";
     const form = document.createElement("div"); form.className = "character-fields";
+    mountRefine(stage, "appearance");
     for (const [name, label] of APPEARANCE_FIELDS) form.append(textControl(document, `candidate.profile.appearance.${name}`, label, state.candidate.profile?.appearance[name] ?? "", true, `appearance.${name}`));
     form.append(textControl(document, "candidate.profile.appearance.distinguishingFeatures", "Distinguishing features (one per line)", state.candidate.profile?.appearance.distinguishingFeatures.join("\n") ?? "", true, "appearance.distinguishingFeatures"));
     stage.append(form); canvas.replaceChildren(stage, actions()); bindCandidateInputs();
@@ -635,6 +660,7 @@ export function mountCharacterWorkspacePage(
   }
 
   function render(): void {
+    refinePanel?.dispose(); refinePanel = null;
     organizePanel?.dispose(); organizePanel = null;
     canvas.dataset.characterCanvas = state.stage;
     if (state.stage === "method") renderMethod();
@@ -982,6 +1008,7 @@ export function mountCharacterWorkspacePage(
       if (!sessionStore?.complete(activeSession.key, activeSession.workflowId, { status: "accepted", candidate })) { if (status) status.textContent = "This character could not be accepted. Return to the world and try again."; return; }
       completed = true; clearDirty(); navigate(activeSession.parentRoute);
     }
+    if (action === "cancel-character") { refinePanel?.dispose(); refinePanel = null; }
     if (action === "cancel-character" && !completed && (dependencies.recoveredSession || sessionStore?.complete(activeSession.key, activeSession.workflowId, { status: "cancelled" }))) { completed = true; clearDirty(); navigate(activeSession.parentRoute); }
   }
 
@@ -1016,6 +1043,7 @@ export function mountCharacterWorkspacePage(
       if (disposed) return;
       closeDialog(false);
       disposed = true;
+      refinePanel?.dispose(); refinePanel = null;
       organizePanel?.dispose(); organizePanel = null;
       durableController.abort(); durableSession?.dispose();
       root.removeEventListener("input", onRootInput);

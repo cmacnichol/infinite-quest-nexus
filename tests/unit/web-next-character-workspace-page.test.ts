@@ -837,3 +837,15 @@ it("explains that Organize requires a saved world", () => {
   click(document, '[data-character-stage="story"]');
   expect(document.querySelector('[data-organize-panel]')?.textContent).toBe("Organize is available after the world is saved.");
 });
+
+it("refines the unsaved workspace candidate without changing its roster", async () => {
+  const { document, window, root } = fixture();
+  const original = structuredClone(generatedCharacter); original.id = "existing";
+  const context = session(original); context.worldContext = { ...draft(), playableCharacters: [structuredClone(original)] } as any;
+  const preview = vi.fn(async (request) => { const result = structuredClone(request.content.playableCharacters[0]); result.profile.story.role = "Sailor"; return { character: result }; });
+  mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(context), generateCharacterPreview: preview as any, navigate: vi.fn() });
+  click(document, '[data-character-stage="story"]'); input(document, window as unknown as Window, '[name="candidate.profile.story.role"]', 'Unsaved');
+  click(document, '[data-refine-open]'); input(document, window as unknown as Window, '[data-refine-panel] textarea', 'Make bolder'); click(document, '[data-refine-generate]'); await settle();
+  expect(preview.mock.calls[0]![0].characterId).toBe('existing'); expect(preview.mock.calls[0]![0].content.playableCharacters[0].profile.story.role).toBe('Unsaved');
+  expect(context.worldContext.playableCharacters[0]!.profile!.story.role).toBe('Guide'); click(document, '[data-refine-apply]'); expect(document.querySelector<HTMLTextAreaElement>('[name="candidate.profile.story.role"]')!.value).toBe('Sailor');
+});

@@ -13,6 +13,7 @@ import { createApiWorldCampaignApplication } from "../../services/runtime/src/wo
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { worldContentSchema, playableCharacterSchema } from "../../packages/contracts/src/world-library.js";
+import { sectionRefineRequest } from "../../packages/client-core/src/characters/section-refine.js";
 import { apiErrorEnvelopeSchema } from "../../packages/contracts/src/http.js";
 import { logger } from "../../packages/logger/src/index.js";
 import { parseAuthoringFailure } from "../../apps/web-next/src/authoring-errors.js";
@@ -170,6 +171,21 @@ integration("authoring reliability API, runtime provider and PostgreSQL", () => 
     expect(saved.statusCode).toBe(200);
     expect(saved.json().revision).toBe(2);
     expect((await snapshot()).drafts[0].revision).toBe(2);
+  });
+  it("sends unsaved existing and new section candidates to the provider without saving", async () => {
+    const before = await snapshot();
+    for (const mode of ["existing", "new"] as const) {
+      const candidate = structuredClone(content.playableCharacters[0]!);
+      if (mode === "new") candidate.id = "unsaved-new";
+      candidate.profile!.story.role = `Unsaved ${mode} navigator`;
+      replies = [JSON.stringify(fixture.character)]; requests = [];
+      const payload = sectionRefineRequest(content, candidate, "story", `Make ${mode} brave`, `refine-${mode}`);
+      const response = await app.inject({ method: "POST", url: "/api/v1/worlds/playable-characters/generate-preview", payload });
+      expect(response.statusCode).toBe(200);
+      const sent = JSON.stringify(requests);
+      expect(sent).toContain(`Unsaved ${mode} navigator`); expect(sent).toContain(`Make ${mode} brave`);
+    }
+    expect(await snapshot()).toEqual(before);
   });
   it("repairs world output and preserves the legacy preview shape without persistence", async () => {
     replies = [fixture.malformed, JSON.stringify(fixture.world), ...fixture.world.character_seeds.map((seed) => JSON.stringify({ ...fixture.character, id: seed.id, name: seed.name }))];

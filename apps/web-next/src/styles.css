@@ -3423,6 +3423,14 @@ footer p:first-child {
   line-height: 1;
 }
 
+[data-refine-panel] { margin-top: 20px; }
+[data-refine-panel] > div:not([hidden]) { display: grid; gap: 12px; margin-top: 14px; }
+[data-refine-panel] button { min-height: 44px; padding: 10px 16px; border: 1px solid var(--rule-strong); color: var(--text-primary); background: var(--surface-entry); font: 600 0.75rem/1.2 "Chakra Petch", sans-serif; }
+[data-refine-panel] button:disabled { opacity: 0.6; }
+[data-refine-panel] [data-refine-generate], [data-refine-panel] [data-refine-cancel], [data-refine-panel] [data-refine-apply] { justify-self: start; }
+[data-refine-panel] [role="status"]:empty { display: none; }
+[data-refine-panel] [data-refine-apply] { margin-top: 12px; }
+
 .character-method-controls {
   display: flex;
   gap: 0;
