@@ -72,8 +72,8 @@ export function createCharactersWorkspace(document: Document, generationActive: 
       }
       const sheet = protagonist && detail.character.origin.kind === "protagonist" ? buildCharacterSheet({ kind: "protagonist", profile: { name: protagonist.name, profile: protagonist.profile }, revision: protagonist.revision }) : buildCharacterSheet({ kind: "supporting", detail });
       dialog.append(node("p", `Last observed turn ${detail.character.lastObservedTurn}${detail.character.lastMentionedTurn != null ? ` · Last mentioned turn ${detail.character.lastMentionedTurn}` : ""}`));
-      if (detail.character.origin.kind === "protagonist") dialog.append(button("Edit main character", () => { if (discard() && protagonist && state.campaignId) renderProfileEditor(state.campaignId, protagonist); }, generationActive() || !protagonist));
-      else dialog.append(button("Edit character", () => { if (!discard()) return; editor = createCastEditor(detail, detail); session.setDraft(editor); renderEditor(); }, state.status.capabilities.editing !== true || generationActive()));
+      if (detail.character.origin.kind === "protagonist") dialog.append(button("Edit main character", () => { if (sheetView?.pending() || !protagonist || !state.campaignId || !discard()) return; sheetView?.dispose(); sheetView = null; renderProfileEditor(state.campaignId, protagonist); }, generationActive() || !protagonist));
+      else dialog.append(button("Edit character", () => { if (sheetView?.pending() || !discard()) return; sheetView?.dispose(); sheetView = null; editor = createCastEditor(detail, detail); session.setDraft(editor); renderEditor(); }, state.status.capabilities.editing !== true || generationActive()));
       if (detail.character.origin.kind !== "protagonist" && !detail.character.mergedIntoCharacterId) {
         if (detail.capabilities.castLifecycle === false) dialog.append(node("p", "Removing and restoring characters is disabled on this server. Character merging is disabled on this server."));
         else if (state.status.capabilities.editing !== true) dialog.append(node("p", "Removing and restoring characters is unavailable while character editing is disabled."));

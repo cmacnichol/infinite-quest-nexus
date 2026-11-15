@@ -155,6 +155,46 @@ it("offers inline character sheet editing", async () => {
   workspace.dispose();
 });
 
+it("returns to the sheet after accepting an inline draft discard and cancelling the full editor", async () => {
+  const { document, workspace, click, confirm } = setup();
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Edit Name")); click("Edit Name");
+    const input = document.querySelector<HTMLInputElement>('[data-path="name"] input')!; input.value = "Draft"; input.dispatchEvent(new document.defaultView!.Event("input"));
+    click("Edit character"); expect(document.querySelector<HTMLInputElement>('[data-path="name"] input')?.value).toBe("Draft");
+    confirm.mockReturnValue(true); click("Edit character"); expect(document.querySelector("#characters-name")).not.toBeNull();
+    click("Cancel"); expect(document.body.textContent).toContain("Edit Name");
+    click("Edit Name"); expect(document.querySelector<HTMLInputElement>('[data-path="name"] input')?.value).toBe("Mara");
+  } finally { workspace.dispose(); }
+});
+
+it("keeps the sheet visible while an inline save is pending", async () => {
+  let release!: (value: typeof detail) => void;
+  const { document, workspace, click, confirm } = setup({ edit: () => new Promise(resolve => { release = resolve; }) });
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Edit Name")); click("Edit Name");
+    const input = document.querySelector<HTMLInputElement>('[data-path="name"] input')!; input.value = "Marin"; input.dispatchEvent(new document.defaultView!.Event("input")); click("Save");
+    confirm.mockReturnValue(true); click("Edit character"); expect(document.querySelector("#characters-name")).toBeNull();
+    release(detail); await vi.waitFor(() => expect(document.body.textContent).toContain("Edit Name"));
+  } finally { workspace.dispose(); }
+});
+
+it("does not retain a discarded inline draft in the main character editor", async () => {
+  const main = { ...person, origin: { kind: "protagonist" as const } };
+  const profile = { name: "Mara", profile: characterProfileSchema.parse({}), revision: 1 };
+  const { document, workspace, click, confirm } = setup({ detail: async () => ({ ...detail, character: main }), list: async () => ({ ...page, characters: [main] }) }, { getProfile: async () => profile });
+  vi.stubGlobal("document", document);
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Edit Name")); click("Edit Name");
+    const input = document.querySelector<HTMLInputElement>('[data-path="name"] input')!; input.value = "Draft"; input.dispatchEvent(new document.defaultView!.Event("input"));
+    confirm.mockReturnValueOnce(true); click("Edit main character"); click("Cancel");
+    expect(document.body.textContent).toContain("Edit Name");
+    click("Edit Name"); expect(document.querySelector<HTMLInputElement>('[data-path="name"] input')?.value).toBe("Mara");
+  } finally { workspace.dispose(); vi.unstubAllGlobals(); }
+});
+
 it.each(["success", "before refresh", "after refresh", "refresh fails"] as const)("uses the cast write receipt for Undo: %s", async scenario => {
   let current = { ...detail, character: { ...person, profile: { "story.role": "Guard" } } }, reads = 0;
   const edit = vi.fn(async (_campaign: string, _id: string, body: any) => {

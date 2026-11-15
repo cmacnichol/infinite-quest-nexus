@@ -39,3 +39,21 @@ test("Web-Next keeps an inline draft and focus during a tracking refresh", async
   await dialog.getByRole("button", { name: "Back to characters", exact: true }).click(); await expect(input).toHaveValue("Draft Mara");
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
 });
+
+test("Web-Next returns to the sheet after switching editors and cancelling", async ({ page }, info) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await fixture(page, false, true);
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`);
+  await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click();
+  const dialog = page.locator("dialog.characters-workspace"); await dialog.getByRole("button", { name: "Mara", exact: true }).click();
+  await dialog.getByRole("button", { name: "Edit Name", exact: true }).click();
+  await dialog.getByRole("textbox", { name: "Name", exact: true }).fill("Draft Mara");
+  page.once("dialog", prompt => prompt.accept());
+  await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Edit Name", exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Edit Name", exact: true }).click();
+  await expect(dialog.getByRole("textbox", { name: "Name", exact: true })).toHaveValue("Mara");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("web-next-returned-to-sheet.png") });
+});
