@@ -38,6 +38,19 @@ describe("sheet writes", () => {
     expect(sheetUndoOperation(cast(s), change("story.role", null))).toEqual({ kind: "restoreAuthored", path: "story.role", value: "Guide" });
     s.character.aliases = ["A"]; expect(sheetUndoRequest(cast(s), { kind: "restoreValue", path: "identity.aliases", value: ["M"] }, fence, "k").body).toEqual({ ...base, aliases: ["M"] });
   });
+  it("uses authored history when field sources are missing and rejects unknown authority", () => {
+    for (const sources of [undefined, { "story.background": "authored" as const }]) {
+      const d = seeded(); d.character.fieldSources = sources;
+      d.authoredHistory = [{ eventId: id, seedEventId: id, effectiveTurnNumber: 3, set: { "story.role": "Captain" }, reset: [] }];
+      const undo = sheetUndoOperation(cast(d), change("story.role", "Sailor"));
+      expect(undo).toEqual({ kind: "restoreAuthored", path: "story.role", value: "Captain" });
+      expect(sheetUndoRequest(cast(d), undo, fence, "k").body).toEqual({ ...base, set: { "story.role": "Captain" } });
+      d.authoredHistory.push({ eventId: id, seedEventId: id, effectiveTurnNumber: 4, set: {}, reset: ["story.role"] });
+      expect(sheetUndoOperation(cast(d), change("story.role", "Sailor"))).toEqual({ kind: "restoreAuthored", path: "story.role", value: null });
+      d.authoredHistory = undefined;
+      expect(() => sheetUndoOperation(cast(d), change("story.role", "Sailor"))).toThrow();
+    }
+  });
   it("restores only the changed identity or toggle and respects retracted replacement evidence", () => {
     const d = detail(); d.character.name = "Ada"; d.character.aliases = ["A"];
     expect(sheetUndoRequest(cast(d), { kind: "restoreValue", path: "name", value: "Mira" }, fence, "k").body).toEqual({ ...base, name: "Mira" });
@@ -59,7 +72,7 @@ describe("sheet writes", () => {
     const d = detail(), undo = { kind: "restoreOverride" as const, path: "story.role" as const, value: null };
     expect(sheetMatchesFence(cast(d), fence)).toBe(true);
     expect(sheetUndoRequest(cast(d), undo, fence, "k").body).toEqual({ ...base, clearOverrides: ["story.role"] });
-    for (const bad of [{ ...fence, revision: 5 }, { ...fence, characterRevision: 4 }, { ...fence, boundary: { ...fence.boundary, turnNumber: 21 } }]) expect(() => sheetUndoRequest(cast(d), undo, bad, "k")).toThrow();
+    for (const bad of [{ ...fence, revision: 5 }, { ...fence, characterRevision: 4 }, { ...fence, boundary: { ...fence.boundary, turnNumber: 21 } }, { ...fence, boundary: { ...fence.boundary, timelineRevision: 1 } }]) expect(() => sheetUndoRequest(cast(d), undo, bad, "k")).toThrow();
   });
   it("restores Main Character text and lists with untouched values and the receipt revision", () => {
     const prior = { name: "Mira", profile: characterProfileSchema.parse({ story: { goals: "Escape", role: "Guide" }, identity: { aliases: ["M"] } }), revision: 2 };
@@ -72,7 +85,9 @@ describe("sheet writes", () => {
   });
   it("groups active facts and builds fenced Retraction requests", () => {
     const d = detail(); const fact = (oid: string, value: string, turn: number): CastObservation => ({ id: oid, characterId: id, field: "story.role", value, mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: id, turnNumber: turn, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p", quote: value } });
-    d.observations = [fact("a", "Guard", 2), fact("b", "Guard", 3), fact("c", "Guide", 4)]; d.observationDecisionStatus = ["a", "c"].map(observationId => ({ observationId, state: "eligible", retractionEventId: null, reason: null }));
+    const invalid = fact("invalid", "Invalid", 8); if (invalid.evidence.kind === "turn") invalid.evidence.invalidated = true;
+    d.observations = [fact("a", "Guard", 2), fact("b", "Guard", 3), { ...fact("c", "Guide", 4), supersedesObservationId: "old" }, fact("old", "Old", 1), { ...fact("claim", "Claim", 7), mode: "claim" }, invalid, fact("retracted", "Retracted", 9)];
+    d.observationDecisionStatus = [...["a", "c"].map(observationId => ({ observationId, state: "eligible" as const, retractionEventId: null, reason: null })), { observationId: "retracted", state: "retracted", retractionEventId: id, reason: null }];
     const f = buildCharacterSheet({ kind: "supporting", detail: d }).sections.flatMap(s => s.fields).find(x => x.path === "story.role")!;
     expect(conflictChoices(f)).toEqual([{ value: "Guide", observationIds: ["c"], latestTurn: 4, quote: "Guide", retractableObservationId: "c" }, { value: "Guard", observationIds: ["a", "b"], latestTurn: 3, quote: "Guard", retractableObservationId: "a" }]);
     expect(retractionRequest(d, "c", "k")).toEqual({ ...base, action: "retract" });

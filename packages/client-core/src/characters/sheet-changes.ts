@@ -62,7 +62,15 @@ export function sheetUndoOperation(before: SheetTarget, change: SheetChange): Sh
   const d = before.detail;
   if (change.path === "name" || change.path === "identity.aliases") return { kind: "restoreValue", path: change.path, value: change.path === "name" ? d.character.name : [...d.character.aliases] };
   if (d.character.originProfile && seededCharacterFieldPolicy(change.path) === "fixed") {
-    const value = d.character.fieldSources?.[change.path as keyof NonNullable<typeof d.character.fieldSources>] === "campaign_edit" ? presetField(d, change.path).effective : null;
+    const source = d.character.fieldSources?.[change.path as keyof NonNullable<typeof d.character.fieldSources>];
+    let value: string | string[] | null;
+    if (source !== undefined) value = source === "campaign_edit" ? presetField(d, change.path).effective : null;
+    else {
+      if (!d.authoredHistory) throw new Error("The prior authored field source is unavailable.");
+      const event = [...d.authoredHistory].reverse().find(item => item.seedEventId === d.character.originProfile!.seedEventId &&
+        (Object.hasOwn(item.set, change.path) || item.reset.some(path => path === change.path)));
+      value = event ? (event.set as Record<string, string | string[]>)[change.path] ?? null : null;
+    }
     return { kind: "restoreAuthored", path: change.path, value: Array.isArray(value) ? [...value] : value };
   }
   const path = castFieldSchema.parse(change.path), edit = d.overrides.find(item => item.field === path);
