@@ -1,9 +1,11 @@
+import { renderCastRoster } from "../../web/src/character-editor/cast-roster-view.js";
+import { renderWorldCastPicker } from "../../web/src/character-editor/world-cast-picker.js";
 import { renderCastEditor } from "./characters-workspace-editor";
 import { openCastTool } from "./characters-workspace-tools";
 import { renderObservationReview } from "../../web/src/character-editor/observation-review.js";
 import { castScanRecovery } from "./campaign-cast-scan-panel";
 import { createCharacterProfileForm } from "./character-profile-form";
-import { buildCharacterSheet, createCastEditor, characterProvenanceLabel, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
+import { buildCharacterSheet, createCastEditor, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
 import { createCampaignCastApi, createCharactersWorkspaceSession, type CharactersWorkspaceState, type CampaignCastApi, type CharactersWorkspaceSessionOptions } from "@infinite-quest/client-web";
 import type { CampaignCharacterProfile, CampaignCharacterProfileUpdate, CharacterFilter } from "@infinite-quest/contracts";
 
@@ -19,14 +21,20 @@ export function createCharactersWorkspace(document: Document, generationActive: 
   let profileEditor: { form: ReturnType<typeof createCharacterProfileForm>; saving: boolean } | null = null;
   let state: CharactersWorkspaceState<CastEditorState>, editor: CastEditorState | null = null, filter: CharacterFilter = "all", query = "", focus: HTMLElement | null = null, reviewing = false;
   const session = createCharactersWorkspaceSession<CastEditorState>({ api, ...(dependencies?.schedule ? { schedule: dependencies.schedule } : {}), onChange(next) { state = next; render(); } });
+  let rosterView: ReturnType<typeof renderCastRoster> | null = null;
+  let searchPending = false;
   const operationKeys = new Map<string, string>();
   function operationKey(operation: string, payload: unknown) { const key = `${operation}:${JSON.stringify(payload)}`; let id = operationKeys.get(key); if (!id) { id = crypto.randomUUID(); operationKeys.set(key, id); } return id; }
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => { const el = document.createElement(tag); el.textContent = text; return el; };
   const button = (text: string, action: () => void, disabled = false) => { const el = node("button", text); el.type = "button"; el.disabled = disabled; el.addEventListener("click", action); return el; };
   const discard = () => !(editor?.dirty || profileEditor?.form.dirty) || (dependencies?.confirm?.("Discard unsaved character changes?") ?? document.defaultView?.confirm("Discard unsaved character changes?") ?? false);
-  function close() { if (editor?.saving || profileEditor?.saving || !discard()) return; openEpoch++; toolEpoch++; editor = null; profileEditor = null; reviewing = false; session.close(); operationKeys.clear(); dialog.close(); focus?.focus(); }
+  function close() { if (editor?.saving || profileEditor?.saving || !discard()) return; rosterView?.dispose(); rosterView = null; searchPending = false; openEpoch++; toolEpoch++; editor = null; profileEditor = null; reviewing = false; session.close(); operationKeys.clear(); dialog.close(); focus?.focus(); }
   function render() {
-    if (!state || !dialog.open || reviewing || profileEditor) return;
+    if (!state || !dialog.open || reviewing || profileEditor || searchPending) return;
+    const oldSearch = dialog.querySelector<HTMLInputElement>('.cast-roster-search input');
+    const selection = oldSearch && document.activeElement === oldSearch ? { start: oldSearch.selectionStart, end: oldSearch.selectionEnd, direction: oldSearch.selectionDirection } : null;
+    const toolsOpen = dialog.querySelector<HTMLDetailsElement>(".cast-roster-tools")?.open ?? false;
+    rosterView?.dispose(); rosterView = null;
     if (editor) { if (state.changedWhileEditing && !dialog.querySelector("[data-stale]")) { const notice = node("p", "This character changed while you were editing. Your draft is preserved; compare the latest before saving."); notice.dataset.stale = ""; dialog.prepend(notice); } return; }
     const sourceOpen = dialog.querySelector("details")?.open ?? false; const scroll = dialog.scrollTop;
     dialog.classList.toggle("characters-sheet-layout", Boolean(state.selectedId));
@@ -69,16 +77,12 @@ export function createCharactersWorkspace(document: Document, generationActive: 
       const expanded = dialog.querySelector("details"); if (expanded) expanded.open = sourceOpen; dialog.scrollTop = scroll;
       return;
     }
+    const tools = node("div");
     const tracking = state.status.tracking;
-    if (!tracking) dialog.append(node("p", "Character tracking status is unavailable. Saved characters are still available."));
-    else {
-      const messages = { disabled: "Automatic character tracking is disabled.", not_enrolled: "Character tracking starts with the next accepted turn.", catching_up: "Character tracking is catching up.", failed: "Character tracking stopped. Your story is saved.", complete: "Character tracking is up to date." };
-      dialog.append(node("p", messages[tracking.state]));
-      if (tracking.coverageStartTurn !== null) dialog.append(node("p", tracking.trackedThroughTurn !== null && tracking.trackedThroughTurn >= tracking.coverageStartTurn ? `Tracked turns ${tracking.coverageStartTurn}–${tracking.trackedThroughTurn}. Earlier turns are not included.` : `Tracking starts at turn ${tracking.coverageStartTurn}.`));
-      if (tracking.unresolvedCount) dialog.append(node("p", `${tracking.unresolvedCount} character matches need review.`));
+    if (tracking) {
       if (tracking.firstGap) {
         const reason = castScanRecovery(tracking, state.status.boundary.turnNumber).diagnostic;
-        dialog.append(node("p", `First tracking gap: turn ${tracking.firstGap.turnNumber} (${tracking.firstGap.status.replaceAll("_", " ")}).${reason ? ` ${reason}` : ""}`),
+        tools.append(node("p", `First tracking gap: turn ${tracking.firstGap.turnNumber} (${tracking.firstGap.status.replaceAll("_", " ")}).${reason ? ` ${reason}` : ""}`),
           ...(state.status.recovery?.kind === "scan" && state.status.recovery.scanId && state.status.recovery.scanStatus !== "cancelled"
             ? [button("Open tracking recovery", () => { void scan(state.status!.recovery!.scanId!); })] : []));
         if (tracking.state === "failed" && tracking.enabled && tracking.firstGap.jobId && state.status.recovery?.kind === "forward" && state.status.recovery.jobId === tracking.firstGap.jobId) {
@@ -96,33 +100,44 @@ export function createCharactersWorkspace(document: Document, generationActive: 
               retry.disabled = conflict || generationActive();
             }
           }, status.capabilities.editing !== true || generationActive());
-          dialog.append(retry, feedback);
+          tools.append(retry, feedback);
         }
       }
     }
-    const counts = state.status.counts;
-    const count = (value: number | null) => value === null ? "unavailable" : String(value);
-    dialog.append(node("p", `Attention — identity matches: ${count(counts.identities)} · details: ${count(counts.details)} · conflicts: ${count(counts.conflicts)}`),
-      button("Review conflicts", () => { filter = "conflicts"; session.setQuery(query, filter); }));
-    dialog.append(button("Scan earlier story", () => { void scan(); }), button("Likely included for this input", () => { void preview(); }), button("Review character changes", () => { void review("matches"); }));
-    const form = node("form"), search = node("input"), select = node("select"); search.type = "search"; search.value = query; search.setAttribute("aria-label", "Find a character");
-    for (const [value, label] of [["all", "All"], ["main", "Main"], ["recent", recentFilterLabel(state.recentWindow)], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"]]) { const option = node("option", label); option.value = value!; select.append(option); } select.value = filter; select.setAttribute("aria-label", "Filter characters");
-    form.append(search, select, button("Search", () => { query = search.value; filter = select.value as CharacterFilter; session.setQuery(query, filter); })); form.addEventListener("submit", event => { event.preventDefault(); query = search.value; filter = select.value as CharacterFilter; session.setQuery(query, filter); }); select.addEventListener("change", () => { query = search.value; filter = select.value as CharacterFilter; session.setQuery(query, filter); }); dialog.append(form);
-    dialog.append(button("Add character", async () => {
-      if (!state.campaignId) return; const campaign = state.campaignId, epoch = openEpoch; const roster = await api.list(campaign); if (epoch !== openEpoch || state.campaignId !== campaign || !dialog.open) return; editor = createCastEditor(roster); session.setDraft(editor); renderEditor();
-    }, state.status.capabilities.editing !== true || generationActive()));
-    const roster = node("ul"); for (const person of state.characters) {
-      const item = node("li"), attention = state.attention[person.id];
-      const facts = [person.profile["story.role"], characterProvenanceLabel(person), person.pinned ? "Pinned" : "", person.ignored ? "Ignored" : "",
-        attention?.review ? `Needs review${attention.reviewCount != null ? ` (${attention.reviewCount})` : ""}` : "", attention?.conflict ? `Conflicting details${attention.conflictCount != null ? ` (${attention.conflictCount})` : ""}` : "", `Last observed turn ${person.lastObservedTurn}`,
-        person.lastMentionedTurn != null ? `Last mentioned turn ${person.lastMentionedTurn}` : ""].filter(Boolean).join(" · ");
-      item.append(button(person.name, () => session.select(person.id)), node("span", ` ${facts}`)); roster.append(item);
-    }
-    if (filter === "recent") dialog.append(node("p", recentFilterLabel(state.recentWindow))); dialog.append(roster); if (!state.characters.length) dialog.append(node("p", "No characters match."));
+    tools.append(button("Scan earlier story", () => { void scan(); }), button("Likely included for this input", () => { void preview(); }), button("Review character changes", () => { void review("matches"); }), button("Review conflicts", () => { cancelSearch(); filter = "conflicts"; session.setQuery(query, filter); }));
+    const filters: Array<[CharacterFilter, string]> = [["all", "All"], ["main", "Main"], ["recent", recentFilterLabel(state.recentWindow)], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"]];
+    if (state.listCapabilities?.castLifecycle !== undefined) filters.push(["removed", "Removed"]);
+    const canAdd = state.status.capabilities.editing === true && !generationActive();
+    const secondaryActions: HTMLElement[] = [];
+    if (state.listCapabilities?.castPresets) secondaryActions.push(button("Add from world", () => {
+      if (!state.campaignId || !canAdd || generationActive()) return;
+      cancelSearch(); const campaign = state.campaignId, epoch = openEpoch, tool = ++toolEpoch;
+      reviewing = true;
+      dialog.replaceChildren(); const head = node("header"); head.append(node("h2", "Add from world"), button("Close", close)); dialog.append(head, button("Back to characters", () => { reviewing = false; toolEpoch++; render(); }));
+      const host = node("section"); dialog.append(host);
+      void renderWorldCastPicker(host, api, campaign, async () => !generationActive(), id => {
+        if (epoch !== openEpoch || tool !== toolEpoch || state.campaignId !== campaign || !dialog.open) return;
+        reviewing = false; toolEpoch++; session.select(id);
+      });
+    }, !canAdd));
+    const counts = Object.values(state.status.counts);
+    const attentionTotal = counts.every(value => value !== null) ? counts.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
+    const host = node("div"); dialog.append(host);
+    rosterView = renderCastRoster(host, { characters: state.characters, attention: state.attention, tracking, attentionTotal, filters, filter, query, canAdd, secondaryActions, tools: [tools],
+      addDisabledReason: state.status.capabilities.editing !== true ? "Character editing is disabled. Saved characters remain available to read." : "Finish or resolve the current generation before editing characters.",
+      onInput() { searchPending = true; query = host.querySelector<HTMLInputElement>('input[type="search"]')!.value; },
+      onQuery(nextQuery, nextFilter) { searchPending = false; query = nextQuery; filter = nextFilter; session.setQuery(query, filter); },
+      onOpen(id) { cancelSearch(); session.select(id); }, onAttention() { review("matches"); },
+      onAdd() { void (async () => { if (!state.campaignId || generationActive()) return; const campaign = state.campaignId, epoch = openEpoch, tool = toolEpoch; const roster = await api.list(campaign); if (epoch !== openEpoch || tool !== toolEpoch || reviewing || state.selectedId || state.campaignId !== campaign || !dialog.open || state.status?.capabilities.editing !== true || generationActive()) return; cancelSearch(); editor = createCastEditor(roster); session.setDraft(editor); renderEditor(); })(); }
+    });
+    const details = host.querySelector<HTMLDetailsElement>(".cast-roster-tools"); if (details) details.open = toolsOpen;
+    if (selection) { const search = host.querySelector<HTMLInputElement>('input[type="search"]')!; search.focus({ preventScroll: true }); if (selection.start !== null && selection.end !== null) search.setSelectionRange(selection.start, selection.end, selection.direction ?? undefined); }
+    dialog.scrollTop = scroll;
   }
   function renderEditor() { renderCastEditor(dialog, { document, api, session, getState: () => state, getEditor: () => editor, setEditor: next => { editor = next; }, generationActive, epoch: () => openEpoch, confirm: message => dependencies?.confirm?.(message) ?? document.defaultView?.confirm(message) ?? false }); }
+  function cancelSearch() { const pending = searchPending; searchPending = false; rosterView?.dispose(); rosterView = null; if (pending) session.setQuery(query, filter); }
   function openTool(kind: "scan" | "preview" | "review", scanId?: string) {
-    if (!state.campaignId) return; const campaign = state.campaignId, epoch = openEpoch, tool = ++toolEpoch; reviewing = true; dialog.classList.remove("characters-sheet-layout");
+    if (!state.campaignId) return; cancelSearch(); const campaign = state.campaignId, epoch = openEpoch, tool = ++toolEpoch; reviewing = true; dialog.classList.remove("characters-sheet-layout");
     void openCastTool(kind, { api, campaignId: campaign, dialog, generationActive, current: () => reviewing && tool === toolEpoch && state.campaignId === campaign && epoch === openEpoch && dialog.open,
       back: () => { reviewing = false; toolEpoch++; render(); }, navigateToTurn: turn => { close(); navigateToTurn(turn); }, operationKey, clearKeys: () => operationKeys.clear(), get capabilities() { return state.status; } }, scanId);
   }
@@ -169,6 +184,6 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     fields.querySelector<HTMLElement>("input, textarea")?.focus();
   }
   dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
-  return { open(campaignId: string, returnFocus?: HTMLElement | null) { openEpoch++; toolEpoch++; protagonist = null; protagonistLoading = false; focus = returnFocus ?? document.activeElement as HTMLElement | null; editor = null; profileEditor = null; reviewing = false; dialog.showModal(); session.open(campaignId); }, dispose() { openEpoch++; toolEpoch++; session.dispose(); dialog.remove(); } };
+  return { open(campaignId: string, returnFocus?: HTMLElement | null) { openEpoch++; toolEpoch++; searchPending = false; rosterView?.dispose(); rosterView = null; protagonist = null; protagonistLoading = false; focus = returnFocus ?? document.activeElement as HTMLElement | null; editor = null; profileEditor = null; reviewing = false; dialog.showModal(); session.open(campaignId); }, dispose() { rosterView?.dispose(); openEpoch++; toolEpoch++; session.dispose(); dialog.remove(); } };
 }
 

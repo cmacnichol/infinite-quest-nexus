@@ -1782,3 +1782,34 @@ for (const surface of ["legacy", "next"] as const) test(`pending retracted sourc
   const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace"); await openReview(dialog);
   await expect(dialog).toContainText("This source was retracted"); await expect(dialog.getByRole("button", { name: "Apply and next" })).toHaveCount(0); await dialog.getByText("Set an override", { exact: true }).click(); await expect(dialog.getByRole("button", { name: "Keep as override" })).toBeVisible(); expect(api.writes).toHaveLength(0);
 });
+
+for (const width of [1280, 390]) test(`web-next roster search and world picker at ${width}px`, async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error" && !(message.location().url.endsWith("/vendor/photoswipe/photoswipe.css") && message.text() === "Failed to load resource: the server responded with a status of 404 (Not Found)") && !message.text().includes("ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS") && !message.text().startsWith("[vite] failed to connect to websocket") && !message.text().startsWith("Failed to send error to Vite server")) errors.push(message.text() + " @ " + message.location().url); });
+  await page.setViewportSize({ width, height: 1000 });
+  await fixture(page, false, false, true);
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`);
+  await page.locator("[data-campaign-tools] summary").click();
+  await page.locator("[data-tool-action='open-characters']").click();
+  await expect(page).toHaveURL(new RegExp(`/app/story/${campaignId}$`));
+  expect(await page.title()).not.toBe("");
+  const dialog = page.locator("dialog.characters-workspace");
+  await expect(dialog.locator(".cast-roster-row").first()).toBeVisible();
+  await expect(dialog.locator(".cast-roster-status")).toBeVisible();
+  expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/web-next-roster-${width}.png` });
+  const search = dialog.locator('.cast-roster-search input');
+  await search.fill("Iven");
+  await expect(dialog.locator(".cast-roster-row")).toHaveCount(1);
+  await expect(search).toBeFocused();
+  await search.fill("");
+  await expect(dialog.locator(".cast-roster-row")).not.toHaveCount(0);
+  await dialog.getByRole("button", { name: "Add from world" }).click();
+  await expect(dialog.getByLabel("World character")).toBeVisible();
+  await dialog.getByLabel("World character").selectOption("world-scout");
+  await expect(dialog.getByRole("button", { name: "Add to campaign" })).toBeVisible();
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/web-next-world-picker-${width}.png` });
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});

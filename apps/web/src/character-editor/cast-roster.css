@@ -1,0 +1,14 @@
+.cast-roster-view { min-width: 0; display: grid; gap: 1rem; }
+.cast-roster-view * { box-sizing: border-box; }
+.cast-roster-status, .cast-roster-toolbar, .cast-roster-list, .cast-roster-row { min-width: 0; overflow-wrap: anywhere; }
+.cast-roster-search, .cast-roster-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: end; }
+.cast-roster-search label { display: grid; gap: .25rem; flex: 1 1 10rem; min-width: 0; }
+.cast-roster-view button, .cast-roster-view input, .cast-roster-view select, .cast-roster-tools summary { min-height: 44px; max-width: 100%; }
+.cast-roster-view button, .cast-roster-tools summary { min-width: 44px; }
+.cast-roster-search input, .cast-roster-search select { width: 100%; }
+.cast-roster-list { display: grid; gap: .75rem; }
+.cast-roster-row { border: 1px solid currentColor; border-radius: .5rem; padding: .75rem; }
+.cast-roster-row p { margin: .25rem 0; }
+.cast-roster-badges { display: flex; flex-wrap: wrap; gap: .35rem; }
+.cast-badge { border: 1px solid currentColor; border-radius: 1rem; padding: .15rem .5rem; }
+.cast-roster-add-reason { flex-basis: 100%; margin: 0; }

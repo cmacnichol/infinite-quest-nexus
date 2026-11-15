@@ -42,3 +42,63 @@ describe("web-next characters workspace", () => {
     release(status); await Promise.resolve(); await Promise.resolve(); expect(document.body.textContent).not.toContain("old"); workspace.dispose();
   });
 });
+
+describe("shared roster", () => {
+  it("shows status before badge rows and capability-gated actions", async () => {
+    const list = { ...page, characters: [{ ...person, pinned: true }], capabilities: { castEditing: true, castPresets: true, castLifecycle: false } };
+    const { document, workspace } = setup({ list: vi.fn(async () => list) }); workspace.open("one");
+    await vi.waitFor(() => expect(document.querySelector(".cast-roster-row")).not.toBeNull());
+    expect(document.querySelector(".cast-roster-view")!.firstElementChild!.className).toBe("cast-roster-status");
+    expect(document.querySelector(".cast-roster-badges")!.textContent).toContain("Pinned");
+    expect(document.body.textContent).toContain("Add from world");
+    expect([...document.querySelectorAll("option")].map(option => option.textContent)).toContain("Removed"); workspace.dispose();
+  });
+  it("debounces live search into one request", async () => {
+    const { document, workspace, api } = setup(); workspace.open("one");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Mara"));
+    const search = document.querySelector<HTMLInputElement>('input[type="search"]')!;
+    const initial = api.list.mock.calls.length; search.value = "Ma"; search.dispatchEvent(new document.defaultView!.Event("input"));
+    search.value = "Mara"; search.dispatchEvent(new document.defaultView!.Event("input"));
+    await new Promise(resolve => setTimeout(resolve, 150)); expect(api.list.mock.calls.length).toBe(initial);
+    await vi.waitFor(() => expect(api.list.mock.calls.length).toBe(initial + 1));
+    expect((api.list.mock.calls.at(-1) as any)[1].query).toBe("Mara"); workspace.dispose();
+  });
+});
+
+describe("world picker", () => {
+  it("opens an added world character sheet", async () => {
+    const worldId = "22222222-2222-4222-8222-222222222222";
+    const preview = { worldVersionId: worldId, castRevision: 1, boundary, previewFingerprint: "fixture", changes: [], eligibleTargets: [] };
+    const api = { list: vi.fn(async () => ({ ...page, capabilities: { castEditing: true, castPresets: true, castLifecycle: true } })),
+      worldChoices: vi.fn(async () => ({ characters: [{ characterId: worldId, name: "World Mara", alwaysInContext: false }] })),
+      fromWorldPreview: vi.fn(async () => preview), fromWorld: vi.fn(async () => ({ character: person })) };
+    const { document, workspace, click } = setup(api);
+    const originalOption = globalThis.Option;
+    (globalThis as any).Option = function (label: string, value: string) { const option = document.createElement("option"); option.textContent = label; option.value = value; return option; };
+    try {
+      workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Add from world")); click("Add from world");
+      await vi.waitFor(() => expect(document.body.textContent).toContain("World Mara"));
+      const select = document.querySelector("select")!; select.value = worldId; select.dispatchEvent(new document.defaultView!.Event("change"));
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Add to campaign")); click("Add to campaign");
+      await vi.waitFor(() => expect(document.body.textContent).toContain("Sources and edit history"));
+      expect(api.fromWorld).toHaveBeenCalledTimes(1);
+    } finally { (globalThis as any).Option = originalOption; workspace.dispose(); }
+  });
+  it("hides world actions and Removed on older servers", async () => {
+    const { document, workspace } = setup(); workspace.open("one");
+    await vi.waitFor(() => expect(document.querySelector(".cast-roster-row")).not.toBeNull());
+    expect(document.body.textContent).not.toContain("Add from world");
+    expect([...document.querySelectorAll("option")].map(option => option.textContent)).not.toContain("Removed"); workspace.dispose();
+  });
+});
+
+it("keeps the search query when opening and returning from the world picker during debounce", async () => {
+  const list = vi.fn(async () => ({ ...page, capabilities: { castEditing: true, castPresets: true } }));
+  const { document, workspace, api, click } = setup({ list, worldChoices: vi.fn(async () => ({ characters: [] })) });
+  workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Add from world"));
+  const search = document.querySelector<HTMLInputElement>('input[type="search"]')!; search.value = "Mar"; search.dispatchEvent(new document.defaultView!.Event("input"));
+  click("Add from world"); click("Back to characters");
+  await vi.waitFor(() => expect((api.list.mock.calls.at(-1) as any)[1].query).toBe("Mar"));
+  await vi.waitFor(() => expect(document.querySelector<HTMLInputElement>('input[type="search"]')?.value).toBe("Mar"));
+  workspace.dispose();
+});
