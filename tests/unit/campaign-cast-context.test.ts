@@ -207,3 +207,16 @@ it("selects only unretracted context contributions without reviving superseded f
   expect(selectWith([newer.id]).content).not.toContain("green eyes");
   expect(selectWith([newer.id]).content).not.toContain("blue eyes");
 });
+
+it("reinstates ordinary static conflict in context when a fact is restored", () => {
+  const input = fixture();
+  const prior = input.details[0]!.observations[0]!;
+  const newer = { ...prior, id: id(13), value: "brown eyes" };
+  const snapshot = castGenerationSnapshotSchema.parse({ ...input, details: [{ ...input.details[0]!, observations: [prior, newer] }] });
+  const context = (retractedObservationIds: ReadonlySet<string>) => selectCastContext({ snapshot, retractedObservationIds,
+    budgetTokens: 3000, direction: "Mara", currentScene: "", openThreads: [] }).content;
+  expect(context(new Set())).not.toContain("blue eyes");
+  expect(context(new Set())).not.toContain("brown eyes");
+  expect(context(new Set([newer.id]))).toContain("blue eyes");
+  expect(context(new Set())).not.toContain("blue eyes");
+});

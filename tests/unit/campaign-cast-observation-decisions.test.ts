@@ -33,7 +33,9 @@ it("rejects correction commands in all supported old archive formats", () => {
     const archive = { formatVersion, revision: 1, characters: [{ id: id(1), origin: { kind: "manual" }, firstObservedTurn: 0 }],
       events: [{ id: id(3), effectiveTurnNumber: 0, revision: 1, commands: [{ characterId: id(1), command: { kind: "create", name: "Mara", aliases: [], origin: { kind: "manual" } } }] }] };
     expect(portableCampaignCastSchema.safeParse(archive).success).toBe(true);
-    const correction = { command: { kind: "retract_observation", characterId: id(1), observationId: id(2) } };
-    expect(portableCampaignCastSchema.safeParse({ ...archive, events: [...archive.events, { id: id(4), effectiveTurnNumber: 0, revision: 2, commands: [correction] }] }).success).toBe(false);
+    for (const command of [
+      { kind: "retract_observation", characterId: id(1), observationId: id(2) },
+      { kind: "restore_observation", characterId: id(1), observationId: id(2), retractionEventId: id(3) }
+    ]) expect(portableCampaignCastSchema.safeParse({ ...archive, events: [...archive.events, { id: id(4), effectiveTurnNumber: 0, revision: 2, commands: [{ command }] }] }).success).toBe(false);
   }
 });
