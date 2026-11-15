@@ -216,6 +216,14 @@ integration("World Library and campaign version integration", () => {
     const browser = await chromium.launch();
     onTestFinished(() => browser.close());
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const browserErrors: string[] = [];
+    page.on("pageerror", error => browserErrors.push(error.message));
+    const failedResponses: string[] = [], resourceErrors: string[] = [];
+    page.on("console", message => {
+      if (message.type() !== "error") return;
+      (message.text().startsWith("Failed to load resource:") ? resourceErrors : browserErrors).push(message.text());
+    });
+    page.on("response", response => { if (response.status() >= 400) failedResponses.push(`${response.status()} ${new URL(response.url()).pathname}`); });
     const webOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
     const screenshotRoot = resolve(process.env.CAST_SCREENSHOT_ROOT ?? "test-results/review-assets/unified-character-editor-phase-4");
     await page.route("**/api/v1/**", async route => {
@@ -494,6 +502,76 @@ integration("World Library and campaign version integration", () => {
     const afterReceipts = (await pool.query("SELECT action,target_kind,result_receipt FROM campaign_cast_review_decisions WHERE campaign_id=$1 ORDER BY revision", [campaignId])).rows;
     expect(afterReceipts.map(row => row.action)).toEqual(["dismiss", "restore"]);
     expect((await isolationRepository.candidates(scope, { view: "review" })).candidates.find(item => item.id === candidateId)?.details?.[0]?.observationIndex).toBe(0);
+    // Accept the restored original detail through the real browser and API.
+    await review.getByRole("button", { name: "Apply and next" }).click();
+    await browserExpect(review.getByRole("heading", { name: "Nothing needs review." })).toBeVisible();
+    const accepted = await isolationRepository.detail(scope, mara.id);
+    const observation = accepted.observations.find(item => item.field === "appearance.description" && item.value === "blue eyes")!;
+    expect(observation).toBeDefined();
+    expect(accepted.character.profile["appearance.description"]).toBe("blue eyes");
+    const { captureCastGenerationSnapshotWithClient } = await import("../../packages/database/src/campaign-cast-repository.js");
+    const { selectCastContext } = await import("../../packages/domain/src/campaign-cast-context.js");
+    const contextField = async () => {
+      const captured = await withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled: false, version: "cast-context-v1" }));
+      return selectCastContext({ snapshot: captured.snapshot, direction: "Review Mara", currentScene: "", openThreads: [], budgetTokens: 3000 })
+        .records.find(record => record.characterId === mara.id)?.fields.find(field => field.field === "appearance.description");
+    };
+    expect((await contextField())?.evidenceId).toBe(observation.id);
+    await page.goto(`${webOrigin}/story/${campaignId}?character=${mara.id}`);
+    await browserExpect(review).toContainText("Review Mara");
+    await review.locator("#cast-sources summary").click();
+    await review.getByRole("button", { name: "Retract fact" }).click();
+    await browserExpect(review).toContainText("Before: blue eyes");
+    await browserExpect(review).toContainText("After: Unknown");
+    await review.getByRole("button", { name: "Confirm retraction" }).click();
+    await browserExpect(review.getByRole("button", { name: "Restore fact" })).toBeVisible();
+    await page.goto(`${webOrigin}/story/${campaignId}?character=${mara.id}`);
+    await browserExpect(review).toContainText("Review Mara");
+    await review.locator("#cast-sources summary").click();
+    await browserExpect(review).toContainText("Retracted fact");
+    const retracted = await isolationRepository.detail(scope, mara.id);
+    expect(retracted.character.profile["appearance.description"]).toBeUndefined();
+    expect(await contextField()).toBeUndefined();
+    const repeated = await withTransaction(pool, client => applyValidatedCastDiscovery(client, { ...job, id: crypto.randomUUID() }));
+    expect(repeated.observationIds).toEqual([]);
+    expect((await isolationRepository.detail(scope, mara.id)).character.profile["appearance.description"]).toBeUndefined();
+    // Archive import remaps turn, character, observation and decision IDs.
+    const { exportCampaignCast, importCampaignCast } = await import("../../packages/database/src/campaign-cast-portability.js");
+    const archive = await withTransaction(pool, client => exportCampaignCast(client, scope));
+    expect(archive?.formatVersion).toBe(5);
+    const archiveCampaign = crypto.randomUUID(), archiveTurn = crypto.randomUUID();
+    const archiveScope = { ownerUserId, campaignId: archiveCampaign };
+    await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title,active_turn_number,character_profile) VALUES($1,$2,$3,'Archive copy',2,'{}')", [archiveCampaign, ownerUserId, nextVersion.worldVersionId]);
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,2,$4)", [archiveTurn, ownerUserId, archiveCampaign, narration]);
+    await withTransaction(pool, client => importCampaignCast(client, archiveScope, archive, { turns: new Map([[turnId, archiveTurn]]), worlds: new Map() }));
+    const archivedMara = (await isolationRepository.current(archiveScope)).characters.find(person => person.name === "Review Mara")!;
+    expect(archivedMara.profile["appearance.description"]).toBeUndefined();
+    const archivedDetail = await isolationRepository.detail(archiveScope, archivedMara.id);
+    expect(archivedDetail.observationDecisionStatus?.some(status => status.state === "retracted" && status.observationId !== observation.id)).toBe(true);
+    expect((await withTransaction(pool, client => exportCampaignCast(client, archiveScope)))?.formatVersion).toBe(5);
+    await review.getByRole("button", { name: "Restore fact" }).click();
+    await browserExpect(review).toContainText("Refresh before trying again");
+    await page.goto(`${webOrigin}/story/${campaignId}?character=${mara.id}`);
+    await browserExpect(review).toContainText("Review Mara");
+    await review.locator("#cast-sources summary").click();
+    await review.getByRole("button", { name: "Restore fact" }).click();
+    await browserExpect(review).toContainText("After: blue eyes");
+    await review.getByRole("button", { name: "Confirm restore" }).click();
+    await browserExpect(review.getByRole("button", { name: "Retract fact" })).toBeVisible();
+    expect((await isolationRepository.detail(scope, mara.id)).character.profile["appearance.description"]).toBe("blue eyes");
+    expect((await contextField())?.evidenceId).toBe(observation.id);
+    expect(browserErrors).toEqual([]);
+    // The source-served test fixture omits the vendored stylesheet and discovery scan
+    // service; its earlier rewind also leaves Story requesting the absent first turn.
+    const expectedFailures = new Set([
+      "404 /vendor/photoswipe/photoswipe.css",
+      `503 /api/v1/campaigns/${campaignId}/cast/scans`,
+      `404 /api/v1/campaigns/${campaignId}/reader/turns/1`,
+      `409 /api/v1/campaigns/${campaignId}/cast/characters/${mara.id}/observations/${observation.id}/decision-preview`
+    ]);
+    expect(failedResponses.filter(failure => !expectedFailures.has(failure))).toEqual([]);
+    expect(failedResponses).toContain(`409 /api/v1/campaigns/${campaignId}/cast/characters/${mara.id}/observations/${observation.id}/decision-preview`);
+    expect(resourceErrors).toHaveLength(failedResponses.length);
     expect(await getWorld(pool, unrelatedWorld.id)).toEqual(unrelatedWorldBefore);
     expect((await isolationRepository.current(otherScope))).toEqual(otherSnapshot);
     expect((await pool.query("SELECT content FROM world_versions WHERE id=$1", [published.worldVersionId])).rows[0].content).toEqual(pinnedWorld);
