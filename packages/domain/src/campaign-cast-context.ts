@@ -199,10 +199,17 @@ function selectCastContextV2(snapshot: CastGenerationSnapshot, input: { directio
   const candidates = ranked.map(({ person }) => ({ characterId: person.id, revision: person.revision, name: person.name,
     fields: snapshot.fiction!.find(item => item.characterId === person.id)!.fields }));
   const allocated = allocateCastFictionContext(candidates, input.budgetTokens, notice, coverage, !usesPresets);
+  const v3Gap = (input.contextProtocol === CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION || input.contextProtocol === HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION)
+    && snapshot.discoveryStatus !== "off" && !current;
+  const gapOmissions = v3Gap ? ranked.reduce((count, { person }) => {
+    const fields = snapshot.fiction!.find(item => item.characterId === person.id)!.fields;
+    return count + Object.keys(person.profile).filter(field => (field.startsWith("state.") || field === "story.goals")
+      && !fields.some(item => item.field === field)).length;
+  }, 0) : 0;
   const wire = allocated.content ? JSON.parse(allocated.content) as { characters: { characterId: string; revision: number; fields: CastV2ContextField[] }[] } : { characters: [] };
   const admitted = new Set(wire.characters.map(item => item.characterId));
   const reasons: CastContextReason[] = usesPresets ? ["direct_reference", "open_thread", "recent_observation", "pinned"] : ["direct_reference", "open_thread", "pinned", "recent_observation"];
-  return { content: allocated.content, estimatedTokens: allocated.estimatedTokens, coverage, omittedFieldCount: allocated.omittedFieldCount,
+  return { content: allocated.content, estimatedTokens: allocated.estimatedTokens, coverage, omittedFieldCount: allocated.omittedFieldCount + gapOmissions,
     omittedCharacterIds: allocated.omittedCharacterIds,
     records: wire.characters.map(character => ({ characterId: character.characterId, revision: character.revision, content: JSON.stringify(character), fields: character.fields })),
     explanation: { selected: ranked.filter(item => admitted.has(item.person.id)).map(item => ({ characterId: item.person.id, name: item.person.name, reason: reasons[item.rank]! })),

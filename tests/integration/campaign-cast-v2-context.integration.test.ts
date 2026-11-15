@@ -81,6 +81,23 @@ it("keeps v1 replay stable and captures only bounded v2 fiction with discovery o
   await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [campaignId]);
   await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,2,$4)", [laterTurn, ownerUserId, campaignId, laterNarration]);
   await repository.applyBatch(scope, { boundary: { turnNumber: 2, timelineRevision: 0 }, idempotencyKey: "location-observation", commands: [{ kind: "observe", characterId: created.character.id, field: "state.location", value: "the palace", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: laterTurn, turnNumber: 2, narrationRevision: 0, sourceHash: sha256(laterNarration), paragraphId: "p1", quote: laterNarration } }] });
+  await repository.applyBatch(scope, { boundary: { turnNumber: 2, timelineRevision: 0 }, idempotencyKey: "condition-observation", commands: [{ kind: "observe", characterId: created.character.id, field: "state.condition", value: "well rested", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: laterTurn, turnNumber: 2, narrationRevision: 0, sourceHash: sha256(laterNarration), paragraphId: "p1", quote: laterNarration } }] });
+  const captureGap = (contextProtocol: typeof CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION | typeof CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, discoveryEnabled: boolean) => withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled, version: "cast-context-v2", contextProtocol }));
+  const gapV3 = await captureGap(CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, true);
+  expect(gapV3.snapshot.discoveryStatus).toBe("failed");
+  const gapFields = gapV3.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields;
+  expect(gapFields).toContainEqual(expect.objectContaining({ field: "state.location", value: "the palace", source: "observation", evidenceKind: "turn", effectiveTurn: 2 }));
+  expect(gapFields).not.toContainEqual(expect.objectContaining({ field: "state.condition" }));
+  await pool.query("UPDATE campaign_cast_discovery_jobs SET status='complete' WHERE id=$1", [jobId]);
+  const pendingV3 = await captureGap(CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, true);
+  expect(pendingV3.snapshot.discoveryStatus).toBe("pending");
+  expect(pendingV3.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields).not.toContainEqual(expect.objectContaining({ field: "state.condition" }));
+  const selectionV3 = selectCastContext({ snapshot: gapV3.snapshot, contextProtocol: CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, direction: "Mara", currentScene: "", openThreads: [], budgetTokens: 3000 });
+  expect(selectionV3.omittedFieldCount).toBeGreaterThanOrEqual(1);
+  expect(selectionV3.records[0]!.fields).toContainEqual(expect.objectContaining({ field: "state.location", value: "the palace", authority: "observation" }));
+  for (const result of [await captureGap(CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, true), await captureGap(CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, false)]) {
+    expect(result.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields).toContainEqual(expect.objectContaining({ field: "state.condition", value: "well rested", source: "observation" }));
+  }
   for (const [contextProtocol, value, source] of [[CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, "the docks", "override"], [CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, "the palace", "observation"]] as const) {
     const result = await withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled: false, version: "cast-context-v2", contextProtocol }));
     expect(result.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields).toContainEqual(expect.objectContaining({ field: "state.location", value, source }));
