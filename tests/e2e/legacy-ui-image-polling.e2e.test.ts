@@ -221,17 +221,18 @@ test("pending_jobs_keep_the_five_second_poll_cadence", async ({ page }) => {
     const originalSetTimeout = window.setTimeout.bind(window);
     (window as Window & { __imagePollTimers?: number }).__imagePollTimers = 0;
     window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
-      if (timeout === 5_000) (window as Window & { __imagePollTimers: number }).__imagePollTimers += 1;
+      const trackedWindow = window as Window & { __imagePollTimers?: number };
+      if (timeout === 5_000) trackedWindow.__imagePollTimers = (trackedWindow.__imagePollTimers ?? 0) + 1;
       return originalSetTimeout(handler, timeout, ...args);
     }) as typeof window.setTimeout;
   });
   releaseFirstRead.resolve();
-  await expect.poll(() => page.evaluate(() => (window as Window & { __imagePollTimers: number }).__imagePollTimers)).toBe(1);
+  await expect.poll(() => page.evaluate(() => (window as Window & { __imagePollTimers?: number }).__imagePollTimers)).toBe(1);
   await page.clock.runFor(4_999);
   expect(jobsReads).toBe(1);
   await page.clock.runFor(1);
   await expect.poll(() => jobsReads).toBe(2);
-  await expect.poll(() => page.evaluate(() => (window as Window & { __imagePollTimers: number }).__imagePollTimers)).toBe(2);
+  await expect.poll(() => page.evaluate(() => (window as Window & { __imagePollTimers?: number }).__imagePollTimers)).toBe(2);
   await page.clock.runFor(5_000);
   await expect.poll(() => jobsReads).toBe(3);
 });
