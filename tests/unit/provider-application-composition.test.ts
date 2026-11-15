@@ -106,7 +106,7 @@ describe("provider application composition capability cache transactions", () =>
     });
     const system = preview.sections.find((section) => section.label === "System prompt preview (output encoding pending)")!;
     expect(system.content.includes("Campaign cast authority:")).toBe(castContextEnabled);
-    expect(system.content.includes("User corrections govern current portrayal from their effective turn; user state edits govern until later story evidence")).toBe(castContextEnabled);
+    expect(system.content.includes("User corrections govern current portrayal from their effective turn, including intentional empty values; user state edits govern until later story evidence")).toBe(castContextEnabled);
   });
 
   it("uses the V2 preview contract when cast editing is unavailable", async () => {

@@ -102,7 +102,15 @@ export function retractionRequest(detail: CastDetail, observationId: string, ide
   void observationId; // The observation ID identifies the endpoint, not the request body.
   return observationDecisionRequestSchema.parse({ action: "retract", expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: detail.boundary, idempotencyKey });
 }
-export function clearEditLabel(field: CharacterField, kind: "plain" | "startingCast"): "Use story value" | "Use discovered value" | "Reset to world" {
+export function clearEditLabel(field: CharacterField, kind: "plain" | "startingCast"): "Use story value" | "Use discovered value" | "Reset to world" | "Clear my edit" {
   if (kind === "startingCast" && seededCharacterFieldPolicy(field.path) === "fixed") return "Reset to world";
+  // Without a fact to fall back to, clearing only empties the field; say so.
+  if (!field.observations.some(item => item.mode === "fact")) return "Clear my edit";
   return seededCharacterFieldPolicy(field.path) === "updating" ? "Use story value" : "Use discovered value";
+}
+/** Feedback for a saved field or toggle. Toggles read as their new state, not their storage key. */
+export function sheetSavedMessage(change: SheetChange, fieldLabel: string): string {
+  if (change.kind === "field") return `Saved ${fieldLabel}.`;
+  if (change.key === "pinned") return change.value ? "Pinned." : "Unpinned.";
+  return change.value ? "Ignored." : "No longer ignored.";
 }

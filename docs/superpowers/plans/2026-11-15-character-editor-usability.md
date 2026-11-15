@@ -176,13 +176,13 @@ it("locked precedence keeps the V2 rule for both projections", () => {
 - [ ] **Step 1: Write failing tests:**
   - **Authority attribution (V3):** edit "the docks" at 12, fact "the palace" at 20. The selected field is `{ value: "the palace", authority: "observation", evidenceId: <fact id> }`. Today `campaign-cast-context.ts:87-93` would emit `authority: "user"` with the Observation's value.
   - **Gap, edited field (V3):** the same data with tracking `pending` through turn 20 and boundary turn 21 still sends "the palace" with observation authority. With an edit at 21 and no fact after 21, it sends "the docks" with user authority.
-  - **Gap, unedited field (V3):** with no edit, a `pending` or `failed` state field is omitted and counted in `omittedFieldCount`, as today.
+  - **Gap, unedited field (V3):** with no edit, a `pending` or `failed` state field is still sent as dated last-known state with observation authority, as in V2, and is not counted in `omittedFieldCount`.
   - Cover all four State Edit fields, Added/Discovered and Starting Cast Characters, a retracted replacing Observation (edit restored, user authority), and discovery `off` (last-known observations kept).
   - **V2 pinning:** a V2 capture of the same data sends "the docks" with user authority.
 - [ ] **Step 2: Run, expect FAIL.**
 - [ ] **Step 3: Implement.**
   - Capture passes the precedence derived from `contextProtocol` into the projection.
-  - In context selection, an override counts only when it is in force under that precedence. A replaced State Edit falls through to the supplying-Observation branch, which already gives observation authority and evidence. The existing `!override && (!current || …)` omission then stays correct for unedited dynamic fields.
+  - In context selection, an override counts only when it is in force under that precedence. A replaced State Edit falls through to the supplying-Observation branch, which already gives observation authority and evidence. The legacy `cast-context-v1` path keeps its existing omission; V3 capture uses the `cast-context-v2` envelope, which keeps unedited dynamic fields as last-known state.
   - Do not add a separate gap filter.
 - [ ] **Step 4: Run the listed files, expect PASS.**
 - [ ] **Step 5: Commit** `feat(story): version-selected state edit precedence in narrator capture`.

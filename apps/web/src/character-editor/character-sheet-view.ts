@@ -85,7 +85,7 @@ export function renderCharacterSheetView(host: HTMLElement, options: CharacterSh
           }
           const writeOwn = button("Write my own", () => open(field.path, "edit")); writeOwn.className = "character-sheet-write-own"; row.append(writeOwn);
         }
-        if (preview?.field.path === field.path) { const region = el("div"); region.className = "character-sheet-confirm"; region.append(el("p", `After this, ${field.label} will read: ${preview.data.projectedValue || "Unknown"}`), el("p", `“${preview.data.quote}” · turn ${preview.data.turn}`), button("Confirm", () => { const id = preview!.id; void run(() => options.retraction!.apply(id)); }), button("Cancel", () => { preview = null; render(); focusField(field.path, "button"); options.onInteractionEnd?.(field.path); })); row.append(region); }
+        if (preview?.field.path === field.path) { const region = el("div"); region.className = "character-sheet-confirm"; region.append(el("p", `${field.label} now reads: ${preview.data.currentValue || "Unknown"}`), el("p", `After this, ${field.label} will read: ${preview.data.projectedValue || "Unknown"}`), el("p", `“${preview.data.quote}” · turn ${preview.data.turn}`), button("Confirm", () => { const id = preview!.id; void run(() => options.retraction!.apply(id)); }), button("Cancel", () => { preview = null; render(); focusField(field.path, "button"); options.onInteractionEnd?.(field.path); })); row.append(region); }
       }
     }
   }

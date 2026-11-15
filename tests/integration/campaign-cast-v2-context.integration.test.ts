@@ -100,13 +100,15 @@ it("keeps v1 replay stable and captures only bounded v2 fiction with discovery o
   expect(gapV3.snapshot.discoveryStatus).toBe("failed");
   const gapFields = gapV3.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields;
   expect(gapFields).toContainEqual(expect.objectContaining({ field: "state.location", value: "the palace", source: "observation", evidenceKind: "turn", effectiveTurn: 2 }));
-  expect(gapFields).not.toContainEqual(expect.objectContaining({ field: "state.condition" }));
+  // Unedited current-state fields stay as dated last-known state during gaps, as in V2.
+  expect(gapFields).toContainEqual(expect.objectContaining({ field: "state.condition", value: "well rested", source: "observation" }));
   await pool.query("UPDATE campaign_cast_discovery_jobs SET status='complete' WHERE id=$1", [jobId]);
   const pendingV3 = await captureGap(CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, true);
   expect(pendingV3.snapshot.discoveryStatus).toBe("pending");
-  expect(pendingV3.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields).not.toContainEqual(expect.objectContaining({ field: "state.condition" }));
+  expect(pendingV3.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields).toContainEqual(expect.objectContaining({ field: "state.condition", value: "well rested", source: "observation" }));
   const selectionV3 = selectCastContext({ snapshot: gapV3.snapshot, contextProtocol: CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, direction: "Mara", currentScene: "", openThreads: [], budgetTokens: 3000 });
-  expect(selectionV3.omittedFieldCount).toBeGreaterThanOrEqual(1);
+  expect(selectionV3.omittedFieldCount).toBe(0);
+  expect(selectionV3.records[0]!.fields).toContainEqual(expect.objectContaining({ field: "state.condition", value: "well rested", authority: "observation" }));
   expect(selectionV3.records[0]!.fields).toContainEqual(expect.objectContaining({ field: "state.location", value: "the palace", authority: "observation" }));
   for (const result of [await captureGap(CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, true), await captureGap(CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, false)]) {
     expect(result.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields).toContainEqual(expect.objectContaining({ field: "state.condition", value: "well rested", source: "observation" }));

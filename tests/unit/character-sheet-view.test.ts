@@ -40,7 +40,7 @@ describe("character sheet view", () => {
     observed.origin = "observed"; observed.observedTurn = 7; observed.retractable = observation; observed.retractableObservationIds = ["a"]; observed.observations = [observation];
     const apply = vi.fn().mockResolvedValue({ ok: true });
     const { host, click } = setup({ sheet: { name: "A", kind: "supporting", sections: [{ name: "Identity", fields: [observed] }], sources: [], locks: [], attention: [] }, retraction: { preview: vi.fn().mockResolvedValue({ currentValue: "Tinker", projectedValue: null, quote: "<img src=x>", turn: 7 }), apply } });
-    click("This is wrong"); await Promise.resolve(); await Promise.resolve(); expect(host.textContent).toContain("After this, Pronouns will read: Unknown"); expect(host.querySelector("img")).toBeNull(); click("Confirm"); await Promise.resolve(); expect(apply).toHaveBeenCalledWith("a");
+    click("This is wrong"); await Promise.resolve(); await Promise.resolve(); expect(host.textContent).toContain("Pronouns now reads: Tinker"); expect(host.textContent).toContain("After this, Pronouns will read: Unknown"); expect(host.querySelector("img")).toBeNull(); click("Confirm"); await Promise.resolve(); expect(apply).toHaveBeenCalledWith("a");
   });
   it("splits list edits and hides actions when locked", async () => {
     const onChange = vi.fn().mockResolvedValue({ ok: true }); const a = setup({ onChange }); a.click("Edit Aliases"); const input = a.host.querySelector("textarea") as HTMLTextAreaElement; input.value = " One \n\n Two "; a.click("Save"); await Promise.resolve(); expect(onChange).toHaveBeenCalledWith({ kind: "field", path: "identity.aliases", value: ["One", "Two"] });

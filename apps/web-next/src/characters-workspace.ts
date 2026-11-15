@@ -7,7 +7,7 @@ import { renderCharacterSheetView, type SheetFeedback } from "../../web/src/char
 import { renderObservationReview } from "../../web/src/character-editor/observation-review.js";
 import { castScanRecovery } from "./campaign-cast-scan-panel";
 import { createCharacterProfileForm } from "./character-profile-form";
-import { buildCharacterSheet, createCastEditor, recentFilterLabel, sheetRequest, sheetUndoOperation, sheetUndoRequest, sheetMatchesFence, retractionRequest, type SheetTarget, type SheetUndo, type SheetWriteFence, type SheetChange, type CastEditorState } from "@infinite-quest/client-core";
+import { buildCharacterSheet, createCastEditor, recentFilterLabel, sheetRequest, sheetUndoOperation, sheetSavedMessage, sheetUndoRequest, sheetMatchesFence, retractionRequest, type SheetTarget, type SheetUndo, type SheetWriteFence, type SheetChange, type CastEditorState } from "@infinite-quest/client-core";
 import { createCampaignCastApi, createCharactersWorkspaceSession, type CharactersWorkspaceState, type CampaignCastApi, type CharactersWorkspaceSessionOptions } from "@infinite-quest/client-web";
 import type { CampaignCharacterProfile, CampaignCharacterProfileUpdate, CharacterFilter } from "@infinite-quest/contracts";
 
@@ -160,8 +160,8 @@ export function createCharactersWorkspace(document: Document, generationActive: 
             const inverse = sheetUndoOperation(target, change), request = sheetRequest(target, change, operationKey("sheet", [id, change, detail.revision]));
             const result = await dispatch(request); if (!current()) return { ok: true };
             const fence: SheetWriteFence = request.endpoint === "profile" ? { kind: "main", revision: result.revision } : { kind: "cast", revision: result.revision, characterRevision: (result as typeof detail).character.revision, boundary: (result as typeof detail).boundary };
-            const label = change.kind === "toggle" ? change.key : sheet.sections.flatMap(section => section.fields).find(field => field.path === change.path)?.label ?? change.path;
-            sheetFeedback = { message: `Saved ${label}.`, undo: inverse, fence, deadline: Date.now() + 30000, key: crypto.randomUUID(), refreshFailed: true };
+            const label = change.kind === "toggle" ? "" : sheet.sections.flatMap(section => section.fields).find(field => field.path === change.path)?.label ?? change.path;
+            sheetFeedback = { message: sheetSavedMessage(change, label), undo: inverse, fence, deadline: Date.now() + 30000, key: crypto.randomUUID(), refreshFailed: true };
             if (request.endpoint === "profile") onProfileSaved(campaign);
             sheetTimer = setTimeout(() => { if (!current() || !sheetFeedback) return; delete sheetFeedback.undo; sheetView?.setFeedback({ message: sheetFeedback.message }); }, 30000);
             await refresh(); return { ok: true };

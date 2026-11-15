@@ -2645,7 +2645,8 @@ integration("durable continuity review", () => {
     expect(requests[0]).toContain("SEED_LATER");
     expect(requests[0]).not.toContain("RETRACT_CONDITION");
     expect(requests[0]).not.toContain("SAME_TURN_OBSERVATION");
-    expect(requests[0]!.includes("UNEDITED_CONDITION")).toBe(!discoveryEnabled);
+    // Unedited current state stays as dated last-known state during tracking gaps (ADR 0045).
+    expect(requests[0]).toContain("UNEDITED_CONDITION");
     expect(requests.join("\n")).not.toContain("FOREIGN_CAST_SECRET");
     await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
     const repository = createPostgresGenerationExecutionRepository(pool);

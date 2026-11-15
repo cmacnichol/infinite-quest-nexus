@@ -244,7 +244,7 @@ it.each(["current", "pending", "failed", "off"] as const)("selects frozen notice
     fiction: [{ characterId: id(1), fields: [{ field: "story.role", value: "guardian", source: "authored", evidenceId: id(11) }] }] };
   const v3 = status === "current" ? "User corrections are portrayal authority from their effective turn. User state edits are authority until later story evidence. Older conflicting facts remain historical evidence."
     : status === "off" ? "Character discovery is off. User corrections guide portrayal; state edits yield to later recorded story evidence. Observations are dated last-known state; use accepted history for later events."
-      : "Tracking is incomplete. User corrections remain portrayal authority; user state edits are authority until later recorded story evidence. Stable observations are dated historical evidence. Other dynamic observations are omitted. Use accepted history for intervening events.";
+      : "Tracking is incomplete. User corrections remain portrayal authority; user state edits are authority until later recorded story evidence. Other observations are dated, lower-authority last-known state; use accepted history for intervening events.";
   for (const snapshot of [old, modern]) {
     const captured = castGenerationSnapshotSchema.parse({ ...snapshot, discoveryStatus: status, trackedThroughTurn: status === "current" ? 4 : 1 });
     const run = (contextProtocol: string) => JSON.parse(selectCastContext({ snapshot: captured, direction: "Mara", currentScene: "", openThreads: [], budgetTokens: 3000, contextProtocol }).content).notice;

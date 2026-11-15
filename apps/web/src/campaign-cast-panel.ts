@@ -1,5 +1,5 @@
 import { renderCharacterSheetView, type SheetFeedback } from "./character-editor/character-sheet-view.js";
-import { sheetRequest, sheetUndoOperation, sheetUndoRequest, sheetMatchesFence, retractionRequest, type SheetTarget, type SheetUndo, type SheetWriteFence, type SheetChange } from "@infinite-quest/client-core";
+import { sheetRequest, sheetUndoOperation, sheetSavedMessage, sheetUndoRequest, sheetMatchesFence, retractionRequest, type SheetTarget, type SheetUndo, type SheetWriteFence, type SheetChange } from "@infinite-quest/client-core";
 import { renderCastRoster } from "./character-editor/cast-roster-view.js";
 import { renderObservationReview } from "./character-editor/observation-review.js";
 import { mountCampaignPresentation } from "./character-editor/campaign-presentation.js";
@@ -500,8 +500,8 @@ export function createLegacyCastPanel(options: {
           const result = await dispatch(request);
           if (!stillCurrent()) return { ok: true };
           const fence: SheetWriteFence = request.endpoint === "profile" ? { kind: "main", revision: result.revision } : { kind: "cast", revision: result.revision, characterRevision: (result as CastDetail).character.revision, boundary: (result as CastDetail).boundary };
-          const label = change.kind === "toggle" ? change.key : sheet.sections.flatMap(section => section.fields).find(field => field.path === change.path)?.label ?? change.path;
-          sheetFeedback = { message: `Saved ${label}.`, undo: inverse, fence, deadline: Date.now() + 30000, key: crypto.randomUUID() };
+          const label = change.kind === "toggle" ? "" : sheet.sections.flatMap(section => section.fields).find(field => field.path === change.path)?.label ?? change.path;
+          sheetFeedback = { message: sheetSavedMessage(change, label), undo: inverse, fence, deadline: Date.now() + 30000, key: crypto.randomUUID() };
           sheetTimer = setTimeout(() => { if (!stillCurrent() || !sheetFeedback) return; delete sheetFeedback.undo; sheetView?.setFeedback({ message: sheetFeedback.message }); }, 30000);
           await refresh(); return { ok: true };
         } catch (error) { if (!stillCurrent()) return { ok: true }; const conflict = (error as { statusCode?: number }).statusCode === 409; return { ok: false, conflict, message: conflict ? "This character changed. Your edit is kept; compare the latest before saving." : message(error) }; }

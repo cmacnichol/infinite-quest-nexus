@@ -16,7 +16,7 @@ export function castContextNotice(contextVersion: string, status: CastGeneration
   if (contextVersion === CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION || contextVersion === HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION) {
     return status === "current" ? "User corrections are portrayal authority from their effective turn. User state edits are authority until later story evidence. Older conflicting facts remain historical evidence."
       : status === "off" ? "Character discovery is off. User corrections guide portrayal; state edits yield to later recorded story evidence. Observations are dated last-known state; use accepted history for later events."
-        : "Tracking is incomplete. User corrections remain portrayal authority; user state edits are authority until later recorded story evidence. Stable observations are dated historical evidence. Other dynamic observations are omitted. Use accepted history for intervening events.";
+        : "Tracking is incomplete. User corrections remain portrayal authority; user state edits are authority until later recorded story evidence. Other observations are dated, lower-authority last-known state; use accepted history for intervening events.";
   }
   return status === "current" ? "Authored and user-edited fields guide portrayal. Observations are lower-authority evidence."
     : status === "off" ? "Character discovery is off. Observations are dated, lower-authority last-known state; use accepted history for later events."
@@ -200,17 +200,10 @@ function selectCastContextV2(snapshot: CastGenerationSnapshot, input: { directio
   const candidates = ranked.map(({ person }) => ({ characterId: person.id, revision: person.revision, name: person.name,
     fields: snapshot.fiction!.find(item => item.characterId === person.id)!.fields }));
   const allocated = allocateCastFictionContext(candidates, input.budgetTokens, notice, coverage, !usesPresets);
-  const v3Gap = (input.contextProtocol === CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION || input.contextProtocol === HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION)
-    && snapshot.discoveryStatus !== "off" && !current;
-  const gapOmissions = v3Gap ? ranked.reduce((count, { person }) => {
-    const fields = snapshot.fiction!.find(item => item.characterId === person.id)!.fields;
-    return count + Object.keys(person.profile).filter(field => (field.startsWith("state.") || field === "story.goals")
-      && !fields.some(item => item.field === field)).length;
-  }, 0) : 0;
   const wire = allocated.content ? JSON.parse(allocated.content) as { characters: { characterId: string; revision: number; fields: CastV2ContextField[] }[] } : { characters: [] };
   const admitted = new Set(wire.characters.map(item => item.characterId));
   const reasons: CastContextReason[] = usesPresets ? ["direct_reference", "open_thread", "recent_observation", "pinned"] : ["direct_reference", "open_thread", "pinned", "recent_observation"];
-  return { content: allocated.content, estimatedTokens: allocated.estimatedTokens, coverage, omittedFieldCount: allocated.omittedFieldCount + gapOmissions,
+  return { content: allocated.content, estimatedTokens: allocated.estimatedTokens, coverage, omittedFieldCount: allocated.omittedFieldCount,
     omittedCharacterIds: allocated.omittedCharacterIds,
     records: wire.characters.map(character => ({ characterId: character.characterId, revision: character.revision, content: JSON.stringify(character), fields: character.fields })),
     explanation: { selected: ranked.filter(item => admitted.has(item.person.id)).map(item => ({ characterId: item.person.id, name: item.person.name, reason: reasons[item.rank]! })),

@@ -28,6 +28,17 @@ Evidence recorded on 2026-11-15 in the implementation worktree. The automated ch
 
 Chromium tab zoom was set and read back through a disposable extension; CSS zoom and reduced viewport are not treated as native zoom. [Nexus world editor](assets/character-editor-usability/nexus-native-zoom-200-editor.png) ([metrics](assets/character-editor-usability/nexus-native-zoom-200-metrics.json)); [Nexus sheet](assets/character-editor-usability/nexus-sheet-native-zoom-200-edited.png) ([metrics](assets/character-editor-usability/nexus-sheet-native-zoom-200.json)); [Web-Next world](assets/character-editor-usability/web-next-world-native-zoom-200-edited.png) ([metrics](assets/character-editor-usability/web-next-world-native-zoom-200.json)); [Web-Next sheet](assets/character-editor-usability/web-next-sheet-native-zoom-200.png) ([metrics](assets/character-editor-usability/web-next-sheet-native-zoom-200-metrics.json)). Screenshots use synthetic fixtures.
 
+## Post-review corrections (2026-11-15)
+
+A whole-branch review against the spec found that V3 capture omitted unedited current-state fields while tracking was `pending` or `failed`. `pending` is the normal status after each accepted turn, so the narrator would often have lost every unedited character's location, condition, clothing and goals. V2 sends them as dated last-known state. The spec wording caused this. V3 now matches V2 for unedited fields and keeps the new rule for State Edits. The incomplete-tracking notice and B2, B3, A0, ADR 0045 and the plan were corrected to match. Smaller fixes in the same pass:
+
+- The V3 authority contract places "including intentional empty values" on corrections.
+- Toggle feedback reads "Pinned.", "Unpinned.", "Ignored." or "No longer ignored.".
+- The clear-edit action reads "Clear my edit" when no fact Observation exists.
+- The retraction confirmation shows the current value before the resulting value.
+
+Verification after these fixes: `pnpm check` passed. Twelve focused unit files passed, 307 tests (cast context, V3 readers, provider composition, sheet changes and view, both cast controllers, projection, provenance, continuity adapter, planner, prompt library). Real PostgreSQL suites passed: `campaign-cast-v2-context` (1), `campaign-cast-generation` (13), `story-continuity-review` (116; one assertion updated from omission to inclusion), `campaign-cast-repository` (35) and `story-memory-enrollment` (14). The fixture-browser suites `web-next-characters-sheet`, `unified-character-editor` and `campaign-cast` passed, 132 cases. The full `pnpm test:integration`, the native-zoom suites and the opt-in composed proof were not rerun.
+
 ## Results and release boundary
 
 - **Passed before review fixes (`63cf1618`):** `pnpm check`, `pnpm check:client-boundaries`, `pnpm build:web:legacy`, `pnpm build:web:next`; the Next build retains unresolved-at-build-time font and large-chunk warnings.

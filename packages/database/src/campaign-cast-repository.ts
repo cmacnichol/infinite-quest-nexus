@@ -480,10 +480,6 @@ export async function captureCastGenerationSnapshotWithClient(client: DatabaseCl
     for (const [field, raw] of Object.entries(person.profile)) {
       const override = detail.overrides.find(item => item.field === field);
       const source: string = person.fieldSources?.[field as keyof typeof person.fieldSources] ?? (override ? "override" : "observation");
-      // Keep a replaced State Edit eligible through tracking gaps: its newer evidence
-      // is trustworthy even though other current-state observations are incomplete.
-      if (precedence === "yield" && options.discoveryEnabled && trackedThroughTurn !== boundary.turnNumber
-        && !override && source === "observation" && (field.startsWith("state.") || field === "story.goals")) continue;
       const value = raw;
       const superseded = new Set(detail.observations.flatMap(item => item.supersedesObservationId ? [item.supersedesObservationId] : []));
       const observation = detail.observations.filter(item => !superseded.has(item.id) && !projected.retractedObservationIds.has(item.id) && item.field === field && item.value === value && item.mode === "fact")

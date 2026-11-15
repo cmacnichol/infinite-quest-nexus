@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { characterProfileSchema, type CastDetail, type CastObservation } from "../../packages/contracts/src/index.js";
 import { buildCharacterSheet } from "../../packages/client-core/src/characters/sheet.js";
-import { sheetRequest, sheetUndoOperation, sheetUndoRequest, sheetMatchesFence, conflictChoices, retractionRequest, clearEditLabel } from "../../packages/client-core/src/characters/sheet-changes.js";
+import { sheetRequest, sheetUndoOperation, sheetUndoRequest, sheetMatchesFence, conflictChoices, retractionRequest, clearEditLabel, sheetSavedMessage } from "../../packages/client-core/src/characters/sheet-changes.js";
 
 const id = "10000000-0000-4000-8000-000000000001";
 const detail = (): CastDetail => ({ character: { id, name: "Mira", aliases: ["M"], origin: { kind: "manual" }, profile: {}, revision: 3, pinned: false, ignored: false, firstObservedTurn: 0, lastObservedTurn: 0, lastMentionedTurn: null }, revision: 4, boundary: { turnNumber: 20, timelineRevision: 0 }, observations: [], overrides: [], identityEvents: [], autoMatches: [], unresolvedCandidateIds: [], editorDestination: null });
@@ -94,5 +94,12 @@ describe("sheet writes", () => {
     expect(clearEditLabel(f, "plain")).toBe("Use discovered value");
     expect(clearEditLabel(f, "startingCast")).toBe("Reset to world");
     expect(clearEditLabel({ ...f, path: "state.location" }, "plain")).toBe("Use story value");
+    expect(clearEditLabel({ ...f, observations: [] }, "plain")).toBe("Clear my edit");
+    expect(clearEditLabel({ ...f, observations: f.observations.filter(item => item.mode === "claim") }, "plain")).toBe("Clear my edit");
+  });
+  it("reads toggle feedback as the new state", () => {
+    expect(sheetSavedMessage({ kind: "field", path: "story.role", value: "Guide" }, "Role")).toBe("Saved Role.");
+    expect([true, false].map(value => sheetSavedMessage({ kind: "toggle", key: "pinned", value }, ""))).toEqual(["Pinned.", "Unpinned."]);
+    expect([true, false].map(value => sheetSavedMessage({ kind: "toggle", key: "ignored", value }, ""))).toEqual(["Ignored.", "No longer ignored."]);
   });
 });
