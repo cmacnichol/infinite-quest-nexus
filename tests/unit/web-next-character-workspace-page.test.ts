@@ -1,4 +1,4 @@
-import { authoringJobLabel } from "../../packages/client-core/src/characters/section-refine.js";
+import { authoringJobLabel } from "../../apps/web-next/src/authoring-job-label.js";
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
 import type { PlayableCharacter } from "../../packages/contracts/src/world-library.js";

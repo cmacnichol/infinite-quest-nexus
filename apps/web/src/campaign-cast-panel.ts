@@ -488,7 +488,7 @@ export function createLegacyCastPanel(options: {
     sheetView = renderCharacterSheetView(host, {
       sheet, kind: main ? "main" : "supporting", editable: canEdit, lockedReason: null,
       ...(!main && canEdit() ? { toggles: { pinned: detail.character.pinned, ignored: detail.character.ignored } } : {}),
-      ...(feedback ? { feedback } : {}), onEditStart: clearSheetFeedback, showEmpty, onShowEmpty(value) { showEmpty = value; renderSheet(detail, profile); },
+      ...(feedback ? { feedback } : {}), onEditStart: clearSheetFeedback, showEmpty, onShowEmpty(value) { showEmpty = value; renderSheet(detail, profile); dialog.querySelector<HTMLElement>("[data-show-empty-toggle]")?.focus(); },
       compareLabel: main ? "Load latest version" : "Compare latest", onCompareLatest() { void refresh(); },
       confirmDiscard: () => window.confirm("Discard unsaved character changes?"), isCurrent: stillCurrent,
       async onChange(change: SheetChange) {

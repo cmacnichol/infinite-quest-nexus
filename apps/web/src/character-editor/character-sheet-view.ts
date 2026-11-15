@@ -50,7 +50,7 @@ export function renderCharacterSheetView(host: HTMLElement, options: CharacterSh
       for (const key of ["pinned", "ignored"] as const) { const b = button(key === "pinned" ? "Pin" : "Ignore", () => { if (allowRefresh()) void run(() => options.onChange({ kind: "toggle", key, value: !options.toggles![key] })); }); b.setAttribute("aria-pressed", String(options.toggles[key])); group.append(b); }
       group.append(el("p", "Pin prioritizes this character in story context. Ignore excludes this supporting character from story context.")); root.append(group);
     }
-    const show = button(options.showEmpty ? "Hide empty fields" : "Show empty fields", () => { if (allowRefresh()) options.onShowEmpty(!options.showEmpty); }); root.append(show);
+    const show = button(options.showEmpty ? "Hide empty fields" : "Show empty fields", () => { if (allowRefresh()) options.onShowEmpty(!options.showEmpty); }); show.dataset.showEmptyToggle = ""; root.append(show);
     for (const section of options.sheet.sections) {
       const visible = section.fields.filter(field => options.showEmpty || field.value !== null && (Array.isArray(field.value) ? field.value.length > 0 : field.value.trim().length > 0) || field.origin === "conflicted" || field.origin === "claim" || field.path === activePath);
       if (!visible.length) continue;

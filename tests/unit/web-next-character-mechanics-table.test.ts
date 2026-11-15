@@ -32,10 +32,10 @@ describe("character mechanics table", () => {
     window.HTMLElement.prototype.focus = function () { Object.defineProperty(document, "activeElement", { configurable: true, value: this }); };
     renderMechanicsTable(host, { kind: "stat", items: Array.from({ length: 51 }, (_, i) => ({ name: `Stat ${i + 1}` })), max: 53, onChange: vi.fn() });
     const button = (label: string) => [...host.querySelectorAll("button")].find(b => b.textContent === label)!;
-    expect(host.querySelector('[role="status"]')?.textContent).toBe("Rows 1–50 of 51");
+    expect(host.querySelector('[role="status"]')?.textContent).toBe("Rows 1â€“50 of 51");
     button("Next rows").click();
     expect(document.activeElement?.getAttribute("aria-label")).toBe("Name for row 51");
-    expect(host.querySelector('[role="status"]')?.textContent).toBe("Rows 51–51 of 51");
+    expect(host.querySelector('[role="status"]')?.textContent).toBe("Rows 51â€“51 of 51");
     button("Previous rows").click();
     expect(document.activeElement?.getAttribute("aria-label")).toBe("Name for row 1");
     button("Add statistic").click();

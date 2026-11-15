@@ -468,7 +468,7 @@ integration("World Library and campaign version integration", () => {
     await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason) VALUES($1,$2,$3,0,$4,$5,$6,'identity_needs_review')", [candidateId, ownerUserId, campaignId, proposal.localKey, JSON.stringify(source), JSON.stringify(proposal)]);
     await openCampaignCast("review-detail");
     const review = page.locator("#campaignCastDialog");
-    await review.getByRole("button", { name: "Needs attention", exact: true }).click();
+    await review.getByRole("button", { name: /^Needs attention/ }).click();
     await review.getByRole("button", { name: "Review identity questions and details", exact: true }).click();
     await browserExpect(review).toContainText("Identity: Review Mara");
     await review.screenshot({ path: resolve(screenshotRoot, "composed-review-pending.png") });
@@ -496,7 +496,7 @@ integration("World Library and campaign version integration", () => {
     expect(rescanned.observationIds).toEqual([]);
     expect((await isolationRepository.detail(scope, mara.id)).observations).toEqual([]);
     await openCampaignCast("review-reload");
-    await review.getByRole("button", { name: "Needs attention", exact: true }).click();
+    await review.getByRole("button", { name: /^Needs attention/ }).click();
     await review.getByRole("button", { name: "Review identity questions and details", exact: true }).click();
     await review.getByRole("button", { name: "Dismissed", exact: true }).click();
     await browserExpect(review).toContainText("blue eyes");
@@ -522,6 +522,16 @@ integration("World Library and campaign version integration", () => {
         .records.find(record => record.characterId === mara.id)?.fields.find(field => field.field === "appearance.description");
     };
     expect((await contextField())?.evidenceId).toBe(observation.id);
+    await page.goto(`${webOrigin}/story/${campaignId}?character=${mara.id}`);
+    await browserExpect(review).toContainText("Review Mara");
+    await review.getByRole("button", { name: "Edit Name", exact: true }).click();
+    await review.getByRole("textbox", { name: "Name", exact: true }).fill("Review Marin");
+    await review.getByRole("button", { name: "Save", exact: true }).click();
+    await browserExpect(review.getByText("Saved Name.")).toBeVisible();
+    expect((await isolationRepository.detail(scope, mara.id)).character.name).toBe("Review Marin");
+    await review.getByRole("button", { name: "Undo", exact: true }).click();
+    await browserExpect(review.getByText("Undone", { exact: true })).toBeVisible();
+    expect((await isolationRepository.detail(scope, mara.id)).character.name).toBe("Review Mara");
     await page.goto(`${webOrigin}/story/${campaignId}?character=${mara.id}`);
     await browserExpect(review).toContainText("Review Mara");
     await review.locator("#cast-sources summary").click();
@@ -565,6 +575,160 @@ integration("World Library and campaign version integration", () => {
     await browserExpect(review.getByRole("button", { name: "Retract fact" })).toBeVisible();
     expect((await isolationRepository.detail(scope, mara.id)).character.profile["appearance.description"]).toBe("blue eyes");
     expect((await contextField())?.evidenceId).toBe(observation.id);
+    // Exercise the second client against the same real API and PostgreSQL state.
+    const nextPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const nextErrors: string[] = [];
+    nextPage.on("pageerror", error => nextErrors.push(error.message));
+    await nextPage.goto(`${origin}/app/story/${campaignId}`);
+    await nextPage.locator("[data-campaign-tools] summary").click();
+    await nextPage.locator("[data-tool-action='open-characters']").click();
+    const nextSheet = nextPage.locator("dialog.characters-workspace");
+    await nextSheet.getByRole("button", { name: "Review Mara", exact: true }).click();
+    await nextSheet.getByRole("button", { name: "Edit Name", exact: true }).click();
+    await nextSheet.getByRole("textbox", { name: "Name", exact: true }).fill("Review Marin");
+    await nextSheet.getByRole("button", { name: "Save", exact: true }).click();
+    await browserExpect(nextSheet.getByText("Saved Name.")).toBeVisible();
+    expect((await isolationRepository.detail(scope, mara.id)).character.name).toBe("Review Marin");
+    await nextSheet.getByRole("button", { name: "Undo", exact: true }).click();
+    await browserExpect(nextSheet.getByText("Undone", { exact: true })).toBeVisible();
+    expect((await isolationRepository.detail(scope, mara.id)).character.name).toBe("Review Mara");
+    await nextPage.reload();
+    await nextPage.locator("[data-campaign-tools] summary").click();
+    await nextPage.locator("[data-tool-action='open-characters']").click();
+    await nextSheet.getByRole("button", { name: "Review Mara", exact: true }).click();
+    await nextSheet.getByText("Sources and edit history").click();
+    await nextSheet.getByRole("button", { name: "Retract fact" }).click();
+    await nextSheet.getByRole("button", { name: "Confirm retraction" }).click();
+    await browserExpect(nextSheet.getByRole("button", { name: "Restore fact" })).toBeVisible();
+    expect((await isolationRepository.detail(scope, mara.id)).character.profile["appearance.description"]).toBeUndefined();
+    await nextPage.reload();
+    await nextPage.locator("[data-campaign-tools] summary").click();
+    await nextPage.locator("[data-tool-action='open-characters']").click();
+    await nextSheet.getByRole("button", { name: "Review Mara", exact: true }).click();
+    await nextSheet.getByText("Sources and edit history").click();
+    await browserExpect(nextSheet).toContainText("Retracted fact");
+    await nextSheet.screenshot({ path: resolve(screenshotRoot, "composed-web-next-retracted.png") });
+    // Exercise all remaining sheet write paths against the same real database.
+    const beforeAdded = await isolationRepository.current(scope);
+    const added = await isolationRepository.create(scope, { name: "Composed Added", aliases: [], profile: {}, expectedCastRevision: beforeAdded.revision, expectedBoundary: beforeAdded.boundary, idempotencyKey: crypto.randomUUID() });
+    const roster = await isolationRepository.current(scope);
+    const main = roster.characters.find(person => person.origin.kind === "protagonist")!;
+    const starting = roster.characters.find(person => person.name === "Browser Ally")!;
+    expect(main).toBeDefined(); expect(starting.originProfile).toBeDefined();
+    for (const client of ["nexus", "next"] as const) for (const person of [main, added.character, starting]) {
+      const activePage = client === "nexus" ? page : nextPage;
+      if (client === "nexus") {
+        await activePage.goto(`${webOrigin}/story/${campaignId}?character=${person.id}`);
+      } else {
+        await activePage.goto(`${origin}/app/story/${campaignId}`);
+        await activePage.locator("[data-campaign-tools] summary").click();
+        await activePage.locator("[data-tool-action='open-characters']").click();
+        await nextSheet.getByRole("button", { name: person.name, exact: true }).first().click();
+      }
+      const panel = client === "nexus" ? review : nextSheet;
+      await browserExpect(panel.getByRole("button", { name: "Edit Name", exact: true })).toBeVisible();
+      const readName = async () => person.origin.kind === "protagonist"
+        ? (await (await activePage.request.get(`${origin}/api/v1/campaigns/${campaignId}/character-profile`)).json()).name
+        : (await isolationRepository.detail(scope, person.id)).character.name;
+      expect(await readName()).toBe(person.name);
+      await panel.getByRole("button", { name: "Edit Name", exact: true }).click();
+      await panel.getByRole("textbox", { name: "Name", exact: true }).fill(`${person.name} revised`);
+      await panel.getByRole("button", { name: "Save", exact: true }).click();
+      await browserExpect(panel.getByText("Saved Name.")).toBeVisible();
+      expect(await readName()).toBe(`${person.name} revised`);
+      await panel.getByRole("button", { name: "Undo", exact: true }).click();
+      await browserExpect(panel.getByText("Undone", { exact: true })).toBeVisible();
+      expect(await readName()).toBe(person.name);
+      await activePage.reload();
+      if (client === "nexus") {
+        await activePage.goto(`${webOrigin}/story/${campaignId}?character=${person.id}`);
+      } else {
+        await activePage.locator("[data-campaign-tools] summary").click();
+        await activePage.locator("[data-tool-action='open-characters']").click();
+        await nextSheet.getByRole("button", { name: person.name, exact: true }).first().click();
+      }
+      await browserExpect(panel.getByRole("heading", { name: person.name, exact: true })).toBeVisible();
+    }
+    // A competing API edit before refresh and after refresh must never be undone.
+    const addedId = added.character.id;
+    const competingWrite = async (value: string) => {
+      const current = await isolationRepository.current(scope);
+      const character = current.characters.find(item => item.id === addedId)!;
+      const response = await nextPage.request.patch(`${origin}/api/v1/campaigns/${campaignId}/cast/${addedId}`, { data: {
+        expectedCastRevision: current.revision, expectedCharacterRevision: character.revision, expectedBoundary: current.boundary,
+        idempotencyKey: crypto.randomUUID(), setOverrides: { "story.role": value }
+      } });
+      expect(response.status()).toBe(200);
+    };
+    for (const client of ["nexus", "next"] as const) for (const window of ["before-refresh", "after-refresh"] as const) {
+      const activePage = client === "nexus" ? page : nextPage;
+      const name = (await isolationRepository.detail(scope, addedId)).character.name;
+      if (client === "nexus") await activePage.goto(`${webOrigin}/story/${campaignId}?character=${addedId}`);
+      else { await activePage.goto(`${origin}/app/story/${campaignId}`); await activePage.locator("[data-campaign-tools] summary").click(); await activePage.locator("[data-tool-action='open-characters']").click(); await nextSheet.getByRole("button", { name, exact: true }).first().click(); }
+      const panel = client === "nexus" ? review : nextSheet;
+      await panel.getByRole("button", { name: "Edit Name", exact: true }).click();
+      await panel.getByRole("textbox", { name: "Name", exact: true }).fill(`${name}x`);
+      const pattern = `**/api/v1/campaigns/${campaignId}/cast/${addedId}`;
+      let intercepted = false, saved = false;
+      const markSaved = (response: import("@playwright/test").Response) => {
+        if (response.request().method() === "PATCH" && new URL(response.url()).pathname.endsWith(`/cast/${addedId}`) && response.status() === 200) saved = true;
+      };
+      const handler = async (route: import("@playwright/test").Route) => {
+        if (saved && !intercepted && route.request().method() === "GET") { intercepted = true; await competingWrite(`${client}-${window}`); }
+        await route.fallback();
+      };
+      if (window === "before-refresh") { activePage.on("response", markSaved); await activePage.route(pattern, handler); }
+      await panel.getByRole("button", { name: "Save", exact: true }).click();
+      if (window === "before-refresh") {
+        await browserExpect(panel).toContainText("Undo expired");
+        expect(intercepted).toBe(true); await activePage.unroute(pattern, handler); activePage.off("response", markSaved);
+      } else {
+        await browserExpect(panel.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
+        await competingWrite(`${client}-${window}`);
+        await panel.getByRole("button", { name: "Undo", exact: true }).click();
+        await browserExpect(panel).toContainText("Could not undo");
+      }
+      const actual = await isolationRepository.detail(scope, addedId);
+      expect(actual.character.name).toBe(`${name}x`);
+      expect(actual.character.profile["story.role"]).toBe(`${client}-${window}`);
+    }
+    // A later observed location may be retracted to restore an earlier State Edit.
+    const statePeople: Array<{ client: "nexus" | "next"; id: string; name: string }> = [];
+    for (const client of ["nexus", "next"] as const) {
+      const current = await isolationRepository.current(scope);
+      const name = `State ${client}`;
+      const created = await isolationRepository.create(scope, { name, aliases: [], profile: {}, expectedCastRevision: current.revision, expectedBoundary: current.boundary, idempotencyKey: crypto.randomUUID() });
+      await isolationRepository.applyBatch(scope, { boundary: created.boundary, idempotencyKey: crypto.randomUUID(), commands: [{ kind: "override", characterId: created.character.id, field: "state.location", value: "the docks" }] });
+      statePeople.push({ client, id: created.character.id, name });
+    }
+    const stateTurnId = crypto.randomUUID(), stateNarration = "Both travelers wait at the palace.";
+    await pool.query("UPDATE campaigns SET active_turn_number=3 WHERE id=$1", [campaignId]);
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,3,$4)", [stateTurnId, ownerUserId, campaignId, stateNarration]);
+    const { sha256 } = await import("../../packages/domain/src/text.js");
+    const stateBoundary = (await isolationRepository.current(scope)).boundary;
+    for (const person of statePeople) {
+      await isolationRepository.applyBatch(scope, { boundary: stateBoundary, idempotencyKey: crypto.randomUUID(), commands: [{ kind: "observe", characterId: person.id, field: "state.location", value: "the palace", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: stateTurnId, turnNumber: 3, narrationRevision: 0, sourceHash: sha256(stateNarration), paragraphId: "p1", quote: stateNarration } }] });
+      expect((await isolationRepository.detail(scope, person.id)).character.profile["state.location"]).toBe("the palace");
+      const activePage = person.client === "nexus" ? page : nextPage;
+      if (person.client === "nexus") await activePage.goto(`${webOrigin}/story/${campaignId}?character=${person.id}`);
+      else { await activePage.goto(`${origin}/app/story/${campaignId}`); await activePage.locator("[data-campaign-tools] summary").click(); await activePage.locator("[data-tool-action='open-characters']").click(); await nextSheet.getByRole("button", { name: person.name, exact: true }).click(); }
+      const panel = person.client === "nexus" ? review : nextSheet;
+      const row = panel.locator('[data-path="state.location"]');
+      await browserExpect(row).toContainText("the palace");
+      await row.getByRole("button", { name: "This is wrong" }).click();
+      const decision = activePage.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/decision"));
+      await row.getByRole("button", { name: "Confirm", exact: true }).click();
+      expect((await decision).status()).toBe(200);
+      await browserExpect(row).toContainText("the docks");
+      expect((await isolationRepository.detail(scope, person.id)).character.profile["state.location"]).toBe("the docks");
+      await activePage.reload();
+      if (person.client === "nexus") await activePage.goto(`${webOrigin}/story/${campaignId}?character=${person.id}`);
+      else { await activePage.locator("[data-campaign-tools] summary").click(); await activePage.locator("[data-tool-action='open-characters']").click(); await nextSheet.getByRole("button", { name: person.name, exact: true }).click(); }
+      await browserExpect(panel.locator('[data-path="state.location"]')).toContainText("the docks");
+    }
+    expect(await isolationRepository.current(otherScope)).toEqual(otherSnapshot);
+    expect(nextErrors).toEqual([]);
+    await nextPage.close();
     expect(browserErrors).toEqual([]);
     // The source-served test fixture omits the vendored stylesheet and discovery scan
     // service; its earlier rewind also leaves Story requesting the absent first turn.
@@ -572,10 +736,12 @@ integration("World Library and campaign version integration", () => {
       "404 /vendor/photoswipe/photoswipe.css",
       `503 /api/v1/campaigns/${campaignId}/cast/scans`,
       `404 /api/v1/campaigns/${campaignId}/reader/turns/1`,
-      `409 /api/v1/campaigns/${campaignId}/cast/characters/${mara.id}/observations/${observation.id}/decision-preview`
+      `409 /api/v1/campaigns/${campaignId}/cast/characters/${mara.id}/observations/${observation.id}/decision-preview`,
+      `409 /api/v1/campaigns/${campaignId}/cast/${addedId}`
     ]);
     expect(failedResponses.filter(failure => !expectedFailures.has(failure))).toEqual([]);
     expect(failedResponses).toContain(`409 /api/v1/campaigns/${campaignId}/cast/characters/${mara.id}/observations/${observation.id}/decision-preview`);
+    expect(failedResponses).toContain(`409 /api/v1/campaigns/${campaignId}/cast/${addedId}`);
     // Navigation and panel changes abort these in-flight fixture loads.
     const expectedAborts = new Set([
       "GET /vendor/photoswipe/photoswipe.css: net::ERR_ABORTED",

@@ -1,7 +1,7 @@
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
-import { playableCharacterSchema } from "../../packages/contracts/src/world-library";
-import { mountSectionRefine } from "../../apps/web/src/character-editor/section-refine";
+import { playableCharacterSchema } from "../../packages/contracts/src/world-library.js";
+import { mountSectionRefine } from "../../apps/web/src/character-editor/section-refine.js";
 
 const character = () => playableCharacterSchema.parse({ id: "hero", name: "Hero", profile: { story: { role: "Guide" }, appearance: { eyes: "Silver" } }, rpgStats: [{ name: "Strength" }] });
 const flush = async () => { await Promise.resolve(); await Promise.resolve(); };

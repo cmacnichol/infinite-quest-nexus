@@ -1,6 +1,7 @@
+import { authoringJobLabel } from "../../apps/web-next/src/authoring-job-label.js";
 import { describe, expect, it } from "vitest";
 import { worldContentSchema } from "../../packages/contracts/src/world-library.js";
-import { applyRefinedSection, authoringJobLabel, refinedSectionDiff, refineSectionPaths, sectionRefineRequest } from "../../packages/client-core/src/characters/section-refine.js";
+import { applyRefinedSection, refinedSectionDiff, refineSectionPaths, sectionRefineRequest } from "../../packages/client-core/src/characters/section-refine.js";
 
 const content = () => worldContentSchema.parse({ world: { title: "World" }, playableCharacters: [{ id: "hero", name: "Hero", profile: { appearance: { eyes: "Silver" }, story: { role: "Guide" } }, rpgStats: [{ name: "Strength" }], source: { origin: "test" } }, { id: "other", name: "Other" }] });
 

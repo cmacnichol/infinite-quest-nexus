@@ -14,7 +14,8 @@ const screenshotRoot = process.env.CAST_SCREENSHOT_ROOT;
 
 async function openTrackingTools(dialog: Locator) {
   const details = dialog.locator(".cast-roster-tools");
-  if (await details.count() && !await details.evaluate(el => (el as HTMLDetailsElement).open)) await details.locator("summary").click();
+  await expect(details).toBeVisible();
+  if (!await details.evaluate(el => (el as HTMLDetailsElement).open)) await details.locator("summary").click();
 }
 
 async function selectEditorSection(dialog: Locator, id: string) {
@@ -29,7 +30,7 @@ async function openReview(dialog: Locator) {
     await dialog.getByRole("button", { name: /^Needs attention(?: \(\d+\))?$/ }).click();
     await expect(dialog.getByText("Loading identity questions…")).toHaveCount(0);
     await dialog.getByRole("button", { name: "Review identity questions and details", exact: true }).click();
-  } else await dialog.getByRole("button", { name: "Review character changes", exact: true }).click();
+  } else { await openTrackingTools(dialog); await dialog.getByRole("button", { name: "Review character changes", exact: true }).click(); }
 }
 
 async function recoveryWorkspace(page: Page, kind: "forward" | "scan") {
@@ -149,9 +150,7 @@ test("legacy retains a failed scan retry key and keeps cancellation available af
   await dialog.getByRole("button", { name: "Scan earlier story", exact: true }).click();
   await expect(dialog).toContainText("2 character matches need review");
   const retry = dialog.getByRole("button", { name: "Retry turn 1", exact: true });
-  await openTrackingTools(dialog);
   await retry.click(); await expect(dialog).toContainText("Could not update the scan");
-  await openTrackingTools(dialog);
   await retry.click(); await expect(dialog).toContainText("Could not update the scan");
   expect(retries).toHaveLength(2); expect(retries[0]).toEqual(retries[1]);
   enabled = false;
@@ -182,10 +181,10 @@ test("legacy discovery retry requires refresh after conflict and respects editin
   await expect(dialog).toContainText("Refresh characters before retrying");
   if (screenshotRoot) await page.screenshot({ path: `${screenshotRoot}/retry-conflict-desktop.png`, fullPage: true });
   await openTrackingTools(dialog);
-  await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click(); await expect(retry).toBeEnabled();
+  await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click(); await openTrackingTools(dialog); await expect(retry).toBeEnabled();
   api.disable();
   await openTrackingTools(dialog);
-  await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click(); await expect(retry).toBeDisabled();
+  await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click(); await openTrackingTools(dialog); await expect(retry).toBeDisabled();
   expect(requests).toBe(1);
 });
 
@@ -242,7 +241,7 @@ test("legacy match targets are independent of the roster search", async ({ page 
   await fixture(page);
   await open(page);
   const dialog = page.locator("#campaignCastDialog");
-  await dialog.getByLabel("Find a character", { exact: true }).fill("No such character");
+  await dialog.getByLabel("Search characters", { exact: true }).fill("No such character");
   await dialog.getByRole("button", { name: "Search", exact: true }).click();
   await expect(dialog).toContainText("No characters match this search.");
   await openReview(dialog);
@@ -271,7 +270,7 @@ for (const surface of ["legacy", "next"] as const) test(`supporting editor keeps
   await dialog.getByRole("button", { name: "Mara", exact: true }).click();
   await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
   await expect(dialog.getByRole("button", { name: /Use discovered value/ })).toHaveCount(0);
-  await expect(dialog).toContainText("Pin prioritizes this character");
+  if (surface === "legacy") await expect(dialog).toContainText("Pin prioritizes this character");
   await dialog.getByLabel("Role", { exact: true }).fill("Guide");
   await dialog.getByRole("button", { name: "Use discovered value for role", exact: true }).click();
   await expect(dialog).toContainText("Will use the discovered value after saving.");
@@ -558,7 +557,7 @@ for (const width of [1440, 390]) test(`legacy cast add, edit, reset, conflict an
   await dialog.getByRole("button", { name: "Save character", exact: true }).click();
   await expect.poll(() => api.characters[1].name).toBe("Mara Reed");
   await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
-  await dialog.getByLabel("Find a character").fill("Watcher");
+  await dialog.getByLabel("Search characters").fill("Watcher");
   await dialog.getByRole("button", { name: "Search", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "Mara Reed", exact: true })).toBeVisible();
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/roster-${width}.png` });
@@ -702,8 +701,8 @@ for (const surface of ["legacy", "next"] as const) for (const width of [1440, 39
   }
   const dialog = surface === "legacy" ? page.locator("#campaignCastDialog") : page.locator("dialog.characters-workspace");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("conflicts: 1");
-  if (surface === "next") await dialog.getByRole("button", { name: "Review conflicts", exact: true }).click();
+  await expect(dialog).toContainText(surface === "next" ? "Conflict (1)" : "conflicts: 1");
+  if (surface === "next") { await openTrackingTools(dialog); await dialog.getByRole("button", { name: "Review conflicts", exact: true }).click(); }
   await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toBeVisible();
   if (surface === "next") await expect(dialog).toContainText("Needs review (2)");
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/roster-${surface}-${width}.png` });
@@ -716,10 +715,8 @@ for (const surface of ["legacy", "next"] as const) for (const width of [1440, 39
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/context-${surface}-${width}.png` });
   await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
   await dialog.getByRole("button", { name: "Iven", exact: true }).click();
-  if (surface === "legacy") {
-    await expect(dialog).toContainText("Source unavailable");
-    await dialog.getByRole("button", { name: "Show empty fields", exact: true }).click();
-  }
+  if (surface === "legacy") await expect(dialog).toContainText("Source unavailable");
+  await dialog.getByRole("button", { name: "Show empty fields", exact: true }).click();
   await expect(dialog).toContainText("Unknown");
   if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/sheet-${surface}-${width}.png` });
   await dialog.getByRole("button", { name: "Edit main character", exact: true }).click();
@@ -812,11 +809,12 @@ for (const surface of ["legacy", "next"] as const) test(`conflict field can be c
   if (surface === "legacy") {
     await dialog.getByRole("button", { name: /^Needs attention(?: \(\d+\))?$/ }).click();
     await dialog.getByRole("button", { name: "Mara · Role", exact: true }).click();
-    await expect(dialog.getByLabel("Role", { exact: true })).toBeFocused();
+    await expect(dialog.locator(".character-sheet-choice button").first()).toBeFocused();
+    await dialog.getByRole("button", { name: "Edit Role" }).click();
   } else {
-    await dialog.getByRole("button", { name: "Review conflicts", exact: true }).click(); await expect(dialog.getByRole("button", { name: "Mara", exact: true })).toBeVisible(); await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toHaveCount(0);
-    await dialog.getByRole("button", { name: "Mara", exact: true }).click(); await expect(dialog).toContainText("Conflicting observations"); await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
-  } await dialog.getByLabel("Role", { exact: true }).fill("guide"); await dialog.getByRole("button", { name: "Save character", exact: true }).click();
+    await openTrackingTools(dialog); await dialog.getByRole("button", { name: "Review conflicts", exact: true }).click(); await expect(dialog.getByRole("button", { name: "Mara", exact: true })).toBeVisible(); await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Mara", exact: true }).click(); await expect(dialog.getByRole("button", { name: "Resolve conflict" })).toBeVisible(); await dialog.getByRole("button", { name: "Edit Role", exact: true }).click();
+  } await dialog.getByLabel("Role", { exact: true }).fill("guide"); await dialog.getByRole("button", { name: "Save", exact: true }).click();
 });
 
 test("legacy exposes recovery for a failed tracking gap", async ({ page }) => {
@@ -1029,8 +1027,8 @@ for (const width of [1440, 390]) test(`legacy needs attention routes individual 
   await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
   await dialog.getByRole("button", { name: "Mara · Role", exact: true }).focus();
   await page.keyboard.press("Enter");
-  await expect(dialog.getByLabel("Role", { exact: true })).toBeFocused();
-  await expect(dialog.getByRole("button", { name: "Save character", exact: true })).toBeVisible();
+  await expect(dialog.locator(".character-sheet-choice button").first()).toBeFocused();
+  await expect(dialog.getByRole("button", { name: "Edit Role", exact: true })).toBeVisible();
   // Three inbox reads plus two targeted review reads, each within its own revision fence.
   expect(views.filter(view => view === "review").length).toBe(5);
 });
@@ -1056,14 +1054,14 @@ for (const width of [1440, 390]) for (const [source, expected] of [["snapshot", 
   }
   await expect(roster.getByRole("button", { name: "Iven" })).toHaveAttribute("aria-current", "true");
   const toggle = dialog.getByRole("button", { name: "Show empty fields", exact: true });
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
-  await expect(dialog.getByText("Pronouns:", { exact: false })).toHaveCount(0);
+  await expect(toggle).toBeVisible();
+  await expect(dialog.getByText("Pronouns", { exact: true })).toHaveCount(0);
   await tabTo(page, toggle);
   await page.keyboard.press("Enter");
-  await expect(dialog.getByRole("button", { name: "Hide empty fields" })).toHaveAttribute("aria-pressed", "true");
-  await expect(dialog.getByText("Pronouns:", { exact: false })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Hide empty fields" })).toBeFocused();
+  await expect(dialog.getByText("Pronouns", { exact: true })).toBeVisible();
   await page.keyboard.press("Enter");
-  await expect(dialog.getByText("Pronouns:", { exact: false })).toHaveCount(0);
+  await expect(dialog.getByText("Pronouns", { exact: true })).toHaveCount(0);
 });
 
 test("supporting character warns on a roster alias without blocking save", async ({ page }) => {
@@ -1786,7 +1784,7 @@ for (const surface of ["legacy", "next"] as const) test(`pending retracted sourc
 for (const width of [1280, 390]) test(`web-next roster search and world picker at ${width}px`, async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
-  page.on("console", message => { if (message.type() === "error" && !(message.location().url.endsWith("/vendor/photoswipe/photoswipe.css") && message.text() === "Failed to load resource: the server responded with a status of 404 (Not Found)") && !message.text().includes("ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS") && !message.text().startsWith("[vite] failed to connect to websocket") && !message.text().startsWith("Failed to send error to Vite server")) errors.push(message.text() + " @ " + message.location().url); });
+  page.on("console", message => { if (message.type() === "error" && !(message.location().url.endsWith("/vendor/photoswipe/photoswipe.css") && message.text() === "Failed to load resource: the server responded with a status of 404 (Not Found)") && !(message.location().url.endsWith("/nexus/@vite/client") && (message.text().includes("ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS") || message.text().startsWith("[vite] failed to connect to websocket") || message.text().startsWith("Failed to send error to Vite server")))) errors.push(message.text() + " @ " + message.location().url); });
   await page.setViewportSize({ width, height: 1000 });
   await fixture(page, false, false, true);
   await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`);

@@ -74,11 +74,11 @@ test("mechanics pagination preserves keyboard focus and reports its range", asyn
   await page.addInitScript((session) => sessionStorage.setItem("iqn:character-workspace:session:local", JSON.stringify(session)), { version: 1, key: "local", origin: "world-editor", mode: "edit", workflowId: "workflow-1", parentRoute: "/app/worlds/world-1?tab=characters", expectedWorldRevision: 4, parentDraft: draft, worldContext: draft, rosterSummaries: [], candidate, expiresAt: Date.now() + 60_000 });
   await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/characters/local`);
   await page.locator('[data-character-stage="mechanics"]').click();
-  await expect(page.getByRole("status").filter({ hasText: "Rows 1�50 of 51" })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Rows 1–50 of 51" })).toBeVisible();
   await page.getByRole("button", { name: "Next rows" }).focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("textbox", { name: "Name for row 51" })).toBeFocused();
-  await expect(page.getByRole("status").filter({ hasText: "Rows 51�51 of 51" })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Rows 51–51 of 51" })).toBeVisible();
   await page.screenshot({ path: info.outputPath("mechanics-pagination-390.png") });
   await page.getByRole("button", { name: "Previous rows" }).focus();
   await page.keyboard.press("Enter");

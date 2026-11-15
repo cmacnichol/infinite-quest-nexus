@@ -45,7 +45,7 @@ export function renderMechanicsTable(host: HTMLElement, options: { kind: "stat" 
       previous.addEventListener("click", () => { if (disposed || page === 0) return; page--; render(); host.querySelector<HTMLInputElement>("tbody input")?.focus(); });
       const next = document.createElement("button"); next.type = "button"; next.textContent = "Next rows"; next.disabled = (page + 1) * pageSize >= items.length;
       next.addEventListener("click", () => { if (disposed || (page + 1) * pageSize >= items.length) return; page++; render(); host.querySelector<HTMLInputElement>("tbody input")?.focus(); });
-      const range = document.createElement("span"); range.setAttribute("role", "status"); range.textContent = `Rows ${page * pageSize + 1}–${Math.min((page + 1) * pageSize, items.length)} of ${items.length}`;
+      const range = document.createElement("span"); range.setAttribute("role", "status"); range.textContent = `Rows ${page * pageSize + 1}â€“${Math.min((page + 1) * pageSize, items.length)} of ${items.length}`;
       host.append(previous, range, next);
     }
     const add = document.createElement("button"); add.type = "button"; add.textContent = `Add ${singular}`; add.disabled = items.length >= options.max;

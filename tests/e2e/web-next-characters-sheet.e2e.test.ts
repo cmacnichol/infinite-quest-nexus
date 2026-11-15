@@ -9,6 +9,11 @@ for (const width of [1280, 390]) test(`Web-Next sheet saves and undoes at ${widt
   await page.locator("[data-tool-action='open-characters']").click();
   const dialog = page.locator("dialog.characters-workspace");
   await dialog.getByRole("button", { name: "Mara", exact: true }).click();
+  await dialog.getByRole("button", { name: "Show empty fields", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await expect(dialog.getByRole("button", { name: "Hide empty fields", exact: true })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(dialog.getByRole("button", { name: "Show empty fields", exact: true })).toBeFocused();
   await dialog.getByRole("button", { name: "Edit Name", exact: true }).click();
   await dialog.getByRole("textbox", { name: "Name", exact: true }).fill("Marin");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();

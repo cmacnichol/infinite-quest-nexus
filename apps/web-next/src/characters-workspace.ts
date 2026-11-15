@@ -150,7 +150,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
           if (!sheetRenderPending || !current()) return;
           render();
           Array.from(dialog.querySelectorAll<HTMLElement>("[data-path]")).find(row => row.dataset.path === path)?.querySelector<HTMLElement>("button")?.focus();
-        }, showEmpty, onShowEmpty(value) { showEmpty = value; render(); },
+        }, showEmpty, onShowEmpty(value) { showEmpty = value; render(); dialog.querySelector<HTMLElement>("[data-show-empty-toggle]")?.focus(); },
         compareLabel: main ? "Load latest version" : "Compare latest", onCompareLatest() { void refresh(); },
         confirmDiscard: () => dependencies?.confirm?.("Discard unsaved character changes?") ?? document.defaultView?.confirm("Discard unsaved character changes?") ?? false, isCurrent: current,
         async onChange(change: SheetChange) {

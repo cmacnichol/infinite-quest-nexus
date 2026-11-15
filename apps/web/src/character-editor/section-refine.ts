@@ -1,5 +1,5 @@
-import { playableCharacterSchema, type PlayableCharacter } from "../../../../packages/contracts/src/world-library";
-import { applyRefinedSection, refinedSectionDiff, type RefineSection } from "../../../../packages/client-core/src/characters/section-refine";
+import { playableCharacterSchema, type PlayableCharacter } from "../../../../packages/contracts/src/world-library.js";
+import { applyRefinedSection, refinedSectionDiff, type RefineSection } from "../../../../packages/client-core/src/characters/section-refine.js";
 
 type Options = { section: RefineSection; current(): PlayableCharacter; generate(current: PlayableCharacter, instruction: string, signal: AbortSignal): Promise<PlayableCharacter>; onApply(next: PlayableCharacter): void; available: boolean; unavailableText: string };
 

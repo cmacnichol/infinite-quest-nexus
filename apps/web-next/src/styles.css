@@ -3957,3 +3957,8 @@ footer p:first-child {
   width: 20px;
   height: 20px;
 }
+
+/* On short viewports, a sticky ledger can cover the focused field. */
+@media (max-height: 500px) {
+  .character-progress-ledger { position: static; }
+}

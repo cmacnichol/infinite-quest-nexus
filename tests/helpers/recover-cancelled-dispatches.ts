@@ -8,13 +8,16 @@ export function runDispatchRecovery(manifest: unknown, reference: string): void 
   database.password = "";
   const variables = ["-X", "-w", "-v", `manifest=${JSON.stringify(manifest)}`, "-v", `reference=${reference}`, "-f", "-"];
   const external = process.env.INFINITEQUEST_TEST_DATABASE_URL !== undefined;
-  const result = spawnSync(external ? "psql" : "docker", external
+  const container = process.env.INFINITEQUEST_TEST_POSTGRES_CONTAINER;
+  if (container && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(container)) throw new Error("Invalid test PostgreSQL container name.");
+  const useHostPsql = external && !container;
+  const result = spawnSync(useHostPsql ? "psql" : "docker", useHostPsql
     ? ["--dbname", database.toString(), ...variables]
-    : ["exec", "-i", "infinitequest-integration-postgres", "psql",
+    : ["exec", "-i", container ?? "infinitequest-integration-postgres", "psql",
       "-U", decodeURIComponent(database.username), "-d", database.pathname.slice(1), ...variables], {
     input: readFileSync("scripts/recover-cancelled-dispatches.sql"),
     encoding: "utf8",
-    env: external ? { ...process.env, PGPASSWORD: password } : process.env,
+    env: useHostPsql ? { ...process.env, PGPASSWORD: password } : process.env,
     timeout: 15_000,
     windowsHide: true
   });

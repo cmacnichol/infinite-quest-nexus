@@ -1,5 +1,6 @@
 import { mountSectionRefine } from "../../web/src/character-editor/section-refine";
-import { authoringJobLabel, sectionRefineRequest, type RefineSection } from "../../../packages/client-core/src/characters/section-refine";
+import { sectionRefineRequest, type RefineSection } from "../../../packages/client-core/src/characters/section-refine";
+import { authoringJobLabel } from "./authoring-job-label";
 import { createNexusApiClient, createNoopSessionPort } from "@infinite-quest/client-web";
 import { renderOrganizePanel } from "./character-organize-panel";
 import { WORLD_EDITOR_FIELDS } from "../../../packages/client-core/src/characters/profile-fields";
