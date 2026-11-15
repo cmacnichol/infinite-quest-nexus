@@ -30,6 +30,7 @@ it("retries the same receipt and disables a stale confirmation", async () => {
   confirm.click(); await vi.waitFor(() => expect(document.body.textContent).toContain("Retry"));
   confirm.click(); await vi.waitFor(() => expect(document.body.textContent).toContain("Refresh before"));
   expect(apply.mock.calls[0]![1]).toEqual(apply.mock.calls[1]![1]); expect(confirm.disabled).toBe(true);
+  expect([...document.querySelectorAll("button")].some(b => b.textContent === "Reload character")).toBe(true);
 });
 
 it("retains invalidated retraction history without offering restore", () => {
@@ -49,4 +50,5 @@ it("rejects a stale preview without offering a write", async () => {
   [...document.querySelectorAll("button")].find(b => b.textContent === "Retract fact")!.click();
   await vi.waitFor(() => expect(document.body.textContent).toContain("Refresh before trying again"));
   expect(document.body.textContent).not.toContain("Confirm retraction"); expect(apply).not.toHaveBeenCalled();
+  expect([...document.querySelectorAll("button")].some(b => b.textContent === "Reload character")).toBe(true);
 });

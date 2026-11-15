@@ -81,7 +81,11 @@ async function alreadyResolved(client: DatabaseClient, scope: CastScope, source:
   const rows = (await client.query(`SELECT source,proposal,resolution_receipt,detail_decisions FROM campaign_cast_discovery_candidates
     WHERE campaign_id=$1 AND owner_user_id=$2 AND status<>'cancelled' AND source->>'turnId'=$3
       AND source->>'narrationRevision'=$4 AND source->>'sourceHash'=$5`, [scope.campaignId, scope.ownerUserId, source.turnId, String(source.narrationRevision), source.sourceHash])).rows;
+  return resolvedAmong(rows, source, target, active);
+}
+function resolvedAmong(rows: any[], source: any, target: ReviewTarget, active: ActiveReview): boolean {
   return rows.some(row => {
+    if (row.source.turnId !== source.turnId || String(row.source.narrationRevision) !== String(source.narrationRevision) || row.source.sourceHash !== source.sourceHash) return false;
     if (!row.resolution_receipt) return false;
     if (target.kind === "identity") return sameTarget(active, source, target, row.source, { kind: "identity", proposal: row.proposal });
     return row.proposal.observations.some((observation: any, index: number) => {
@@ -139,19 +143,41 @@ export function createCastReviewDecisionRepository(pool: DatabasePool, editingEn
         await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
         const cast = await readCastSnapshotWithClient(client, scope);
         const active = await readActiveReviewDismissals(client, scope, cast.characters);
+        const decisions = active.rows.filter(decision => !query.cursor || decision.id > query.cursor)
+          .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
         const entries: { decision: Row; row: any }[] = [];
-        for (const decision of active.rows) {
-          if (query.cursor && decision.id <= query.cursor) continue;
-          const row = (await client.query("SELECT * FROM campaign_cast_discovery_candidates WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3", [decision.candidate_id, scope.campaignId, scope.ownerUserId])).rows[0];
-          if (row && await currentSource(client, scope, cast, row)) entries.push({ decision, row });
+        // Eligibility is evaluated before the page limit. Each bounded batch replaces
+        // the old per-decision candidate and source round trips.
+        for (let offset = 0; offset < decisions.length && entries.length <= query.limit; offset += 50) {
+          const batch = decisions.slice(offset, offset + 50);
+          const rows = (await client.query(`SELECT p.*, n.turn_number, n.correction_revision, n.effective_narration
+            FROM campaign_cast_discovery_candidates p LEFT JOIN effective_turn_narrations n
+              ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
+            WHERE p.campaign_id=$1 AND p.owner_user_id=$2 AND p.id=ANY($3::uuid[])`,
+          [scope.campaignId, scope.ownerUserId, batch.map(item => item.candidate_id)])).rows;
+          const byId = new Map(rows.map(row => [row.id, row]));
+          for (const decision of batch) {
+            const row = byId.get(decision.candidate_id);
+            if (!row) continue;
+            const parsed = castDiscoverySourceSchema.safeParse(row.source);
+            if (!parsed.success) continue;
+            const source = parsed.data;
+            if (source.scope.ownerUserId !== scope.ownerUserId || source.scope.campaignId !== scope.campaignId
+              || source.timelineRevision !== cast.boundary.timelineRevision || source.turnNumber > cast.boundary.turnNumber
+              || row.turn_number !== source.turnNumber || row.correction_revision !== source.narrationRevision
+              || typeof row.effective_narration !== "string" || sha256(row.effective_narration) !== source.sourceHash) continue;
+            entries.push({ decision, row });
+            if (entries.length > query.limit) break;
+          }
         }
-        entries.sort((a, b) => a.decision.id < b.decision.id ? -1 : a.decision.id > b.decision.id ? 1 : 0);
         const selected = entries.slice(0, query.limit);
-        const page = [];
-        for (const { decision, row } of selected) {
+        const resolvedRows = selected.length ? (await client.query(`SELECT source,proposal,resolution_receipt,detail_decisions FROM campaign_cast_discovery_candidates
+          WHERE campaign_id=$1 AND owner_user_id=$2 AND status<>'cancelled' AND resolution_receipt IS NOT NULL
+            AND source->>'turnId'=ANY($3::text[])`, [scope.campaignId, scope.ownerUserId, selected.map(item => item.row.source.turnId)])).rows : [];
+        const page = selected.map(({ decision, row }) => {
           const target: ReviewTarget = decision.target_payload;
-          page.push({ decisionId: decision.id, candidateId: row.id, source: decision.source, target: target.kind === "identity" ? target : { kind: "detail", observationIndex: decision.observation_index, observation: target.observation }, canRestore: eligible(row, target, decision.observation_index) && !await alreadyResolved(client, scope, row.source, target, active) });
-        }
+          return { decisionId: decision.id, candidateId: row.id, source: decision.source, target: target.kind === "identity" ? target : { kind: "detail", observationIndex: decision.observation_index, observation: target.observation }, canRestore: eligible(row, target, decision.observation_index) && !resolvedAmong(resolvedRows, row.source, target, active) };
+        });
         return dismissedReviewPageSchema.parse({ reviewRevision: await readReviewRevision(client, scope), revision: cast.revision, boundary: cast.boundary, decisions: page, nextCursor: entries.length > query.limit ? page.at(-1)!.decisionId : null });
       });
     }

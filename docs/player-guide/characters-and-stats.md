@@ -36,6 +36,8 @@ For a detail supported by the original narration, **Apply and next** accepts the
 
 In character review, **Skip for now** only moves past an item for the current review session. **Dismiss discovery** hides that proposed identity and its details for the same source; **Dismiss detail** hides just that proposed detail, including when you then attach or create the identity. Neither action deletes the story or bans a name. A different turn or corrected narration can produce new evidence to review. Open **Dismissed** and choose **Undo** to return a decision to pending review. Earlier dismissals made before this recovery workflow remain effective but cannot be listed or undone here. Dismissals are operational inbox decisions and do not travel with campaign archives or branches, so imported or branched history can be reviewed again.
 
+If a fact preview or confirmation says the story or character changed, choose **Reload character** to refresh the current character, then review the fact again.
+
 Tracking progress and review progress are separate. When tracking has a gap, open recovery to see the affected turn and reason. Retry failed work when appropriate, resume a paused scan, or preview the suggested missing range. Check the estimate before starting; completed work is preserved. Opening recovery or reviewing a character does not call the text provider.
 
 Use **Likely included for this input** to estimate which characters fit the current story context. Enter the intended story input and refresh the estimate. It explains selection and omissions within the available budget without sending a model request. Refresh after the story or characters change; later routing and action assessment can change the final selection.

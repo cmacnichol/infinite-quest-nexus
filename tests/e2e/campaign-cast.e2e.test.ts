@@ -1693,7 +1693,7 @@ for (const surface of ["legacy", "next"] as const) test(`fact correction native 
     const cdp = await context.newCDPSession(page); const capture = await cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false }); await writeFile(info.outputPath(`fact-native-200-${surface}.png`), Buffer.from(capture.data, "base64"));
   } finally { await context.close(); }
 });
-for (const surface of ["legacy", "next"] as const) test(`fact correction safeguards ${surface}`, async ({ page }) => {
+for (const surface of ["legacy", "next"] as const) test(`fact correction safeguards ${surface}`, async ({ page }, info) => {
   const api = await fixture(page, false, true, false, false, false, false, false, false, true);
   const boundary = { turnNumber: 1, timelineRevision: 0 };
   const source = { id: protagonistId, characterId: candidateId, field: "story.role", value: "guide", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: "55555555-5555-4555-8555-555555555555", turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: "Mara waits at the gate." } };
@@ -1703,13 +1703,20 @@ for (const surface of ["legacy", "next"] as const) test(`fact correction safegua
     const restore = route.request().postDataJSON().action === "restore";
     return route.fulfill({ json: { field: "story.role", currentValue: "captain", projectedValue: restore ? null : "captain", currentConflict: false, projectedConflict: restore, source, castRevision: 0, characterRevision: 0, boundary } });
   });
-  await page.route("**/decision", async route => { const input = route.request().postDataJSON(); if (input.action === "restore") return route.fallback(); keys.push(input.idempotencyKey); if (keys.length === 1) { await gate; return route.fulfill({ status: 503, json: { code: "unavailable" } }); } return route.fallback(); });
+  await page.route("**/decision", async route => { const input = route.request().postDataJSON(); if (input.action === "restore") return route.fallback(); keys.push(input.idempotencyKey); if (keys.length === 1) { await gate; return route.fulfill({ status: 503, json: { code: "unavailable" } }); } if (keys.length === 2) return route.fulfill({ status: 409, json: { code: "cast_revision_conflict" } }); return route.fallback(); });
   if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
   const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace"); await dialog.getByRole("button", { name: "Mara", exact: true }).click(); await dialog.getByText("Sources and edit history").click();
   await dialog.getByRole("button", { name: "Retract fact" }).click(); await expect(dialog).toContainText("Refresh before trying again"); await expect(dialog.getByRole("button", { name: "Confirm retraction" })).toHaveCount(0);
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click(); await dialog.getByRole("button", { name: "Retract fact" }).click(); await expect(dialog).toContainText("displayed value will remain unchanged");
+  const reload = dialog.getByRole("button", { name: "Reload character" }); await expect(reload).toBeFocused();
+  await dialog.screenshot({ path: info.outputPath(`fact-stale-reload-${surface}.png`) });
+  await reload.click(); await expect(dialog.getByText("Sources and edit history")).toBeFocused();
+  await dialog.getByRole("button", { name: "Retract fact" }).click(); await expect(dialog).toContainText("displayed value will remain unchanged");
   const confirm = dialog.getByRole("button", { name: "Confirm retraction" }); await confirm.click(); await expect.poll(() => keys.length).toBe(1); await expect(confirm).toBeDisabled(); await confirm.evaluate((el: HTMLButtonElement) => el.click()); expect(keys).toHaveLength(1); release();
-  await expect(dialog).toContainText("Retry to check the same request"); await confirm.click(); await expect(dialog.getByRole("button", { name: "Restore fact" })).toBeVisible(); expect(keys[0]).toBe(keys[1]);
+  await expect(dialog).toContainText("Retry to check the same request"); await confirm.click();
+  await expect(dialog.getByRole("button", { name: "Reload character" })).toBeFocused(); expect(keys[0]).toBe(keys[1]);
+  await dialog.getByRole("button", { name: "Reload character" }).click(); await expect(dialog.getByText("Sources and edit history")).toBeFocused();
+  await dialog.getByRole("button", { name: "Retract fact" }).click(); await dialog.getByRole("button", { name: "Confirm retraction" }).click();
+  await expect(dialog.getByRole("button", { name: "Restore fact" })).toBeVisible(); expect(keys[2]).not.toBe(keys[1]);
   await dialog.getByRole("button", { name: "Restore fact" }).click(); await expect(dialog).toContainText("After: Conflicting observations"); await dialog.getByRole("button", { name: "Confirm restore" }).click(); await expect(dialog.getByRole("button", { name: "Retract fact" })).toBeVisible(); expect(api.writes.map(w => w.action)).toEqual(["retract", "restore"]);
 });
 

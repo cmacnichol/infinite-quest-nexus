@@ -41,6 +41,21 @@ export function renderObservationReview(options: Options) {
       const area = node("section"), message = node("p", "Loading preview…"); area.setAttribute("role", "region"); area.setAttribute("aria-label", `${action === "restore" ? "Restore" : "Retract"} fact confirmation`); area.append(message); row.append(area);
       const request: ObservationDecisionRequest = { action, expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: detail.boundary, idempotencyKey: crypto.randomUUID(), ...(action === "restore" ? { retractionEventId: status!.retractionEventId! } : {}) } as ObservationDecisionRequest;
       const cancel = button("Cancel", () => { if (busy) return; area.remove(); trigger.disabled = !options.editing(); trigger.focus(); });
+      function offerReload(target: HTMLElement) {
+        const reload = button("Reload character", () => { void reloadCharacter(); });
+        target.append(reload); reload.focus();
+        async function reloadCharacter() {
+          if (busy || !options.current()) return;
+          busy = true; reload.disabled = true; cancel.disabled = true;
+          try { await options.refresh(); }
+          catch {
+            if (options.current() && area.isConnected) {
+              message.textContent = "Could not reload the character. Try again.";
+              reload.disabled = false; cancel.disabled = false; reload.focus();
+            }
+          } finally { busy = false; }
+        }
+      }
       try {
         const preview = await options.preview(observation.id, request);
         if (!options.current() || !area.isConnected) return;
@@ -63,12 +78,14 @@ export function renderObservationReview(options: Options) {
             const stale = (error as { statusCode?: number }).statusCode === 409;
             feedback.textContent = stale ? "The story or character changed. Refresh before trying again." : "Could not confirm the change. Retry to check the same request.";
             confirm.disabled = stale || !options.editing();
+            if (stale) offerReload(area);
           } finally { busy = false; cancel.disabled = false; }
         }
       } catch (error) {
         if (!options.current()) return;
         message.textContent = (error as { statusCode?: number }).statusCode === 409 ? "The story or character changed. Refresh before trying again." : "Preview unavailable. Cancel and try again.";
-        area.append(cancel); busy = false; cancel.focus();
+        area.append(cancel); busy = false;
+        if ((error as { statusCode?: number }).statusCode === 409) offerReload(area); else cancel.focus();
       }
     }
   }

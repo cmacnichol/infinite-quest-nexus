@@ -29,6 +29,52 @@ describe('cast review decisions', () => {
     expect((await pool.query('SELECT 1 FROM campaign_cast_state WHERE campaign_id=$1', [campaignId])).rowCount).toBe(0);
     expect((await pool.query('SELECT 1 FROM campaign_cast_characters WHERE campaign_id=$1', [campaignId])).rowCount).toBe(0);
   });
+  it('bounds dismissal page queries as active history grows', async () => {
+    const worldId = randomUUID(), versionId = randomUUID(), campaignId = randomUUID(), turnId = randomUUID(), id = randomUUID();
+    await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Scale')", [worldId, ownerUserId]);
+    await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) VALUES($1,$2,$3,1,'{}')", [versionId, worldId, ownerUserId]);
+    await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title,active_turn_number) VALUES($1,$2,$3,'Scale',1)", [campaignId, ownerUserId, versionId]);
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,1,'Mara arrives.')", [turnId, ownerUserId, campaignId]);
+    const scope = { ownerUserId, campaignId }, repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const cast = await repo.initialize(scope);
+    const source = buildCastDiscoverySource({ scope, turnId, turnNumber: 1, timelineRevision: 0, narrationRevision: 0, narration: 'Mara arrives.' });
+    const proposal = { localKey: 'mara', name: 'Mara', aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: 'p1', quote: 'Mara arrives.' }], observations: [] };
+    await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason) VALUES($1,$2,$3,0,'mara',$4,$5,'identity_needs_review')", [id, ownerUserId, campaignId, JSON.stringify(source), JSON.stringify(proposal)]);
+    await repo.reviewDecision(scope, id, { action: 'dismiss_identity', expectedCastRevision: cast.revision, expectedBoundary: cast.boundary, expectedReviewRevision: 0, sourceHash: source.sourceHash, idempotencyKey: 'first' });
+    const client = await pool.connect();
+    let count = 0, maxCandidateRows = 0;
+    const counted = { connect: async () => ({ query: async (...args: any[]) => {
+      count++; const result = await (client.query as any)(...args);
+      if (String(args[0]).includes('SELECT p.id,p.reason,p.proposal')) maxCandidateRows = Math.max(maxCandidateRows, result.rows.length);
+      return result;
+    }, release() {} }) } as unknown as DatabasePool;
+    const measured = createPostgresCampaignCastRepository(counted, { editingEnabled: true });
+    try {
+      await measured.dismissedReview(scope, { limit: 25 }); const small = count;
+      await pool.query(`INSERT INTO campaign_cast_review_decisions(id,campaign_id,owner_user_id,candidate_id,turn_id,narration_revision,timeline_revision,source_hash,source,target_kind,observation_index,target_payload,target_fingerprint,action,restores_decision_id,revision,request_hash,idempotency_key,result_receipt)
+        SELECT gen_random_uuid(),campaign_id,owner_user_id,candidate_id,turn_id,narration_revision,timeline_revision,source_hash,source,target_kind,observation_index,target_payload,target_fingerprint,action,NULL,n+1,request_hash,'scale-'||n,result_receipt FROM campaign_cast_review_decisions CROSS JOIN generate_series(1,100) n WHERE campaign_id=$1`, [campaignId]);
+      const invalidId = randomUUID(), otherId = randomUUID();
+      await pool.query(`INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason,resolution_receipt)
+        SELECT $2,owner_user_id,campaign_id,0,'invalid',jsonb_set(source,'{sourceHash}',to_jsonb(repeat('0',64))),proposal,reason,NULL FROM campaign_cast_discovery_candidates WHERE id=$1`, [id, invalidId]);
+      await pool.query(`INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason,resolution_receipt)
+        SELECT $2,owner_user_id,campaign_id,0,'other',source,jsonb_set(proposal,'{name}',to_jsonb('Other'::text)),reason,'{"result":{"pendingObservations":[]}}'::jsonb FROM campaign_cast_discovery_candidates WHERE id=$1`, [id, otherId]);
+      await pool.query(`INSERT INTO campaign_cast_review_decisions(id,campaign_id,owner_user_id,candidate_id,turn_id,narration_revision,timeline_revision,source_hash,source,target_kind,observation_index,target_payload,target_fingerprint,action,restores_decision_id,revision,request_hash,idempotency_key,result_receipt)
+        SELECT '00000000-0000-4000-8000-000000000001',campaign_id,owner_user_id,$2,turn_id,narration_revision,timeline_revision,source_hash,source,target_kind,observation_index,target_payload,target_fingerprint,action,NULL,102,request_hash,'invalid',result_receipt FROM campaign_cast_review_decisions WHERE candidate_id=$1 LIMIT 1`, [id, invalidId]);
+      count = 0; const startedAt = performance.now(); const first = await measured.dismissedReview(scope, { limit: 25 }); const elapsed = performance.now() - startedAt; const large = count;
+      count = 0; const second = await measured.dismissedReview(scope, { limit: 25, cursor: first.nextCursor! });
+      expect(first.decisions).toHaveLength(25); expect(second.decisions).toHaveLength(25);
+      expect([...first.decisions, ...second.decisions].every(item => item.candidateId !== invalidId && item.canRestore)).toBe(true);
+      expect(new Set([...first.decisions, ...second.decisions].map(item => item.decisionId)).size).toBe(50);
+      process.stderr.write(`dismissed synthetic small=${small} page1=${large} page2=${count} page1_ms=${elapsed.toFixed(1)}\n`);
+      expect(large).toBeLessThanOrEqual(small + 5); expect(count).toBeLessThanOrEqual(small + 5);
+      await pool.query(`INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason)
+        SELECT gen_random_uuid(),owner_user_id,campaign_id,0,'pending-'||n,source,jsonb_set(proposal,'{name}',to_jsonb('Other '||n)),reason
+        FROM campaign_cast_discovery_candidates CROSS JOIN generate_series(1,100) n WHERE id=$1`, [id]);
+      const pending = await measured.candidates(scope, { view: 'review', limit: 25 });
+      expect(pending.candidates).toHaveLength(25); expect(pending.nextCursor).not.toBeNull();
+      expect(maxCandidateRows).toBeLessThanOrEqual(50);
+    } finally { client.release(); }
+  });
   it('fences stale resolved detail writes after same-source legacy or journal dismissal', async () => {
     const worldId = randomUUID(), versionId = randomUUID(), campaignId = randomUUID(), turnId = randomUUID();
     await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Fence')", [worldId, ownerUserId]);

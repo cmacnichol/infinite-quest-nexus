@@ -218,12 +218,17 @@ integration("World Library and campaign version integration", () => {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     const browserErrors: string[] = [];
     page.on("pageerror", error => browserErrors.push(error.message));
-    const failedResponses: string[] = [], resourceErrors: string[] = [];
+    const failedResponses: string[] = [], resourceErrors: string[] = [], failedRequests: string[] = [];
     page.on("console", message => {
       if (message.type() !== "error") return;
-      (message.text().startsWith("Failed to load resource:") ? resourceErrors : browserErrors).push(message.text());
+      if (message.text().startsWith("Failed to load resource:")) {
+        const status = message.text().match(/status of (\d+)/)?.[1] ?? "unknown";
+        const url = message.location().url;
+        resourceErrors.push(`${status} ${url ? new URL(url).pathname : "unknown"}`);
+      } else browserErrors.push(message.text());
     });
     page.on("response", response => { if (response.status() >= 400) failedResponses.push(`${response.status()} ${new URL(response.url()).pathname}`); });
+    page.on("requestfailed", request => failedRequests.push(`${request.method()} ${new URL(request.url()).pathname}: ${request.failure()?.errorText}`));
     const webOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
     const screenshotRoot = resolve(process.env.CAST_SCREENSHOT_ROOT ?? "test-results/review-assets/unified-character-editor-phase-4");
     await page.route("**/api/v1/**", async route => {
@@ -571,7 +576,14 @@ integration("World Library and campaign version integration", () => {
     ]);
     expect(failedResponses.filter(failure => !expectedFailures.has(failure))).toEqual([]);
     expect(failedResponses).toContain(`409 /api/v1/campaigns/${campaignId}/cast/characters/${mara.id}/observations/${observation.id}/decision-preview`);
-    expect(resourceErrors).toHaveLength(failedResponses.length);
+    // Navigation and panel changes abort these in-flight fixture loads.
+    const expectedAborts = new Set([
+      "GET /vendor/photoswipe/photoswipe.css: net::ERR_ABORTED",
+      `GET /api/v1/campaigns/${campaignId}/cast: net::ERR_ABORTED`
+    ]);
+    const abortedCastDetail = new RegExp(`^GET /api/v1/campaigns/${campaignId}/cast/[0-9a-f-]{36}: net::ERR_ABORTED$`);
+    expect(failedRequests.filter(failure => !expectedAborts.has(failure) && !abortedCastDetail.test(failure))).toEqual([]);
+    expect(resourceErrors.sort()).toEqual([...failedResponses].sort());
     expect(await getWorld(pool, unrelatedWorld.id)).toEqual(unrelatedWorldBefore);
     expect((await isolationRepository.current(otherScope))).toEqual(otherSnapshot);
     expect((await pool.query("SELECT content FROM world_versions WHERE id=$1", [published.worldVersionId])).rows[0].content).toEqual(pinnedWorld);

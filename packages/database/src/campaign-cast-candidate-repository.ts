@@ -35,7 +35,10 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
           ($10::jsonb -> (p.resolution_receipt #>> '{result,character,id}'))
           ? (p.proposal->'observations'->((item.value->>'index')::integer)->>'field'), false)`;
         const active = await readActiveReviewDismissals(client, scope, cast.characters), reviewRevision = await readReviewRevision(client, scope);
-        const allRows = (await client.query(`SELECT p.id,p.reason,p.proposal,p.source,p.resolution_receipt,p.detail_decisions,n.effective_narration,
+        const rows: any[] = [];
+        let scanCursor = query.cursor ?? null;
+        while (rows.length <= query.limit) {
+          const batch = (await client.query(`SELECT p.id,p.reason,p.proposal,p.source,p.resolution_receipt,p.detail_decisions,n.effective_narration,
           ARRAY(SELECT (pending.item->>'index')::integer FROM (${visiblePending}) pending) AS pending_indexes FROM campaign_cast_discovery_candidates p
           JOIN effective_turn_narrations n ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
           WHERE p.campaign_id=$1 AND p.owner_user_id=$2 AND p.status='pending' AND ($3::uuid IS NULL OR p.id>$3)
@@ -48,13 +51,17 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
             AND n.correction_revision=(p.source->>'narrationRevision')::integer
             AND encode(digest(n.effective_narration,'sha256'),'hex')=p.source->>'sourceHash'
             AND NOT (COALESCE(p.resolution_receipt #>> '{result,character,id}', p.proposal->>'existingCharacterId', '')=ANY($11::text[]))
-          ORDER BY p.id`, [scope.campaignId, scope.ownerUserId, query.cursor ?? null, cast.boundary.timelineRevision,
+          ORDER BY p.id LIMIT 50`, [scope.campaignId, scope.ownerUserId, scanCursor, cast.boundary.timelineRevision,
           cast.boundary.turnNumber, query.view === "matches", cast.characters.filter(person => person.ignored).map(person => person.id), query.view === "details", query.view === "review", JSON.stringify(hiddenFields), cast.characters.filter(person => cast.characters.find(target => target.id === effective(person.id))?.removed).map(person => person.id)])).rows;
-        const rows = allRows.filter(row => {
-          if (!row.resolution_receipt && isReviewDismissed(active, row.source, { kind: "identity", proposal: row.proposal })) return false;
-          row.pending_indexes = row.pending_indexes.filter((index: number) => !isReviewDismissed(active, row.source, { kind: "detail", proposal: row.proposal, observation: row.proposal.observations[index] }));
-          return !row.resolution_receipt || row.pending_indexes.length > 0;
-        }).slice(0, query.limit + 1);
+          for (const row of batch) {
+            if (!row.resolution_receipt && isReviewDismissed(active, row.source, { kind: "identity", proposal: row.proposal })) continue;
+            row.pending_indexes = row.pending_indexes.filter((index: number) => !isReviewDismissed(active, row.source, { kind: "detail", proposal: row.proposal, observation: row.proposal.observations[index] }));
+            if (!row.resolution_receipt || row.pending_indexes.length > 0) rows.push(row);
+            if (rows.length > query.limit) break;
+          }
+          if (batch.length < 50 || rows.length > query.limit) break;
+          scanCursor = batch.at(-1)!.id;
+        }
         const notRetracted = await retractedDiscoveryFactFilterWithClient(client, scope, cast.boundary);
         const candidates = rows.slice(0, query.limit).map((row) => {
           const saved = row.resolution_receipt ? castCandidateResolutionSchema.parse(row.resolution_receipt.result) : null;
