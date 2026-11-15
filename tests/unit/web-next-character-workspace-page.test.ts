@@ -207,8 +207,8 @@ describe("Character Workspace page", () => {
     const sessionStore = store(session(generatedCharacter));
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore, navigate: vi.fn() });
     click(document, '[data-character-stage="mechanics"]');
-    expect(document.querySelector('[data-action="remove-character-mechanic"]')).not.toBeNull();
-    click(document, '[data-action="remove-character-mechanic"]');
+    expect(document.querySelector('[data-mechanics-table="rpgStats"] button[aria-label^="Remove"]')).not.toBeNull();
+    click(document, '[data-mechanics-table="rpgStats"] button[aria-label^="Remove"]');
     click(document, '[data-action="continue-character"]'); click(document, '[data-action="accept-character"]');
     expect(sessionStore.complete.mock.calls[0]?.[2].candidate.rpgStats).toEqual([]);
     expect(sessionStore.complete.mock.calls[0]?.[2].candidate.defaultTriggers).toEqual(generatedCharacter.defaultTriggers);
@@ -569,7 +569,7 @@ describe("Character Workspace page", () => {
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(overfull) });
     click(document, '[data-character-stage="mechanics"]');
     click(document, '[data-action="continue-character"]');
-    const target = document.querySelector<HTMLButtonElement>('[data-mechanics-collection="rpgStats"]');
+    const target = document.querySelector<HTMLInputElement>('[data-mechanics-table="rpgStats"] input');
     const error = document.querySelector<HTMLElement>('[data-field-error="candidate.rpgStats"]');
     expect(document.activeElement).toBe(target);
     expect(target?.getAttribute("aria-invalid")).toBe("true");
@@ -592,8 +592,8 @@ describe("Character Workspace page", () => {
     const edited = { ...generatedCharacter, source: {}, profile: { ...generatedCharacter.profile!, story: { ...generatedCharacter.profile!.story, personality: "" } } };
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(edited)) });
     click(document, '[data-character-stage="mechanics"]');
-    expect(document.querySelector(".character-mechanics-master")).not.toBeNull();
-    expect(document.querySelector(".character-mechanics-detail")).not.toBeNull();
+    expect(document.querySelector('[data-mechanics-table="rpgStats"]')).not.toBeNull();
+    expect(document.querySelector('[data-mechanics-table="defaultTriggers"]')).not.toBeNull();
     click(document, '[data-action="continue-character"]');
     const review = document.querySelector("[data-character-review]");
     expect(review?.textContent).toContain("Manual");

@@ -17,6 +17,15 @@ for (const width of [1280, 390]) test(`existing world character opens Review at 
   await page.screenshot({ path: info.outputPath(`review-${width}.png`), fullPage: true });
   await page.locator('[data-action="accept-character"]').click();
   await expect(page.locator('[name="candidate.profile.story.role"]')).toBeFocused();
+  await page.locator('[name="candidate.profile.story.role"]').fill("Guide");
+  await page.locator('[data-character-stage="mechanics"]').click();
+  await page.getByRole("button", { name: "Add statistic" }).click();
+  await page.getByRole("textbox", { name: "Name for row 1" }).first().fill("Resolve");
+  await page.getByRole("button", { name: "Remove Resolve" }).click();
+  await page.getByRole("button", { name: "Undo remove" }).click();
+  await expect(page.getByRole("textbox", { name: "Name for row 1" }).first()).toHaveValue("Resolve");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath(`mechanics-${width}.png`), fullPage: true });
   await page.locator('[data-character-stage="identity"]').click();
   await expect(page.getByText("Character use", { exact: true })).toBeVisible();
   await page.locator('[data-character-use]').selectOption("both");

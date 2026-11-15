@@ -1,4 +1,4 @@
-import { playableCharacterSchema, worldContentSchema } from "../../../packages/contracts/src/world-library";
+import { MAX_CHARACTER_MECHANICS_ITEMS, playableCharacterSchema, worldContentSchema } from "../../../packages/contracts/src/world-library";
 import type { AuthoringJobView, AuthoringSubmit } from "../../../packages/contracts/src/authoring";
 import type { AuthoringJobsApi } from "./authoring-jobs-api";
 import { createAuthoringJobSession, type AuthoringJobSession } from "./authoring-job-session";
@@ -25,7 +25,8 @@ import {
   type CharacterWorkspaceSession,
   type CharacterWorkspaceSessionStore
 } from "./character-workspace-session";
-import { mergeStructuredFields, structuredFieldsFor } from "./world-editor-fields";
+import { renderMechanicsTable } from "./character-mechanics-table";
+import { structuredFieldsFor } from "./world-editor-fields";
 import type { MountedPage } from "./world-library-page";
 
 export interface CharacterWorkspacePageDependencies {
@@ -183,8 +184,6 @@ export function mountCharacterWorkspacePage(
   let generationController: AbortController | null = null;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let completionTimer: ReturnType<typeof setTimeout> | null = null;
-  let mechanicsCollection: "rpgStats" | "defaultTriggers" = "rpgStats";
-  let mechanicsIndex = 0;
   let dialogOpen = false;
   let fallbackModal = false;
   let fallbackInertStates: Array<{ element: HTMLElement; value: string | null }> = [];
@@ -498,39 +497,12 @@ export function mountCharacterWorkspacePage(
 
   function renderMechanics(): void {
     const stage = document.createElement("div"); stage.className = "character-stage";
-    stage.innerHTML = `<header><h2>Mechanics</h2><p>Stats and trackers are optional. You can review your character without adding them.</p></header><div class="character-mechanics"><aside class="character-mechanics-master"><div role="group" aria-label="Mechanics collection"><button type="button" data-mechanics-collection="rpgStats" aria-describedby="character-rpgStats-error">Stats</button><button type="button" data-mechanics-collection="defaultTriggers" aria-describedby="character-defaultTriggers-error">Trackers</button></div><small class="character-field-error" id="character-rpgStats-error" data-field-error="candidate.rpgStats"></small><small class="character-field-error" id="character-defaultTriggers-error" data-field-error="candidate.defaultTriggers"></small><ol data-mechanics-list></ol><button type="button" data-action="add-character-mechanic">Add item</button></aside><section class="character-mechanics-detail" aria-label="Selected mechanic"></section></div>`;
+    stage.innerHTML = `<header><h2>Mechanics</h2><p>Statistics and trackers are optional. You can review your character without adding them.</p></header><div class="character-mechanics"><section><h3>Statistics</h3><small class="character-field-error" id="character-rpgStats-error" data-field-error="candidate.rpgStats"></small><div data-mechanics-table="rpgStats"></div></section><section><h3>Trackers</h3><small class="character-field-error" id="character-defaultTriggers-error" data-field-error="candidate.defaultTriggers"></small><div data-mechanics-table="defaultTriggers"></div></section></div>`;
     canvas.replaceChildren(stage, actions());
-    const list = required<HTMLOListElement>(canvas, "[data-mechanics-list]");
-    const detail = required<HTMLElement>(canvas, ".character-mechanics-detail");
-    const items = state.candidate[mechanicsCollection];
-    items.forEach((item, index) => {
-      const fields = structuredFieldsFor(mechanicsCollection === "rpgStats" ? "stat" : "trigger", item);
-      const button = document.createElement("button"); button.type = "button"; button.textContent = String(fields.name || `Item ${index + 1}`); button.dataset.mechanicsIndex = String(index);
-      const row = document.createElement("li"); row.append(button); list.append(row);
-    });
-    mechanicsIndex = Math.min(mechanicsIndex, Math.max(0, items.length - 1));
-    if (items.length === 0) detail.innerHTML = "<p>No item selected.</p>";
-    else {
-      const remove = document.createElement("button");
-      remove.type = "button"; remove.dataset.action = "remove-character-mechanic"; remove.textContent = "Remove selected item";
-      detail.append(remove);
-      const kind = mechanicsCollection === "rpgStats" ? "stat" : "trigger";
-      const fields = structuredFieldsFor(kind, items[mechanicsIndex]);
-      const names = kind === "stat" ? [["name", "Name"], ["value", "Value"], ["note", "Note"]] : [["name", "Name"], ["condition", "Condition"], ["effect", "Effect"]];
-      for (const [name, label] of names) {
-        const field = textControl(document, `mechanic.${name}`, label, String(fields[name] ?? ""), name === "note" || name === "condition" || name === "effect");
-        detail.append(field);
-      }
-      detail.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[name]").forEach((control) => {
-        function onMechanicInput(): void {
-          if (disposed) return;
-          const changed = { [control.name.split(".")[1]!]: control.value };
-          const next = [...state.candidate[mechanicsCollection]];
-          next[mechanicsIndex] = mergeStructuredFields(kind, next[mechanicsIndex], changed);
-          fieldChanged([mechanicsCollection], next);
-        }
-        control.addEventListener("input", onMechanicInput);
-      });
+    for (const [collection, kind] of [["rpgStats", "stat"], ["defaultTriggers", "trigger"]] as const) {
+      const host = required<HTMLElement>(stage, `[data-mechanics-table="${collection}"]`);
+      host.setAttribute("aria-describedby", `character-${collection}-error`);
+      renderMechanicsTable(host, { kind, items: state.candidate[collection], max: MAX_CHARACTER_MECHANICS_ITEMS, onChange: (items) => fieldChanged([collection], items) });
     }
   }
 
@@ -651,9 +623,9 @@ export function mountCharacterWorkspacePage(
     function issueControl(path: string): HTMLElement | null {
       if (path === "method") return canvas.querySelector<HTMLElement>('[name="characterMethod"]');
       const mechanic = path.match(/^candidate\.(rpgStats|defaultTriggers)$/)?.[1];
-      if (mechanic) return canvas.querySelector<HTMLElement>(`[data-mechanics-collection="${mechanic}"]`);
+      if (mechanic) return canvas.querySelector<HTMLElement>(`[data-mechanics-table="${mechanic}"] input, [data-mechanics-table="${mechanic}"] button`);
       return canvas.querySelector<HTMLElement>(`[name="${path}"]`) ??
-        canvas.querySelector<HTMLElement>("input[name], textarea[name], button[data-mechanics-collection]");
+        canvas.querySelector<HTMLElement>("input[name], textarea[name], button[data-action]");
     }
     for (const issue of issues) {
       const control = issueControl(issue.path);
@@ -947,10 +919,6 @@ export function mountCharacterWorkspacePage(
     if (action === "close-character-prompt") closeDialog();
     if (action === "copy-character-prompt") void clipboard("copy", target);
     if (action === "paste-character-prompt") void clipboard("paste", target);
-    if (action === "remove-character-mechanic") { fieldChanged([mechanicsCollection], state.candidate[mechanicsCollection].filter((_, index) => index !== mechanicsIndex)); render(); }
-    if (action === "add-character-mechanic") { fieldChanged([mechanicsCollection], [...state.candidate[mechanicsCollection], {}]); mechanicsIndex = state.candidate[mechanicsCollection].length - 1; render(); }
-    if (target.dataset.mechanicsCollection) { mechanicsCollection = target.dataset.mechanicsCollection as typeof mechanicsCollection; mechanicsIndex = 0; render(); }
-    if (target.dataset.mechanicsIndex) { mechanicsIndex = Number(target.dataset.mechanicsIndex); render(); }
     if (action === "accept-character" && !completed) {
       const candidate = characterHandoffCandidate(state);
       const status = canvas.querySelector<HTMLElement>("[data-character-acceptance-status]");
