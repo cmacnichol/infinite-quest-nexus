@@ -17,9 +17,10 @@ function setup(overrides: Record<string, unknown> = {}, options: { saveProfile?:
   const api = { workspaceStatus: vi.fn(async () => status), list: vi.fn(async () => page), detail: vi.fn(async () => detail), create: vi.fn(async () => detail), ...overrides };
   const confirm = vi.fn(() => false);
   const schedule = options.schedule ?? { set: () => 1, clear: () => {}, visible: () => true, onVisibilityChange: () => () => {} };
-  const workspace = createCharactersWorkspace(document, options.generationActive ?? (() => false), options.saveProfile ?? vi.fn(), vi.fn(), options.getProfile ?? vi.fn(), undefined, { api: api as any, confirm, schedule });
+  const navigate = vi.fn();
+  const workspace = createCharactersWorkspace(document, options.generationActive ?? (() => false), options.saveProfile ?? vi.fn(), navigate, options.getProfile ?? vi.fn(), undefined, { api: api as any, confirm, schedule });
   const click = (text: string) => [...document.querySelectorAll("button")].find(button => button.textContent === text)!.click();
-  return { document, workspace, api, confirm, click };
+  return { document, workspace, api, confirm, click, navigate };
 }
 describe("web-next characters workspace", () => {
   it("shows the cast and selected character sheet", async () => {
@@ -403,4 +404,37 @@ it("applies reviewed story suggestions with evidence fences and announces a save
   expect((edit.mock.calls[0] as any)[2].draftEvidenceFences).toEqual([fence]);
   await vi.waitFor(() => expect(document.body.textContent).toContain("Saved Mara"));
   expect(document.body.textContent).toContain("Sources and edit history"); workspace.dispose();
+});
+
+
+it("keeps the editor open and does not navigate to evidence when discard is declined", async () => {
+  const eligible = { ...detail, draftFromStoryEligible: true };
+  const evidence = { evidenceId: "e1", turnNumber: 1, quote: "Mara guides us." };
+  const draftPreview = vi.fn(async () => ({ proposals: [{ path: "story.role", value: "Guide", evidenceIds: ["e1"], draftEvidenceFence: { path: "story.role", value: "Guide", evidence: [evidence] } }], evidence: [evidence], omitted: [] }));
+  const { document, workspace, click, confirm, navigate } = setup({ detail: vi.fn(async () => eligible), draftPreview });
+  workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara");
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Edit character")); click("Edit character");
+  const name = document.querySelector<HTMLInputElement>('#characters-name')!; name.value = "Marin"; name.dispatchEvent(new document.defaultView!.Event("input"));
+  click("Draft from story"); await vi.waitFor(() => expect(document.body.textContent).toContain("Turn 1")); click("Turn 1");
+  expect(confirm).toHaveBeenCalled(); expect(navigate).not.toHaveBeenCalled();
+  expect(document.querySelector("dialog")!.open).toBe(true); expect(document.querySelector<HTMLInputElement>('#characters-name')!.value).toBe("Marin");
+  confirm.mockReturnValue(true); click("Turn 1"); expect(navigate).toHaveBeenCalledWith(1); expect(document.querySelector("dialog")!.open).toBe(false);
+  workspace.dispose();
+});
+
+it("does not navigate to evidence while a character save is pending", async () => {
+  const eligible = { ...detail, draftFromStoryEligible: true };
+  const evidence = { evidenceId: "e1", turnNumber: 1, quote: "Mara guides us." };
+  const draftPreview = vi.fn(async () => ({ proposals: [{ path: "story.role", value: "Guide", evidenceIds: ["e1"], draftEvidenceFence: { path: "story.role", value: "Guide", evidence: [evidence] } }], evidence: [evidence], omitted: [] }));
+  let release!: (value: typeof eligible) => void;
+  const edit = vi.fn(() => new Promise<typeof eligible>(resolve => { release = resolve; }));
+  const { document, workspace, click, navigate } = setup({ detail: vi.fn(async () => eligible), draftPreview, edit });
+  workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara");
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Edit character")); click("Edit character");
+  const name = document.querySelector<HTMLInputElement>('#characters-name')!; name.value = "Marin"; name.dispatchEvent(new document.defaultView!.Event("input"));
+  click("Draft from story"); await vi.waitFor(() => expect(document.body.textContent).toContain("Turn 1"));
+  document.querySelector("form")!.dispatchEvent(new document.defaultView!.Event("submit", { cancelable: true }));
+  await vi.waitFor(() => expect(edit).toHaveBeenCalled()); click("Turn 1");
+  expect(navigate).not.toHaveBeenCalled(); expect(document.querySelector("dialog")!.open).toBe(true);
+  release(eligible); await vi.waitFor(() => expect(document.body.textContent).toContain("Saved Mara")); workspace.dispose();
 });

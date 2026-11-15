@@ -45,7 +45,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => { const el = document.createElement(tag); el.textContent = text; return el; };
   const button = (text: string, action: () => void, disabled = false) => { const el = node("button", text); el.type = "button"; el.disabled = disabled; el.addEventListener("click", action); return el; };
   const discard = () => !(editor?.dirty || profileEditor?.form.dirty || sheetView?.dirty()) || (dependencies?.confirm?.("Discard unsaved character changes?") ?? document.defaultView?.confirm("Discard unsaved character changes?") ?? false);
-  function close() { if (editor?.saving || profileEditor?.saving || !discard()) return; clearSheetFeedback(); sheetView?.dispose(); sheetView = null; rosterView?.dispose(); rosterView = null; searchPending = false; openEpoch++; toolEpoch++; editor = null; profileEditor = null; reviewing = false; session.close(); operationKeys.clear(); dialog.close(); focus?.focus(); }
+  function close(): boolean { if (editor?.saving || profileEditor?.saving || !discard()) return false; clearSheetFeedback(); sheetView?.dispose(); sheetView = null; rosterView?.dispose(); rosterView = null; searchPending = false; openEpoch++; toolEpoch++; editor = null; profileEditor = null; reviewing = false; session.close(); operationKeys.clear(); dialog.close(); focus?.focus(); return true; }
   function render() {
     if (!state || !dialog.open || reviewing || profileEditor || searchPending) return;
     sheetRenderPending = false;
@@ -179,7 +179,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
         current: () => dialog.open && state.detail === detail && !editor && !reviewing,
         preview: (id, request) => api.previewObservationDecision(state.campaignId!, detail.character.id, id, request),
         apply: (id, request) => api.applyObservationDecision(state.campaignId!, detail.character.id, id, request),
-        refresh: async () => { await session.refresh(); dialog.querySelector<HTMLElement>("details summary")?.focus(); }, navigate: turn => { close(); navigateToTurn(turn); } });
+        refresh: async () => { await session.refresh(); dialog.querySelector<HTMLElement>("details summary")?.focus(); }, navigate: turn => { if (close()) navigateToTurn(turn); } });
       dialog.append(sources);
       for (const match of detail.autoMatches) {
         const row = node("section"); row.append(node("p", `${match.basis === "unique_world_name" ? "Unique world name" : "Unique campaign name"} · turn ${match.turnNumber}: “${match.quote}”`));
@@ -249,12 +249,12 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     if (selection) { const search = host.querySelector<HTMLInputElement>('input[type="search"]')!; search.focus({ preventScroll: true }); if (selection.start !== null && selection.end !== null) search.setSelectionRange(selection.start, selection.end, selection.direction ?? undefined); }
     dialog.scrollTop = scroll;
   }
-  function renderEditor() { renderCastEditor(dialog, { document, api, session, getState: () => state, getEditor: () => editor, setEditor: next => { editor = next; }, generationActive, epoch: () => openEpoch, confirm: message => dependencies?.confirm?.(message) ?? document.defaultView?.confirm(message) ?? false, saved: (id, name) => { lifecycleNotice = `Saved ${name}`; if (id === state.selectedId) { render(); void session.refresh(); } else session.select(id); }, navigate: turn => { close(); navigateToTurn(turn); } }); }
+  function renderEditor() { renderCastEditor(dialog, { document, api, session, getState: () => state, getEditor: () => editor, setEditor: next => { editor = next; }, generationActive, epoch: () => openEpoch, confirm: message => dependencies?.confirm?.(message) ?? document.defaultView?.confirm(message) ?? false, saved: (id, name) => { lifecycleNotice = `Saved ${name}`; if (id === state.selectedId) { render(); void session.refresh(); } else session.select(id); }, navigate: turn => { if (close()) navigateToTurn(turn); } }); }
   function cancelSearch() { const pending = searchPending; searchPending = false; rosterView?.dispose(); rosterView = null; if (pending) session.setQuery(query, filter); }
   function openTool(kind: "scan" | "preview" | "review", scanId?: string) {
     if (!state.campaignId) return; cancelSearch(); const campaign = state.campaignId, epoch = openEpoch, tool = ++toolEpoch; reviewing = true; dialog.classList.remove("characters-sheet-layout");
     void openCastTool(kind, { api, campaignId: campaign, dialog, generationActive, current: () => reviewing && tool === toolEpoch && state.campaignId === campaign && epoch === openEpoch && dialog.open,
-      back: () => { reviewing = false; toolEpoch++; render(); }, navigateToTurn: turn => { close(); navigateToTurn(turn); }, operationKey, clearKeys: () => operationKeys.clear(), get capabilities() { return state.status; } }, scanId);
+      back: () => { reviewing = false; toolEpoch++; render(); }, navigateToTurn: turn => { if (close()) navigateToTurn(turn); }, operationKey, clearKeys: () => operationKeys.clear(), get capabilities() { return state.status; } }, scanId);
   }
   function scan(scanId?: string) { openTool("scan", scanId); }
   function preview() { openTool("preview"); }
