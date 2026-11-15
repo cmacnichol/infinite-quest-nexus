@@ -249,7 +249,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     if (selection) { const search = host.querySelector<HTMLInputElement>('input[type="search"]')!; search.focus({ preventScroll: true }); if (selection.start !== null && selection.end !== null) search.setSelectionRange(selection.start, selection.end, selection.direction ?? undefined); }
     dialog.scrollTop = scroll;
   }
-  function renderEditor() { renderCastEditor(dialog, { document, api, session, getState: () => state, getEditor: () => editor, setEditor: next => { editor = next; }, generationActive, epoch: () => openEpoch, confirm: message => dependencies?.confirm?.(message) ?? document.defaultView?.confirm(message) ?? false }); }
+  function renderEditor() { renderCastEditor(dialog, { document, api, session, getState: () => state, getEditor: () => editor, setEditor: next => { editor = next; }, generationActive, epoch: () => openEpoch, confirm: message => dependencies?.confirm?.(message) ?? document.defaultView?.confirm(message) ?? false, saved: (id, name) => { lifecycleNotice = `Saved ${name}`; if (id === state.selectedId) { render(); void session.refresh(); } else session.select(id); }, navigate: turn => { close(); navigateToTurn(turn); } }); }
   function cancelSearch() { const pending = searchPending; searchPending = false; rosterView?.dispose(); rosterView = null; if (pending) session.setQuery(query, filter); }
   function openTool(kind: "scan" | "preview" | "review", scanId?: string) {
     if (!state.campaignId) return; cancelSearch(); const campaign = state.campaignId, epoch = openEpoch, tool = ++toolEpoch; reviewing = true; dialog.classList.remove("characters-sheet-layout");

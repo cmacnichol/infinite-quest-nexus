@@ -1,5 +1,6 @@
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
+import { SUPPORTING_FIELDS } from "../../packages/client-core/src/characters/profile-fields.js";
 import { characterProfileSchema } from "../../packages/contracts/src/world-library.js";
 import { createCharactersWorkspace } from "../../apps/web-next/src/characters-workspace.js";
 
@@ -369,4 +370,37 @@ it.each([false, true])("reconciles a deferred poll after a failed retraction pre
     await vi.waitFor(() => expect(document.body.textContent).toContain("This is wrong")); click("This is wrong"); revision = 2; poll(); await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2)); await new Promise(resolve => setTimeout(resolve, 0));
     reject(new Error("offline")); await vi.waitFor(() => expect(document.querySelector("dialog h2")?.textContent).toBe("Updated Mara")); expect(document.body.textContent).toContain("Could not preview this change.");
   } finally { workspace.dispose(); }
+});
+
+
+it("groups supporting fields by registry section with associated labels", async () => {
+  const { document, workspace, click } = setup(); workspace.open("one");
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Add character");
+  await vi.waitFor(() => expect(document.querySelector("form")).not.toBeNull());
+  expect([...document.querySelectorAll("[data-cast-group] summary")].map(el => el.textContent)).toEqual([...new Set(SUPPORTING_FIELDS.map(field => field.section))]);
+  for (const field of SUPPORTING_FIELDS) {
+    const id = `characters-${field.path.replace(".", "-")}`;
+    expect(document.querySelector(`label[for="${id}"]`)).not.toBeNull();
+    expect(document.getElementById(id)?.tagName.toLowerCase()).toBe(field.input === "text" ? "input" : "textarea");
+  }
+  workspace.dispose();
+});
+
+it("applies reviewed story suggestions with evidence fences and announces a save", async () => {
+  const fence = { path: "story.role", value: "Guide", evidence: [{ evidenceId: "e1", turnNumber: 1, quote: "Mara guides us." }] };
+  const eligible = { ...detail, draftFromStoryEligible: true };
+  const draftPreview = vi.fn(async () => ({ proposals: [{ path: "story.role", value: "Guide", evidenceIds: ["e1"], draftEvidenceFence: fence }, { path: "story.personality", value: "Warm", evidenceIds: ["e1"], draftEvidenceFence: { ...fence, path: "story.personality", value: "Warm" } }], evidence: fence.evidence, omitted: [] }));
+  const edit = vi.fn(async () => eligible);
+  const { document, workspace, click } = setup({ detail: vi.fn(async () => eligible), edit, draftPreview });
+  workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara");
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Edit character")); click("Edit character"); click("Draft from story");
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Apply selected suggestions"));
+  const checks = document.querySelectorAll<HTMLInputElement>('.story-draft-review input[type="checkbox"]'); checks[1]!.checked = false; checks[1]!.dispatchEvent(new document.defaultView!.Event("change"));
+  click("Apply selected suggestions");
+  expect(document.querySelector<HTMLTextAreaElement>('#characters-story-role')!.value).toBe("Guide");
+  document.querySelector("form")!.dispatchEvent(new document.defaultView!.Event("submit", { cancelable: true }));
+  await vi.waitFor(() => expect(edit).toHaveBeenCalled());
+  expect((edit.mock.calls[0] as any)[2].draftEvidenceFences).toEqual([fence]);
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Saved Mara"));
+  expect(document.body.textContent).toContain("Sources and edit history"); workspace.dispose();
 });

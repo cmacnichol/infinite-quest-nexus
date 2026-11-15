@@ -4,6 +4,7 @@ import { renderCastRoster } from "./character-editor/cast-roster-view.js";
 import { renderObservationReview } from "./character-editor/observation-review.js";
 import { mountCampaignPresentation } from "./character-editor/campaign-presentation.js";
 import { showLifecycle } from "./character-editor/cast-lifecycle.js";
+import { renderStoryDraftPanel } from "./character-editor/story-draft-panel.js";
 import { createStoryDraftReview } from "./character-editor/story-draft.js";
 import { renderPresetFields } from "./character-editor/preset-fields.js";
 import { renderWorldCastPicker } from "./character-editor/world-cast-picker.js";
@@ -534,9 +535,8 @@ export function createLegacyCastPanel(options: {
       const current = state ? state.draft.values[path] : editor?.draft.profile[path as CastField];
       return Array.isArray(current) ? current.join("\n") : current ?? "";
     };
-    storyReview.render(form, {
-      eligible: Boolean(api && detail.draftFromStoryEligible), locked: readonly || Boolean(editor?.conflict),
-      value, label: path => availableFields.find(field => field.path === path)?.label ?? path,
+    renderStoryDraftPanel(form, { detail, readonly: readonly || Boolean(editor?.conflict), draftPreview: api, campaign, review: storyReview,
+      current: value, label: path => availableFields.find(field => field.path === path)?.label ?? path,
       fetch: async direction => {
         const token = epoch, activeCampaign = campaign;
         if (!await syncLock() || !current(token)) throw new Error("Character editing is unavailable");
@@ -553,11 +553,12 @@ export function createLegacyCastPanel(options: {
         return api!(campaign, detail.character.id, { expectedCastRevision: detail.revision, expectedBoundary: detail.boundary,
           expectedCharacterRevision: detail.character.revision, ...(direction ? { direction } : {}) });
       },
-      apply: (path, text) => {
+      apply: (path, value) => {
+        const text = Array.isArray(value) ? value.join("\n") : value;
         if (state) changePresetField(state, path, text);
         else editor = setCastEditorField(editor!, path as CastField, text);
       },
-      turn: turn => requestNavigation(() => { closePanel(); void options.navigateToTurn(turn); }), refresh: renderEditor
+      turn: turn => requestNavigation(() => { closePanel(); void options.navigateToTurn(turn); }), changed: renderEditor
     });
   }
   function collectedFences() {

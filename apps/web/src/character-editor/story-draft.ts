@@ -9,11 +9,12 @@ export function createStoryDraftReview() {
     fetch(direction: string): Promise<CastDraftPreviewResponse>; apply(path: string, value: string): void;
     turn(number: number): void; refresh(): void;
   }) {
-    const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => { const node = document.createElement(tag); node.textContent = text; return node; };
+    const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => { const node = container.ownerDocument.createElement(tag); node.textContent = text; return node; };
     const btn = (label: string, fn: () => void, disabled = false) => {
       const node = el("button", label); node.type = "button"; node.disabled = disabled; node.onclick = fn; return node;
     };
     const group = el("section"), input = el("textarea"), label = el("label", "Direction (optional)");
+    input.id = "story-draft-direction"; label.setAttribute("for", input.id);
     input.value = direction; input.maxLength = 2000; input.disabled = busy || options.locked; input.oninput = () => { direction = input.value; };
     const canFill = (path: string) => {
       const value = options.value(path);
