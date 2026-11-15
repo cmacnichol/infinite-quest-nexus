@@ -331,6 +331,12 @@ An executable, read-only schema probe imported the exact baseline `900df97` read
 
 The [activity history runbook](activity-history.md) documents additive rollout/rollback, retention, publication health, quarantine and cache coverage. See [acceptance evidence](../review/legacy-activity-verification.md) for the composed PostgreSQL/API/provider workflow, portability checks, browser screenshots and separately reported limitations.
 
+## Cast fact correction reader rollout and rollback
+
+Cast journals containing fact retraction or restoration commands export as cast format 5. Deploy compatible API and worker readers across every replica before enabling any fact-correction writes; keep writes disabled during the coordinated rollout and verify all serving and worker images have the compatible reader. Formats 1–4 retain their existing meaning. Operational review dismissals are not included in Campaign or System Archives or branches.
+
+Once a format 5 command has been stored, disabling writes does not make older binaries safe: their cast journal readers and archive contracts may reject the retained authority. The rollback floor is a release that reads format 5 and understands correction replay, including merge and unmerge provenance. Stop intake and drain jobs before any rollback, check the proposed image against retained journals and archives, and retain a compatible image if it cannot read them. Do not remove or rewrite corrections to force a downgrade. A pre-correction recovery set can only restore its earlier point in time; account for all later writes before any recovery.
+
 ## Cast lifecycle reader rollout and rollback
 
 Deploy and verify v4-capable API, worker, campaign archive and system archive readers across every replica before enabling any merge, unmerge, remove or restore writer. Rehearse with a copied database and representative v4 exports, including branch and transfer, before enabling writers. Confirm no old reader remains; a rolling deployment with mixed readers is not sufficient once v4 events can be written.

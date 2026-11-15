@@ -213,7 +213,7 @@ export type CastListQuery = z.infer<typeof castListQuerySchema>;
 
 export const castStoredCommandSchema = z.object({ command: castCommandSchema, characterId: z.uuid().optional(), observationId: z.uuid().optional() }).strict();
 export const portableCampaignCastSchema = z.object({
-  formatVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]), revision: ordinal,
+  formatVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5)]), revision: ordinal,
   characters: z.array(z.object({ id: z.uuid(), origin: castOriginSchema, firstObservedTurn: ordinal }).strict()).max(10000),
   events: z.array(z.object({ id: z.uuid(), effectiveTurnNumber: ordinal, revision: ordinal,
     receipt: castBatchReceiptSchema.optional(), commands: z.array(castStoredCommandSchema).min(1).max(100), attachment: castAttachmentSchema.optional() }).strict()).max(100000)
@@ -221,6 +221,8 @@ export const portableCampaignCastSchema = z.object({
   const characters = new Map(value.characters.map((person) => [person.id, person]));
   const events = new Set(value.events.map((event) => event.id));
   const observations = new Set<string>(), created = new Set<string>();
+  const observationSources = new Map<string, { command: Extract<CastCommand, { kind: "observe" }>; effectiveTurnNumber: number }>();
+  const activeRetractions = new Map<string, string>();
   const fail = () => context.addIssue({ code: "custom", message: "Invalid cast archive relationships." });
   if (characters.size !== value.characters.length || events.size !== value.events.length
     || value.characters.filter((person) => person.origin.kind === "protagonist").length > 1) fail();
@@ -276,12 +278,35 @@ export const portableCampaignCastSchema = z.object({
     }
     for (const item of event.commands) {
     const command = item.command;
-    if (command.kind === "retract_observation" || command.kind === "restore_observation") fail(); // Format 5 validation is implemented by the archive migration.
+    if (command.kind === "retract_observation" || command.kind === "restore_observation") {
+      const observationSource = observationSources.get(command.observationId);
+      const source = observationSource?.command;
+      let effectiveCharacterId = source?.characterId;
+      const seen = new Set<string>();
+      while (effectiveCharacterId && !seen.has(effectiveCharacterId)) {
+        seen.add(effectiveCharacterId);
+        const merge = [...activeMerges.values()].find(entry => entry.source === effectiveCharacterId);
+        if (!merge) break;
+        effectiveCharacterId = merge.target;
+      }
+      if (value.formatVersion < 5 || event.commands.length !== 1 || item.characterId || item.observationId || event.attachment
+        || !source || observationSource!.effectiveTurnNumber > event.effectiveTurnNumber || source.mode !== "fact" || source.speakerCharacterId !== null
+        || source.evidence.kind !== "turn" || effectiveCharacterId !== command.characterId
+        || removed.has(command.characterId) || characters.get(command.characterId)?.origin.kind === "protagonist") fail();
+      const active = activeRetractions.get(command.observationId);
+      if (command.kind === "retract_observation") {
+        if (active) fail();
+        activeRetractions.set(command.observationId, event.id);
+      } else {
+        if (!active || active !== command.retractionEventId) fail();
+        activeRetractions.delete(command.observationId);
+      }
+    }
     const lifecycleCommand = ["merge", "unmerge", "remove", "restore"].includes(command.kind);
     if (value.formatVersion < 4 && (lifecycleCommand || command.kind === "identity" && command.aliasChanges)) fail();
     // Live decisions use the active turn. Rewind discards later decisions before another can be written.
     // Their journal prefixes must therefore also be valid at each historical turn. Discovery may arrive out of order.
-    if (lifecycleCommand || command.kind === "detach" && seedCommands.has(command.eventId)) {
+    if (lifecycleCommand || command.kind === "retract_observation" || command.kind === "restore_observation" || command.kind === "detach" && seedCommands.has(command.eventId)) {
       if (event.effectiveTurnNumber < lastLifecycleTurn) fail();
       lastLifecycleTurn = event.effectiveTurnNumber;
     }
@@ -373,7 +398,7 @@ export const portableCampaignCastSchema = z.object({
         if (!item.observationId || observations.has(item.observationId)
           || command.speakerCharacterId && !characters.has(command.speakerCharacterId)
           || command.supersedesObservationId && !observations.has(command.supersedesObservationId)) fail();
-        if (item.observationId) observations.add(item.observationId);
+        if (item.observationId) { observations.add(item.observationId); observationSources.set(item.observationId, { command, effectiveTurnNumber: event.effectiveTurnNumber }); }
       }
     }
   }

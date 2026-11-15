@@ -142,10 +142,13 @@ integration("campaign cast portable authority", () => {
       name: "Mara", aliases: [], profile: { "appearance.description": "" } });
     const turn = (await pool.query("SELECT turn_id,turn_number,correction_revision,effective_narration FROM effective_turn_narrations WHERE campaign_id=$1 ORDER BY turn_number LIMIT 1", [scope.campaignId])).rows[0];
     const quote = turn.effective_narration.slice(0, 10), sourceHash = sha256(turn.effective_narration);
-    await withTransaction(pool, client => applyCastBatchWithClient(client, scope, { boundary: initial.boundary, idempotencyKey: "system-attachment",
+    const fact = await withTransaction(pool, client => applyCastBatchWithClient(client, scope, { boundary: initial.boundary, idempotencyKey: "system-attachment",
       commands: [{ kind: "observe", characterId: created.character.id, field: "appearance.description", value: "blue eyes", mode: "fact", speakerCharacterId: null, supersedesObservationId: null,
         evidence: { kind: "turn", turnId: turn.turn_id, turnNumber: turn.turn_number, narrationRevision: turn.correction_revision, sourceHash, paragraphId: "p1", quote } }] },
       { attachment: { characterId: created.character.id, basis: "unique_name", sourceRanges: [{ turnId: turn.turn_id, narrationRevision: turn.correction_revision, sourceHash, paragraphId: "p1", start: 0, end: quote.length }] } }));
+    const beforeCorrection = await repo.detail(scope, created.character.id);
+    await repo.applyObservationDecision(scope, created.character.id, fact.observationIds[0]!, { action: "retract", expectedCastRevision: beforeCorrection.revision,
+      expectedCharacterRevision: beforeCorrection.character.revision, expectedBoundary: beforeCorrection.boundary, idempotencyKey: "system-retract" });
     const current = await repo.current(scope);
     const second = await repo.create(scope, { expectedCastRevision: current.revision, expectedBoundary: current.boundary,
       idempotencyKey: "system-second", name: "Mary", aliases: [], profile: {} });
@@ -180,8 +183,16 @@ integration("campaign cast portable authority", () => {
       const restoredScope = { ...target, campaignId: scope.campaignId };
       const detail = await restoredRepository.detail(restoredScope, person.id);
       expect(detail.autoMatches).toHaveLength(1);
+      const archive = await withTransaction(destination, client => exportCampaignCast(client, restoredScope));
+      expect(archive?.formatVersion).toBe(5);
+      const retract = archive!.events.find(event => event.commands.some(item => item.command.kind === "retract_observation"))!;
+      const observationId = detail.observations[0]!.id;
+      const restored = await restoredRepository.applyObservationDecision(restoredScope, person.id, observationId, { action: "restore", retractionEventId: retract.id,
+        expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: detail.boundary, idempotencyKey: "system-restore-fact" });
+      expect(restored.character.id).toBe(person.id);
+      const refreshed = await restoredRepository.detail(restoredScope, person.id);
       await restoredRepository.detachAttachment(restoredScope, person.id, detail.autoMatches[0]!.eventId, {
-        expectedCastRevision: detail.revision, expectedBoundary: detail.boundary, expectedCharacterRevision: person.revision, idempotencyKey: "restore-undo" });
+        expectedCastRevision: refreshed.revision, expectedBoundary: refreshed.boundary, expectedCharacterRevision: refreshed.character.revision, idempotencyKey: "restore-undo" });
       expect((await restoredRepository.detail(restoredScope, person.id)).observations).toEqual([]);
     } finally { await destination.end(); await pool.query(`DROP DATABASE ${databaseName}`); }
   });
@@ -382,10 +393,16 @@ integration("campaign cast portable authority", () => {
     const initial = await repo.current(scope);
     const created = await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: "cast-export",
       name: "Mara", aliases: [], profile: { "appearance.description": "" } });
-    await repo.changeRemoval!(scope, created.character.id, "remove", { expectedCastRevision: created.revision, expectedBoundary: created.boundary,
-      expectedCharacterRevision: created.character.revision, idempotencyKey: "cast-export-remove" });
+    const turn = (await pool.query("SELECT turn_id,turn_number,correction_revision,effective_narration FROM effective_turn_narrations WHERE campaign_id=$1 ORDER BY turn_number LIMIT 1", [scope.campaignId])).rows[0];
+    const quote = turn.effective_narration.slice(0, 10);
+    const fact = await repo.applyBatch(scope, { boundary: initial.boundary, idempotencyKey: "campaign-fact", commands: [{ kind: "observe", characterId: created.character.id,
+      field: "state.location", value: "harbor", mode: "fact", speakerCharacterId: null, supersedesObservationId: null,
+      evidence: { kind: "turn", turnId: turn.turn_id, turnNumber: turn.turn_number, narrationRevision: turn.correction_revision, sourceHash: sha256(turn.effective_narration), paragraphId: "p1", quote } }] });
+    const detail = await repo.detail(scope, created.character.id);
+    await repo.applyObservationDecision(scope, created.character.id, fact.observationIds[0]!, { action: "retract", expectedCastRevision: detail.revision,
+      expectedCharacterRevision: detail.character.revision, expectedBoundary: detail.boundary, idempotencyKey: "campaign-retract" });
     const projected = campaignArchivePayloads(await loadCampaignArchiveExportSnapshot(pool, ownerUserId, scope.campaignId));
-    expect(projected.campaign.archiveRecords).toHaveProperty("cast.formatVersion", 4);
+    expect(projected.campaign.archiveRecords).toHaveProperty("cast.formatVersion", 5);
     const mutations = createPostgresPortableFamilyMutationRepository(createPostgresWorldRepositoryAdapters(pool, { memory: memoryGeneration(pool) }).worlds);
     const restored = await withTransaction(pool, (client) => mutations.commitCampaignZip(client, {
       owner: { ownerUserId }, destination: { kind: "existing_world_version", worldId: imported.worldId, worldVersionId: imported.worldVersionId },
@@ -393,12 +410,16 @@ integration("campaign cast portable authority", () => {
       payload: JSON.parse(JSON.stringify({ archiveFormat: "manifest_v1", sourceName: "cast.zip", ...projected }))
     }));
     expect((await repo.current({ ownerUserId, campaignId: restored.campaignId! })).characters.filter((c) => c.origin.kind !== "protagonist"))
-      .toEqual([expect.objectContaining({ name: "Mara", removed: true, profile: { "appearance.description": "" } })]);
+      .toEqual([expect.objectContaining({ name: "Mara", profile: { "appearance.description": "" } })]);
+    const restoredScope = { ownerUserId, campaignId: restored.campaignId! };
+    const restoredCast = await withTransaction(pool, client => exportCampaignCast(client, restoredScope));
+    expect(restoredCast?.formatVersion).toBe(5);
+    expect(restoredCast?.events.flatMap(event => event.commands).some(item => item.command.kind === "retract_observation")).toBe(true);
     const system = createPostgresSystemArchiveExportRepository(pool, { sourceApplicationVersion: "0.1.0" });
     await system.withOwnerSnapshot({ ownerUserId }, async (snapshot) => {
       let found = false;
       for await (const envelope of snapshot.streamDomain("campaigns")) if (envelope.sourceId === scope.campaignId) {
-        expect(envelope.record).toHaveProperty("cast.formatVersion", 4);
+        expect(envelope.record).toHaveProperty("cast.formatVersion", 5);
         found = true;
       }
       expect(found).toBe(true);

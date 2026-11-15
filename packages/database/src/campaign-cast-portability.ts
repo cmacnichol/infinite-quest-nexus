@@ -50,14 +50,15 @@ export async function exportCampaignCast(client: DatabaseClient, scope: CastScop
         || command.kind === "override" && command.value.length > 2_000);
   });
   const needsV4 = retained.some(event => event.commands.some(({ command }: ReturnType<typeof castStoredCommandSchema.parse>) => ["merge", "unmerge", "remove", "restore"].includes(command.kind) || command.kind === "identity" && command.aliasChanges));
-  return portableCampaignCastSchema.parse({ formatVersion: needsV4 ? 4 : needsV3 ? 3 : 2, revision: state.revision, characters,
-    events: needsV4 || needsV3 ? retained : retained.map(({ receipt, ...event }) => event) });
+  const needsV5 = retained.some(event => event.commands.some(({ command }: ReturnType<typeof castStoredCommandSchema.parse>) => command.kind === "retract_observation" || command.kind === "restore_observation"));
+  return portableCampaignCastSchema.parse({ formatVersion: needsV5 ? 5 : needsV4 ? 4 : needsV3 ? 3 : 2, revision: state.revision, characters,
+    events: needsV5 || needsV4 || needsV3 ? retained : retained.map(({ receipt, ...event }) => event) });
 }
 
 export async function importCampaignCast(client: DatabaseClient, scope: CastScope, raw: unknown,
   maps: { turns: ReadonlyMap<string, string>; worlds: ReadonlyMap<string, string> }): Promise<void> {
   if (raw === undefined || raw === null) return;
-  if (typeof raw === "object" && "formatVersion" in raw && raw.formatVersion !== 1 && raw.formatVersion !== 2 && raw.formatVersion !== 3 && raw.formatVersion !== 4) throw new Error("cast_archive_version_unsupported");
+  if (typeof raw === "object" && "formatVersion" in raw && raw.formatVersion !== 1 && raw.formatVersion !== 2 && raw.formatVersion !== 3 && raw.formatVersion !== 4 && raw.formatVersion !== 5) throw new Error("cast_archive_version_unsupported");
   const payload = portableCampaignCastSchema.parse(raw);
   const characterIds = new Map(payload.characters.map((person) => [person.id, randomUUID()]));
   const eventIds = new Map(payload.events.map((event) => [event.id, randomUUID()]));

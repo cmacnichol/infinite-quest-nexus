@@ -136,3 +136,38 @@ it("allows undoing the latest merge while an earlier merge into the same target 
   ] };
   expect(portableCampaignCastSchema.safeParse(payload).success).toBe(true);
 });
+
+it("validates v5 correction provenance through merge and unmerge", () => {
+  const a = "11111111-1111-4111-8111-111111111111", b = "22222222-2222-4222-8222-222222222222";
+  const ids = Array.from({ length: 8 }, (_, n) => `${(n + 3).toString(16).repeat(8)}-${(n + 3).toString(16).repeat(4)}-4${(n + 3).toString(16).repeat(3)}-8${(n + 3).toString(16).repeat(3)}-${(n + 3).toString(16).repeat(12)}`);
+  const origin = { kind: "manual" };
+  const make = (index: number, command: object, extra: object = {}) => ({ id: ids[index], effectiveTurnNumber: 1, revision: index + 1, commands: [{ command, ...extra }] });
+  const payload = { formatVersion: 5, revision: 7, characters: [a,b].map(id => ({ id, origin, firstObservedTurn: 0 })), events: [
+    ...[a,b].map((characterId, i) => ({ id: ids[i], effectiveTurnNumber: 0, revision: i + 1, commands: [{ characterId, command: { kind: "create", name: "Mara", aliases: [], origin } }] })),
+    make(2, { kind: "observe", characterId: b, field: "story.role", value: "guide", mode: "fact", speakerCharacterId: null, evidence, supersedesObservationId: null }, { observationId: ids[7] }),
+    { ...make(3, { kind: "merge", characterId: a, sourceCharacterId: b, reviewedAliases: [], choices: {}, aliasChanges: { priorTargetAliases: [], added: [], removed: [] } }), commands: [
+      { command: { kind: "merge", characterId: a, sourceCharacterId: b, reviewedAliases: [], choices: {}, aliasChanges: { priorTargetAliases: [], added: [], removed: [] } } },
+      { command: { kind: "identity", characterId: a, name: "Mara", aliases: [] } }] },
+    make(4, { kind: "retract_observation", characterId: a, observationId: ids[7] }),
+    make(5, { kind: "unmerge", characterId: a, mergeEventId: ids[3] }),
+    make(6, { kind: "restore_observation", characterId: b, observationId: ids[7], retractionEventId: ids[4] })
+  ] };
+  expect(portableCampaignCastSchema.safeParse(payload).success).toBe(true);
+  expect(portableCampaignCastSchema.safeParse({ ...payload, formatVersion: 4 }).success).toBe(false);
+  expect(portableCampaignCastSchema.safeParse({ ...payload, formatVersion: 6 }).success).toBe(false);
+  const bad = structuredClone(payload);
+  (bad.events[4]!.commands[0]!.command as any).observationId = ids[0];
+  expect(portableCampaignCastSchema.safeParse(bad).success).toBe(false);
+  const wrong = structuredClone(payload);
+  (wrong.events[6]!.commands[0]!.command as any).retractionEventId = ids[3];
+  expect(portableCampaignCastSchema.safeParse(wrong).success).toBe(false);
+  const foreign = structuredClone(payload);
+  (foreign.events[6]!.commands[0]!.command as any).characterId = a;
+  expect(portableCampaignCastSchema.safeParse(foreign).success).toBe(false);
+  const fromFuture = structuredClone(payload);
+  fromFuture.events[2]!.effectiveTurnNumber = 2;
+  expect(portableCampaignCastSchema.safeParse(fromFuture).success).toBe(false);
+  const mixed = structuredClone(payload);
+  mixed.events[4]!.commands.push({ command: { kind: "pin", characterId: a, value: true } });
+  expect(portableCampaignCastSchema.safeParse(mixed).success).toBe(false);
+});
