@@ -18,3 +18,11 @@ it("reads only matching V3 protocol pairs and preserves V2", () => {
  expect(castContextNotice(cast, "failed")).toBe(castContextNotice(cast, "pending"));
  expect(castContextNotice(oldCast, "off")).toBe("Character discovery is off. Observations are dated, lower-authority last-known state; use accepted history for later events.");
 });
+
+it("gives newer observations authority over state edits in the complete V3 contract while freezing V2", () => {
+ const v3 = storyMemoryMandatoryContract(prompt);
+ expect(CAST_V3_STORY_AUTHORITY_CONTRACT).toBe("Campaign cast authority: use only the selected cast records and supplied evidence. User corrections govern current portrayal from their effective turn; user state edits govern until later story evidence, including intentional empty values. Older conflicting facts remain dated historical evidence; do not restore them as current attributes or treat compliance with a correction as a contradiction. Immutable world rules still apply; unresolved conflicts require uncertainty. Cast coverage is bounded: when tracking is incomplete, use accepted recent history for intervening events, and never infer that an omitted character or field is absent. Aliases identify the supplied stable character only when unambiguous. Prose relationship guidance is not a structured relationship record. Authored fields and deliberate campaign edits guide portrayal. Older conflicting observations are lower-authority dated evidence. When discovery is off, use last-known observations with accepted history; during a tracking gap, an authored goal takes precedence over an older observed goal unless a user override applies. An authored appearance summary and an observed appearance are distinct.");
+ expect(v3).toContain("Older conflicting observations are lower-authority dated evidence.");
+ expect(v3).not.toContain("Observations are lower-authority dated evidence.");
+ expect(storyMemoryMandatoryContract(oldPrompt)).toContain("Observations are lower-authority dated evidence.");
+});
