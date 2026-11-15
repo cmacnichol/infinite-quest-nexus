@@ -5,6 +5,7 @@ import type {
   CharacterWorkspaceSession,
   CharacterWorkspaceSessionStore
 } from "../../apps/web-next/src/character-workspace-session.js";
+import { WORLD_EDITOR_FIELDS } from "../../packages/client-core/src/characters/profile-fields.js";
 import { mountCharacterWorkspacePage } from "../../apps/web-next/src/character-workspace-page.js";
 
 const draft = () => ({
@@ -102,6 +103,28 @@ function key(window: Window, value: string, shiftKey = false): Event {
 }
 
 describe("Character Workspace page", () => {
+  it("shows registry guidance and associates it with every world character field", () => {
+    const { document, root } = fixture();
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(generatedCharacter)), navigate: vi.fn() });
+    for (const stage of ["identity", "story", "appearance"]) {
+      click(document, `[data-character-stage="${stage}"]`);
+      const descriptors = WORLD_EDITOR_FIELDS.filter((field) => {
+        const group = field.world!.group;
+        return stage === "identity" ? ["name", "identity"].includes(group) : stage === "story" ? ["core", "story", "notes"].includes(group) : group === "appearance";
+      });
+      for (const descriptor of descriptors) {
+        const name = descriptor.path === "name" ? "candidate.name" : `candidate.profile.${descriptor.path}`;
+        const control = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[name="${name}"]`)!;
+        expect(control, name).not.toBeNull();
+        const hint = control.parentElement!.querySelector<HTMLElement>("small.character-field-hint")!;
+        const error = control.parentElement!.querySelector<HTMLElement>("small.character-field-error")!;
+        expect(control.placeholder, name).toBe(descriptor.world!.placeholder);
+        expect(hint?.textContent, name).toBe(descriptor.world!.title);
+        expect(hint?.id, name).toBeTruthy();
+        expect(control.getAttribute("aria-describedby"), name).toBe(`${hint.id} ${error.id}`);
+      }
+    }
+  });
   it("edits character use and supporting context flags on Identity", () => {
     const { document, window, root } = fixture();
     const sessionStore = store(session(generatedCharacter));

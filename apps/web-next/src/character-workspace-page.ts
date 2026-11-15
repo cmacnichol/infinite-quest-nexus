@@ -1,3 +1,4 @@
+import { WORLD_EDITOR_FIELDS } from "../../../packages/client-core/src/characters/profile-fields";
 import { MAX_CHARACTER_MECHANICS_ITEMS, playableCharacterSchema, worldContentSchema } from "../../../packages/contracts/src/world-library";
 import type { AuthoringJobView, AuthoringSubmit } from "../../../packages/contracts/src/authoring";
 import type { AuthoringJobsApi } from "./authoring-jobs-api";
@@ -104,7 +105,7 @@ function workspaceMarkup(returnPath: string): string {
   </main>`;
 }
 
-function textControl(document: Document, name: string, labelText: string, value: string, textarea = false): HTMLLabelElement {
+function textControl(document: Document, name: string, labelText: string, value: string, textarea = false, descriptorPath?: string): HTMLLabelElement {
   const label = document.createElement("label");
   label.className = "character-field";
   const caption = document.createElement("span");
@@ -119,8 +120,18 @@ function textControl(document: Document, name: string, labelText: string, value:
   error.className = "character-field-error";
   error.dataset.fieldError = name;
   error.id = `character-${name.replaceAll(".", "-")}-error`;
-  control.setAttribute("aria-describedby", error.id);
-  label.append(caption, control, error);
+  const descriptor = WORLD_EDITOR_FIELDS.find((field) => field.path === descriptorPath)?.world;
+  const hint = descriptor ? document.createElement("small") : null;
+  if (hint && descriptor) {
+    hint.className = "character-field-hint";
+    hint.id = `character-${name.replaceAll(".", "-")}-hint`;
+    hint.textContent = descriptor.title;
+    control.placeholder = descriptor.placeholder;
+  }
+  control.setAttribute("aria-describedby", hint ? `${hint.id} ${error.id}` : error.id);
+  label.append(caption, control);
+  if (hint) label.append(hint);
+  label.append(error);
   return label;
 }
 
@@ -415,9 +426,9 @@ export function mountCharacterWorkspacePage(
     const technical = document.createElement("details");
     const summary = document.createElement("summary"); summary.textContent = "Technical details";
     technical.append(summary, id);
-    form.append(textControl(document, "candidate.name", "Name", state.candidate.name),
-      textControl(document, "candidate.profile.identity.pronouns", "Pronouns", state.candidate.profile?.identity.pronouns ?? ""),
-      textControl(document, "candidate.profile.identity.aliases", "Aliases (one per line)", state.candidate.profile?.identity.aliases.join("\n") ?? "", true));
+    form.append(textControl(document, "candidate.name", "Name", state.candidate.name, false, "name"),
+      textControl(document, "candidate.profile.identity.pronouns", "Pronouns", state.candidate.profile?.identity.pronouns ?? "", false, "identity.pronouns"),
+      textControl(document, "candidate.profile.identity.aliases", "Aliases (one per line)", state.candidate.profile?.identity.aliases.join("\n") ?? "", true, "identity.aliases"));
     const useField = document.createElement("label"); useField.className = "character-field";
     useField.innerHTML = `<span>Character use</span><select data-character-use><option value="playable">Playable</option><option value="supporting">Supporting</option><option value="both">Both</option></select>`;
     const flags = document.createElement("div"); flags.className = "character-context-flags";
@@ -466,10 +477,10 @@ export function mountCharacterWorkspacePage(
     const summary = document.createElement("summary"); summary.textContent = "More story details (optional)";
     optional.append(summary);
     for (const [index, [name, label]] of STORY_FIELDS.entries()) {
-      const field = textControl(document, `candidate.profile.story.${name}`, label, state.candidate.profile?.story[name] ?? "", true);
+      const field = textControl(document, `candidate.profile.story.${name}`, label, state.candidate.profile?.story[name] ?? "", true, `story.${name}`);
       (index < 3 ? form : optional).append(field);
     }
-    optional.append(textControl(document, "candidate.profile.unclassifiedNotes", "Additional notes", state.candidate.profile?.unclassifiedNotes ?? "", true));
+    optional.append(textControl(document, "candidate.profile.unclassifiedNotes", "Additional notes", state.candidate.profile?.unclassifiedNotes ?? "", true, "unclassifiedNotes"));
     form.append(optional);
     if (state.candidate.characterText.trim()) {
       const source = document.createElement("details"); source.dataset.characterSource = "";
@@ -485,8 +496,8 @@ export function mountCharacterWorkspacePage(
     const stage = document.createElement("div"); stage.className = "character-stage";
     stage.innerHTML = "<header><h2>Appearance</h2><p>Record concrete visual facts without requiring a portrait.</p></header>";
     const form = document.createElement("div"); form.className = "character-fields";
-    for (const [name, label] of APPEARANCE_FIELDS) form.append(textControl(document, `candidate.profile.appearance.${name}`, label, state.candidate.profile?.appearance[name] ?? "", true));
-    form.append(textControl(document, "candidate.profile.appearance.distinguishingFeatures", "Distinguishing features (one per line)", state.candidate.profile?.appearance.distinguishingFeatures.join("\n") ?? "", true));
+    for (const [name, label] of APPEARANCE_FIELDS) form.append(textControl(document, `candidate.profile.appearance.${name}`, label, state.candidate.profile?.appearance[name] ?? "", true, `appearance.${name}`));
+    form.append(textControl(document, "candidate.profile.appearance.distinguishingFeatures", "Distinguishing features (one per line)", state.candidate.profile?.appearance.distinguishingFeatures.join("\n") ?? "", true, "appearance.distinguishingFeatures"));
     stage.append(form); canvas.replaceChildren(stage, actions()); bindCandidateInputs();
     const features = required<HTMLTextAreaElement>(canvas, '[name="candidate.profile.appearance.distinguishingFeatures"]');
     function onFeaturesInput(): void {
