@@ -36,7 +36,7 @@ export function renderMechanicsTable(host: HTMLElement, options: { kind: "stat" 
         });
         cell.append(control); row.append(cell);
       }
-      remove.addEventListener("click", () => { if (disposed) return; removed = { item: items[index], index }; items.splice(index, 1); page = Math.min(page, Math.max(0, Math.ceil(items.length / pageSize) - 1)); options.onChange([...items]); render(); host.querySelector<HTMLButtonElement>("[data-undo-remove]")?.focus(); });
+      remove.addEventListener("click", () => { if (disposed) return; removed = { item: items[index], index }; items.splice(index, 1); page = Math.min(page, Math.max(0, Math.ceil(items.length / pageSize) - 1)); options.onChange([...items]); render(); const undo = host.querySelector<HTMLButtonElement>("[data-undo-remove]"); (undo && !undo.disabled ? undo : host.querySelector<HTMLElement>("tbody input, button:not(:disabled)"))?.focus(); });
       const cell = document.createElement("td"); cell.append(remove); row.append(cell); body.append(row);
     });
     table.append(body); host.append(table);

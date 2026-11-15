@@ -45,4 +45,12 @@ describe("character mechanics table", () => {
     button("Undo remove").click();
     expect(document.activeElement?.getAttribute("aria-label")).toBe("Name for row 52");
   });
+  it("focuses an enabled row control when undo is disabled for an over-limit collection", () => {
+    const { document, window } = parseHTML("<div></div>"); const host = document.querySelector("div")!;
+    window.HTMLElement.prototype.focus = function () { Object.defineProperty(document, "activeElement", { configurable: true, value: this }); };
+    renderMechanicsTable(host, { kind: "stat", items: [{ name: "A" }, { name: "B" }, { name: "C" }], max: 2, onChange: vi.fn() });
+    (host.querySelector('button[aria-label="Remove A"]') as HTMLButtonElement).click();
+    expect(host.querySelector<HTMLButtonElement>('[data-undo-remove]')?.disabled).toBe(true);
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("Name for row 1");
+  });
 });
