@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Only Phase 0 changes domain projection, repository field sources, frozen narrator capture and protocol consumers, under V3 versions. Nothing adds a migration, API endpoint, provider operation, capability flag or storage-format change; the existing snapshot envelope carries version-selected fiction values.
+- Only Phase 0 changes domain projection, repository field sources, frozen narrator capture and protocol consumers, under V3 versions. Nothing adds a migration, API endpoint, provider operation, capability flag or storage-format change; the existing in-memory snapshot envelope carries version-selected fiction values; the job persists the fingerprint, not the snapshot.
 - Every write keeps its existing revision, boundary, idempotency, generation-lock and capability fences. Request bodies are built only through `prepareCastSubmission`, `buildPresetRequest`, `buildProfileUpdate` and the observation-decision request shape.
 - Untrusted text (names, values, quotes, prompts) is set with `textContent` only.
 - Labels, input kinds and limits come from `CHARACTER_FIELD_DESCRIPTORS` and its views. The State Edit field set is defined once (`CAST_STATE_FIELDS`, Task 1).
@@ -195,9 +195,9 @@ it("locked precedence keeps the V2 rule for both projections", () => {
 - Test: `tests/integration/campaign-cast-generation.integration.test.ts`, `tests/integration/story-memory-compatibility.integration.test.ts`
 
 - [ ] **Step 1: Write failing integration tests:**
-  - `"V2 job captured before the upgrade resumes after it with an unchanged fingerprint"`. Capture a V2 job with an edit at 12 under the old projection. Record a fact at 20, then resume. Recapture uses `"locked"` and the job continues instead of failing.
+  - A V2 job captured with a State Edit and a later Observation resumes with an unchanged fingerprint when authority is unchanged; recapture uses `"locked"`.
   - A V3 job's recapture during resume uses `"yield"` and matches its frozen fingerprint.
-  - Retries after tracking catches up reuse the saved fiction and evidence unchanged.
+  - If cast authority changes between attempts, including tracking catching up, the job fails stale and requires a fresh job. Preserve exact already-dispatched request replay where supported; never silently reproject.
   - Preview and generation select identical fields for the same frozen protocol.
 - [ ] **Step 2: Run with `--config vitest.integration.config.ts`, expect FAIL in the new cases.**
 - [ ] **Step 3: Implement.** Every capture and recapture call site passes the job's frozen `contextProtocol`, never the live default.
@@ -210,7 +210,7 @@ it("locked precedence keeps the V2 rule for both projections", () => {
 - Modify: `packages/database/src/story-memory-policy-repository.ts:135-136`, `packages/database/src/prompt-repository.ts:24, 287` (enqueue V3)
 - Test: `tests/integration/story-continuity-review.integration.test.ts`, `tests/integration/story-memory-compatibility.integration.test.ts`, `tests/unit/story-memory-policy-repository.test.ts`
 
-- [ ] **Step 1: Write the end-to-end proof first**, against real PostgreSQL and a deterministic provider, with V3 selected explicitly: enqueue → freeze/validate snapshot → dispatch → continuity review/repair → restart/resume → commit. Inspect the provider's captured request for the Task 3a cases. Incompatible pairs reject before dispatch. Failed or rejected output does not mutate accepted state, and another campaign's facts never appear. Then add the failing enqueue test: new enqueue chooses V3 (history V3 when `historyCoverageEnabled !== false`).
+- [ ] **Step 1: Write the end-to-end proof first**, against real PostgreSQL and a deterministic provider, with V3 selected explicitly: enqueue → capture/fingerprint snapshot → dispatch → continuity review/repair → restart/resume with unchanged authority → commit. Inspect the provider's captured request for the Task 3a cases. Incompatible pairs reject before dispatch. Failed or rejected output does not mutate accepted state, and another campaign's facts never appear. Then add the failing enqueue test: new enqueue chooses V3 (history V3 when `historyCoverageEnabled !== false`).
 - [ ] **Step 2: Run, expect the proof to PASS and the enqueue test to FAIL.**
 - [ ] **Step 3: Switch the enqueue default to V3.**
 - [ ] **Step 4: Run the suites plus Task 3's protocol units, expect PASS.**
