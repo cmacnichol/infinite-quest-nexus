@@ -53,3 +53,5 @@ export * from "./campaign-cast-authored.js";
 export * from "./campaign-cast-merge.js";
 export * from "./campaign-cast-promotion.js";
 export * from "./campaign-cast-review-decisions.js";
+
+export * from "./campaign-cast-observation-decisions.js";

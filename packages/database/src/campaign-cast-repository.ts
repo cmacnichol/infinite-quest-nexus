@@ -620,6 +620,8 @@ async function applyCommand(client: DatabaseClient, scope: CastScope, campaign: 
 
 async function persistBatch(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State,
   batch: CastBatch, requestHash: string, publicCharacterId?: string, deferMetadataRefresh = false, attachmentInput?: { characterId: string; basis: "unique_name" | "unique_world_name"; sourceRanges: import("../../contracts/src/campaign-cast.js").CastSourceRange[] }, trustedAuthored = false, eventId = randomUUID()): Promise<CastBatchReceipt> {
+  if (batch.commands.some(command => command.kind === "retract_observation" || command.kind === "restore_observation"))
+    throw new Error("Observation decisions require the dedicated workflow.");
   const payload: StoredCommand[] = batch.commands.map((command) => ({ command,
     ...(command.kind === "create" ? { characterId: publicCharacterId ?? randomUUID() } : {}),
     ...(command.kind === "observe" ? { observationId: randomUUID() } : {}) }));
@@ -673,7 +675,7 @@ async function persistBatch(client: DatabaseClient, scope: CastScope, campaign: 
 export async function applyCastBatchWithClient(client: DatabaseClient, rawScope: CastScope, rawBatch: CastBatch,
   options: { deferMetadataRefresh?: boolean; attachment?: { characterId: string; basis: "unique_name" | "unique_world_name"; sourceRanges: import("../../contracts/src/campaign-cast.js").CastSourceRange[] } } = {}): Promise<CastBatchReceipt> {
   const scope = castScopeSchema.parse(rawScope), batch = castBatchSchema.parse(rawBatch);
-  if (batch.commands.some(command => ["merge", "unmerge", "remove", "restore"].includes(command.kind)
+  if (batch.commands.some(command => ["merge", "unmerge", "remove", "restore", "retract_observation", "restore_observation"].includes(command.kind)
     || command.kind === "identity" && command.aliasChanges)) throw new Error("Lifecycle cast writes require the dedicated workflow.");
   const campaign = await lockCampaign(client, scope);
   const state = await initialize(client, scope, campaign);

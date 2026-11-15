@@ -26,7 +26,7 @@ function usable(evidence: CastEvidence, baseTurn: number) {
 
 /** Pure selection over captured authority; this function performs no discovery or mutable reads. */
 export function selectCastContext(input: {
-  snapshot: CapturedReadonly<CastGenerationSnapshot>; direction: string; currentScene: string; openThreads: readonly string[]; budgetTokens: number;
+  snapshot: CapturedReadonly<CastGenerationSnapshot>; direction: string; currentScene: string; openThreads: readonly string[]; budgetTokens: number; retractedObservationIds?: ReadonlySet<string>;
 }): CastContextSelection {
   const snapshot = castGenerationSnapshotSchema.parse(input.snapshot);
   if (snapshot.version === "cast-context-v2") return selectCastContextV2(snapshot, input);
@@ -73,13 +73,13 @@ export function selectCastContext(input: {
     }
     const supported = observations.filter((entry) => ids.has(entry.id));
     const superseded = new Set(supported.flatMap((entry) => entry.supersedesObservationId ? [entry.supersedesObservationId] : []));
-    const profile = projectCastProfile({ observations: supported, overrides });
+    const profile = projectCastProfile({ observations: supported, overrides, ...(input.retractedObservationIds ? { retractedObservationIds: input.retractedObservationIds } : {}) });
     const fields: CastContextField[] = [];
     for (const field of castFieldSchema.options) {
       const value = profile[field];
       if (value === undefined) continue;
       const override = overrides.find((entry) => entry.field === field);
-      const observation = supported.filter((entry) => !superseded.has(entry.id) && entry.field === field && entry.mode === "fact" && entry.value === value)
+      const observation = supported.filter((entry) => !superseded.has(entry.id) && !input.retractedObservationIds?.has(entry.id) && entry.field === field && entry.mode === "fact" && entry.value === value)
         .sort((a, b) => castEvidenceOrder(b.evidence)[0] - castEvidenceOrder(a.evidence)[0]
           || castEvidenceOrder(b.evidence)[1] - castEvidenceOrder(a.evidence)[1]).at(0);
       if (!override && (!current || observation?.evidence.kind === "historical_world")

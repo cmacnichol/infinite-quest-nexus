@@ -133,3 +133,11 @@ describe("campaign cast reference translation", () => {
     expect(() => createCastReferenceTranslator({ ...maps, [missing]: new Map() }, rules).event(source)).toThrow("Missing");
   });
 });
+
+it("fails closed when correction reference translation is not yet available", () => {
+  const translator = createCastReferenceTranslator(maps, rules);
+  for (const command of [
+    { kind: "retract_observation" as const, characterId: ids.character, observationId: ids.observation },
+    { kind: "restore_observation" as const, characterId: ids.character, observationId: ids.observation, retractionEventId: ids.event }
+  ]) expect(() => translator.event({ id: ids.event, commands: [{ command }] })).toThrow(/format 5/);
+});

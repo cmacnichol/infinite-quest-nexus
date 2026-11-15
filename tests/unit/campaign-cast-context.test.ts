@@ -196,3 +196,14 @@ it("keeps dated lower-authority state through enrollment gaps and distinguishes 
   expect(off.notice).toContain("discovery is off");
   expect(off.characters[0].fields).toEqual(gap.characters[0].fields);
 });
+
+it("selects only unretracted context contributions without reviving superseded facts", () => {
+  const input = fixture();
+  const prior = input.details[0]!.observations[0]!;
+  const newer = { ...prior, id: id(13), value: "green eyes", supersedesObservationId: prior.id };
+  const snapshot = { ...input, details: [{ ...input.details[0]!, observations: [prior, newer] }] };
+  const selectWith = (ids: string[]) => selectCastContext({ snapshot: castGenerationSnapshotSchema.parse(snapshot), budgetTokens: 3000, direction: "Mara", currentScene: "", openThreads: [], retractedObservationIds: new Set(ids) });
+  expect(selectWith([]).content).toContain("green eyes");
+  expect(selectWith([newer.id]).content).not.toContain("green eyes");
+  expect(selectWith([newer.id]).content).not.toContain("blue eyes");
+});

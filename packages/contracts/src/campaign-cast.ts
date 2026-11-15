@@ -129,6 +129,8 @@ export const castCommandSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("edit_authored_profile"), characterId: z.uuid(), seedEventId: z.uuid(),
     set: castAuthoredValuesSchema, reset: z.array(castAuthoredPathSchema).max(30),
     restoreAuthoredGoals: z.literal(true).optional() }).strict(),
+  z.object({ kind: z.literal("retract_observation"), characterId: z.uuid(), observationId: z.uuid() }).strict(),
+  z.object({ kind: z.literal("restore_observation"), characterId: z.uuid(), observationId: z.uuid(), retractionEventId: z.uuid() }).strict(),
   z.object({ kind: z.literal("detach"), characterId: z.uuid(), eventId: z.uuid() }).strict(),
   z.object({ kind: z.literal("override"), characterId: z.uuid(), field: castFieldSchema, value: z.string().max(20_000) }).strict().refine((value) => value.field === "story.goals" || value.value.length <= 2000),
   z.object({ kind: z.literal("clear_override"), characterId: z.uuid(), field: castFieldSchema }).strict(),
@@ -274,6 +276,7 @@ export const portableCampaignCastSchema = z.object({
     }
     for (const item of event.commands) {
     const command = item.command;
+    if (command.kind === "retract_observation" || command.kind === "restore_observation") fail(); // Format 5 validation is implemented by the archive migration.
     const lifecycleCommand = ["merge", "unmerge", "remove", "restore"].includes(command.kind);
     if (value.formatVersion < 4 && (lifecycleCommand || command.kind === "identity" && command.aliasChanges)) fail();
     // Live decisions use the active turn. Rewind discards later decisions before another can be written.
