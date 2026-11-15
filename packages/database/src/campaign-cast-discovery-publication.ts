@@ -175,7 +175,7 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
       { kind: "mention", characterId, evidence: evidence(candidate.identityEvidence[0]!) },
       ...eligibleObservations.map((observation) => ({ kind: "observe" as const, characterId: characterId!, field: observation.field, value: observation.value,
         mode: observation.mode, speakerCharacterId: observation.speakerCharacterId, evidence: evidence(observation), supersedesObservationId: null }))
-    ] }, automatic ? { attachment: { characterId, basis: identityBasis, sourceRanges } } : {});
+    ] }, automatic ? { suppressRetractedFacts: true, attachment: { characterId, basis: identityBasis, sourceRanges } } : { suppressRetractedFacts: true });
     observationIds.push(...receipt.observationIds);
     accepted++;
     current = await initializeCastWithClient(client, claim.scope);

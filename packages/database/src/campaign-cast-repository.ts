@@ -691,9 +691,28 @@ async function persistBatch(client: DatabaseClient, scope: CastScope, campaign: 
   return receipt;
 }
 
+// Filter only imported discovery evidence; explicit edits and confirmations retain their own semantics.
+function suppressRetractedDiscoveryFacts(batch: CastBatch, projected: Awaited<ReturnType<typeof snapshotProjection>>): CastBatch {
+  const effective = (id: string | null) => {
+    if (!id) return null;
+    const person = projected.snapshot.characters.find(item => item.id === id);
+    return person?.mergedIntoCharacterId ?? id;
+  };
+  const commands = batch.commands.filter(command => {
+    if (command.kind !== "observe" || command.mode !== "fact" || command.evidence.kind !== "turn") return true;
+    const characterId = effective(command.characterId);
+    const detail = projected.details.find(item => item.characterId === characterId);
+    return !detail?.observations.some(observation => projected.retractedObservationIds.has(observation.id)
+      && observation.field === command.field && observation.value === command.value && observation.mode === command.mode
+      && effective(observation.speakerCharacterId) === effective(command.speakerCharacterId)
+      && stableStringify(observation.evidence) === stableStringify(command.evidence));
+  });
+  return { ...batch, commands };
+}
+
 /** Discovery publication and its receipt share the caller's transaction. */
 export async function applyCastBatchWithClient(client: DatabaseClient, rawScope: CastScope, rawBatch: CastBatch,
-  options: { deferMetadataRefresh?: boolean; attachment?: { characterId: string; basis: "unique_name" | "unique_world_name"; sourceRanges: import("../../contracts/src/campaign-cast.js").CastSourceRange[] } } = {}): Promise<CastBatchReceipt> {
+  options: { suppressRetractedFacts?: boolean; deferMetadataRefresh?: boolean; attachment?: { characterId: string; basis: "unique_name" | "unique_world_name"; sourceRanges: import("../../contracts/src/campaign-cast.js").CastSourceRange[] } } = {}): Promise<CastBatchReceipt> {
   const scope = castScopeSchema.parse(rawScope), batch = castBatchSchema.parse(rawBatch);
   if (batch.commands.some(command => ["merge", "unmerge", "remove", "restore", "retract_observation", "restore_observation"].includes(command.kind)
     || command.kind === "identity" && command.aliasChanges)) throw new Error("Lifecycle cast writes require the dedicated workflow.");
@@ -711,7 +730,9 @@ export async function applyCastBatchWithClient(client: DatabaseClient, rawScope:
     const current = await snapshot(client, scope, campaign, state, batch.boundary);
     for (const command of manualCreates) if (command.kind === "create") assertNoRemovedNames(current.characters, [command.name, ...command.aliases]);
   }
-  return persistBatch(client, scope, campaign, state, batch, requestHash, undefined, options.deferMetadataRefresh, options.attachment);
+  const eligibleBatch = options.suppressRetractedFacts ? suppressRetractedDiscoveryFacts(batch, await snapshotProjection(client, scope, campaign, state, batch.boundary)) : batch;
+  if (!eligibleBatch.commands.length) throw new CampaignCastError("cast_invalid_request");
+  return persistBatch(client, scope, campaign, state, eligibleBatch, requestHash, undefined, options.deferMetadataRefresh, options.attachment);
 }
 
 /** Seed a roster entry in the caller's campaign transaction with one preallocated identity. */

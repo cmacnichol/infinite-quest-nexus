@@ -139,7 +139,7 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
             commands: [{ kind: "observe", characterId: character.id, field: observation.field, value: observation.value,
               mode: "fact", speakerCharacterId: null, supersedesObservationId: null,
               evidence: { kind: "turn", turnId: source.turnId, turnNumber: source.turnNumber, narrationRevision: source.narrationRevision,
-                sourceHash: source.sourceHash, paragraphId: observation.paragraphId, quote: observation.quote } }] });
+                sourceHash: source.sourceHash, paragraphId: observation.paragraphId, quote: observation.quote } }] }, { suppressRetractedFacts: true });
           observationId = receipt.observationIds[0];
           cast = await initializeCastWithClient(client, scope);
         }
@@ -262,7 +262,7 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
           ...candidate.observations.map((observation) => ({ kind: "observe" as const, characterId: characterId!, field: observation.field,
             value: observation.value, mode: observation.mode, speakerCharacterId: observation.speakerCharacterId,
             evidence: evidence({ paragraphId: observation.paragraphId, quote: observation.quote }), supersedesObservationId: null }))
-        ] });
+        ] }, { suppressRetractedFacts: true });
         cast = await initializeCastWithClient(client, scope);
         const result = castCandidateResolutionSchema.parse({ candidateId: id, character: cast.characters.find((person) => person.id === characterId),
           revision: cast.revision, boundary: cast.boundary, observationIds: receipt.observationIds, pendingObservations: validated.pendingObservations });
