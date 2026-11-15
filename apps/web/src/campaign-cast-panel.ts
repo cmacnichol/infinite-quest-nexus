@@ -1,3 +1,5 @@
+import "./styles.css";
+import { renderCastRoster } from "./character-editor/cast-roster-view.js";
 import { renderObservationReview } from "./character-editor/observation-review.js";
 import { mountCampaignPresentation } from "./character-editor/campaign-presentation.js";
 import { showLifecycle } from "./character-editor/cast-lifecycle.js";
@@ -39,6 +41,7 @@ export function createLegacyCastPanel(options: {
   let lockedByServer = false, editingForm = false, saving = false;
   let presentation: ReturnType<typeof mountCampaignPresentation> | null = null;
   let presentationCharacter = "", detailed = false, activeSection = "overview";
+  let rosterView: ReturnType<typeof renderCastRoster> | null = null;
   let lockCheck = 0;
   let lockPoll: ReturnType<typeof setInterval> | undefined;
   const locked = () => lockedByServer || options.generationActive();
@@ -89,6 +92,7 @@ export function createLegacyCastPanel(options: {
     result.addEventListener("click", action); return result;
   }
   function closePanel() {
+    rosterView?.dispose(); rosterView = null;
     presentation?.dispose(); presentation = null;
     storyReview.reset(); epoch++; clearInterval(lockPoll); preset = null; editor = null; workspace.close(); operationKeys.clear(); dialog.close(); returnFocus?.focus();
   }
@@ -115,6 +119,7 @@ export function createLegacyCastPanel(options: {
   }
   function requestClose() { requestNavigation(closePanel); }
   function shell(title: string) {
+    rosterView?.dispose(); rosterView = null;
     if (presentation) { activeSection = presentation.section(); presentation.dispose(); presentation = null; }
     editingForm = false;
     dialog.classList.remove("cast-sheet-layout"); dialog.replaceChildren();
@@ -126,11 +131,11 @@ export function createLegacyCastPanel(options: {
     const p = node("p", message); p.setAttribute("role", "status"); dialog.append(p); return p;
   }
   const current = (token: number) => token === epoch && campaign === options.campaignId();
-  async function loadRoster(cursor?: string, notice?: string) {
+  async function loadRoster(cursor?: string, notice?: string, keepControls = false) {
     presentationCharacter = ""; detailed = false; activeSection = "overview";
     storyReview.reset();
     const token = ++epoch; preset = null; editor = null; latest = null; latestRoster = null; rosterVisible = true;
-    shell("Characters"); status("Loading characters…");
+    if (!keepControls) { shell("Characters"); status("Loading characters…"); }
     try {
       const [rosterResult, discoveryResult, scanResult, workspaceResult] = await Promise.allSettled([
         options.api.list(campaign, { query, filter, ...(cursor ? { cursor } : {}) }), options.api.discoveryStatus(campaign),
@@ -268,33 +273,34 @@ export function createLegacyCastPanel(options: {
   }
   function renderRoster() {
     shell("Characters");
+    const tools = node("div");
+    const toolStatus = (text: string) => { const p = node("p", text); p.setAttribute("role", "status"); tools.append(p); return p; };
     const narrator = castNarratorNotice(narratorState, campaign);
     if (narrator) {
-      const note = status(narrator.text);
+      const note = toolStatus(narrator.text);
       if (narrator.href) { const link = node("a", narrator.label); link.href = narrator.href; note.append(" ", link); }
     }
     if (!options.campaignPage) renderStoryTools();
-    status(attentionSummary()).dataset.castAttention = "";
-    dialog.append(button("Needs attention", () => { void loadAttention(); }));
+    toolStatus(attentionSummary()).dataset.castAttention = "";
     function renderStoryTools() {
-      if (!discovery) status("Character tracking status is unavailable. Saved characters are still available.");
+      if (!discovery) toolStatus("Character tracking status is unavailable. Saved characters are still available.");
       else {
         const messages = { disabled: "Automatic character tracking is disabled.", not_enrolled: "Character tracking starts with the next accepted turn.",
           catching_up: "Character tracking is catching up.", failed: `Character tracking stopped at turn ${discovery.firstGap?.turnNumber}. Your story is saved.`,
           complete: "Character tracking is up to date." };
-        status(messages[discovery.state]);
-        if (discovery.coverageStartTurn !== null) status(discovery.trackedThroughTurn! >= discovery.coverageStartTurn
+        toolStatus(messages[discovery.state]);
+        if (discovery.coverageStartTurn !== null) toolStatus(discovery.trackedThroughTurn! >= discovery.coverageStartTurn
           ? `Tracked turns ${discovery.coverageStartTurn}–${discovery.trackedThroughTurn}. Earlier turns are not included.`
           : `Tracking starts at turn ${discovery.coverageStartTurn}; no turns in this range are complete yet.`);
         if (discovery.firstGap) {
           const reason = castScanRecovery(discovery, list!.boundary.turnNumber).diagnostic;
-          status(`First tracking gap: turn ${discovery.firstGap.turnNumber} (${discovery.firstGap.status.replaceAll("_", " ")}).${reason ? ` ${reason}` : ""}`);
-          if (recovery?.kind === "scan" && recovery.scanId && recovery.scanStatus !== "cancelled") dialog.append(button("Open tracking recovery", () => { void loadScan(recovery!.scanId!); }));
+          toolStatus(`First tracking gap: turn ${discovery.firstGap.turnNumber} (${discovery.firstGap.status.replaceAll("_", " ")}).${reason ? ` ${reason}` : ""}`);
+          if (recovery?.kind === "scan" && recovery.scanId && recovery.scanStatus !== "cancelled") tools.append(button("Open tracking recovery", () => { void loadScan(recovery!.scanId!); }));
         }
-        if (discovery.unresolvedCount) status(`${discovery.unresolvedCount} character ${discovery.unresolvedCount === 1 ? "match needs" : "matches need"} review.`);
+        if (discovery.unresolvedCount) toolStatus(`${discovery.unresolvedCount} character ${discovery.unresolvedCount === 1 ? "match needs" : "matches need"} review.`);
 
         if (discovery.state === "failed" && discovery.firstGap?.diagnosticCode === "source_requires_manual_scan") {
-          status("This turn exceeds automatic tracking limits. Review or add its characters manually.");
+          toolStatus("This turn exceeds automatic tracking limits. Review or add its characters manually.");
         } else if (discovery.enabled && discovery.state === "failed" && discovery.firstGap?.jobId && recovery?.kind === "forward" && recovery.jobId === discovery.firstGap.jobId) {
           const jobId = discovery.firstGap.jobId, token = epoch;
           const request = { expectedCastRevision: list!.revision, expectedBoundary: list!.boundary, idempotencyKey: crypto.randomUUID() };
@@ -316,14 +322,15 @@ export function createLegacyCastPanel(options: {
               retry.disabled = code === 409 || !enabled || options.generationActive();
             }
           }
-          dialog.append(retry, feedback);
+          tools.append(retry, feedback);
         }
       }
-      dialog.append(button("Refresh characters", () => { void loadRoster(); }), button("Likely included for this input", previewContext));
-      if (scanData && (scanData.capabilities.castBackfill || scanData.scan)) dialog.append(button("Scan earlier story", () => { void loadScan(); }));
+      tools.append(button("Refresh characters", () => { void loadRoster(); }), button("Likely included for this input", previewContext));
+      if (scanData && (scanData.capabilities.castBackfill || scanData.scan)) tools.append(button("Scan earlier story", () => { void loadScan(); }));
     }
+    const secondaryActions: HTMLElement[] = [];
     if (list?.capabilities.castPresets && options.api.worldChoices && options.api.fromWorldPreview && options.api.fromWorld) {
-      dialog.append(button("Add from world", async () => {
+      secondaryActions.push(button("Add from world", async () => {
         rosterVisible = false; const token = ++epoch;
         await syncLock(); if (!current(token)) return;
         shell("Add from world"); dialog.append(button("Back to characters", () => void loadRoster()));
@@ -333,35 +340,20 @@ export function createLegacyCastPanel(options: {
           campaign, syncLock, id => void openDetail(id));
       }, !enabled));
     }
-    const controls = node("form"); controls.className = "cast-toolbar";
-    const label = node("label", "Find a character"); label.htmlFor = "cast-search";
-    const search = node("input"); search.id = "cast-search"; search.type = "search"; search.value = query; search.maxLength = 200;
-    const submit = node("button", "Search"); submit.type = "submit";
-    const filterLabel = node("label", "Filter characters"), filterSelect = node("select"); filterLabel.htmlFor = "cast-filter"; filterSelect.id = "cast-filter";
-    for (const [value, label] of [["all", "All"], ["main", "Main"], ["recent", recentFilterLabel(list?.recentWindow)], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"], ...(list?.capabilities.castLifecycle !== undefined ? [["removed", "Removed"]] : [])]) { const option = node("option", label); option.value = value!; option.selected = value === filter; filterSelect.append(option); }
-    filterSelect.addEventListener("change", () => { filter = filterSelect.value as CharacterFilter; query = search.value; workspace.setQuery(query, filter); void loadRoster(); });
-    controls.append(label, search, filterLabel, filterSelect, submit);
-    controls.addEventListener("submit", (event) => { event.preventDefault(); query = search.value; workspace.setQuery(query, filter); void loadRoster(); });
-    dialog.append(controls);
-    if (!enabled) status("Character editing is disabled. Saved characters remain available to read.");
-    else if (!options.campaignPage && locked()) status("Finish or resolve the current generation before editing characters.");
-    else dialog.append(button("Add character", async () => {
-      const token = epoch;
-      if (options.checkLock) await syncLock();
-      if (!current(token)) return;
-      rosterVisible = false; editor = createCastEditor(list!); renderEditor();
-    }));
-    if (filter === "recent") status(recentFilterLabel(list!.recentWindow));
-    const roster = node("ul"); roster.className = "cast-roster";
-    for (const person of [...list!.characters].sort((a, b) => Number(b.origin.kind === "protagonist") - Number(a.origin.kind === "protagonist"))) {
-      const li = node("li"), title = button(person.name, () => { void openDetail(person.id); });
-      const attention = list!.attention?.find((item) => item.characterId === person.id);
-      li.append(title, node("p", [person.profile["story.role"], characterProvenanceLabel(person), `Last observed turn ${person.lastObservedTurn}${person.lastMentionedTurn != null ? ` · Last mentioned turn ${person.lastMentionedTurn}` : ""}`,
-        person.pinned ? "Pinned" : "", person.ignored ? "Ignored" : "", attention?.review ? "Needs review" : "", attention?.conflict ? "Conflicting details" : ""].filter(Boolean).join(" · ")));
-      roster.append(li);
-    }
-    dialog.append(roster);
-    if (!list!.characters.length) status(query ? "No characters match this search." : "No supporting characters yet. Add someone from your story.");
+    const filters: Array<[CharacterFilter, string]> = [["all", "All"], ["main", "Main"], ["recent", recentFilterLabel(list?.recentWindow)], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"]];
+    if (list?.capabilities.castLifecycle !== undefined) filters.push(["removed", "Removed"]);
+    const host = node("div"); dialog.append(host);
+    const counts = attention && Object.values(attention).every(value => value !== null) ? Object.values(attention).reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
+    rosterView = renderCastRoster(host, { characters: list!.characters, attention: Object.fromEntries((list!.attention ?? []).map(item => [item.characterId, item])),
+      tracking: discovery, attentionTotal: counts, filters, filter, query, secondaryActions, tools: [tools],
+      canAdd: enabled && (options.campaignPage || !locked()),
+      addDisabledReason: !enabled ? "Character editing is disabled. Saved characters remain available to read." : "Finish or resolve the current generation before editing characters.",
+      onQuery(nextQuery, nextFilter) { query = nextQuery; filter = nextFilter; workspace.setQuery(query, filter); void loadRoster(undefined, undefined, true); },
+      onOpen(id) { void openDetail(id); }, onAttention() { void loadAttention(); },
+      onAdd() { void (async () => { const token = epoch; if (options.checkLock) await syncLock(); if (!current(token) || locked()) return; rosterVisible = false; editor = createCastEditor(list!); renderEditor(); })(); }
+    });
+    const search = host.querySelector<HTMLInputElement>('input[type="search"]')!; search.id = "cast-search"; search.maxLength = 200;
+    host.querySelector<HTMLSelectElement>("select")!.id = "cast-filter";
     if (list!.nextCursor) dialog.append(button("Load more characters", () => { void loadRoster(list!.nextCursor!); }));
   }
   async function openDetail(id: string) {

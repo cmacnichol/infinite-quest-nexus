@@ -33,6 +33,29 @@ describe("legacy cast panel", () => {
     expect(buildPresetRequest(state, id)).toEqual({ expectedCastRevision: 4, expectedCharacterRevision: 3, expectedBoundary: detail.boundary,
       idempotencyKey: id, resetIdentity: true, reset: ["story.role"], restoreAuthoredGoals: true, setOverrides: { "appearance.description": "" } });
   });
+  it("debounces search once and ignores an older response", async () => {
+    const { document, window } = parseHTML("<html><body></body></html>");
+    vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
+    const authority = { revision: 1, boundary: { turnNumber: 0, timelineRevision: 0 }, capabilities: { castEditing: true, castLifecycle: false }, nextCursor: null };
+    const person = (name: string) => ({ id: name, name, aliases: [], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0, lastMentionedTurn: null });
+    const pending = new Map<string, (value: unknown) => void>();
+    const list = vi.fn((_campaign: string, args?: { query?: string }) => args?.query ? new Promise(resolve => pending.set(args.query!, resolve)) : Promise.resolve({ ...authority, characters: [] }));
+    const api = { list, discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} });
+    const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    await panel.open(); expect(dialog.querySelector('#cast-filter option[value="removed"]')).not.toBeNull();
+    vi.useFakeTimers();
+    const search = dialog.querySelector<HTMLInputElement>("#cast-search")!;
+    search.value = "a"; search.dispatchEvent(new window.Event("input")); search.value = "old"; search.dispatchEvent(new window.Event("input"));
+    await vi.advanceTimersByTimeAsync(249); expect(list).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1); expect(list).toHaveBeenCalledTimes(2);
+    // A second request starts after the first one, and completes first.
+    search.value = "new"; search.dispatchEvent(new window.Event("input"));
+    await vi.advanceTimersByTimeAsync(250); expect(list).toHaveBeenCalledTimes(3);
+    pending.get("new")!({ ...authority, characters: [person("New")] }); await vi.advanceTimersByTimeAsync(0);
+    pending.get("old")!({ ...authority, characters: [person("Old")] }); await vi.advanceTimersByTimeAsync(0);
+    expect(dialog.textContent).toContain("New"); expect(dialog.textContent).not.toContain("Old"); panel.requestClose(); vi.useRealTimers();
+  });
   it("labels main profile provenance from the profile read, with an unknown fallback", () => {
     expect(mainProfileSourceLabel({ inheritedFromSnapshot: true, storedProfile: null })).toBe("World snapshot");
     expect(mainProfileSourceLabel({ inheritedFromSnapshot: false, storedProfile: {} })).toBe("Campaign profile");
@@ -67,7 +90,12 @@ describe("legacy cast panel", () => {
     expect(dialog.textContent).toContain("1 character match needs review");
     expect(dialog.querySelector("img")).toBeNull();
     expect(dialog.textContent).toContain("Finish or resolve the current generation");
-    expect([...dialog.querySelectorAll("button")].some((button) => button.textContent === "Add character")).toBe(false);
+    expect([...dialog.querySelectorAll("button")].find((button) => button.textContent === "Add character")?.disabled).toBe(true);
+    expect(dialog.querySelector(".cast-roster-status")?.compareDocumentPosition(dialog.querySelector("#cast-search")!)! & 4).toBeTruthy();
+    const tools = dialog.querySelector(".cast-roster-tools")!;
+    expect(tools.textContent).toContain("Refresh characters");
+    expect(tools.textContent).toContain("Likely included for this input");
+    expect(dialog.querySelector("#cast-filter option[value=removed]")).toBeNull();
     generationActive = false;
     const row = [...dialog.querySelectorAll("button")].find((button) => button.textContent?.includes("<img"))!;
     row.click(); await new Promise((resolve) => setTimeout(resolve, 0));
