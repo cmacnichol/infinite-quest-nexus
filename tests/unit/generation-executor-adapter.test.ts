@@ -2872,6 +2872,26 @@ describe("generation executor adapter", () => {
     }));
   });
 
+  it.each([
+    ["story-v18-fiction-cast", "current-continuity-v6", "story-v19-state-edit-precedence|story-output-v2|current-continuity-v8"],
+    ["story-v19-state-edit-precedence", "current-continuity-v8", "story-v18-fiction-cast|story-output-v2|current-continuity-v6"]
+  ])("rejects frozen %s policy with mismatched prompt identity before dispatch", async (promptProtocol, contextProtocol, protocolIdentity) => {
+    const policy = defaultStoryMemoryPolicy("r2");
+    const job = completeGenerationExecutionPayload();
+    job.generation_base_identity = { ...job.generation_base_identity, version: "generation-base-v4" } as never;
+    job.context_options = { ...job.context_options, storyMemoryPolicy: { policy, policyHash: storyMemoryPolicyHash(policy), castContext: true,
+      castDiscoveryEnabled: true, contextProtocol, promptProtocol, providerConfigurationFingerprint: "a".repeat(64) } } as never;
+    const templates = validPromptSnapshot();
+    job.prompt_snapshot = { version: 2, templates, continuityReview: null, storyMemoryCompatibility: { protocolIdentity,
+      templateHashes: { story_system: templates.story_system.hash, event_extension: templates.event_extension.hash } } } as never;
+    const repository = { ...guardedRepository(), loadExecutionPayload: vi.fn(async () => job), markRecoverable: vi.fn(async () => true) };
+    const collaborators = rejectedCollaborators();
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "v3-mismatch", leaseSeconds: 30, claim })).resolves.toBe(false);
+    expect(collaborators.loadTextExecution).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "generation_prompt_snapshot_invalid" }));
+  });
+
   it("raises generation_cancelled when malformed snapshot recovery loses its lease", async () => {
     const malformedJob = { ...completeGenerationExecutionPayload(), prompt_snapshot: {} as never };
     const repository = {

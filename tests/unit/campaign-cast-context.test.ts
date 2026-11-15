@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { castGenerationSnapshotSchema, castGenerationSnapshotFingerprint } from "../../packages/contracts/src/campaign-cast-context.js";
 import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
+import { CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { estimateTokens } from "../../packages/domain/src/text.js";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -224,4 +225,23 @@ it("reinstates ordinary static conflict in context when a fact is restored", () 
   expect(context(new Set())).not.toContain("brown eyes");
   expect(context(new Set([newer.id]))).toContain("blue eyes");
   expect(context(new Set())).not.toContain("blue eyes");
+});
+
+
+it.each(["current", "pending", "failed", "off"] as const)("selects frozen notices on both cast snapshot paths: %s", (status) => {
+  const old = fixture();
+  const modern = { ...old, version: "cast-context-v2" as const, details: [{ characterId: id(1), observations: [], overrides: [] }],
+    fiction: [{ characterId: id(1), fields: [{ field: "story.role", value: "guardian", source: "authored", evidenceId: id(11) }] }] };
+  const v3 = status === "current" ? "User corrections are portrayal authority from their effective turn. User state edits are authority until later story evidence. Older conflicting facts remain historical evidence."
+    : status === "off" ? "Character discovery is off. User corrections guide portrayal; state edits yield to later recorded story evidence. Observations are dated last-known state; use accepted history for later events."
+      : "Tracking is incomplete. User corrections remain portrayal authority; user state edits are authority until later recorded story evidence. Stable observations are dated historical evidence. Other dynamic observations are omitted. Use accepted history for intervening events.";
+  for (const snapshot of [old, modern]) {
+    const captured = castGenerationSnapshotSchema.parse({ ...snapshot, discoveryStatus: status, trackedThroughTurn: status === "current" ? 4 : 1 });
+    const run = (contextProtocol: string) => JSON.parse(selectCastContext({ snapshot: captured, direction: "Mara", currentScene: "", openThreads: [], budgetTokens: 3000, contextProtocol }).content).notice;
+    expect(run(CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION)).toBe(v3);
+    const expectedOld = snapshot.version === "cast-context-v1"
+      ? status === "current" ? "User field overrides are current portrayal authority from their effective turn. Older conflicting facts remain historical evidence." : "Tracking is incomplete. User field overrides remain portrayal authority; stable observations are dated historical evidence. Dynamic observations are omitted. Use accepted history for intervening events."
+      : status === "current" ? "Authored and user-edited fields guide portrayal. Observations are lower-authority evidence." : status === "off" ? "Character discovery is off. Observations are dated, lower-authority last-known state; use accepted history for later events." : "Character tracking is incomplete. Observations are dated, lower-authority last-known state; use accepted history for later events.";
+    expect(run(CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION)).toBe(expectedOld);
+  }
 });
