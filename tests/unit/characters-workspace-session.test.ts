@@ -56,3 +56,12 @@ describe("characters workspace refresh", () => {
   });
 
 });
+
+it("waits for an in-flight poll before an explicit refresh", async () => {
+  let release!: () => void, calls = 0;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const boundary = { turnNumber: 0, timelineRevision: 0 };
+  const status = { revision: 1, boundary, capabilities: { editing: true, discovery: false, autoMatch: false, backfill: false, context: false }, contextDisabledReason: null, counts: { identities: 0, details: 0, conflicts: 0 }, tracking: null };
+  const session = createCharactersWorkspaceSession({ api: { workspaceStatus: async () => { calls++; if (calls === 1) await pending; return status; }, list: async () => ({ revision: 1, boundary, characters: [], nextCursor: null }), detail: async () => { throw new Error("no selection"); } }, onChange: () => {} });
+  session.open("campaign"); const refresh = session.refresh(); release(); await refresh; expect(calls).toBe(2); session.dispose();
+});

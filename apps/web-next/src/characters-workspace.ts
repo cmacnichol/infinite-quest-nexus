@@ -2,10 +2,11 @@ import { renderCastRoster } from "../../web/src/character-editor/cast-roster-vie
 import { renderWorldCastPicker } from "../../web/src/character-editor/world-cast-picker.js";
 import { renderCastEditor } from "./characters-workspace-editor";
 import { openCastTool } from "./characters-workspace-tools";
+import { renderCharacterSheetView, type SheetFeedback } from "../../web/src/character-editor/character-sheet-view.js";
 import { renderObservationReview } from "../../web/src/character-editor/observation-review.js";
 import { castScanRecovery } from "./campaign-cast-scan-panel";
 import { createCharacterProfileForm } from "./character-profile-form";
-import { buildCharacterSheet, createCastEditor, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
+import { buildCharacterSheet, createCastEditor, recentFilterLabel, sheetRequest, sheetUndoOperation, sheetUndoRequest, sheetMatchesFence, retractionRequest, type SheetTarget, type SheetUndo, type SheetWriteFence, type SheetChange, type CastEditorState } from "@infinite-quest/client-core";
 import { createCampaignCastApi, createCharactersWorkspaceSession, type CharactersWorkspaceState, type CampaignCastApi, type CharactersWorkspaceSessionOptions } from "@infinite-quest/client-web";
 import type { CampaignCharacterProfile, CampaignCharacterProfileUpdate, CharacterFilter } from "@infinite-quest/contracts";
 
@@ -20,15 +21,27 @@ export function createCharactersWorkspace(document: Document, generationActive: 
   let openEpoch = 0; let toolEpoch = 0; let protagonist: ProtagonistProfile | null = null; let protagonistLoading = false;
   let profileEditor: { form: ReturnType<typeof createCharacterProfileForm>; saving: boolean } | null = null;
   let state: CharactersWorkspaceState<CastEditorState>, editor: CastEditorState | null = null, filter: CharacterFilter = "all", query = "", focus: HTMLElement | null = null, reviewing = false;
-  const session = createCharactersWorkspaceSession<CastEditorState>({ api, ...(dependencies?.schedule ? { schedule: dependencies.schedule } : {}), onChange(next) { state = next; render(); } });
+  const session = createCharactersWorkspaceSession<CastEditorState>({ api, ...(dependencies?.schedule ? { schedule: dependencies.schedule } : {}), onChange(next) {
+    state = next;
+    if (sheetFeedback?.undo && sheetFeedback.fence?.kind === "cast" && !sheetFeedback.refreshFailed && state.detail && state.selectedId === state.detail.character.id && !sheetMatchesFence({ kind: "cast", detail: state.detail }, sheetFeedback.fence)) {
+      sheetFeedback.message += " Undo expired: the character was updated after your save."; delete sheetFeedback.undo;
+    }
+    render();
+  } });
   let rosterView: ReturnType<typeof renderCastRoster> | null = null;
   let searchPending = false;
+  let showEmpty = false;
+  let sheetView: ReturnType<typeof renderCharacterSheetView> | null = null;
+  let sheetTimer: ReturnType<typeof setTimeout> | undefined;
+  let sheetFeedback: { message: string; undo?: SheetUndo; fence?: SheetWriteFence; deadline: number; key: string; refreshFailed?: boolean } | null = null;
+  function clearSheetFeedback() { clearTimeout(sheetTimer); sheetFeedback = null; }
+  function selectCharacter(id: string | null) { if (id !== state.selectedId) { clearSheetFeedback(); openEpoch++; showEmpty = false; protagonist = null; protagonistLoading = false; } session.select(id); }
   const operationKeys = new Map<string, string>();
   function operationKey(operation: string, payload: unknown) { const key = `${operation}:${JSON.stringify(payload)}`; let id = operationKeys.get(key); if (!id) { id = crypto.randomUUID(); operationKeys.set(key, id); } return id; }
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => { const el = document.createElement(tag); el.textContent = text; return el; };
   const button = (text: string, action: () => void, disabled = false) => { const el = node("button", text); el.type = "button"; el.disabled = disabled; el.addEventListener("click", action); return el; };
   const discard = () => !(editor?.dirty || profileEditor?.form.dirty) || (dependencies?.confirm?.("Discard unsaved character changes?") ?? document.defaultView?.confirm("Discard unsaved character changes?") ?? false);
-  function close() { if (editor?.saving || profileEditor?.saving || !discard()) return; rosterView?.dispose(); rosterView = null; searchPending = false; openEpoch++; toolEpoch++; editor = null; profileEditor = null; reviewing = false; session.close(); operationKeys.clear(); dialog.close(); focus?.focus(); }
+  function close() { if (editor?.saving || profileEditor?.saving || !discard()) return; clearSheetFeedback(); sheetView?.dispose(); rosterView?.dispose(); rosterView = null; searchPending = false; openEpoch++; toolEpoch++; editor = null; profileEditor = null; reviewing = false; session.close(); operationKeys.clear(); dialog.close(); focus?.focus(); }
   function render() {
     if (!state || !dialog.open || reviewing || profileEditor || searchPending) return;
     const oldSearch = dialog.querySelector<HTMLInputElement>('.cast-roster-search input');
@@ -42,13 +55,13 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     if (state.error) dialog.append(node("p", "Characters could not be refreshed. Try again."), button("Retry", () => { void session.refresh(); }));
     if (!state.status) { dialog.append(node("p", "Loading characters…")); return; }
     if (state.selectedId) {
-      const sidebar = node("nav"); sidebar.className = "characters-sheet-roster"; sidebar.setAttribute("aria-label", "Characters"); for (const person of state.characters) sidebar.append(button(person.name, () => session.select(person.id))); dialog.append(sidebar);
-      dialog.append(button("Back to characters", () => session.select(null)));
+      const sidebar = node("nav"); sidebar.className = "characters-sheet-roster"; sidebar.setAttribute("aria-label", "Characters"); for (const person of state.characters) sidebar.append(button(person.name, () => selectCharacter(person.id))); dialog.append(sidebar);
+      dialog.append(button("Back to characters", () => selectCharacter(null)));
       if (!state.detail) { dialog.append(node("p", "Loading character…")); return; }
       const detail = state.detail;
       if (detail.character.origin.kind === "protagonist" && !protagonist && !protagonistLoading && state.campaignId) {
         protagonistLoading = true; const campaign = state.campaignId, epoch = openEpoch;
-        void getProfile(campaign).then(value => { if (epoch === openEpoch && state.campaignId === campaign) { protagonist = value; protagonistLoading = false; render(); } }).catch(() => { protagonistLoading = false; });
+        void getProfile(campaign).then(value => { if (epoch === openEpoch && state.campaignId === campaign && state.selectedId === detail.character.id && dialog.open) { protagonist = value; protagonistLoading = false; render(); } }).catch(() => { if (epoch === openEpoch) protagonistLoading = false; });
       }
       const sheet = protagonist && detail.character.origin.kind === "protagonist" ? buildCharacterSheet({ kind: "protagonist", profile: { name: protagonist.name, profile: protagonist.profile }, revision: protagonist.revision }) : buildCharacterSheet({ kind: "supporting", detail });
       dialog.append(node("p", `Last observed turn ${detail.character.lastObservedTurn}${detail.character.lastMentionedTurn != null ? ` · Last mentioned turn ${detail.character.lastMentionedTurn}` : ""}`));
@@ -56,7 +69,64 @@ export function createCharactersWorkspace(document: Document, generationActive: 
       else dialog.append(button("Edit character", () => { editor = createCastEditor(detail, detail); session.setDraft(editor); renderEditor(); }, state.status.capabilities.editing !== true || generationActive()));
       if (detail.character.origin.kind !== "protagonist" && !detail.character.mergedIntoCharacterId && detail.capabilities.castLifecycle === false) dialog.append(node("p", "Removing and restoring characters is disabled on this server."));
       else if (detail.character.origin.kind !== "protagonist" && state.status.capabilities.editing !== true) dialog.append(node("p", "Removing and restoring characters is unavailable while character editing is disabled."));
-      for (const section of sheet.sections) { const group = node("section"); group.append(node("h3", section.name)); for (const field of section.fields) { const value = Array.isArray(field.value) ? field.value.join(", ") : field.value; group.append(node("p", `${field.label}: ${value || (field.origin === "conflicted" ? "Conflicting observations" : field.origin === "claim" ? "Unverified claim" : "Unknown")} ${field.origin === "unknown" ? "" : `· ${field.origin}`}`)); } dialog.append(group); }
+      const campaign = state.campaignId!, id = detail.character.id, epoch = openEpoch;
+      const main = detail.character.origin.kind === "protagonist";
+      const target: SheetTarget | null = main ? (protagonist ? { kind: "main", profile: protagonist } : null) : { kind: "cast", detail };
+      const current = () => epoch === openEpoch && state.selectedId === id && state.campaignId === campaign && dialog.open;
+      const editable = () => Boolean(target && state.status?.capabilities.editing === true && !generationActive() && !detail.character.removed && !detail.character.mergedIntoCharacterId);
+      const dispatch = async (request: ReturnType<typeof sheetRequest>) => request.endpoint === "profile" ? saveProfile(campaign, request.body) : request.endpoint === "editAuthoredProfile" ? api.editAuthoredProfile(campaign, id, request.body) : api.edit(campaign, id, request.body);
+      const refresh = async () => {
+        try {
+          await session.refresh();
+          if (!current()) return;
+          if (state.error || !state.detail) throw state.error ?? new Error("Refresh failed");
+          const nextProfile = main ? await getProfile(campaign) : null;
+          if (!current()) return;
+          if (nextProfile) protagonist = nextProfile;
+          const refreshed: SheetTarget | null = main ? (nextProfile ? { kind: "main", profile: nextProfile } : null) : { kind: "cast", detail: state.detail };
+          if (sheetFeedback) {
+            sheetFeedback.refreshFailed = false;
+            sheetFeedback.message = sheetFeedback.message.replace(/\. Could not refresh this character\.$/, ".");
+            if (sheetFeedback.undo && sheetFeedback.fence && refreshed && !sheetMatchesFence(refreshed, sheetFeedback.fence)) { sheetFeedback.message += " Undo expired: the character was updated after your save."; delete sheetFeedback.undo; }
+          }
+          render();
+        } catch {
+          if (!current()) return;
+          if (sheetFeedback) { sheetFeedback.message = sheetFeedback.message.replace(/\. Could not refresh this character\.$/, ".").replace(/\.$/, "") + ". Could not refresh this character."; sheetFeedback.refreshFailed = true; }
+          render();
+        }
+      };
+      const owner = sheetFeedback;
+      const feedback: SheetFeedback | undefined = owner ? { message: owner.message, ...(owner.undo && owner.fence && !owner.refreshFailed && Date.now() < owner.deadline && target && sheetMatchesFence(target, owner.fence) ? { undo: async () => {
+        if (!current() || !editable() || sheetFeedback !== owner || !owner.undo || !owner.fence || Date.now() >= owner.deadline) return { ok: true as const };
+        try { await dispatch(sheetUndoRequest(target, owner.undo, owner.fence, owner.key)); if (!current()) return { ok: true as const }; clearSheetFeedback(); sheetFeedback = { message: "Undone", deadline: 0, key: "" }; await refresh(); return { ok: true as const }; }
+        catch (error) { if (!current()) return { ok: true as const }; if ((error as { statusCode?: number }).statusCode === 409) { clearSheetFeedback(); sheetFeedback = { message: "Could not undo. The character changed; review the latest values.", deadline: 0, key: "" }; render(); return { ok: true as const }; } return { ok: false as const, conflict: false, message: "Could not undo. Please try again." }; }
+      } } : {}) } : undefined;
+      const host = node("div"); dialog.append(host);
+      sheetView = renderCharacterSheetView(host, { sheet, kind: main ? "main" : "supporting", editable, lockedReason: null,
+        ...(!main && editable() ? { toggles: { pinned: detail.character.pinned, ignored: detail.character.ignored } } : {}),
+        ...(feedback ? { feedback } : {}), onEditStart: clearSheetFeedback, showEmpty, onShowEmpty(value) { showEmpty = value; render(); },
+        compareLabel: main ? "Load latest version" : "Compare latest", onCompareLatest() { void refresh(); },
+        confirmDiscard: () => dependencies?.confirm?.("Discard unsaved character changes?") ?? document.defaultView?.confirm("Discard unsaved character changes?") ?? false, isCurrent: current,
+        async onChange(change: SheetChange) {
+          if (!target || !editable()) return { ok: false, conflict: false, message: "Character editing is unavailable." };
+          clearSheetFeedback();
+          try {
+            const inverse = sheetUndoOperation(target, change), request = sheetRequest(target, change, operationKey("sheet", [id, change, detail.revision]));
+            const result = await dispatch(request); if (!current()) return { ok: true };
+            const fence: SheetWriteFence = request.endpoint === "profile" ? { kind: "main", revision: result.revision } : { kind: "cast", revision: result.revision, characterRevision: (result as typeof detail).character.revision, boundary: (result as typeof detail).boundary };
+            const label = change.kind === "toggle" ? change.key : sheet.sections.flatMap(section => section.fields).find(field => field.path === change.path)?.label ?? change.path;
+            sheetFeedback = { message: `Saved ${label}.`, undo: inverse, fence, deadline: Date.now() + 30000, key: crypto.randomUUID(), refreshFailed: true };
+            if (request.endpoint === "profile") onProfileSaved(campaign);
+            sheetTimer = setTimeout(() => { if (!current() || !sheetFeedback) return; delete sheetFeedback.undo; sheetView?.setFeedback({ message: sheetFeedback.message }); }, 30000);
+            await refresh(); return { ok: true };
+          } catch (error) { if (!current()) return { ok: true }; const conflict = (error as { statusCode?: number }).statusCode === 409; return { ok: false, conflict, message: conflict ? "This character changed. Your edit is kept; compare the latest before saving." : "Could not save. Please try again." }; }
+        },
+        ...(!main && state.status.capabilities.observationDecisions === true ? { retraction: {
+          async preview(observationId: string) { const result = await api.previewObservationDecision(campaign, id, observationId, retractionRequest(detail, observationId, operationKey("retract", [id, observationId, detail.revision]))); const observation = detail.observations.find(item => item.id === observationId); return { currentValue: result.currentValue, projectedValue: result.projectedValue, quote: observation?.evidence.kind === "turn" ? observation.evidence.quote : "", turn: observation?.evidence.kind === "turn" ? observation.evidence.turnNumber : 0 }; },
+          async apply(observationId: string) { if (!editable() || !current()) return { ok: false as const, conflict: false, message: "Character editing is unavailable." }; try { await api.applyObservationDecision(campaign, id, observationId, retractionRequest(detail, observationId, operationKey("retract", [id, observationId, detail.revision]))); if (current()) { clearSheetFeedback(); await refresh(); } return { ok: true as const }; } catch (error) { return { ok: false as const, conflict: (error as { statusCode?: number }).statusCode === 409, message: "Could not retract this observation." }; } }
+        } } : {}) });
+      if (sheetFeedback?.refreshFailed) dialog.append(button("Reload", () => { void refresh(); }));
       const sources = node("details"); sources.append(node("summary", "Sources and edit history"));
       renderObservationReview({ document, container: sources, detail,
         supported: state.status.capabilities.observationDecisions === true,
@@ -117,7 +187,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
       const host = node("section"); dialog.append(host);
       void renderWorldCastPicker(host, api, campaign, async () => !generationActive(), id => {
         if (epoch !== openEpoch || tool !== toolEpoch || state.campaignId !== campaign || !dialog.open) return;
-        reviewing = false; toolEpoch++; session.select(id);
+        reviewing = false; toolEpoch++; selectCharacter(id);
       });
     }, !canAdd));
     const counts = Object.values(state.status.counts);
@@ -127,7 +197,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
       addDisabledReason: state.status.capabilities.editing !== true ? "Character editing is disabled. Saved characters remain available to read." : "Finish or resolve the current generation before editing characters.",
       onInput() { searchPending = true; query = host.querySelector<HTMLInputElement>('input[type="search"]')!.value; },
       onQuery(nextQuery, nextFilter) { searchPending = false; query = nextQuery; filter = nextFilter; session.setQuery(query, filter); },
-      onOpen(id) { cancelSearch(); session.select(id); }, onAttention() { review("matches"); },
+      onOpen(id) { cancelSearch(); selectCharacter(id); }, onAttention() { review("matches"); },
       onAdd() { void (async () => { if (!state.campaignId || generationActive()) return; const campaign = state.campaignId, epoch = openEpoch, tool = toolEpoch; const roster = await api.list(campaign); if (epoch !== openEpoch || tool !== toolEpoch || reviewing || state.selectedId || state.campaignId !== campaign || !dialog.open || state.status?.capabilities.editing !== true || generationActive()) return; cancelSearch(); editor = createCastEditor(roster); session.setDraft(editor); renderEditor(); })(); }
     });
     const details = host.querySelector<HTMLDetailsElement>(".cast-roster-tools"); if (details) details.open = toolsOpen;
@@ -184,6 +254,6 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     fields.querySelector<HTMLElement>("input, textarea")?.focus();
   }
   dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
-  return { open(campaignId: string, returnFocus?: HTMLElement | null) { openEpoch++; toolEpoch++; searchPending = false; rosterView?.dispose(); rosterView = null; protagonist = null; protagonistLoading = false; focus = returnFocus ?? document.activeElement as HTMLElement | null; editor = null; profileEditor = null; reviewing = false; dialog.showModal(); session.open(campaignId); }, dispose() { rosterView?.dispose(); openEpoch++; toolEpoch++; session.dispose(); dialog.remove(); } };
+  return { open(campaignId: string, returnFocus?: HTMLElement | null) { clearSheetFeedback(); openEpoch++; toolEpoch++; searchPending = false; rosterView?.dispose(); rosterView = null; protagonist = null; protagonistLoading = false; focus = returnFocus ?? document.activeElement as HTMLElement | null; editor = null; profileEditor = null; reviewing = false; dialog.showModal(); session.open(campaignId); }, dispose() { clearSheetFeedback(); sheetView?.dispose(); rosterView?.dispose(); openEpoch++; toolEpoch++; session.dispose(); dialog.remove(); } };
 }
 

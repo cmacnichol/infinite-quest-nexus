@@ -36,10 +36,6 @@ export function renderCastEditor(dialog: HTMLDialogElement, context: CastEditorC
       wrap.querySelector("textarea, input")!.addEventListener("input", syncFieldStatus); syncFieldStatus();
       groups.get(field.path.split(".")[0]!)?.append(wrap);
     }
-    if (holder.editor.characterId) for (const [key, label] of [["pinned", "Pin character"], ["ignored", "Ignore character"]] as const) {
-      const wrap = node("label", label), control = node("input"); control.type = "checkbox"; control.checked = holder.editor.draft[key]; control.disabled = generationActive() || holder.editor.saving; control.addEventListener("change", () => { holder.editor = changeCastEditor(holder.editor!, { [key]: control.checked }); syncSave(); }); wrap.prepend(control); form.append(wrap);
-    }
-    if (holder.editor.characterId) form.append(node("small", "Pin prioritizes this character in story context. Ignore excludes this supporting character from story context."));
     if (holder.editor.error) form.append(node("p", holder.editor.error));
     if (holder.editor.conflict || context.getState().changedWhileEditing) {
       form.append(node("p", "The saved character changed. Your edits are still here."));

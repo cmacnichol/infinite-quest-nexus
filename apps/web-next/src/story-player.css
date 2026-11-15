@@ -623,3 +623,13 @@ main[data-ui-implementation="web-awesome"] .quiet-leaf[data-story-width="full"] 
   .characters-sheet-layout > :not(header):not(.characters-sheet-roster) { grid-column: 2; }
 }
 @media (max-width: 899px) { .characters-sheet-roster { display: none; } }
+
+.characters-workspace .character-sheet-view { display: grid; gap: 1rem; min-width: 0; }
+.characters-workspace .character-sheet-view section { display: grid; gap: .75rem; min-width: 0; }
+.characters-workspace .character-sheet-field { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; min-width: 0; border-bottom: 1px solid var(--border, #625e50); padding: .5rem 0; }
+.characters-workspace .character-sheet-field > strong, .characters-workspace .character-sheet-field > p, .characters-workspace .character-sheet-field > label, .characters-workspace .character-sheet-field > input, .characters-workspace .character-sheet-field > textarea, .characters-workspace .character-sheet-confirm { flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; }
+.characters-workspace .character-sheet-field p { margin: 0; white-space: pre-wrap; }
+.characters-workspace .character-sheet-view button, .characters-workspace .character-sheet-view input, .characters-workspace .character-sheet-view textarea { min-height: 44px; max-width: 100%; }
+.characters-workspace .character-sheet-view button { min-width: 44px; }
+.characters-workspace .character-sheet-toggles { display: flex; flex-wrap: wrap; gap: .5rem; }
+.characters-workspace .character-sheet-toggles p { flex-basis: 100%; }

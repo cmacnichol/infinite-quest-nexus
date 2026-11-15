@@ -39,6 +39,7 @@ export function createCharactersWorkspaceSession<Draft = unknown>({ api, schedul
   };
   let state: CharactersWorkspaceState<Draft> = { campaignId: null, status: null, characters: [], listCapabilities: null, recentWindow: DEFAULT_RECENT_WINDOW_TURNS, attention: {}, selectedId: null, detail: null, draft: null, draftBaseDetail: null, changedWhileEditing: false, error: null };
   let epoch = 0, timer: unknown, controller: AbortController | undefined, running = false, failures = 0;
+  let activeRefresh: Promise<void> | undefined;
   let query = "", filter: CharacterFilter = "all";
   const emit = () => onChange({ ...state });
   const stop = () => { if (timer !== undefined) clock.clear(timer); timer = undefined; controller?.abort(); controller = undefined; };
@@ -46,6 +47,7 @@ export function createCharactersWorkspaceSession<Draft = unknown>({ api, schedul
   async function refresh(force = false) {
     if (!state.campaignId || running || !clock.visible()) return;
     const campaignId = state.campaignId, currentEpoch = epoch, abort = new AbortController(); controller = abort; running = true;
+    let complete!: () => void; const pending = new Promise<void>(resolve => { complete = resolve; }); activeRefresh = pending;
     try {
       let status = await api.workspaceStatus(campaignId, abort.signal);
       const recovering = state.error !== null;
@@ -87,14 +89,14 @@ export function createCharactersWorkspaceSession<Draft = unknown>({ api, schedul
       state.status = status; state.error = null; failures = 0;
       if (force || statusChanged || recovering) emit();
     } catch (error) { if (epoch === currentEpoch && !abort.signal.aborted) { state.error = error; failures++; emit(); } }
-    finally { if (epoch === currentEpoch) { running = false; controller = undefined; arm(); } }
+    finally { if (epoch === currentEpoch) { running = false; controller = undefined; arm(); } if (activeRefresh === pending) activeRefresh = undefined; complete(); }
   }
   const visibilityOff = clock.onVisibilityChange(() => { if (!clock.visible()) { stop(); epoch++; running = false; } else void refresh(true); });
   return {
     open(campaignId: string) { stop(); epoch++; running = false; failures = 0; state = { campaignId, status: null, characters: [], listCapabilities: null, recentWindow: DEFAULT_RECENT_WINDOW_TURNS, attention: {}, selectedId: null, detail: null, draft: null, draftBaseDetail: null, changedWhileEditing: false, error: null }; emit(); void refresh(true); },
     select(characterId: string | null) { stop(); epoch++; running = false; state.selectedId = characterId; state.detail = null; state.draft = null; state.draftBaseDetail = null; state.changedWhileEditing = false; emit(); void refresh(true); },
     setQuery(value: string, nextFilter: CharacterFilter) { stop(); epoch++; running = false; query = value; filter = nextFilter; void refresh(true); },
-    refresh: () => refresh(true),
+    async refresh() { const requestedEpoch = epoch; while (running && activeRefresh && epoch === requestedEpoch) await activeRefresh; if (epoch === requestedEpoch) await refresh(true); },
     setDraft(draft: Draft | null) { if (draft !== null && state.draft === null) state.draftBaseDetail = state.detail; state.draft = draft; if (draft === null) { state.changedWhileEditing = false; state.draftBaseDetail = null; } emit(); },
     close() { stop(); epoch++; running = false; state.campaignId = null; emit(); },
     dispose() { stop(); epoch++; running = false; state.campaignId = null; visibilityOff(); }
