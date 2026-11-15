@@ -26,11 +26,13 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     if (sheetFeedback?.undo && sheetFeedback.fence?.kind === "cast" && !sheetFeedback.refreshFailed && state.detail && state.selectedId === state.detail.character.id && !sheetMatchesFence({ kind: "cast", detail: state.detail }, sheetFeedback.fence)) {
       sheetFeedback.message += " Undo expired: the character was updated after your save."; delete sheetFeedback.undo;
     }
-    if (!sheetView?.active()) render();
+    if (sheetView?.active()) sheetRenderPending = true;
+    else render();
   } });
   let rosterView: ReturnType<typeof renderCastRoster> | null = null;
   let searchPending = false;
   let showEmpty = false;
+  let sheetRenderPending = false;
   let sheetView: ReturnType<typeof renderCharacterSheetView> | null = null;
   let sheetTimer: ReturnType<typeof setTimeout> | undefined;
   let sheetFeedback: { message: string; undo?: SheetUndo; fence?: SheetWriteFence; deadline: number; key: string; refreshFailed?: boolean } | null = null;
@@ -44,6 +46,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
   function close() { if (editor?.saving || profileEditor?.saving || !discard()) return; clearSheetFeedback(); sheetView?.dispose(); sheetView = null; rosterView?.dispose(); rosterView = null; searchPending = false; openEpoch++; toolEpoch++; editor = null; profileEditor = null; reviewing = false; session.close(); operationKeys.clear(); dialog.close(); focus?.focus(); }
   function render() {
     if (!state || !dialog.open || reviewing || profileEditor || searchPending) return;
+    sheetRenderPending = false;
     const oldSearch = dialog.querySelector<HTMLInputElement>('.cast-roster-search input');
     const selection = oldSearch && document.activeElement === oldSearch ? { start: oldSearch.selectionStart, end: oldSearch.selectionEnd, direction: oldSearch.selectionDirection } : null;
     const toolsOpen = dialog.querySelector<HTMLDetailsElement>(".cast-roster-tools")?.open ?? false;
@@ -106,7 +109,17 @@ export function createCharactersWorkspace(document: Document, generationActive: 
       const host = node("div"); dialog.append(host);
       sheetView = renderCharacterSheetView(host, { sheet, kind: main ? "main" : "supporting", editable, lockedReason: null,
         ...(!main && editable() ? { toggles: { pinned: detail.character.pinned, ignored: detail.character.ignored } } : {}),
-        ...(feedback ? { feedback } : {}), onEditStart: clearSheetFeedback, showEmpty, onShowEmpty(value) { showEmpty = value; render(); },
+        ...(feedback ? { feedback } : {}),
+        onEditStart(path, mode) {
+          clearSheetFeedback();
+          if (!sheetRenderPending || !current()) return;
+          render(); sheetView?.revealField(path, mode); return true;
+        },
+        onInteractionEnd(path) {
+          if (!sheetRenderPending || !current()) return;
+          render();
+          Array.from(dialog.querySelectorAll<HTMLElement>("[data-path]")).find(row => row.dataset.path === path)?.querySelector<HTMLElement>("button")?.focus();
+        }, showEmpty, onShowEmpty(value) { showEmpty = value; render(); },
         compareLabel: main ? "Load latest version" : "Compare latest", onCompareLatest() { void refresh(); },
         confirmDiscard: () => dependencies?.confirm?.("Discard unsaved character changes?") ?? document.defaultView?.confirm("Discard unsaved character changes?") ?? false, isCurrent: current,
         async onChange(change: SheetChange) {

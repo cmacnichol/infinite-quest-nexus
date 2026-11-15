@@ -10,7 +10,8 @@ export type CharacterSheetViewOptions = {
   sheet: CharacterSheet; kind: "main" | "supporting";
   editable(path: string): boolean; lockedReason: string | null;
   onChange(change: SheetChange): Promise<SheetResult>;
-  onEditStart?(): void;
+  onEditStart?(path: string, mode: "edit" | "conflict"): boolean | void;
+  onInteractionEnd?(path: string): void;
   feedback?: SheetFeedback;
   retraction?: { preview(observationId: string): Promise<RetractionPreview>; apply(observationId: string): Promise<SheetResult> };
   toggles?: { pinned: boolean; ignored: boolean };
@@ -35,7 +36,7 @@ export function renderCharacterSheetView(host: HTMLElement, options: CharacterSh
   const setPending = (value: boolean) => { pending = value; host.querySelectorAll("button, input, textarea").forEach(node => { (node as HTMLButtonElement).disabled = value; }); };
   const showError = (result: SheetResult) => { if (!current() || result.ok) return; error = result; const region = host.querySelector(".character-sheet-error"); if (region) { region.replaceChildren(); region.append(el("span", result.conflict ? "This character changed. Your edit is kept; compare the latest before saving." : result.message)); region.append(button(options.compareLabel, () => { if (allowRefresh()) options.onCompareLatest(); })); } };
   const run = async (operation: () => Promise<SheetResult>) => { if (pending || !current()) return; setPending(true); let result: SheetResult; try { result = await operation(); } catch { result = { ok: false, conflict: false, message: "Could not save. Please try again." }; } if (!current()) return; setPending(false); if (!result.ok) showError(result); };
-  const open = (path: string, next: "edit" | "conflict") => { if (!current() || pending || !options.editable(path)) return; if (activePath !== path && dirty() && !options.confirmDiscard()) return; if (options.onEditStart) { feedbackVisible = false; options.onEditStart(); } activePath = path; mode = next; editor = null; preview = null; error = null; render(); focusField(path, next === "edit" ? "input, textarea" : ".character-sheet-choice button, .character-sheet-write-own"); };
+  const open = (path: string, next: "edit" | "conflict") => { if (!current() || pending || !options.editable(path)) return; if (activePath !== path && dirty() && !options.confirmDiscard()) return; if (options.onEditStart) { feedbackVisible = false; if (options.onEditStart(path, next)) return; } activePath = path; mode = next; editor = null; preview = null; error = null; render(); focusField(path, next === "edit" ? "input, textarea" : ".character-sheet-choice button, .character-sheet-write-own"); };
   const startRetraction = async (field: CharacterField, id: string) => { if (!options.retraction || pending || !current()) return; if (dirty() && !options.confirmDiscard()) return; setPending(true); try { const data = await options.retraction.preview(id); if (!current()) return; setPending(false); activePath = null; editor = null; preview = { field, id, data }; render(); focusField(field.path, ".character-sheet-confirm button"); } catch { if (!current()) return; setPending(false); showError({ ok: false, conflict: false, message: "Could not preview this change. Please try again." }); } };
   function render() {
     if (!current()) return;
@@ -66,8 +67,8 @@ export function renderCharacterSheetView(host: HTMLElement, options: CharacterSh
         if (activePath === field.path && mode === "edit") {
           const descriptor = CHARACTER_FIELD_DESCRIPTORS.find(item => item.path === field.path); const label = el("label", field.label); const input = descriptor?.input === "text" ? el("input") : el("textarea"); input.id = `${idPrefix}-${field.path.replace(/[^a-zA-Z0-9_-]/g, "-")}`; label.htmlFor = input.id; input.value = Array.isArray(field.value) ? field.value.join("\n") : field.value ?? ""; if (descriptor) input.maxLength = descriptor.maxLength;
           editor = { path: field.path, input, initial: input.value }; row.append(label, input);
-          input.addEventListener("keydown", event => { if ((event as KeyboardEvent).key === "Escape") { event.stopPropagation(); activePath = null; editor = null; render(); focusField(field.path, "button"); } });
-          row.append(button("Save", () => { const raw = input.value; const next = descriptor?.input === "list" ? raw.split(/\r?\n/).map(item => item.trim()).filter(Boolean) : raw.trim(); void run(() => options.onChange({ kind: "field", path: field.path, value: next })); }), button("Cancel", () => { if (dirty() && !options.confirmDiscard()) return; activePath = null; editor = null; render(); focusField(field.path, "button"); }));
+          input.addEventListener("keydown", event => { if ((event as KeyboardEvent).key === "Escape") { event.stopPropagation(); activePath = null; editor = null; render(); focusField(field.path, "button"); options.onInteractionEnd?.(field.path); } });
+          row.append(button("Save", () => { const raw = input.value; const next = descriptor?.input === "list" ? raw.split(/\r?\n/).map(item => item.trim()).filter(Boolean) : raw.trim(); void run(() => options.onChange({ kind: "field", path: field.path, value: next })); }), button("Cancel", () => { if (dirty() && !options.confirmDiscard()) return; activePath = null; editor = null; render(); focusField(field.path, "button"); options.onInteractionEnd?.(field.path); }));
         } else {
           row.append(button(`Edit ${field.label}`, () => open(field.path, "edit")));
           if (options.kind === "supporting" && field.origin === "user" && field.editTurn !== null && field.path !== "name" && field.path !== "identity.aliases") row.append(button(field.storyDiffers ? "Use story value" : clearEditLabel(field, field.override ? "plain" : "startingCast"), () => { if (allowRefresh()) void run(() => options.onChange({ kind: "field", path: field.path, value: null })); }));
@@ -83,7 +84,7 @@ export function renderCharacterSheetView(host: HTMLElement, options: CharacterSh
           }
           const writeOwn = button("Write my own", () => open(field.path, "edit")); writeOwn.className = "character-sheet-write-own"; row.append(writeOwn);
         }
-        if (preview?.field.path === field.path) { const region = el("div"); region.className = "character-sheet-confirm"; region.append(el("p", `After this, ${field.label} will read: ${preview.data.projectedValue || "Unknown"}`), el("p", `“${preview.data.quote}” · turn ${preview.data.turn}`), button("Confirm", () => { const id = preview!.id; void run(() => options.retraction!.apply(id)); }), button("Cancel", () => { preview = null; render(); focusField(field.path, "button"); })); row.append(region); }
+        if (preview?.field.path === field.path) { const region = el("div"); region.className = "character-sheet-confirm"; region.append(el("p", `After this, ${field.label} will read: ${preview.data.projectedValue || "Unknown"}`), el("p", `“${preview.data.quote}” · turn ${preview.data.turn}`), button("Confirm", () => { const id = preview!.id; void run(() => options.retraction!.apply(id)); }), button("Cancel", () => { preview = null; render(); focusField(field.path, "button"); options.onInteractionEnd?.(field.path); })); row.append(region); }
       }
     }
   }

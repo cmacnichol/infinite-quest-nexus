@@ -264,3 +264,38 @@ it("keeps a successful receipt when refresh is skipped while hidden", async () =
     expect(edit).toHaveBeenCalledTimes(1);
   } finally { workspace.dispose(); }
 });
+
+it("reconciles a competing refresh after cancelling an inline edit and restores field focus", async () => {
+  let poll!: () => void, revision = 1;
+  const schedule = { set: (callback: () => void) => { poll = callback; return 1; }, clear: () => {}, visible: () => true, onVisibilityChange: () => () => {} };
+  const latest = () => ({ ...person, name: revision === 1 ? "Mara" : "Updated Mara", revision });
+  const read = vi.fn(async () => ({ ...detail, revision, character: latest() }));
+  const { document, workspace, click, confirm } = setup({ workspaceStatus: async () => ({ ...status, revision }), list: async () => ({ ...page, revision, characters: [latest()] }), detail: read }, { schedule });
+  const proto = document.defaultView!.HTMLElement.prototype as any;
+  proto.focus = function () { Object.defineProperty(document, "activeElement", { configurable: true, value: this }); };
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("Edit Name")); click("Edit Name");
+    const input = document.querySelector<HTMLInputElement>('[data-path="name"] input')!; input.value = "Unsaved draft"; input.dispatchEvent(new document.defaultView!.Event("input")); input.focus();
+    revision = 2; poll(); await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2)); await new Promise(resolve => setTimeout(resolve, 0));
+    expect(document.querySelector('[data-path="name"] input')).toBe(input); expect(input.value).toBe("Unsaved draft");
+    confirm.mockReturnValue(true); const cancel = [...document.querySelectorAll("button")].find(button => button.textContent === "Cancel")!; cancel.click();
+    await vi.waitFor(() => expect(document.querySelector('[data-path="name"]')?.textContent).toContain("Updated Mara"));
+    expect((document.activeElement as HTMLElement)?.textContent).toBe("Edit Name");
+    click("Edit Name"); expect(document.querySelector<HTMLInputElement>('[data-path="name"] input')!.value).toBe("Updated Mara");
+  } finally { workspace.dispose(); }
+});
+
+it("uses refreshed values when switching directly to another field", async () => {
+  let poll!: () => void, revision = 1;
+  const schedule = { set: (callback: () => void) => { poll = callback; return 1; }, clear: () => {}, visible: () => true, onVisibilityChange: () => () => {} };
+  const latest = () => ({ ...person, revision, profile: { "story.role": revision === 1 ? "Guard" : "Captain" } });
+  const read = vi.fn(async () => ({ ...detail, revision, character: latest() }));
+  const { document, workspace, click, confirm } = setup({ workspaceStatus: async () => ({ ...status, revision }), list: async () => ({ ...page, revision, characters: [latest()] }), detail: read }, { schedule });
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("Edit Role")); click("Edit Name");
+    const input = document.querySelector<HTMLInputElement>('[data-path="name"] input')!; input.value = "Draft"; input.dispatchEvent(new document.defaultView!.Event("input"));
+    revision = 2; poll(); await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2)); await new Promise(resolve => setTimeout(resolve, 0));
+    confirm.mockReturnValue(true); click("Edit Role");
+    expect(document.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!.value).toBe("Captain");
+  } finally { workspace.dispose(); }
+});

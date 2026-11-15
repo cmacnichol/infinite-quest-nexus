@@ -92,3 +92,11 @@ it("reports an open sheet interaction independently of dirty state", () => {
   expect(view.active()).toBe(false); click("Edit Pronouns"); expect(view.active()).toBe(true); expect(view.dirty()).toBe(false);
   click("Cancel"); expect(view.active()).toBe(false); view.dispose();
 });
+
+it("notifies the host only after an inline edit is actually cancelled", () => {
+  const onInteractionEnd = vi.fn(), confirmDiscard = vi.fn(() => false);
+  const { host, click, Event } = setup({ onInteractionEnd, confirmDiscard });
+  click("Edit Pronouns"); const input = host.querySelector<HTMLInputElement>('input')!; input.value = "she/her"; input.dispatchEvent(new Event("input"));
+  click("Cancel"); expect(onInteractionEnd).not.toHaveBeenCalled();
+  confirmDiscard.mockReturnValue(true); click("Cancel"); expect(onInteractionEnd).toHaveBeenCalledExactlyOnceWith("identity.pronouns");
+});
