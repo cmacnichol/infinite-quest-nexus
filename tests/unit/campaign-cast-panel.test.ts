@@ -33,6 +33,30 @@ describe("legacy cast panel", () => {
     expect(buildPresetRequest(state, id)).toEqual({ expectedCastRevision: 4, expectedCharacterRevision: 3, expectedBoundary: detail.boundary,
       idempotencyKey: id, resetIdentity: true, reset: ["story.role"], restoreAuthoredGoals: true, setOverrides: { "appearance.description": "" } });
   });
+  it.each(["Added Character", "Starting Cast Character"])("conflict link opens that field's choices on the sheet with focus on the first action: %s", async kind => {
+    const { document, window } = parseHTML("<html><body></body></html>");
+    vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
+    let focused: Element | null = null;
+    window.HTMLElement.prototype.focus = function () { focused = this; };
+    const id = "11111111-1111-4111-8111-111111111111", boundary = { turnNumber: 2, timelineRevision: 0 }, capabilities = { castEditing: true };
+    const worldProfile = characterProfileSchema.parse({});
+    const originProfile = { seedEventId: id, worldVersionId: id, entityId: "marin", rosterName: "Marin", rosterAliases: [], legacyCharacterText: "", profile: worldProfile, evidence: { kind: "world", worldVersionId: id, sourcePath: "/characters/0" } };
+    const person = { id, name: "Marin", aliases: [], origin: kind === "Added Character" ? { kind: "manual" } : { kind: "world", entityId: "marin", worldVersionId: id }, ...(kind === "Starting Cast Character" ? { originProfile, campaignProfile: worldProfile } : {}), profile: {}, pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 2, lastMentionedTurn: null };
+    const observations = ["Tinker", "Sailor"].map(value => ({ id: crypto.randomUUID(), characterId: id, field: "story.role", value, mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "world", worldVersionId: id, sourcePath: "/characters/0" } }));
+    const authority = { revision: 1, boundary, capabilities };
+    const detail = { ...authority, character: person, observations, overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null };
+    const api = { editAuthoredProfile: async () => { throw new Error("not used"); }, list: async () => ({ ...authority, characters: [person], nextCursor: null }), detail: async () => detail, candidates: async () => ({ ...authority, candidates: [], nextCursor: null }), discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} });
+    const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    await panel.open(); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Needs attention")!.click();
+    await vi.waitFor(() => expect(dialog.textContent).toContain("Marin · Role"));
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Marin · Role")!.click();
+    await vi.waitFor(() => expect(dialog.querySelector('[data-path="story.role"]')?.textContent).toContain("Tinker"));
+    const row = dialog.querySelector('[data-path="story.role"]')!;
+    expect(row.textContent).toContain("Sailor");
+    expect(focused).toBe(row.querySelector(".character-sheet-choice button"));
+    panel.requestClose(); vi.unstubAllGlobals();
+  });
   it("offers an inline edit on an Added Character sheet", async () => {
     const { document, window } = parseHTML("<html><body></body></html>");
     vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);

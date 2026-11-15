@@ -251,12 +251,7 @@ export function createLegacyCastPanel(options: {
   }
   async function openConflict(id: string, field: string) {
     await openDetail(id);
-    if (!editor || editor.characterId !== id) return;
-    if (editor.loaded?.character.originProfile) preset = createPresetDraft(editor.loaded);
-    renderEditor();
-    const input = dialog.querySelector<HTMLElement>(`#cast-${field.replace(".", "-")}`);
-    const group = input?.closest("details"); if (group) group.open = true;
-    input?.focus();
+    sheetView?.revealField(field, "conflict");
   }
   function loadReview(initialItem?: string) {
     rosterVisible = false; const token = ++epoch; editor = null; shell("Character review");

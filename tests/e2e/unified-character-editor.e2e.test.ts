@@ -13,6 +13,23 @@ async function capture(page: Page, info: TestInfo, name: string) {
   await page.screenshot({ path });
 }
 
+test("Nexus conflict link opens the sheet choices", async ({ page }, info) => {
+  const data = legacyUiFixture({ turnCount: 1, campaignCount: 1, worldCount: 1 });
+  await installLegacyUiFixture(page, data);
+  const id = "88888888-8888-4888-8888-888888888888";
+  const person = { id, name: "Mara", aliases: [], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 1, lastObservedTurn: 1 };
+  const boundary = { turnNumber: 1, timelineRevision: 0 }, capabilities = { castEditing: true };
+  const observations = ["Scout", "Guide"].map((value, index) => ({ id: index ? "22222222-2222-4222-8222-222222222222" : "11111111-1111-4111-8111-111111111111", characterId: id, field: "story.role", value, mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "world", worldVersionId: id, sourcePath: "/characters/0" } }));
+  await page.route("**/api/v1/meta", route => route.fulfill({ json: { capabilities } }));
+  await page.route("**/cast?*", route => route.fulfill({ json: { revision: 0, boundary, characters: [person], nextCursor: null, capabilities } }));
+  await page.route(`**/cast/${id}`, route => route.fulfill({ json: { revision: 0, boundary, character: person, observations, overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null, capabilities } }));
+  await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await page.locator(`#campaignList [data-campaign-id="${data.campaignId}"]`).click(); await page.locator("#editCampaignCharacter").click();
+  const dialog = page.locator("#campaignCastDialog"); await dialog.getByRole("button", { name: "Needs attention", exact: true }).click();
+  await dialog.getByRole("button", { name: "Mara · Role", exact: true }).click();
+  const row = dialog.locator('[data-path="story.role"]'); await expect(row).toContainText("Scout"); await expect(row).toContainText("Guide");
+  await expect(row.locator(".character-sheet-choice button").first()).toBeFocused(); await capture(page, info, "nexus-conflict-choices");
+});
 for (const width of [1440, 390]) {
   test(`Nexus sheet saves and undoes an Added Character at ${width}px`, async ({ page }, info) => {
     const data = legacyUiFixture({ turnCount: 1, campaignCount: 1, worldCount: 1 });
