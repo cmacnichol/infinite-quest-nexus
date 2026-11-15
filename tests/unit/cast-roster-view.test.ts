@@ -8,7 +8,7 @@ function setup(changes: Partial<Parameters<typeof renderCastRoster>[1]> = {}) {
   const { document, Event } = parseHTML("<html><body><div id='host'></div></body></html>");
   const host = document.getElementById("host") as unknown as HTMLElement;
   const onQuery = vi.fn(); let pending: (() => void) | undefined;
-  const options: Parameters<typeof renderCastRoster>[1] = { characters: [person("s", "<img src=x>"), person("m", "Main", "protagonist")], attention: { s: { review: true } }, tracking: null, attentionTotal: 5, filters: [["all", "All"], ["recent", "Recent"]], filter: "all", query: "", canAdd: false, addDisabledReason: "Unavailable", secondaryActions: [], tools: [], onQuery, onOpen: vi.fn(), onAdd: vi.fn(), onAttention: vi.fn(), schedule: fn => { pending = fn; return () => { pending = undefined; }; }, ...changes };
+  const options: Parameters<typeof renderCastRoster>[1] = { characters: [person("s", "<img src=x>"), person("m", "Main", "protagonist")], attention: { s: { review: true, conflict: false } }, tracking: null, attentionTotal: 5, filters: [["all", "All"], ["recent", "Recent"]], filter: "all", query: "", canAdd: false, addDisabledReason: "Unavailable", secondaryActions: [], tools: [], onQuery, onOpen: vi.fn(), onAdd: vi.fn(), onAttention: vi.fn(), schedule: fn => { pending = fn; return () => { pending = undefined; }; }, ...changes };
   const view = renderCastRoster(host, options);
   return { host, options, onQuery, view, event: (name: string) => new Event(name, { bubbles: true, cancelable: true }), flush: () => pending?.() };
 }
