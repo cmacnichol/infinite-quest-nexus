@@ -384,10 +384,14 @@ async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Camp
   return (await snapshotProjection(client, scope, campaign, state, boundary)).snapshot;
 }
 
+function eligibleDraftObservations(observations: CastObservation[], retractedObservationIds: ReadonlySet<string>): CastObservation[] {
+  const superseded = new Set(observations.flatMap(item => item.supersedesObservationId ? [item.supersedesObservationId] : []));
+  return observations.filter(item => !superseded.has(item.id) && !retractedObservationIds.has(item.id));
+}
+
 async function collectDraftEvidence(client: DatabaseClient, scope: CastScope, boundary: CastBoundary, character: CastCharacter,
   observations: CastObservation[], retractedObservationIds: ReadonlySet<string>): Promise<import("../../contracts/src/campaign-cast.js").CastDraftPreviewResponse["evidence"]> {
-  const superseded = new Set(observations.flatMap(item => item.supersedesObservationId ? [item.supersedesObservationId] : []));
-  const candidates = [...observations].reverse().filter(item => !superseded.has(item.id) && !retractedObservationIds.has(item.id) && item.evidence.kind === "turn" && item.mode === "fact" && item.speakerCharacterId === null).slice(0, 40);
+  const candidates = eligibleDraftObservations(observations, retractedObservationIds).reverse().filter(item => item.evidence.kind === "turn" && item.mode === "fact" && item.speakerCharacterId === null).slice(0, 40);
   const events = (await client.query("SELECT id,effective_turn_number,payload,receipt,attachment FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND effective_turn_number <= $3 ORDER BY sequence DESC", [scope.campaignId, scope.ownerUserId, boundary.turnNumber])).rows.map(row => eventSchema.parse(row));
   const attachments = projectCastAttachments([...events].reverse(), boundary.turnNumber);
   const mentions: { eventId: string; evidence: Extract<CastEvidence, { kind: "turn" }>; range?: import("../../contracts/src/campaign-cast.js").CastSourceRange; allRanges?: import("../../contracts/src/campaign-cast.js").CastSourceRange[] }[] = [];
@@ -409,6 +413,15 @@ async function collectDraftEvidence(client: DatabaseClient, scope: CastScope, bo
   const byTurn = new Map(rows.map(row => [row.turn_id, row]));
   const evidence: import("../../contracts/src/campaign-cast.js").CastDraftPreviewResponse["evidence"] = [];
   let size = 0;
+  const overlapsRetraction = (source: Extract<CastEvidence, { kind: "turn" }>, paragraph: string, span: { start: number; end: number }) => observations.some(observation => {
+    const retracted = observation.evidence;
+    if (!retractedObservationIds.has(observation.id) || retracted.kind !== "turn" || retracted.turnId !== source.turnId
+      || retracted.narrationRevision !== source.narrationRevision || retracted.sourceHash !== source.sourceHash || retracted.paragraphId !== source.paragraphId || !retracted.quote) return false;
+    for (let start = paragraph.indexOf(retracted.quote); start >= 0; start = paragraph.indexOf(retracted.quote, start + 1)) {
+      if (start < span.end && start + retracted.quote.length > span.start) return true;
+    }
+    return false;
+  });
   for (const observation of candidates) {
     const e = observation.evidence;
     if (e.kind !== "turn") continue;
@@ -418,7 +431,7 @@ async function collectDraftEvidence(client: DatabaseClient, scope: CastScope, bo
     const paragraph = source.paragraphs.find(item => item.id === e.paragraphId)?.text;
     if (!paragraph || !supportsCastDraftFact({ paragraph, quote: e.quote, names: [character.name, ...character.aliases], field: observation.field, value: observation.value })) continue;
     const start = paragraph.indexOf(e.quote);
-    if (start < 0 || size + e.quote.length > 24000) continue;
+    if (start < 0 || size + e.quote.length > 24000 || overlapsRetraction(e, paragraph, { start, end: start + e.quote.length })) continue;
     evidence.push({ evidenceId: observation.id, characterId: character.id, turnId: e.turnId, turnNumber: e.turnNumber, narrationRevision: e.narrationRevision, sourceHash: e.sourceHash, paragraphId: e.paragraphId, start, end: start + e.quote.length, quote: e.quote });
     size += e.quote.length;
   }
@@ -431,6 +444,7 @@ async function collectDraftEvidence(client: DatabaseClient, scope: CastScope, bo
     if (!paragraph || (mention.range ? !paragraph.slice(mention.range.start, mention.range.end).trim() : !paragraph.includes(e.quote))) continue;
     const span = extractCastDraftFactSpan(paragraph, [character.name, ...character.aliases]);
     if (!span || span.quote.length > 1000 || size + span.quote.length > 24000 || evidence.some(item => item.evidenceId === mention.eventId)) continue;
+    if (overlapsRetraction(e, paragraph, span)) continue;
     evidence.push({ evidenceId: mention.eventId, characterId: character.id, turnId: e.turnId, turnNumber: row.turn_number, narrationRevision: e.narrationRevision, sourceHash: e.sourceHash, paragraphId: e.paragraphId, ...span });
     size += span.quote.length;
   }
@@ -747,7 +761,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
     if (new Set(fences.map(item => item.path)).size !== fences.length) fail();
     for (const fence of fences) {
       const allowed = person.campaignProfile ? castAuthoredPathSchema.safeParse(fence.path).success : castFieldSchema.safeParse(fence.path).success;
-      if (!allowed || edits[fence.path] !== fence.value || isCastUpdatingPath(fence.path) || observations.some(item => item.field === fence.path && !projected.retractedObservationIds.has(item.id))
+      if (!allowed || edits[fence.path] !== fence.value || isCastUpdatingPath(fence.path) || eligibleDraftObservations(observations, projected.retractedObservationIds).some(item => item.field === fence.path)
         || !person.campaignProfile && fence.value.length > 2000) fail();
       try { validateCastFiction(fence.value); } catch { fail(); }
       const [section, key] = fence.path.split(".");
@@ -1220,7 +1234,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         const observations = projected.details.find(item => item.characterId === id)?.observations ?? [];
         const evidence = await collectDraftEvidence(client, scope, request.expectedBoundary, character, observations, projected.retractedObservationIds);
         const source = (await client.query("SELECT c.text_provider_profile_id,w.content FROM campaigns c JOIN world_versions w ON w.id=c.world_version_id AND w.owner_user_id=c.owner_user_id WHERE c.id=$1 AND c.owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows[0];
-        return { character, boundary: request.expectedBoundary, evidence, observedPaths: [...new Set(observations.filter(item => !projected.retractedObservationIds.has(item.id)).map(item => item.field))], textProviderProfileId: source?.text_provider_profile_id ?? null, worldContent: source?.content ?? null };
+        return { character, boundary: request.expectedBoundary, evidence, observedPaths: [...new Set(eligibleDraftObservations(observations, projected.retractedObservationIds).map(item => item.field))], textProviderProfileId: source?.text_provider_profile_id ?? null, worldContent: source?.content ?? null };
       });
     },
     editAuthoredProfile, fromWorldPreview, fromWorld,

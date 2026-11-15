@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { captureCastGenerationSnapshotWithClient, createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { applyCastBatchWithClient, captureCastGenerationSnapshotWithClient, createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -107,7 +107,7 @@ integration("cast observation decisions", () => {
       const receipt = await repo.applyBatch(scope, { boundary, idempotencyKey: randomUUID(), commands: [{ kind: "observe", characterId, field, value, mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: evidence[turnIndex]! }] });
       return receipt.observationIds[0]!;
     };
-    return { scope, boundary, repo, characterId, observe };
+    return { scope, boundary, repo, characterId, observe, evidence };
   }
 
   async function verifyDecisionCycle(f: Awaited<ReturnType<typeof projectionFixture>>, observationId: string,
@@ -200,6 +200,56 @@ integration("cast observation decisions", () => {
     await f.repo.applyObservationDecision(f.scope, f.characterId, newer, { action: "restore", retractionEventId: result.decisionEventId, expectedCastRevision: result.revision, expectedCharacterRevision: result.character.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID() });
     expect(selection((await capture("cast-context-v1")).snapshot)).toMatchObject({ value: "green coat", evidenceId: newer });
     expect(selection(after.snapshot)).toMatchObject({ value: "blue coat", evidenceId: older });
+  });
+
+  it.each(["mention", "attachment"] as const)("does not offer or accept %s evidence overlapping a retracted fact", async kind => {
+    const f = await projectionFixture();
+    const fact = await f.observe("appearance.description", "blue hair", 0);
+    const unrelatedNarration = "Mara is a kind guide.";
+    const unrelated = { ...f.evidence[1]!, quote: unrelatedNarration, sourceHash: sha256(unrelatedNarration) };
+    await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [unrelated.turnId, unrelatedNarration]);
+    const source = { ...f.evidence[0]!, quote: "Mara" };
+    const range = { turnId: source.turnId, narrationRevision: source.narrationRevision, sourceHash: source.sourceHash, paragraphId: source.paragraphId, start: 0, end: 4 };
+    const batch = { boundary: f.boundary, idempotencyKey: randomUUID(), commands: [{ kind: "mention" as const, characterId: f.characterId, evidence: source }] };
+    const mentioned = kind === "attachment" ? await withTransaction(pool, client => applyCastBatchWithClient(client, f.scope, batch, { attachment: { characterId: f.characterId, basis: "unique_name", sourceRanges: [range] } })) : await f.repo.applyBatch(f.scope, batch);
+    const other = await f.repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: randomUUID(), commands: [{ kind: "mention", characterId: f.characterId, evidence: { ...unrelated, quote: "Mara" } }] });
+    const detail = await f.repo.detail(f.scope, f.characterId);
+    const beforeRequest = { expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: f.boundary };
+    const before = await f.repo.draftPreviewContext!(f.scope, f.characterId, beforeRequest);
+    const staleEvidence = before.evidence.find(e => e.evidenceId === mentioned.eventId)!;
+    expect(staleEvidence?.quote).toContain("blue hair");
+    expect(before.evidence.some(e => e.evidenceId === other.eventId)).toBe(true);
+    const result = await f.repo.applyObservationDecision(f.scope, f.characterId, fact, { action: "retract", ...beforeRequest, idempotencyKey: randomUUID() });
+    const request = { expectedCastRevision: result.revision, expectedCharacterRevision: result.character.revision, expectedBoundary: f.boundary };
+    const after = await f.repo.draftPreviewContext!(f.scope, f.characterId, request);
+    expect(after.evidence.some(e => e.evidenceId === mentioned.eventId)).toBe(false);
+    expect(after.evidence.some(e => e.evidenceId === other.eventId)).toBe(true);
+    await expect(f.repo.edit(f.scope, f.characterId, { ...request, idempotencyKey: randomUUID(), setOverrides: { "appearance.description": "blue hair" }, draftEvidenceFences: [{ path: "appearance.description", value: "blue hair", evidence: [staleEvidence] }] })).rejects.toMatchObject({ code: "cast_draft_evidence_changed" });
+  });
+
+  it("does not treat a superseded predecessor as an observed path when its successor is retracted", async () => {
+    const f = await projectionFixture();
+    const older = await f.observe("appearance.description", "blue hair", 0);
+    const newer = await f.repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: randomUUID(), commands: [{ kind: "observe", characterId: f.characterId, field: "appearance.description", value: "green hair", mode: "fact", speakerCharacterId: null, supersedesObservationId: older, evidence: f.evidence[1]! }] });
+    const detail = await f.repo.detail(f.scope, f.characterId);
+    const result = await f.repo.applyObservationDecision(f.scope, f.characterId, newer.observationIds[0]!, { action: "retract", expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID() });
+    const context = await f.repo.draftPreviewContext!(f.scope, f.characterId, { expectedCastRevision: result.revision, expectedCharacterRevision: result.character.revision, expectedBoundary: f.boundary });
+    expect(context.observedPaths).not.toContain("appearance.description");
+    expect(context.evidence.some(e => e.evidenceId === older)).toBe(false);
+  });
+
+  it("retains an unrelated fact span in the same paragraph", async () => {
+    const f = await projectionFixture(), narration = "Mara has blue hair. Mara is a kind guide.";
+    const source = { ...f.evidence[0]!, sourceHash: sha256(narration) };
+    await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [source.turnId, narration]);
+    const write = async (field: "appearance.description" | "story.role", value: string, quote: string) => f.repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: randomUUID(), commands: [{ kind: "observe", characterId: f.characterId, field, value, mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { ...source, quote } }] });
+    const fact = await write("appearance.description", "blue hair", "Mara has blue hair.");
+    const other = await write("story.role", "kind guide", "Mara is a kind guide.");
+    const detail = await f.repo.detail(f.scope, f.characterId);
+    const result = await f.repo.applyObservationDecision(f.scope, f.characterId, fact.observationIds[0]!, { action: "retract", expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID() });
+    const context = await f.repo.draftPreviewContext!(f.scope, f.characterId, { expectedCastRevision: result.revision, expectedCharacterRevision: result.character.revision, expectedBoundary: f.boundary });
+    expect(context.evidence.map(e => e.evidenceId)).toContain(other.observationIds[0]);
+    expect(context.evidence.map(e => e.evidenceId)).not.toContain(fact.observationIds[0]);
   });
 
 });
