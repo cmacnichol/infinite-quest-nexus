@@ -436,8 +436,70 @@ integration("World Library and campaign version integration", () => {
     expect(replaced.draftRevision).toBe(promoted.draftRevision! + 2);
     expect(replaced.draftContent?.playableCharacters).toHaveLength(renamedContent.playableCharacters.length);
     expect(replaced.draftContent?.playableCharacters.find(entry => entry.id === "browser-keeper")?.name).toBe("Renamed world keeper");
+    // Exercise real API writes and PostgreSQL receipts using a synthetic accepted turn.
+    const { buildCastDiscoverySource } = await import("../../packages/domain/src/campaign-cast-discovery.js");
+    const { withTransaction } = await import("../../packages/database/src/pool.js");
+    const { applyValidatedCastDiscovery, captureCastDiscoveryIdentities } = await import("../../packages/database/src/campaign-cast-discovery-publication.js");
+    const { createCastDiscoveryJobRepository, enqueueCastDiscoveryWithClient } = await import("../../packages/database/src/campaign-cast-job-repository.js");
+    const { deriveTextExecutionPlan, textExecutionRouteBasisHash } = await import("../../packages/contracts/src/text-execution-plan.js");
+    const { CAST_DISCOVERY_SYSTEM_PROMPT } = await import("../../packages/contracts/src/prompt-library.js");
+    const unrelatedWorld = await createWorld(pool, worldCreateSchema.parse({ title: `Review isolation ${crypto.randomUUID()}`, content: content("Review isolation", "Control") }));
+    const unrelatedWorldBefore = await getWorld(pool, unrelatedWorld.id);
+    const turnId = crypto.randomUUID(), candidateId = crypto.randomUUID();
+    const narration = "Review Mara has blue eyes.";
+    await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [campaignId]);
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,2,$4)", [turnId, ownerUserId, campaignId, narration]);
+    const source = buildCastDiscoverySource({ scope, turnId, turnNumber: 2, timelineRevision: (await isolationRepository.current(scope)).boundary.timelineRevision, narrationRevision: 0, narration });
+    const proposal = { localKey: "review-mara", name: "Review Mara", aliases: [], existingCharacterId: null,
+      identityEvidence: [{ paragraphId: "p1", quote: narration }], observations: [{ field: "appearance.description", value: "blue eyes", mode: "fact", speakerCharacterId: null, paragraphId: "p1", quote: narration }] };
+    await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason) VALUES($1,$2,$3,0,$4,$5,$6,'identity_needs_review')", [candidateId, ownerUserId, campaignId, proposal.localKey, JSON.stringify(source), JSON.stringify(proposal)]);
+    await openCampaignCast("review-detail");
+    const review = page.locator("#campaignCastDialog");
+    await review.getByRole("button", { name: "Needs attention", exact: true }).click();
+    await review.getByRole("button", { name: "Review identity questions and details", exact: true }).click();
+    await browserExpect(review).toContainText("Identity: Review Mara");
+    await review.screenshot({ path: resolve(screenshotRoot, "composed-review-pending.png") });
+    await review.getByRole("button", { name: "Dismiss detail", exact: true }).click();
+    await browserExpect(review).toContainText("Dismissed.");
+    await review.getByRole("button", { name: "Create separate character", exact: true }).click();
+    await browserExpect(review.getByRole("heading", { name: "Nothing needs review." })).toBeVisible();
+    const actual = await isolationRepository.current(scope), mara = actual.characters.find(person => person.name === "Review Mara")!;
+    expect(mara).toBeDefined();
+    expect((await isolationRepository.detail(scope, mara.id)).observations).toEqual([]);
+    const receipt = (await pool.query("SELECT action,target_kind,result_receipt FROM campaign_cast_review_decisions WHERE campaign_id=$1 ORDER BY revision", [campaignId])).rows;
+    expect(receipt).toHaveLength(1); expect(receipt[0].action).toBe("dismiss"); expect(receipt[0].target_kind).toBe("detail");
+    // Re-run automatic publication against the same turn and source after identity resolution.
+    const providerProfileId = crypto.randomUUID();
+    const basis = { version: 2 as const, selection: { kind: "model" as const, modelId: "fixture" }, preset: null,
+      candidates: [{ modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 }], presetSystemPrompt: "", parameters: {}, endpointReference: "fixture-endpoint", credentialReference: providerProfileId, profileRevision: "fixture", authorityRevision: "fixture", requestTimeoutMs: 30000, protocolVersion: "cast-discovery-v1", routeBasisHash: "0".repeat(64) };
+    const execution = { providerProfileId, plan: deriveTextExecutionPlan({ ...basis, routeBasisHash: textExecutionRouteBasisHash(basis) }, CAST_DISCOVERY_SYSTEM_PROMPT) };
+    await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope, turnId, execution, enabled: true }));
+    const job = (await createCastDiscoveryJobRepository(pool, () => true).claim("composed-review"))!;
+    job.output = { version: 1, characters: [{ ...proposal, existingCharacterId: mara.id }] } as typeof job.output;
+    job.execution.admission = { identityPolicy: "unique_name" } as NonNullable<typeof job.execution.admission>;
+    job.identities = await withTransaction(pool, client => captureCastDiscoveryIdentities(client, scope));
+    const rescanned = await withTransaction(pool, client => applyValidatedCastDiscovery(client, job));
+    expect(rescanned.validationSummary.accepted).toBe(1);
+    expect(rescanned.observationIds).toEqual([]);
+    expect((await isolationRepository.detail(scope, mara.id)).observations).toEqual([]);
+    await openCampaignCast("review-reload");
+    await review.getByRole("button", { name: "Needs attention", exact: true }).click();
+    await review.getByRole("button", { name: "Review identity questions and details", exact: true }).click();
+    await review.getByRole("button", { name: "Dismissed", exact: true }).click();
+    await browserExpect(review).toContainText("blue eyes");
+    await review.screenshot({ path: resolve(screenshotRoot, "composed-review-dismissed.png") });
+    await review.getByRole("button", { name: "Undo", exact: true }).click();
+    await browserExpect(review).toContainText("Dismissal undone.");
+    await browserExpect(review).toContainText("blue eyes");
+    const afterReceipts = (await pool.query("SELECT action,target_kind,result_receipt FROM campaign_cast_review_decisions WHERE campaign_id=$1 ORDER BY revision", [campaignId])).rows;
+    expect(afterReceipts.map(row => row.action)).toEqual(["dismiss", "restore"]);
+    expect((await isolationRepository.candidates(scope, { view: "review" })).candidates.find(item => item.id === candidateId)?.details?.[0]?.observationIndex).toBe(0);
+    expect(await getWorld(pool, unrelatedWorld.id)).toEqual(unrelatedWorldBefore);
+    expect((await isolationRepository.current(otherScope))).toEqual(otherSnapshot);
+    expect((await pool.query("SELECT content FROM world_versions WHERE id=$1", [published.worldVersionId])).rows[0].content).toEqual(pinnedWorld);
+    await (await import("node:fs/promises")).writeFile(resolve(screenshotRoot, "composed-review-receipts.json"), JSON.stringify({ receipts: afterReceipts, rescanned, otherCampaignUnchanged: true, worldUnchanged: true }, null, 2));
     await page.unrouteAll({ behavior: "wait" });
-  }, 100_000);
+  }, 180_000);
 
   it("keeps published versions immutable while drafts advance by revision", async () => {
     const first = await publishedWorld("Immutable");

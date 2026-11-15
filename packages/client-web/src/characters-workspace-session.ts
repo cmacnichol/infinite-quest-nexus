@@ -1,6 +1,8 @@
 import { NexusApiError, DEFAULT_RECENT_WINDOW_TURNS, matchesLocalCharacterFilter } from "@infinite-quest/client-core";
 import type { CharacterFilter, CastDetail, CastCharacter, CharactersWorkspaceStatus } from "@infinite-quest/contracts";
 
+type WorkspaceDetail = import("zod").infer<typeof import("./campaign-cast-api.js").castDetailResponseSchema>;
+
 export interface CharactersWorkspaceState<Draft = unknown> {
   campaignId: string | null;
   status: CharactersWorkspaceStatus | null;
@@ -10,7 +12,7 @@ export interface CharactersWorkspaceState<Draft = unknown> {
   /** Server-reported review/conflict markers by character ID; absent on older servers. */
   attention: Record<string, { review: boolean; conflict: boolean; reviewCount?: number | undefined; conflictCount?: number | undefined }>;
   selectedId: string | null;
-  detail: CastDetail | null;
+  detail: WorkspaceDetail | null;
   draft: Draft | null;
   draftBaseDetail: CastDetail | null;
   changedWhileEditing: boolean;
@@ -21,7 +23,7 @@ export interface CharactersWorkspaceSessionOptions<Draft> {
   api: {
     workspaceStatus(campaignId: string, signal?: AbortSignal): Promise<CharactersWorkspaceStatus>;
     list(campaignId: string, input: { query: string; filter: CharacterFilter; cursor?: string; expectedRevision?: number; expectedTurnNumber?: number; expectedTimelineRevision?: number }, signal?: AbortSignal): Promise<{ revision: number; boundary: { turnNumber: number; timelineRevision: number }; characters: CastCharacter[]; nextCursor: string | null; recentWindow?: number | undefined; attention?: { characterId: string; review: boolean; conflict: boolean; reviewCount?: number | undefined; conflictCount?: number | undefined }[] | undefined }>;
-    detail(campaignId: string, id: string, signal?: AbortSignal): Promise<CastDetail>;
+    detail(campaignId: string, id: string, signal?: AbortSignal): Promise<WorkspaceDetail>;
   };
   schedule?: { set(callback: () => void, delay: number): unknown; clear(handle: unknown): void; visible(): boolean; onVisibilityChange(callback: () => void): () => void };
   onChange(state: CharactersWorkspaceState<Draft>): void;

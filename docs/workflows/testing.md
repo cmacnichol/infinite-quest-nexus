@@ -44,6 +44,10 @@ node node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts te
 
 Confirm that the opt-in browser case ran. Use the integration configuration's isolated database, and stop only the Vite process you started. [Acceptance evidence](../review/nexus-character-workspace-acceptance.md) distinguishes database, fixture-browser, native-zoom and physical-keyboard verification.
 
+## Character review dismissal verification
+
+For pending-review changes, run the decision, discovery, migration and API PostgreSQL suites, including automatic publication after detail dismissal and distinct identities sharing a quotation. Extend the opt-in composed world-library proof through the real API and database: dismiss a source-backed detail, resolve its identity, reload, repeat publication, inspect receipts and isolation, and undo from Dismissed. Pair it with the affected browser suite for both clients and narrow layouts, plus an actual browser zoom test. Record fixture-browser and composed database evidence separately. Native browser zoom does not establish physical mobile-keyboard behavior. See the [acceptance record](../review/character-review-dismissal-and-retraction-acceptance.md).
+
 ## Generation rejection review verification
 
 Changes to the durable generation-review workflow require a composed real-PostgreSQL test with a deterministic streaming provider. It must capture a complete primary response, pause on a reviewable finding, make an explicit decision, commit through the normal transaction, and prove that final Keep makes no additional primary or continuity-repair request. Cover append and replacement plus Action and scene input paths. Pair it with the Story Direction choice/replacement integrations, private-memory and foreign-campaign retrieval isolation, and independent illustration-enqueue failure coverage. Browser fixtures establish player behavior; they do not replace the PostgreSQL workflow test. Deterministic providers establish workflow correctness, not live narrative quality.

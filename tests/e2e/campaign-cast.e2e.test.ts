@@ -1,7 +1,9 @@
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 import { tabTo } from "./helpers/keyboard.js";
-import { mkdir, readFile } from "node:fs/promises";
-import { expect, test, type Page, type Route, type Locator } from "@playwright/test";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chromium, expect, test, type Page, type Route, type Locator } from "@playwright/test";
+
+import { resolve } from "node:path";
 
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const worldId = "33333333-3333-4333-8333-333333333333";
@@ -1595,4 +1597,49 @@ for (const surface of ["legacy", "next"] as const) test(`review focuses the next
   const dismiss = dialog.getByRole("button", { name: "Dismiss discovery" }); await tabTo(page, dismiss); await page.keyboard.press("Enter");
   await expect(dialog.getByRole("heading", { name: "Identity: Bea" })).toBeFocused();
   await expect(dialog.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
+});
+
+
+test("review controls work at native Chromium 200 percent zoom", async ({}, info) => {
+  await mkdir(info.outputDir, { recursive: true });
+  const owned = await mkdtemp(resolve(info.outputDir, "review-native-zoom-"));
+  const extension = resolve(owned, "extension"); await mkdir(extension);
+  await writeFile(resolve(extension, "manifest.json"), JSON.stringify({ manifest_version: 3, name: "Review owned zoom probe", version: "1.0.0", permissions: ["tabs"], background: { service_worker: "worker.js" } }));
+  await writeFile(resolve(extension, "worker.js"), "chrome.runtime.onInstalled.addListener(() => {});\n");
+  const options = { channel: "chromium", headless: true, viewport: null, args: ["--window-size=1280,900", `--disable-extensions-except=${extension}`, `--load-extension=${extension}`] };
+  Reflect.set(options, "deviceScaleFactor", undefined);
+  const context = await chromium.launchPersistentContext(resolve(owned, "profile"), options);
+  try {
+    const page = context.pages()[0] ?? await context.newPage();
+    await fixture(page, false, false, false, false, false, false, false, true);
+    await open(page); const dialog = page.locator("#campaignCastDialog"); await openReview(dialog);
+    const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
+    const tabId = await worker.evaluate(async expectedOrigin => {
+      const chrome = (globalThis as any).chrome;
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      const matches = tabs.filter((tab: any) => tab.url && new URL(tab.url).origin === expectedOrigin);
+      if (matches.length !== 1) throw new Error("Owned review tab not found");
+      await chrome.tabs.setZoomSettings(matches[0].id, { mode: "automatic", scope: "per-tab" });
+      await chrome.tabs.setZoom(matches[0].id, 2); return matches[0].id;
+    }, new URL(page.url()).origin);
+    await expect.poll(() => worker.evaluate(id => (globalThis as any).chrome.tabs.getZoom(id), tabId)).toBe(2);
+    const dismiss = dialog.getByRole("button", { name: "Dismiss discovery" });
+    await dismiss.focus(); await expect(dismiss).toBeFocused(); await expect(dismiss).toBeInViewport();
+    const geometry = await dialog.evaluate(element => { const box = element.getBoundingClientRect(); return { left: box.left, right: box.right, viewportWidth: innerWidth, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth }; });
+    await writeFile(info.outputPath("review-native-zoom-200-geometry.json"), JSON.stringify(geometry, null, 2));
+    expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+    expect(geometry.left).toBeGreaterThanOrEqual(0);
+    expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth + 1);
+    const capture = async (name: string) => {
+      const cdp = await context.newCDPSession(page);
+      try { const shot = await cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false }); await writeFile(info.outputPath(name), Buffer.from(shot.data, "base64")); }
+      finally { await cdp.detach(); }
+    };
+    await capture("review-native-zoom-200.png");
+    await page.keyboard.press("Enter"); await expect(dialog.getByRole("heading", { name: "Nothing needs review." })).toBeFocused();
+    await dialog.getByRole("button", { name: "Dismissed", exact: true }).click();
+    const undo = dialog.getByRole("button", { name: "Undo", exact: true }); await undo.focus(); await expect(undo).toBeInViewport();
+    await capture("review-native-zoom-200-dismissed.png");
+    await page.keyboard.press("Enter"); await expect(dialog).toContainText("Dismissal undone.");
+  } finally { await context.close(); }
 });

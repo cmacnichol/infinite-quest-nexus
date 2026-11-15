@@ -1137,6 +1137,52 @@ describe("durable cast discovery", () => {
     expect(repeated.observationIds).toEqual([]);
   });
 
+  it("suppresses a dismissed detail during automatic world seeding", async () => {
+    const f = await fixture();
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [f.versionId, JSON.stringify({ world: { title: "Fixture" }, playableCharacters: [
+      { id: "mara", name: "Mara", characterText: "A guide", campaignUse: "supporting" }
+    ] })]);
+    await pool.query("UPDATE campaigns SET first_appearance_eligible=true WHERE id=$1", [f.scope.campaignId]);
+    await f.enqueue();
+    const job = (await createCastDiscoveryJobRepository(pool, () => true).claim("automatic-seed-dismissal"))!;
+    const output = proposal(), candidateId = randomUUID();
+    await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason) VALUES($1,$2,$3,0,'mara',$4,$5,'identity_needs_review')", [candidateId, f.scope.ownerUserId, f.scope.campaignId, JSON.stringify(job.source), JSON.stringify(output.characters[0])]);
+    const editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+    const initial = await editor.current(f.scope);
+    await editor.reviewDecision(f.scope, candidateId, { action: "dismiss_detail", observationIndex: 0, expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, expectedReviewRevision: 0, sourceHash: job.source.sourceHash, idempotencyKey: randomUUID() });
+    job.output = output;
+    job.execution.admission = { castPresetsEnabled: true, identityPolicy: "unique_name" } as NonNullable<typeof job.execution.admission>;
+    job.identities = await withTransaction(pool, client => captureCastDiscoveryIdentities(client, f.scope));
+    const result = await withTransaction(pool, client => applyValidatedCastDiscovery(client, job, true));
+    const person = (await editor.current(f.scope)).characters.find(character => character.name === "Mara")!;
+    expect(person.originProfile?.entityId).toBe("mara");
+    expect(result.observationIds).toEqual([]);
+    expect((await editor.detail(f.scope, person.id)).observations).toEqual([]);
+  });
+
+  it("publishes the same quote for a different person despite a dismissal", async () => {
+    const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const initial = await editor.current(f.scope);
+    const mara = await editor.create(f.scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: {} });
+    const other = await editor.create(f.scope, { expectedCastRevision: mara.revision, expectedBoundary: mara.boundary, idempotencyKey: randomUUID(), name: "Iven", aliases: [], profile: {} });
+    await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.turnIds[0], "Mara has blue eyes. Iven has blue eyes."]);
+    await f.enqueue();
+    const job = (await createCastDiscoveryJobRepository(pool, () => true).claim("different-person"))!;
+    const output = proposal(mara.character.id), candidateId = randomUUID();
+    output.characters[0]!.identityEvidence[0]!.quote = "Mara has blue eyes. Iven has blue eyes.";
+    output.characters[0]!.observations[0]!.quote = "Mara has blue eyes. Iven has blue eyes.";
+    await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason) VALUES($1,$2,$3,0,'mara',$4,$5,'identity_needs_review')", [candidateId, f.scope.ownerUserId, f.scope.campaignId, JSON.stringify(job.source), JSON.stringify(output.characters[0])]);
+    await editor.reviewDecision(f.scope, candidateId, { action: "dismiss_detail", observationIndex: 0, expectedCastRevision: other.revision, expectedBoundary: other.boundary, expectedReviewRevision: 0, sourceHash: job.source.sourceHash, idempotencyKey: randomUUID() });
+    job.output = { ...output, characters: [{ ...output.characters[0]!, localKey: "iven", name: "Iven", existingCharacterId: other.character.id }] };
+    job.execution.admission = { identityPolicy: "unique_name" } as NonNullable<typeof job.execution.admission>;
+    job.identities = await withTransaction(pool, client => captureCastDiscoveryIdentities(client, f.scope));
+    const result = await withTransaction(pool, client => applyValidatedCastDiscovery(client, job));
+    expect(result.validationSummary).toMatchObject({ accepted: 1, unresolved: 0, rejected: [] });
+    expect(result.observationIds).toHaveLength(1);
+    expect((await editor.detail(f.scope, other.character.id)).observations).toHaveLength(1);
+    expect((await editor.detail(f.scope, mara.character.id)).observations).toHaveLength(0);
+  });
+
   it.each([[true, true, true], [false, true, false], [true, false, false]] as const)(
     "seeds a first appearance only with frozen %s and live %s permission", async (frozen, live, seeded) => {
       const f = await fixture();
