@@ -849,3 +849,27 @@ it("refines the unsaved workspace candidate without changing its roster", async 
   expect(preview.mock.calls[0]![0].characterId).toBe('existing'); expect(preview.mock.calls[0]![0].content.playableCharacters[0].profile.story.role).toBe('Unsaved');
   expect(context.worldContext.playableCharacters[0]!.profile!.story.role).toBe('Guide'); click(document, '[data-refine-apply]'); expect(document.querySelector<HTMLTextAreaElement>('[name="candidate.profile.story.role"]')!.value).toBe('Sailor');
 });
+
+it("discards a late refinement when navigating to another stage", async () => {
+  const { document, window, root } = fixture();
+  const pending = deferred<{ character: PlayableCharacter }>();
+  const preview = vi.fn((_request, _signal) => pending.promise);
+  const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(generatedCharacter)), generateCharacterPreview: preview as any, navigate: vi.fn() });
+  click(document, '[data-character-stage="story"]');
+  input(document, window as unknown as Window, '[name="candidate.profile.story.role"]', "Unsaved role");
+  click(document, '[data-refine-open]');
+  input(document, window as unknown as Window, '[data-refine-panel] textarea', "Make bolder");
+  click(document, '[data-refine-generate]');
+  const panel = document.querySelector<HTMLElement>('[data-refine-panel]')!;
+  const signal = preview.mock.calls[0]![1] as AbortSignal;
+  click(document, '[data-character-stage="appearance"]');
+  expect(signal.aborted).toBe(true);
+  const proposed = structuredClone(generatedCharacter); proposed.profile!.story.role = "Late proposal";
+  pending.resolve({ character: proposed }); await settle();
+  expect(panel.querySelector('[data-refine-apply]')).toBeNull();
+  expect(panel.textContent).not.toContain("Late proposal");
+  click(document, '[data-character-stage="story"]');
+  expect(document.querySelector('[data-refine-apply]')).toBeNull();
+  expect(document.querySelector<HTMLTextAreaElement>('[name="candidate.profile.story.role"]')!.value).toBe("Unsaved role");
+  mounted.dispose();
+});
