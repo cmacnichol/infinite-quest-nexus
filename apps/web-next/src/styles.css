@@ -3543,6 +3543,7 @@ footer p:first-child {
 }
 
 .character-field input,
+.character-field select,
 .character-field textarea {
   box-sizing: border-box;
   width: 100%;
@@ -3556,6 +3557,18 @@ footer p:first-child {
   font: 400 1rem/1.5 "Geologica", sans-serif;
   letter-spacing: normal;
   text-transform: none;
+}
+
+.character-context-flags:not([hidden]) {
+  display: grid;
+  gap: 8px;
+}
+
+.character-context-flags label {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  gap: 10px;
 }
 
 .character-field input[readonly] {

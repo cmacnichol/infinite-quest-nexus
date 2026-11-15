@@ -102,6 +102,30 @@ function key(window: Window, value: string, shiftKey = false): Event {
 }
 
 describe("Character Workspace page", () => {
+  it("edits character use and supporting context flags on Identity", () => {
+    const { document, window, root } = fixture();
+    const sessionStore = store(session(generatedCharacter));
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore, navigate: vi.fn() });
+    click(document, '[data-character-stage="method"]');
+    expect(document.querySelector('[data-character-use]')).toBeNull();
+    click(document, '[data-character-stage="identity"]');
+    const use = document.querySelector<HTMLSelectElement>('[data-character-use]')!;
+    expect(use.value).toBe("playable");
+    expect(document.querySelector('[data-character-starting-cast]')?.parentElement?.parentElement?.hasAttribute('hidden')).toBe(true);
+    use.querySelector('option[value="both"]')!.setAttribute("selected", ""); use.dispatchEvent(new window.Event("change", { bubbles: true }));
+    const starting = document.querySelector<HTMLInputElement>('[data-character-starting-cast]')!;
+    const context = document.querySelector<HTMLInputElement>('[data-character-always-context]')!;
+    expect(starting.checked).toBe(true); expect(context.checked).toBe(false);
+    starting.checked = false; starting.dispatchEvent(new window.Event("change", { bubbles: true }));
+    context.checked = true; context.dispatchEvent(new window.Event("change", { bubbles: true }));
+    const updatedUse = document.querySelector<HTMLSelectElement>('[data-character-use]')!;
+    updatedUse.querySelectorAll("option[selected]").forEach((option) => option.removeAttribute("selected"));
+    updatedUse.querySelector('option[value="supporting"]')!.setAttribute("selected", ""); updatedUse.dispatchEvent(new window.Event("change", { bubbles: true }));
+    expect(document.querySelector('[data-character-stage="mechanics"]')?.hasAttribute('hidden')).toBe(true);
+    click(document, '[data-character-stage="review"]'); click(document, '[data-action="accept-character"]');
+    expect(sessionStore.complete.mock.calls[0]?.[2].candidate).toMatchObject({ campaignUse: "supporting", startingCastDefault: false, alwaysInContext: true });
+  });
+
   it("opens an existing character on Review with unlocked stages and edit-specific Method copy", () => {
     const { document, root } = fixture();
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(generatedCharacter)) });
@@ -659,6 +683,29 @@ describe("durable character recovery", () => {
     return { id: "character-job", revision: 2, status: "awaiting_review" as const, target: { kind: "new_world" as const }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", canApply: false, incomplete: false, kind: "character" as const,
       request: { kind: "character" as const, idempotencyKey: "submission", target: { kind: "new_world" as const }, prompt: "A guide", content: draft() }, result: generatedCharacter };
   }
+
+  it("leaves the durable proposal when changing to supporting and retains the current copy", async () => {
+    const { root, document, window } = fixture(); const active = session();
+    active.origin = "world-creation"; active.parentRoute = "/app/worlds/new"; active.expectedWorldRevision = null;
+    const sessionStore = store(active);
+    const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore, navigate: vi.fn(), resumeJobId: "character-job", authoringJobsApi: {
+      loadAuthoringCapabilities: async () => ({ enabled: true, supportedKinds: ["character"] }), loadAuthoringJob: async () => durableJob()
+    } as never });
+    try {
+      await vi.waitFor(() => expect(root.textContent).toContain("Review available results"));
+      click(document, '[data-action="review-character-job"]');
+      click(document, '[data-character-stage="identity"]');
+      input(document, window, '[name="candidate.name"]', "Edited name");
+      const use = document.querySelector<HTMLSelectElement>('[data-character-use]')!;
+      use.querySelectorAll("option[selected]").forEach((option) => option.removeAttribute("selected"));
+      use.querySelector('option[value="supporting"]')!.setAttribute("selected", "");
+      use.dispatchEvent(new window.Event("change", { bubbles: true }));
+      expect(root.textContent).toContain("Saved proposals remain available. Supporting generation uses a local preview.");
+      click(document, '[data-character-stage="review"]'); click(document, '[data-action="accept-character"]');
+      expect(sessionStore.complete.mock.calls[0]?.[2].candidate).toMatchObject({ name: "Edited name", campaignUse: "supporting" });
+    } finally { mounted.dispose(); }
+  });
+
   it("offers explicit parent restoration before mounting a lost local character session", async () => {
     const { root, document } = fixture();
     const mounted = mountCharacterWorkspacePage(root, "lost", { sessionStore: store(null), resumeJobId: "character-job", authoringJobsApi: {

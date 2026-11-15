@@ -371,30 +371,10 @@ export function mountCharacterWorkspacePage(
 
   function renderMethod(): void {
     canvas.innerHTML = `<div class="character-stage character-method-stage"><header><h2>${activeSession.mode === "edit" ? "Regenerate with AI" : "Start with a character idea"}</h2><p>${activeSession.mode === "edit" ? "Describe changes and generate a replacement draft for review, or return to Review." : "Describe your character and generate an editable draft, or choose Manual to write it yourself."}</p></header>
-      <label class="character-field"><span>Character use</span><select data-character-use><option value="playable">Playable</option><option value="supporting">Supporting</option><option value="both">Both</option></select></label>
       <fieldset class="character-method-controls"><legend>Character method</legend><label class="character-method-control"><input type="radio" name="characterMethod" value="manual"><span>Manual</span></label><label class="character-method-control"><input type="radio" name="characterMethod" value="ai"><span>AI-assisted</span></label></fieldset>
       <section class="character-prompt-authoring" data-character-ai-prompt hidden><div class="character-prompt-heading"><div><h3>Character concept</h3><p>Describe this character's role, personality, history, and visual identity.</p></div><div class="character-prompt-tools"><button type="button" data-action="copy-character-prompt" aria-label="Copy character concept">${copyIcon}</button><button type="button" data-action="paste-character-prompt" aria-label="Paste character concept">${pasteIcon}</button><button type="button" data-action="expand-character-prompt">${expandIcon}<span>Expand</span></button></div></div>
       <label class="character-field"><span>Concept prompt</span><textarea rows="7" data-character-prompt="compact"></textarea></label><p data-character-clipboard-status aria-live="polite"></p><div data-character-generation-status role="status" aria-live="polite"></div><div class="character-generation-actions"><button type="button" data-action="generate-character" disabled>Generate character</button><button type="button" data-action="cancel-character-generation" hidden>Cancel generation</button></div></section>
       <div data-character-manual hidden><p>Start with a name and one story detail. Appearance and mechanics are optional.</p></div></div>`;
-    const use = required<HTMLSelectElement>(canvas, "[data-character-use]");
-    use.querySelector(`option[value="${state.candidate.campaignUse}"]`)?.setAttribute("selected", "");
-    use.addEventListener("change", () => {
-      stopGeneration();
-      restoreGenerationActions();
-      if (use.value === "supporting" && durableSession) {
-        durableSession.dispose();
-        durableSession = null;
-        if (pageView.location?.href) {
-          const url = new URL(pageView.location.href);
-          url.searchParams.delete("authoringJob");
-          pageView.history.replaceState(null, "", `${url.pathname}${url.search}`);
-        }
-        durableStatus("Saved proposals remain available. Supporting generation uses a local preview.");
-      }
-      fieldChanged(["campaignUse"], use.value);
-      canvas.querySelector(".character-progress-ledger")?.replaceWith(actions());
-      updateStageIndex();
-    });
     const aiSection = required<HTMLElement>(canvas, "[data-character-ai-prompt]");
     const manual = required<HTMLElement>(canvas, "[data-character-manual]");
     const compact = required<HTMLTextAreaElement>(canvas, '[data-character-prompt="compact"]');
@@ -439,7 +419,39 @@ export function mountCharacterWorkspacePage(
     form.append(textControl(document, "candidate.name", "Name", state.candidate.name),
       textControl(document, "candidate.profile.identity.pronouns", "Pronouns", state.candidate.profile?.identity.pronouns ?? ""),
       textControl(document, "candidate.profile.identity.aliases", "Aliases (one per line)", state.candidate.profile?.identity.aliases.join("\n") ?? "", true));
+    const useField = document.createElement("label"); useField.className = "character-field";
+    useField.innerHTML = `<span>Character use</span><select data-character-use><option value="playable">Playable</option><option value="supporting">Supporting</option><option value="both">Both</option></select>`;
+    const flags = document.createElement("div"); flags.className = "character-context-flags";
+    flags.innerHTML = `<label><input type="checkbox" data-character-starting-cast> Select by default in starting cast</label><label><input type="checkbox" data-character-always-context> Always include in narrator context</label>`;
+    flags.hidden = state.candidate.campaignUse === "playable";
+    const starting = required<HTMLInputElement>(flags, "[data-character-starting-cast]");
+    const context = required<HTMLInputElement>(flags, "[data-character-always-context]");
+    starting.checked = state.candidate.startingCastDefault;
+    context.checked = state.candidate.alwaysInContext;
+    starting.addEventListener("change", () => fieldChanged(["startingCastDefault"], starting.checked));
+    context.addEventListener("change", () => fieldChanged(["alwaysInContext"], context.checked));
+    form.append(useField, flags);
     stage.append(form, technical); canvas.replaceChildren(stage, actions()); bindCandidateInputs();
+    const use = required<HTMLSelectElement>(canvas, "[data-character-use]");
+    use.querySelector(`option[value="${state.candidate.campaignUse}"]`)?.setAttribute("selected", "");
+    use.addEventListener("change", () => {
+      stopGeneration();
+      restoreGenerationActions();
+      if (use.value === "supporting" && durableSession) {
+        durableSession.dispose();
+        durableSession = null;
+        if (pageView.location?.href) {
+          const url = new URL(pageView.location.href);
+          url.searchParams.delete("authoringJob");
+          pageView.history.replaceState(null, "", `${url.pathname}${url.search}`);
+        }
+        durableStatus("Saved proposals remain available. Supporting generation uses a local preview.");
+      }
+      fieldChanged(["campaignUse"], use.value);
+      flags.hidden = use.value === "playable";
+      canvas.querySelector(".character-progress-ledger")?.replaceWith(actions());
+      updateStageIndex();
+    });
     const aliases = required<HTMLTextAreaElement>(canvas, '[name="candidate.profile.identity.aliases"]');
     function onAliasesInput(): void {
       fieldChanged(["profile", "identity", "aliases"], aliases.value.split("\n").map((v) => v.trim()).filter(Boolean));
