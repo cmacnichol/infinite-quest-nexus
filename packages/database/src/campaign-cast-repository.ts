@@ -1,3 +1,6 @@
+import { observationFieldConflicts } from "./campaign-cast-observation-decision-repository.js";
+import { activeRetractedObservationIds } from "../../domain/src/campaign-cast-observation-decisions.js";
+import { observationDecisionRequestSchema, observationDecisionPreviewSchema, observationDecisionResultSchema, type ObservationDecisionRequest, type ObservationDecisionPreview, type ObservationDecisionResult } from "../../contracts/src/campaign-cast-observation-decisions.js";
 import { castPromoteSchema, castPromoteResultSchema, type CastPromotionPreview } from "../../contracts/src/campaign-cast-promotion.js";
 import { castMergeRequestSchema, castUnmergePreviewSchema, castUnmergeRequestSchema } from "../../contracts/src/campaign-cast-merge.js";
 import { previewCastMerge } from "../../domain/src/campaign-cast-merge.js";
@@ -119,6 +122,7 @@ async function projectJournal(client: DatabaseClient, scope: CastScope, campaign
   assertBoundary(campaign, state, boundary);
   const characterRows = (await client.query("SELECT id,origin,first_observed_turn FROM campaign_cast_characters WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY created_at,id", [scope.campaignId, scope.ownerUserId])).rows.map((row) => characterRowSchema.parse(row));
   const events = journal ?? (await client.query("SELECT id,effective_turn_number,payload,receipt,attachment FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY sequence", [scope.campaignId, scope.ownerUserId])).rows.map((row) => eventSchema.parse(row));
+  const retractedObservationIds = activeRetractedObservationIds(events.filter(event => event.effective_turn_number <= boundary.turnNumber));
   const attachmentProjection = projectCastAttachments(events, boundary.turnNumber);
   const observations = (await client.query(`SELECT id,character_id AS "characterId",field,value,mode,
     speaker_character_id AS "speakerCharacterId",evidence,supersedes_observation_id AS "supersedesObservationId"
@@ -298,7 +302,7 @@ async function projectJournal(client: DatabaseClient, scope: CastScope, campaign
     if (person.origin.kind === "protagonist") continue;
     const ownOverrides = [...(overrides.get(person.id)?.values() ?? [])];
     if (person.campaignProfile) {
-      const resolved = resolveSeededCastProfile({ profile: characterProfileSchema.parse(person.campaignProfile), observations: own, overrides: ownOverrides,
+      const resolved = resolveSeededCastProfile({ profile: characterProfileSchema.parse(person.campaignProfile), observations: own, overrides: ownOverrides, retractedObservationIds,
         ...(goalCutoffs.has(person.id) ? { restoreGoalsAfterTurn: goalCutoffs.get(person.id)! } : {}) });
       person.profile = resolved.profile; person.fieldSources = resolved.sources;
       for (const path of castAuthoredPathSchema.options) {
@@ -309,10 +313,10 @@ async function projectJournal(client: DatabaseClient, scope: CastScope, campaign
         } else person.fieldSources[path] ??= "none";
       }
     } else {
-      person.profile = projectCastProfile({ observations: own, overrides: ownOverrides });
+      person.profile = projectCastProfile({ observations: own, overrides: ownOverrides, retractedObservationIds });
       if (person.activeMerges?.length && !ownOverrides.some(item => item.field === "appearance.description")) {
         const superseded = new Set(own.map(item => item.supersedesObservationId).filter(Boolean));
-        const latest = own.filter(item => item.field === "appearance.description" && item.mode === "fact" && !superseded.has(item.id))
+        const latest = own.filter(item => item.field === "appearance.description" && item.mode === "fact" && !superseded.has(item.id) && !retractedObservationIds.has(item.id))
           .sort((a, b) => { const left = castEvidenceOrder(a.evidence), right = castEvidenceOrder(b.evidence); return left[0] - right[0] || left[1] - right[1]; }).at(-1);
         if (latest) person.profile["appearance.description"] = latest.value;
       }
@@ -322,7 +326,7 @@ async function projectJournal(client: DatabaseClient, scope: CastScope, campaign
     validateCastFiction(person.name);
     person.aliases.forEach(validateCastFiction);
   }
-  return { people, details, authoredEvidenceByCharacter, observationOrder: new Map(observations.map((item, index) => [item.id, index])), goalCutoffs, journal: events };
+  return { people, details, retractedObservationIds, authoredEvidenceByCharacter, observationOrder: new Map(observations.map((item, index) => [item.id, index])), goalCutoffs, journal: events };
 }
 
 async function snapshotProjection(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State | null, boundary: CastBoundary) {
@@ -619,8 +623,8 @@ async function applyCommand(client: DatabaseClient, scope: CastScope, campaign: 
 }
 
 async function persistBatch(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State,
-  batch: CastBatch, requestHash: string, publicCharacterId?: string, deferMetadataRefresh = false, attachmentInput?: { characterId: string; basis: "unique_name" | "unique_world_name"; sourceRanges: import("../../contracts/src/campaign-cast.js").CastSourceRange[] }, trustedAuthored = false, eventId = randomUUID()): Promise<CastBatchReceipt> {
-  if (batch.commands.some(command => command.kind === "retract_observation" || command.kind === "restore_observation"))
+  batch: CastBatch, requestHash: string, publicCharacterId?: string, deferMetadataRefresh = false, attachmentInput?: { characterId: string; basis: "unique_name" | "unique_world_name"; sourceRanges: import("../../contracts/src/campaign-cast.js").CastSourceRange[] }, trustedAuthored = false, eventId = randomUUID(), validatedObservationDecision = false): Promise<CastBatchReceipt> {
+  if (!validatedObservationDecision && batch.commands.some(command => command.kind === "retract_observation" || command.kind === "restore_observation"))
     throw new Error("Observation decisions require the dedicated workflow.");
   const payload: StoredCommand[] = batch.commands.map((command) => ({ command,
     ...(command.kind === "create" ? { characterId: publicCharacterId ?? randomUUID() } : {}),
@@ -730,7 +734,7 @@ export async function seedCampaignCastWithClient(client: DatabaseClient, rawScop
   return persistBatch(client, scope, campaign, state, batch, hash, input.characterId, false, attachment, true);
 }
 
-export function createPostgresCampaignCastRepository(pool: DatabasePool, options: { lifecycleEnabled?: boolean; castPresetsEnabled?: boolean; editingEnabled?: boolean; discoveryEnabled?: boolean; backfillEnabled?: boolean; castAutoMatchEnabled?: boolean; castContextEnabled?: boolean; storyMemoryCapability?: "r1" | "r2" | "r3" | null } = {}): CampaignCastRepositoryPort & CampaignCastWritePort {
+export function createPostgresCampaignCastRepository(pool: DatabasePool, options: { lifecycleEnabled?: boolean; castPresetsEnabled?: boolean; editingEnabled?: boolean; discoveryEnabled?: boolean; backfillEnabled?: boolean; castAutoMatchEnabled?: boolean; castContextEnabled?: boolean; storyMemoryCapability?: "r1" | "r2" | "r3" | null } = {}): CampaignCastRepositoryPort & CampaignCastWritePort & { previewObservationDecision(scope: CastScope, characterId: string, observationId: string, request: ObservationDecisionRequest): Promise<ObservationDecisionPreview>; applyObservationDecision(scope: CastScope, characterId: string, observationId: string, request: ObservationDecisionRequest): Promise<ObservationDecisionResult> } {
   async function verifyDraftFences(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State, boundary: CastBoundary,
     person: CastCharacter, fences: CastDraftEvidenceFence[] | undefined, edits: Record<string, unknown>): Promise<void> {
     if (!fences?.length) return;
@@ -1068,7 +1072,56 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
     return { campaign, state, draft, person, content, preview };
   }
   const statusCache = new Map<string, { fingerprint: string; value: Awaited<ReturnType<NonNullable<CampaignCastWritePort["workspaceRead"]>>> }>();
+  async function observationDecision(rawScope: CastScope, rawId: string, rawObservationId: string, rawRequest: ObservationDecisionRequest, apply: boolean) {
+    const scope = castScopeSchema.parse(rawScope), id = z.uuid().parse(rawId), observationId = z.uuid().parse(rawObservationId), request = observationDecisionRequestSchema.parse(rawRequest);
+    return withTransaction(pool, async client => {
+      const campaign = await lockCampaign(client, scope);
+      if (!options.editingEnabled) throw new CampaignCastError("cast_editing_disabled");
+      const state = await readState(client, scope);
+      if (!state) throw new CampaignCastError("cast_not_found");
+      const hash = sha256(stableStringify({ operation: "observation-decision", id, observationId, request }));
+      if (apply) {
+        const prior = (await client.query("SELECT request_hash,receipt FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND idempotency_key=$3", [scope.campaignId, scope.ownerUserId, request.idempotencyKey])).rows[0];
+        if (prior) {
+          if (prior.request_hash !== hash) throw new CampaignCastError("cast_idempotency_conflict");
+          const receipt = castBatchReceiptSchema.parse(prior.receipt);
+          if (!receipt.result) throw new CampaignCastError("cast_idempotency_conflict");
+          return observationDecisionResultSchema.parse({ ...receipt.result, observationId, disposition: request.action === "retract" ? "retracted" : "restored", decisionEventId: receipt.eventId });
+        }
+      }
+      if (state.revision !== request.expectedCastRevision || state.timeline_revision !== request.expectedBoundary.timelineRevision || campaign.active_turn_number !== request.expectedBoundary.turnNumber) throw new CampaignCastError("cast_revision_conflict");
+      if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`, [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
+      const projected = await snapshotProjection(client, scope, campaign, state, request.expectedBoundary);
+      const person = projected.snapshot.characters.find(item => item.id === id);
+      if (!person) throw new CampaignCastError("cast_not_found");
+      if (person.removed) throw new CampaignCastError("cast_character_removed");
+      if (person.mergedIntoCharacterId) throw new CampaignCastError("cast_character_merged");
+      if (person.origin.kind === "protagonist") throw new CampaignCastError("cast_protagonist_read_only");
+      if (person.revision !== request.expectedCharacterRevision) throw new CampaignCastError("cast_revision_conflict");
+      const detail = projected.details.find(item => item.characterId === id)!;
+      const source = detail.observations.find(item => item.id === observationId);
+      if (!source || source.mode !== "fact" || source.evidence.kind !== "turn") throw new CampaignCastError("cast_invalid_request");
+      let activeEvent: string | undefined;
+      for (const event of projected.journal) if (event.effective_turn_number <= request.expectedBoundary.turnNumber) for (const { command } of event.payload) {
+        if (command.kind === "retract_observation" && command.observationId === observationId) activeEvent = event.id;
+        if (command.kind === "restore_observation" && command.observationId === observationId && command.retractionEventId === activeEvent) activeEvent = undefined;
+      }
+      if (request.action === "retract" ? Boolean(activeEvent) : !activeEvent || activeEvent !== request.retractionEventId) throw new CampaignCastError("cast_invalid_request");
+      const command: CastCommand = request.action === "retract" ? { kind: "retract_observation", characterId: id, observationId } : { kind: "restore_observation", characterId: id, observationId, retractionEventId: request.retractionEventId };
+      const eventId = randomUUID(), hypothetical = eventSchema.parse({ id: eventId, effective_turn_number: request.expectedBoundary.turnNumber, payload: [{ command }], receipt: { eventId, revision: state.revision + 1, characterIds: [], observationIds: [] } });
+      const after = await projectJournal(client, scope, campaign, { ...state, revision: state.revision + 1 }, request.expectedBoundary, [...projected.journal, hypothetical]);
+      const changed = after.people.get(id)!;
+      const preview = observationDecisionPreviewSchema.parse({ field: source.field, currentValue: person.profile[source.field] ?? null, projectedValue: changed.profile[source.field] ?? null,
+        currentConflict: observationFieldConflicts(person, detail.observations, detail.overrides, projected.retractedObservationIds, source.field),
+        projectedConflict: observationFieldConflicts(changed, detail.observations, detail.overrides, after.retractedObservationIds, source.field), source, castRevision: state.revision, characterRevision: person.revision, boundary: request.expectedBoundary });
+      if (!apply) return preview;
+      const receipt = await persistBatch(client, scope, campaign, state, { boundary: request.expectedBoundary, idempotencyKey: request.idempotencyKey, commands: [command] }, hash, id, false, undefined, false, eventId, true);
+      return observationDecisionResultSchema.parse({ ...receipt.result, observationId, disposition: request.action === "retract" ? "retracted" : "restored", decisionEventId: eventId });
+    });
+  }
   return {
+    async previewObservationDecision(scope, characterId, observationId, request) { return observationDecision(scope, characterId, observationId, request, false) as Promise<ObservationDecisionPreview>; },
+    async applyObservationDecision(scope, characterId, observationId, request) { return observationDecision(scope, characterId, observationId, request, true) as Promise<ObservationDecisionResult>; },
     async promotionPreview(rawScope, rawId, rawWorldId) {
       if (!options.lifecycleEnabled) throw new CampaignCastError("cast_lifecycle_disabled");
       if (!options.editingEnabled) throw new CampaignCastError("cast_editing_disabled");
@@ -1419,21 +1472,9 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         for (const detail of projected.details) {
           const person = projected.snapshot.characters.find(item => item.id === detail.characterId);
           if (person?.removed || person?.mergedIntoCharacterId) continue;
-          const superseded = new Set(detail.observations.map(item => item.supersedesObservationId).filter(Boolean));
-          const fields = new Map<string, Set<string>>();
-          for (const item of detail.observations) {
-            if (item.mode !== "fact" || superseded.has(item.id) || item.field.startsWith("state.") || item.field === "story.goals") continue;
-            const values = fields.get(item.field) ?? new Set<string>(); values.add(item.value); fields.set(item.field, values);
-          }
-          const seeded = projected.snapshot.characters.find((person) => person.id === detail.characterId)?.campaignProfile;
-          for (const [field, values] of fields) {
-            if (seeded && field === "appearance.description") continue;
-            if (seeded && field !== "story.goals") {
-              const [section, key] = field.split(".");
-              const authored = (seeded as Record<string, any>)[section!]?.[key!];
-              if (typeof authored === "string" && authored.trim()) continue;
-            }
-            if (values.size > 1 && !detail.overrides.some(item => item.field === field)) { conflicts++; reviewIds.add(detail.characterId); conflictIds.add(detail.characterId); addAttention(detail.characterId, 1, 1); }
+          const fields = new Set(detail.observations.map(item => item.field));
+          for (const field of fields) if (observationFieldConflicts(person!, detail.observations, detail.overrides, projected.retractedObservationIds, field)) {
+            conflicts++; reviewIds.add(detail.characterId); conflictIds.add(detail.characterId); addAttention(detail.characterId, 1, 1);
           }
         }
         const levels = ["r1", "r2", "r3"];
