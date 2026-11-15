@@ -54,4 +54,35 @@ describe("character sheet view", () => {
     const a = setup({ sheet, retraction: { preview: vi.fn(), apply: vi.fn() } }); a.click("Resolve conflict"); expect(a.host.textContent).toContain("Tinker · turn 8 · “q8”"); expect(a.host.textContent).not.toContain("This is wrong"); expect(a.host.textContent).toContain("Write my own");
     const b = setup({ sheet }); b.click("Resolve conflict"); expect(b.host.textContent).toContain("Use this");
   });
+  it("protects dirty edits before refresh actions", () => {
+    const onChange = vi.fn(), onShowEmpty = vi.fn(), undo = vi.fn();
+    const a = setup({ onChange, onShowEmpty, feedback: { message: "Saved", undo }, toggles: { pinned: false, ignored: false }, confirmDiscard: () => false });
+    a.click("Edit Aliases"); const input = a.host.querySelector("textarea") as HTMLTextAreaElement; input.value = "unsaved";
+    a.click("Pin"); a.click("Reset to world"); a.click("Undo"); a.click("Hide empty fields");
+    expect(onChange).not.toHaveBeenCalled(); expect(onShowEmpty).not.toHaveBeenCalled(); expect(undo).not.toHaveBeenCalled(); expect(input.value).toBe("unsaved");
+  });
+  it("focuses the editor and returns focus to the field after cancel", () => {
+    const a = setup(); const proto = Object.getPrototypeOf(a.host.ownerDocument.createElement("input"));
+    const focus = vi.spyOn(proto, "focus"); a.click("Edit Pronouns"); expect(focus).toHaveBeenCalled(); focus.mockRestore();
+    const buttonProto = Object.getPrototypeOf(a.host.ownerDocument.createElement("button")); const buttonFocus = vi.spyOn(buttonProto, "focus"); a.click("Cancel"); expect(buttonFocus.mock.instances.at(-1)?.textContent).toBe("Edit Pronouns"); buttonFocus.mockRestore();
+  });
+  it("invokes conflict choices and keeps controller feedback across refresh", async () => {
+    const f = field("identity.pronouns", null); f.origin = "conflicted";
+    f.observations = [{ id: "a", field: f.path, value: "Tinker", mode: "fact", supersedesObservationId: null, evidence: { kind: "turn", turnNumber: 7, quote: "q7", invalidated: false } } as unknown as CharacterField["observations"][number]];
+    const onChange = vi.fn().mockResolvedValue({ ok: true }), undo = vi.fn().mockResolvedValue({ ok: true });
+    const sheet: CharacterSheet = { name: "A", kind: "supporting", sections: [{ name: "Identity", fields: [f] }], sources: [], locks: [], attention: [] };
+    const a = setup({ sheet, onChange, feedback: { message: "Saved Pronouns", undo } }); a.click("Resolve conflict"); a.click("Use this"); await Promise.resolve(); expect(onChange).toHaveBeenCalledWith({ kind: "field", path: f.path, value: "Tinker" });
+    a.view.dispose(); renderCharacterSheetView(a.host, a.options); expect(a.host.textContent).toContain("Saved Pronouns"); a.click("Undo"); await Promise.resolve(); expect(undo).toHaveBeenCalledOnce();
+  });
+  it("leaves toggle state unchanged after failure and ignores results after switching", async () => {
+    let current = true; let finish!: (value: { ok: false; conflict: boolean; message: string }) => void;
+    const onChange = vi.fn().mockImplementationOnce(async () => ({ ok: false, conflict: false, message: "failed" })).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const a = setup({ toggles: { pinned: false, ignored: false }, onChange, isCurrent: () => current }); a.click("Pin"); await Promise.resolve(); await Promise.resolve(); expect(a.host.querySelector('[aria-pressed]')!.getAttribute("aria-pressed")).toBe("false"); expect(a.host.textContent).toContain("failed");
+    a.click("Ignore"); current = false; a.host.textContent = "new sheet"; finish({ ok: false, conflict: true, message: "late" }); await Promise.resolve(); await Promise.resolve(); expect(a.host.textContent).toBe("new sheet");
+  });
+  it("labels clear actions and submits the displayed story value choice", async () => {
+    const world = field("identity.pronouns"); const story = field("story.role", "Guide"); story.label = "Role"; story.storyDiffers = { value: "Smith", turn: 20 }; story.override = {} as NonNullable<CharacterField["override"]>;
+    const sheet: CharacterSheet = { name: "A", kind: "supporting", sections: [{ name: "Identity", fields: [world, story] }], sources: [], locks: [], attention: [] };
+    const onChange = vi.fn().mockResolvedValue({ ok: true }); const a = setup({ sheet, onChange }); expect(a.host.textContent).toContain("Reset to world"); expect(a.host.textContent).toContain("Story differs: Smith · turn 20"); a.click("Use story value"); await Promise.resolve(); expect(onChange).toHaveBeenCalledWith({ kind: "field", path: "story.role", value: null });
+  });
 });
