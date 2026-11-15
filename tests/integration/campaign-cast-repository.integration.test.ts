@@ -117,6 +117,32 @@ integration("campaign cast PostgreSQL foundation", () => {
     return { f, repo, seed, content };
   }
 
+  it.each([false, true])("a replaced state edit reports observation source and the later value in list and detail (starting cast: %s)", async startingCast => {
+    const { f, repo, seed } = await castFromRoster([{ id: "guide", name: "Mara" }]);
+    await pool.query("UPDATE campaigns SET active_turn_number=12 WHERE id=$1", [f.scope.campaignId]);
+    const boundary = { turnNumber: 12, timelineRevision: 0 };
+    const created = startingCast ? await seed("guide") : await repo.create(f.scope, {
+      expectedCastRevision: 0, expectedBoundary: boundary, idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: {}
+    });
+    const characterId = created.character.id;
+    await repo.applyBatch(f.scope, { boundary, idempotencyKey: randomUUID(), commands: [
+      { kind: "override", characterId, field: "state.location", value: "the docks" }
+    ] });
+    const turnId = randomUUID(), narration = "Mara waits in the palace.";
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,20,$4)", [turnId, ownerUserId, f.scope.campaignId, narration]);
+    await pool.query("UPDATE campaigns SET active_turn_number=20 WHERE id=$1", [f.scope.campaignId]);
+    await repo.applyBatch(f.scope, { boundary: { turnNumber: 20, timelineRevision: 0 }, idempotencyKey: randomUUID(), commands: [
+      { kind: "observe", characterId, field: "state.location", value: "the palace", mode: "fact", speakerCharacterId: null, supersedesObservationId: null,
+        evidence: { kind: "turn", turnId, turnNumber: 20, narrationRevision: 0, sourceHash: sha256(narration), paragraphId: "p1", quote: narration } }
+    ] });
+    const list = await repo.current(f.scope), detail = await repo.detail(f.scope, characterId);
+    for (const character of [list.characters.find(person => person.id === characterId)!, detail.character]) {
+      expect(character.profile["state.location"]).toBe("the palace");
+      expect(character.fieldSources?.["state.location"]).toBe("observation");
+    }
+    expect(detail.overrides).toEqual(expect.arrayContaining([expect.objectContaining({ field: "state.location", value: "the docks" })]));
+  });
+
   it("promotes a renamed seed only to a reviewed roster target in the chosen world", async () => {
     const { f, repo, seed, content } = await castFromRoster([{ id: "guide", name: "Sera" }, { id: "other", name: "Keeper" }]);
     const seeded = await seed("guide");

@@ -19,7 +19,7 @@ import { createCastCandidateRepository } from "./campaign-cast-candidate-reposit
 import { z } from "zod";
 import {
   castBatchSchema, castBatchReceiptSchema, castBoundarySchema, castCharacterSchema, castAliasDelta, applyCastAliasDelta,
-  castAuthoredPathSchema, castFieldSchema, castCommandSchema, castAttachmentSchema, castObservationSchema, castOriginSchema, castScopeSchema, castSnapshotSchema,
+  castAuthoredPathSchema, castFieldSchema, castCommandSchema, stateEditReplacement, castAttachmentSchema, castObservationSchema, castOriginSchema, castScopeSchema, castSnapshotSchema,
   type CastBatch, type CastBatchReceipt, type CastBoundary, type CastCharacter, type CastCommand,
   type CastDetail, type CastEvidence, type CastObservation, type CastOverride, type CastProfile, type CastScope, type CastSnapshot, type CastDraftEvidenceFence
 } from "../../contracts/src/campaign-cast.js";
@@ -320,7 +320,7 @@ async function projectJournal(client: DatabaseClient, scope: CastScope, campaign
           .sort((a, b) => { const left = castEvidenceOrder(a.evidence), right = castEvidenceOrder(b.evidence); return left[0] - right[0] || left[1] - right[1]; }).at(-1);
         if (latest) person.profile["appearance.description"] = latest.value;
       }
-      const overridden = new Set(ownOverrides.map(item => item.field));
+      const overridden = new Set(ownOverrides.filter(item => stateEditReplacement(item, own, retractedObservationIds) === null).map(item => item.field));
       person.fieldSources = Object.fromEntries(Object.keys(person.profile).map(field => [field, overridden.has(field as CastOverride["field"]) ? "override" : "observation"]));
     }
     validateCastFiction(person.name);
