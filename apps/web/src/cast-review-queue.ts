@@ -6,8 +6,23 @@ export function renderCastReview(options: { document: Document; container: HTMLE
   const { document, container, api, campaign } = options;
   const drafts = new Map<string, string>();
   let undo: { candidateId: string; decisionId: string; sourceHash: string; reviewRevision: number; revision: number; boundary: CastCandidateList["boundary"] } | null = null;
+  let focusCandidate: string | null = null;
   let view: "pending" | "dismissed" = "pending"; let announcement = ""; let dismissedCursor: string | undefined;
   const skipped = new Set<string>(); let busy = false; let epoch = 0; let prioritizeCharacter: string | null = null; let initialItem = options.initialItem; let cached: { matches: CastCandidateList; details: CastCandidateList; targets: CastCharacter[] } | null = null;
+  let disabledControls: { control: HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement; disabled: boolean }[] = [];
+  const preventCancel = (event: Event) => event.preventDefault();
+  function setBusy(value: boolean) {
+    busy = value;
+    if (value) {
+      disabledControls = [...container.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("button,input,select,textarea")].map(control => ({ control, disabled: control.disabled }));
+      for (const { control } of disabledControls) control.disabled = true;
+      container.addEventListener("cancel", preventCancel);
+    } else {
+      for (const { control, disabled } of disabledControls) if (control.isConnected) control.disabled = disabled;
+      disabledControls = []; container.removeEventListener("cancel", preventCancel);
+    }
+  }
+  const focus = (element: HTMLElement) => { element.tabIndex = -1; element.focus(); };
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => { const el = document.createElement(tag); el.textContent = text; return el; };
   const button = (text: string, action: () => void, disabled = false) => { const el = node("button", text); el.type = "button"; el.disabled = disabled; el.addEventListener("click", action); return el; };
   const labelField = (field: string) => ({ "identity.pronouns": "Pronouns", "story.role": "Role", "story.background": "Background", "story.personality": "Personality", "story.motivations": "Motivations", "story.goals": "Goals", "story.voiceAndMannerisms": "Voice and mannerisms", "appearance.description": "Appearance", "state.location": "Last known location", "state.condition": "Condition", "state.clothing": "Clothing" } as Record<string, string>)[field] ?? field;
@@ -27,15 +42,15 @@ export function renderCastReview(options: { document: Document; container: HTMLE
           row.append(node("h4", target.kind === "identity" ? `Discovery: ${target.proposal.name}` : `Detail: ${labelField(target.observation.field)} — ${target.observation.value}`), node("p", `Source turn ${decision.source.turnNumber}`), node("blockquote", target.kind === "identity" ? target.proposal.identityEvidence[0]?.quote ?? "" : target.observation.quote));
           row.append(button("Undo", () => { void (async () => {
             if (busy || !options.editing() || !options.reviewWrites || !api.reviewDecision) return;
-            busy = true; status.textContent = "Restoring…";
+            setBusy(true); status.textContent = "Restoring…";
             try {
               if (options.checkWrite && !await options.checkWrite()) { status.textContent = "Finish or resolve generation before changing review."; return; }
               if (!options.current() || token !== epoch || !options.editing()) return;
               const request = { action: "restore" as const, decisionId: decision.decisionId, sourceHash: decision.source.sourceHash, expectedReviewRevision: page.reviewRevision, expectedCastRevision: page.revision, expectedBoundary: page.boundary, idempotencyKey: options.key("review", [campaign, decision.decisionId, page.reviewRevision, page.revision, page.boundary]) };
               await api.reviewDecision(campaign, decision.candidateId, request); if (!options.current() || token !== epoch) return;
-              options.clearKeys(); undo = null; announcement = "Dismissal undone."; dismissedCursor = undefined; cached = null; await load();
+              options.clearKeys(); undo = null; announcement = "Dismissal undone."; focusCandidate = decision.candidateId; view = "pending"; dismissedCursor = undefined; cached = null; await load();
             } catch (error) { status.replaceChildren(node("span", (error as { statusCode?: number }).statusCode === 409 ? "The source or review changed. Reload before deciding." : "Could not restore this dismissal."), button("Reload review", () => { void load(); })); }
-            finally { busy = false; }
+            finally { setBusy(false); }
           })(); }, !decision.canRestore || !options.reviewWrites || !options.editing())); container.append(row);
         }
         if (dismissedCursor) container.append(button("First page", () => { dismissedCursor = undefined; void load(); }));
@@ -64,6 +79,11 @@ export function renderCastReview(options: { document: Document; container: HTMLE
       }
       if (!options.current() || token !== epoch) return;
       const queue = buildReviewQueue(matches.candidates, details.candidates).filter(item => !skipped.has(itemKey(item)));
+      if (focusCandidate) {
+        const index = queue.findIndex(item => item.kind === "identity" ? item.candidate.id === focusCandidate : item.entries.some(entry => entry.candidate.id === focusCandidate));
+        if (index > 0) queue.unshift(...queue.splice(index, 1));
+        focusCandidate = null;
+      }
       if (initialItem) {
         const index = queue.findIndex(item => initialItem === itemKey(item) || item.kind === "detail" && initialItem!.startsWith(`${itemKey(item)}:`));
         if (index >= 0) {
@@ -85,24 +105,23 @@ export function renderCastReview(options: { document: Document; container: HTMLE
         const receipt = undo;
         const undoButton = button("Undo", () => { void (async () => {
           if (busy || !options.reviewWrites || !options.editing() || !api.reviewDecision) return;
-          busy = true;
+          setBusy(true);
           try {
             if (options.checkWrite && !await options.checkWrite()) return;
             if (!options.current() || token !== epoch || !options.editing()) return;
             await api.reviewDecision(campaign, receipt.candidateId, { action: "restore", decisionId: receipt.decisionId, sourceHash: receipt.sourceHash, expectedReviewRevision: receipt.reviewRevision, expectedCastRevision: receipt.revision, expectedBoundary: receipt.boundary, idempotencyKey: options.key("review-undo", [campaign, receipt]) });
-            if (!options.current() || token !== epoch) return; undo = null; cached = null; options.clearKeys(); announcement = "Dismissal undone."; await load();
+            if (!options.current() || token !== epoch) return; undo = null; focusCandidate = receipt.candidateId; cached = null; options.clearKeys(); announcement = "Dismissal undone."; await load();
           } catch (error) {
             if (options.current() && token === epoch) {
               const stale = (error as { statusCode?: number }).statusCode === 409;
               const notice = node("p", stale ? "The source or review changed. Reload before deciding." : "Could not confirm the undo. Retry it or reload the review."); notice.setAttribute("role", "status");
-              if (stale) { undoButton.disabled = true; notice.append(button("Reload review", () => { undo = null; cached = null; void load(); })); }
+              if (stale) { undoButton.disabled = true; disabledControls = disabledControls.filter(item => item.control !== undoButton); notice.append(button("Reload review", () => { undo = null; cached = null; void load(); })); }
               container.append(notice);
             }
-          } finally { busy = false; }
-        })(); }, !options.reviewWrites || !options.editing()); container.append(undoButton); undoButton.focus();
+          } finally { setBusy(false); }
+        })(); }, !options.reviewWrites || !options.editing()); container.append(undoButton);
       }
-      if (!undo) { const heading = container.querySelector<HTMLElement>("h2"); if (heading) { heading.tabIndex = -1; heading.focus(); } }
-      if (!queue.length) { container.append(node("p", skipped.size ? "Review complete for this pass." : "Nothing needs review.")); return; }
+      if (!queue.length) { const empty = node("h3", skipped.size ? "Review complete for this pass." : "Nothing needs review."); container.append(empty); focus(empty); return; }
       if (options.autoMatch != null) container.append(node("p", options.autoMatch ? "Unique-name matching is on; ambiguous names still need review." : "Automatic name matching is off; exact matches are suggested here."));
       const item = queue[0]!; container.append(node("p", `${queue.length} ${queue.length === 1 ? "item" : "items"} remaining in this pass.`));
       const section = node("section"), feedback = node("p"); feedback.setAttribute("role", "status");
@@ -122,13 +141,13 @@ export function renderCastReview(options: { document: Document; container: HTMLE
       }
       async function dismiss(candidate: CandidateForReview, action: "dismiss_identity" | "dismiss_detail", observationIndex?: number) {
         if (locked() || !options.reviewWrites || !api.reviewDecision || candidate.reviewRevision === undefined || !candidate.source.sourceHash) return;
-        busy = true; feedback.textContent = "Saving…";
+        setBusy(true); feedback.textContent = "Saving…";
         try {
           if (!await canSubmit()) return;
           const target = action === "dismiss_detail" ? { action, observationIndex: observationIndex! } as const : { action } as const;
           const receipt = await api.reviewDecision(campaign, candidate.id, { ...target, sourceHash: candidate.source.sourceHash, expectedReviewRevision: candidate.reviewRevision, expectedCastRevision: matches.revision, expectedBoundary: matches.boundary, idempotencyKey: options.key("review", [campaign, candidate.id, target, candidate.reviewRevision, matches.revision, matches.boundary]) });
           if (!current()) return; undo = { candidateId: candidate.id, decisionId: receipt.decisionId, sourceHash: candidate.source.sourceHash!, reviewRevision: receipt.reviewRevision, revision: receipt.revision, boundary: receipt.boundary }; options.clearKeys(); announcement = "Dismissed."; cached = null; await load();
-        } catch (error) { failed(error); } finally { busy = false; }
+        } catch (error) { failed(error); } finally { setBusy(false); }
       }
       const skip = () => { if (busy) return; skipped.add(itemKey(item)); void load(true); };
       if (item.kind === "identity") {
@@ -171,7 +190,7 @@ export function renderCastReview(options: { document: Document; container: HTMLE
         if (suggested) { select.value = suggested.id; showPreview(); }
         async function decide(action: "attach" | "create") {
           if (locked() || action === "attach" && !select.value) return;
-          busy = true; feedback.textContent = "Saving…";
+          setBusy(true); feedback.textContent = "Saving…";
           try {
             const decision = action === "attach" ? { action, characterId: select.value } as const : { action } as const;
             if (!await canSubmit()) return;
@@ -179,7 +198,7 @@ export function renderCastReview(options: { document: Document; container: HTMLE
               expectedBoundary: matches.boundary, ...(candidate.reviewRevision !== undefined ? { expectedReviewRevision: candidate.reviewRevision } : {}), idempotencyKey: options.key("match", [campaign, candidate.id, decision, candidate.reviewRevision, matches.revision, matches.boundary]) });
             if (!current()) return;
             prioritizeCharacter = saved.character.id; options.clearKeys(); await load();
-          } catch (error) { failed(error); } finally { busy = false; }
+          } catch (error) { failed(error); } finally { setBusy(false); }
         }
         section.append(attach, button("Create separate character", () => { void decide("create"); }, !options.editing()));
       } else {
@@ -207,7 +226,7 @@ export function renderCastReview(options: { document: Document; container: HTMLE
           let pending: { signature: string; request: Parameters<typeof api.resolveDetail>[2] } | null = null;
           async function decide(action: "accept" | "confirm" | "dismiss") {
             if (locked() || !permits(action)) return;
-            busy = true; feedback.textContent = "Saving…";
+            setBusy(true); feedback.textContent = "Saving…";
             try {
               if (!await canSubmit()) return;
               const signature = JSON.stringify([action, action === "confirm" ? value.value : null]);
@@ -223,7 +242,7 @@ export function renderCastReview(options: { document: Document; container: HTMLE
               await api.resolveDetail(campaign, candidate.id, pending.request);
               if (!current()) return;
               drafts.delete(draftKey); pending = null; options.clearKeys(); await load();
-            } catch (error) { failed(error); } finally { busy = false; }
+            } catch (error) { failed(error); } finally { setBusy(false); }
           }
           if (permits("accept")) row.append(
             node("p", `Apply records this observation at turn ${candidate.source.turnNumber}; it does not lock the field.`),
@@ -233,7 +252,7 @@ export function renderCastReview(options: { document: Document; container: HTMLE
           if (permits("dismiss")) row.append(button("Dismiss detail", () => { if (options.reviewReadVersion === 1 && candidate.source.sourceHash && candidate.reviewRevision !== undefined && api.reviewDecision) void dismiss(candidate, "dismiss_detail", detail.observationIndex); else void decide("dismiss"); }, !options.editing() || (options.reviewReadVersion === 1 && !options.reviewWrites))); section.append(row);
         }
       }
-      section.append(node("p", "Skip for now leaves this item pending for a later review."), button("Skip for now", skip), feedback); container.append(section);
+      section.append(node("p", "Skip for now leaves this item pending for a later review."), button("Skip for now", skip), feedback); container.append(section); const cardHeading = section.querySelector<HTMLElement>("h3"); if (cardHeading) focus(cardHeading);
     } catch (error) { if (!options.current() || token !== epoch) return; container.replaceChildren(node("h2", "Character review"), node("p", error instanceof Error ? error.message : "Could not load review."), button("Retry", () => { void load(); }), button("Back to characters", options.back)); }
   }
   void load();

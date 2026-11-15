@@ -13,6 +13,22 @@ describe('cast review decisions', () => {
   let pool: DatabasePool, ownerUserId: string;
   beforeAll(async () => { pool = createDatabasePool(process.env.TEST_DATABASE_URL!, 8); await migrateDatabase(pool, resolve('database/migrations')); ownerUserId = await initialOwnerId(pool); }, 60000);
   afterAll(async () => { await pool?.end(); });
+  it('lists dismissals in a read-only transaction without initializing a new cast', async () => {
+    const worldId = randomUUID(), versionId = randomUUID(), campaignId = randomUUID();
+    await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Read only')", [worldId, ownerUserId]);
+    await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) VALUES($1,$2,$3,1,'{}')", [versionId, worldId, ownerUserId]);
+    await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title,active_turn_number) VALUES($1,$2,$3,'Read only',0)", [campaignId, ownerUserId, versionId]);
+    const client = await pool.connect();
+    try {
+      await client.query('SET default_transaction_read_only = on');
+      const readPool = { connect: async () => ({ query: client.query.bind(client), release() {} }) } as unknown as DatabasePool;
+      const repo = createPostgresCampaignCastRepository(readPool, { editingEnabled: false });
+      expect(await repo.dismissedReview({ ownerUserId, campaignId }, {})).toMatchObject({ revision: 0, reviewRevision: 0, boundary: { turnNumber: 0, timelineRevision: 0 }, decisions: [] });
+      await expect(repo.dismissedReview({ ownerUserId: randomUUID(), campaignId }, {})).rejects.toMatchObject({ code: 'cast_not_found' });
+    } finally { await client.query('RESET default_transaction_read_only'); client.release(); }
+    expect((await pool.query('SELECT 1 FROM campaign_cast_state WHERE campaign_id=$1', [campaignId])).rowCount).toBe(0);
+    expect((await pool.query('SELECT 1 FROM campaign_cast_characters WHERE campaign_id=$1', [campaignId])).rowCount).toBe(0);
+  });
   it('fences stale resolved detail writes after same-source legacy or journal dismissal', async () => {
     const worldId = randomUUID(), versionId = randomUUID(), campaignId = randomUUID(), turnId = randomUUID();
     await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Fence')", [worldId, ownerUserId]);

@@ -1531,13 +1531,68 @@ for (const surface of ["legacy", "next"] as const) for (const width of [1440, 39
   await dialog.screenshot({ path: info.outputPath(`pending-${surface}-${width}.png`) });
   await dialog.getByRole("button", { name: "Dismiss discovery" }).click();
   await expect(dialog.getByText("Dismissed.", { exact: true })).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Undo", exact: true })).toBeFocused();
+  await expect(dialog.getByRole("heading", { name: "Nothing needs review." })).toBeFocused();
   await dialog.screenshot({ path: info.outputPath(`dismissed-${surface}-${width}.png`) });
   await dialog.getByRole("button", { name: "Dismissed", exact: true }).click();
   await expect(dialog).toContainText("Dismissals made with this review workflow");
+  const undoKeys: string[] = [];
+  await page.route(`**/cast/candidates/${candidateId}/review-decisions`, route => {
+    const input = route.request().postDataJSON(); undoKeys.push(input.idempotencyKey);
+    return undoKeys.length === 1 ? route.fulfill({ status: 503, json: { code: "unavailable" } }) : route.fallback();
+  });
+  await dialog.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(dialog).toContainText("Could not restore this dismissal.");
   await dialog.getByRole("button", { name: "Undo", exact: true }).click();
   await expect(dialog).toContainText("Dismissal undone.");
-  await dialog.getByRole("button", { name: "Pending", exact: true }).click();
-  await expect(dialog).toContainText("Identity: Mara");
+  expect(undoKeys).toHaveLength(2); expect(undoKeys[0]).toBe(undoKeys[1]);
+  await expect(dialog.getByRole("heading", { name: "Identity: Mara" })).toBeFocused();
   expect(api.writes.map((write: any) => write.action)).toEqual(["dismiss_identity", "restore"]);
+  await dialog.getByRole("button", { name: "Dismiss discovery" }).click();
+  await expect(dialog.getByRole("heading", { name: "Nothing needs review." })).toBeFocused();
+  await page.route(`**/cast/candidates/${candidateId}/review-decisions`, route => route.fulfill({ status: 409, json: { code: "cast_revision_conflict" } }));
+  await dialog.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(dialog).toContainText("The source or review changed. Reload before deciding.");
+  await expect(dialog.getByRole("button", { name: "Undo", exact: true })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Reload review", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "Nothing needs review." })).toBeFocused();
+});
+
+for (const surface of ["legacy", "next"] as const) test(`review waits for dismissal and keeps focus on the result ${surface}`, async ({ page }) => {
+  const api = await fixture(page, false, false, false, false, false, false, false, true);
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; }); let calls = 0;
+  await page.route(`**/cast/candidates/${candidateId}/review-decisions`, async route => {
+    calls++; if (calls > 1) return route.fallback(); await gate; return route.fulfill({ status: 503, json: { code: "unavailable" } });
+  });
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace");
+  await openReview(dialog);
+  const dismiss = dialog.getByRole("button", { name: "Dismiss discovery" }); await dismiss.click();
+  await expect.poll(() => calls).toBe(1);
+  await expect(dialog.getByRole("button", { name: "Dismissed", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Back to characters", exact: true })).toBeDisabled();
+  await expect(dismiss).toBeDisabled();
+  await expect(dialog).toContainText("Identity: Mara");
+  await dialog.getByRole("button", { name: "Dismissed", exact: true }).evaluate((button: HTMLButtonElement) => button.click());
+  await dismiss.evaluate((button: HTMLButtonElement) => { button.click(); button.click(); });
+  expect(calls).toBe(1); await expect(dialog).toContainText("Identity: Mara");
+  release(); await expect(dialog).toContainText("Could not confirm this decision");
+  await expect(dismiss).toBeEnabled(); await expect(dialog.getByRole("button", { name: "Dismissed", exact: true })).toBeEnabled();
+  expect(calls).toBe(1); expect(api.writes).toHaveLength(0);
+  await dismiss.click(); await expect(dialog.getByRole("heading", { name: "Nothing needs review." })).toBeFocused();
+  expect(calls).toBe(2); expect(api.writes).toHaveLength(1);
+});
+
+for (const surface of ["legacy", "next"] as const) test(`review focuses the next card after a keyboard dismissal ${surface}`, async ({ page }) => {
+  await fixture(page, false, false, false, false, false, false, false, true);
+  const secondId = "99999999-9999-4999-8999-999999999999", boundary = { turnNumber: 1, timelineRevision: 0 }, hash = "a".repeat(64);
+  let dismissed = false;
+  const makeCandidate = (id: string, name: string) => ({ id, reason: "identity_needs_review", reviewRevision: dismissed ? 1 : 0, reviewDetails: [], proposal: { localKey: name, name, aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote: `${name} waits.` }], observations: [] }, source: { turnId: "55555555-5555-4555-8555-555555555555", turnNumber: 1, narrationRevision: 0, sourceHash: hash } });
+  await page.route("**/cast/candidates?**", route => route.fulfill({ json: { revision: 0, boundary, nextCursor: null, candidates: dismissed ? [makeCandidate(secondId, "Bea")] : [makeCandidate(candidateId, "Ada"), makeCandidate(secondId, "Bea")] } }));
+  await page.route(`**/cast/candidates/${candidateId}/review-decisions`, route => { dismissed = true; return route.fulfill({ json: { decisionId: versionId, candidateId, reviewRevision: 1, revision: 0, boundary, disposition: "dismiss_identity" } }); });
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace"); await openReview(dialog);
+  await expect(dialog.getByRole("heading", { name: "Identity: Ada" })).toBeFocused();
+  const dismiss = dialog.getByRole("button", { name: "Dismiss discovery" }); await tabTo(page, dismiss); await page.keyboard.press("Enter");
+  await expect(dialog.getByRole("heading", { name: "Identity: Bea" })).toBeFocused();
+  await expect(dialog.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
 });

@@ -109,7 +109,13 @@ export function createCastReviewDecisionRepository(pool: DatabasePool, editingEn
     async dismissedReview(rawScope: CastScope, input: { cursor?: string; limit?: number } = {}) {
       const scope = castScopeSchema.parse(rawScope), query = dismissedReviewQuerySchema.parse(input);
       return withTransaction(pool, async client => {
-        const cast = await initializeCastWithClient(client, scope), active = await readActiveReviewDismissals(client, scope);
+        await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        const snapshot = (await client.query(`SELECT c.active_turn_number, COALESCE(s.revision, 0) AS revision, COALESCE(s.timeline_revision, 0) AS timeline_revision
+          FROM campaigns c LEFT JOIN campaign_cast_state s ON s.campaign_id=c.id AND s.owner_user_id=c.owner_user_id
+          WHERE c.id=$1 AND c.owner_user_id=$2`, [scope.campaignId, scope.ownerUserId])).rows[0];
+        if (!snapshot) throw new CampaignCastError("cast_not_found");
+        const cast = { revision: Number(snapshot.revision), boundary: { turnNumber: Number(snapshot.active_turn_number), timelineRevision: Number(snapshot.timeline_revision) } };
+        const active = await readActiveReviewDismissals(client, scope);
         const entries: { decision: Row; row: any }[] = [];
         for (const decision of active.rows) {
           if (query.cursor && decision.id <= query.cursor) continue;

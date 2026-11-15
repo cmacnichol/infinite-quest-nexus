@@ -105,3 +105,21 @@ it("forwards the review revision when creating a character", async () => {
   [...document.querySelectorAll("button")].find(button => button.textContent === "Create separate character")!.click();
   await vi.waitFor(() => expect(resolveCandidate).toHaveBeenCalledWith("campaign", "one", expect.objectContaining({ action: "create", expectedReviewRevision: 7 })));
 });
+
+it("creates from remaining unresolved details after a detail dismissal", async () => {
+  const { document } = parseHTML("<html><body></body></html>");
+  Object.defineProperty(document.createElement("select").constructor.prototype, "value", { configurable: true, get() { return this._testValue ?? ""; }, set(value) { this._testValue = value; } });
+  const boundary = { turnNumber: 1, timelineRevision: 0 }; let revision = 2;
+  const observations = [{ field: "story.role", value: "old", quote: "old" }, { field: "story.role", value: "captain", quote: "captain" }];
+  const candidate = () => ({ id: "one", reviewRevision: revision, proposal: { name: "Ada", identityEvidence: [], observations }, reviewDetails: observations.map((observation, observationIndex) => ({ observation, observationIndex })).filter(item => revision === 2 || item.observationIndex !== 0), source: { turnNumber: 1, sourceHash: "hash" } });
+  const resolveCandidate = vi.fn(async () => ({ character: { id: "new" } }));
+  const api = { candidates: async () => ({ revision: 0, boundary, candidates: [candidate()], nextCursor: null }), list: async () => ({ revision: 0, boundary, characters: [], nextCursor: null }), resolveCandidate,
+    reviewDecision: vi.fn(async () => { revision++; return { candidateId: "one", decisionId: "receipt", reviewRevision: revision, revision: 0, boundary }; }) };
+  renderCastReview({ document, container: document.body, api: api as unknown as CampaignCastApi, campaign: "campaign", current: () => true, editing: () => true, navigate() {}, back() {}, key: () => "test", clearKeys() {}, reviewReadVersion: 1, reviewWrites: true });
+  await vi.waitFor(() => expect([...document.querySelectorAll("button")].filter(button => button.textContent === "Dismiss detail")).toHaveLength(2));
+  [...document.querySelectorAll("button")].find(button => button.textContent === "Dismiss detail")!.click();
+  await vi.waitFor(() => expect(document.body.textContent).not.toContain("Proposed Role: old"));
+  expect(document.body.textContent).toContain("Proposed Role: captain");
+  [...document.querySelectorAll("button")].find(button => button.textContent === "Create separate character")!.click();
+  await vi.waitFor(() => expect(resolveCandidate).toHaveBeenCalledWith("campaign", "one", expect.objectContaining({ action: "create", expectedReviewRevision: 3 })));
+});
