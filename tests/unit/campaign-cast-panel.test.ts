@@ -51,9 +51,10 @@ describe("legacy cast panel", () => {
     await vi.advanceTimersByTimeAsync(1); expect(list).toHaveBeenCalledTimes(2);
     // A second request starts after the first one, and completes first.
     search.value = "new"; search.dispatchEvent(new window.Event("input"));
+    pending.get("old")!({ ...authority, characters: [person("Old")] }); await vi.advanceTimersByTimeAsync(0);
+    expect(dialog.querySelector<HTMLInputElement>("#cast-search")?.value).toBe("new");
     await vi.advanceTimersByTimeAsync(250); expect(list).toHaveBeenCalledTimes(3);
     pending.get("new")!({ ...authority, characters: [person("New")] }); await vi.advanceTimersByTimeAsync(0);
-    pending.get("old")!({ ...authority, characters: [person("Old")] }); await vi.advanceTimersByTimeAsync(0);
     expect(dialog.textContent).toContain("New"); expect(dialog.textContent).not.toContain("Old"); panel.requestClose(); vi.useRealTimers();
   });
   it("labels main profile provenance from the profile read, with an unknown fallback", () => {
@@ -164,4 +165,3 @@ describe("legacy cast panel", () => {
   });
 
 });
-

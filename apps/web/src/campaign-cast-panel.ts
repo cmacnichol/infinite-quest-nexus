@@ -339,6 +339,7 @@ export function createLegacyCastPanel(options: {
       tracking: discovery, attentionTotal: counts, filters, filter, query, secondaryActions, tools: [tools],
       canAdd: enabled && (options.campaignPage || !locked()),
       addDisabledReason: !enabled ? "Character editing is disabled. Saved characters remain available to read." : "Finish or resolve the current generation before editing characters.",
+      onInput() { epoch++; },
       onQuery(nextQuery, nextFilter) { query = nextQuery; filter = nextFilter; workspace.setQuery(query, filter); void loadRoster(undefined, undefined, true); },
       onOpen(id) { void openDetail(id); }, onAttention() { void loadAttention(); },
       onAdd() { void (async () => { const token = epoch; if (options.checkLock) await syncLock(); if (!current(token) || locked()) return; rosterVisible = false; editor = createCastEditor(list!); renderEditor(); })(); }

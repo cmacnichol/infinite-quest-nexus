@@ -91,7 +91,8 @@ for (const width of [1280, 390]) test(`legacy previews and controls an explicit 
   expect(pageErrors).toEqual([]);
   // The isolated Vite fixture does not copy the optional PhotoSwipe stylesheet.
   expect(consoleErrors.filter(error => !(error.url.endsWith("/vendor/photoswipe/photoswipe.css")
-    && error.text === "Failed to load resource: the server responded with a status of 404 (Not Found)"))).toEqual([]);
+    && error.text === "Failed to load resource: the server responded with a status of 404 (Not Found)")
+    && !(error.url.endsWith("/nexus/@vite/client") && (error.text.includes("ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS") || error.text.startsWith("[vite] failed to connect to websocket") || error.text.startsWith("Failed to send error to Vite server"))))).toEqual([]);
   await expect(page.locator("vite-error-overlay")).toHaveCount(0);
 });
 

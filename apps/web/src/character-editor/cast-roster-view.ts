@@ -6,7 +6,7 @@ export type CastRosterViewOptions = {
   tracking: CastDiscoveryStatus | null; attentionTotal: number | null;
   filters: Array<[CharacterFilter, string]>; filter: CharacterFilter; query: string;
   canAdd: boolean; addDisabledReason?: string; secondaryActions: HTMLElement[]; tools: HTMLElement[];
-  onQuery(query: string, filter: CharacterFilter): void; onOpen(id: string): void; onAdd(): void; onAttention(): void;
+  onInput?(): void; onQuery(query: string, filter: CharacterFilter): void; onOpen(id: string): void; onAdd(): void; onAttention(): void;
   debounceMs?: number; schedule?: (fn: () => void, ms: number) => () => void;
 };
 
@@ -53,7 +53,7 @@ export function renderCastRoster(host: HTMLElement, options: CastRosterViewOptio
   const schedule = options.schedule ?? ((fn: () => void, ms: number) => { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); });
   let cancel: (() => void) | undefined; let disposed = false;
   const run = () => { cancel?.(); cancel = undefined; if (!disposed) options.onQuery(search.value, filter.value as CharacterFilter); };
-  search.addEventListener("input", () => { cancel?.(); cancel = schedule(() => { cancel = undefined; if (!disposed) options.onQuery(search.value, filter.value as CharacterFilter); }, options.debounceMs ?? 250); });
+  search.addEventListener("input", () => { options.onInput?.(); cancel?.(); cancel = schedule(() => { cancel = undefined; if (!disposed) options.onQuery(search.value, filter.value as CharacterFilter); }, options.debounceMs ?? 250); });
   filter.addEventListener("change", run); form.addEventListener("submit", event => { event.preventDefault(); run(); });
   return { focusSearch: () => search.focus(), dispose: () => { disposed = true; cancel?.(); cancel = undefined; } };
 }
