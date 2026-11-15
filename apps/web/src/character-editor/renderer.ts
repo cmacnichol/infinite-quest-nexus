@@ -11,7 +11,7 @@ export function characterFieldsForGroup(group: string | undefined) {
 /** One labelled supporting-character control; the caller owns the draft and status text. */
 export function createCastTextField(document: Document, options: { label: string; id: string; value: string; maxLength: number; multiline?: boolean; disabled: boolean; onInput(value: string): void }) {
   const wrap = document.createElement("div"), caption = document.createElement("label"), input = document.createElement(options.multiline ? "textarea" : "input");
-  caption.textContent = options.label; caption.htmlFor = options.id;
+  caption.textContent = options.label; caption.setAttribute("for", options.id);
   input.id = options.id; input.value = options.value; input.maxLength = options.maxLength; input.disabled = options.disabled;
   input.addEventListener("input", () => options.onInput(input.value));
   wrap.append(caption, input);

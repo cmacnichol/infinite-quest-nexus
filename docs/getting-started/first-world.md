@@ -34,6 +34,8 @@ When an enabled default text model is available, **Generate with default text mo
 
 If **Premise** or **Background and canon** is empty, Nexus warns that world context is incomplete. Return to add that context or explicitly choose **Generate anyway**.
 
+The character workspace groups identity, story, appearance, current situation, and mechanics. When editing an existing character, review the fields and navigate directly to a section. **Refine with AI** proposes changes to one section; inspect the comparison and choose **Apply** to keep them. Applying a character updates the open world draft; save the world draft to persist it.
+
 A draft can be saved while incomplete, but campaign creation requires a published version with at least one complete playable character.
 
 ## 4. Publish an immutable version

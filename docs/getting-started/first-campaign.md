@@ -30,6 +30,12 @@ Confirm that the text provider is enabled and has a model. The story response le
 
 Select **Save campaign** after changing settings.
 
+## Manage characters during play
+
+Open **Characters** to search the cast, inspect a character sheet, and review tracking or items needing attention. Select **Edit** beside a field and save it; **Undo** is offered while the saved change can still be safely reversed. Undo is often withdrawn as play or other changes advance the campaign, so check the current sheet rather than relying on it remaining available.
+
+A correction to a stable detail stays until cleared. A State Edit to location, condition, clothing, or goals yields to a valid observation from a later turn. The previous edit remains in history. If a later observation is wrong, use its source history to retract it when that capability is available, or edit the field again.
+
 ## Start Infinite Quest
 
 Completing the basic dashboard form immediately opens the campaign-specific Infinite Quest route and starts its first turn. Nexus hands off the server-generated accepted history without placing provider credentials in browser storage.

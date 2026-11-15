@@ -1,3 +1,5 @@
+import { CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../contracts/src/story-prompt.js";
+import type { StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
 import { observationFieldConflicts } from "./campaign-cast-observation-decision-repository.js";
 import { activeRetractionEvents, activeRetractedObservationIds } from "../../domain/src/campaign-cast-observation-decisions.js";
 import { observationDecisionRequestSchema, observationDecisionPreviewSchema, observationDecisionResultSchema, type ObservationDecisionRequest, type ObservationDecisionPreview, type ObservationDecisionResult } from "../../contracts/src/campaign-cast-observation-decisions.js";
@@ -19,9 +21,9 @@ import { createCastCandidateRepository } from "./campaign-cast-candidate-reposit
 import { z } from "zod";
 import {
   castBatchSchema, castBatchReceiptSchema, castBoundarySchema, castCharacterSchema, castAliasDelta, applyCastAliasDelta,
-  castAuthoredPathSchema, castFieldSchema, castCommandSchema, castAttachmentSchema, castObservationSchema, castOriginSchema, castScopeSchema, castSnapshotSchema,
+  castAuthoredPathSchema, castFieldSchema, castCommandSchema, stateEditReplacement, castAttachmentSchema, castObservationSchema, castOriginSchema, castScopeSchema, castSnapshotSchema,
   type CastBatch, type CastBatchReceipt, type CastBoundary, type CastCharacter, type CastCommand,
-  type CastDetail, type CastEvidence, type CastObservation, type CastOverride, type CastProfile, type CastScope, type CastSnapshot, type CastDraftEvidenceFence
+  type StateEditPrecedence, type CastDetail, type CastEvidence, type CastObservation, type CastOverride, type CastProfile, type CastScope, type CastSnapshot, type CastDraftEvidenceFence
 } from "../../contracts/src/campaign-cast.js";
 import { castLifecycleChangeSchema, castWriteResultSchema as lifecycleWriteResultSchema, createCastCharacterSchema, editCastCharacterSchema, type CreateCastCharacter, type EditCastCharacter, type CastWriteResult } from "../../contracts/src/campaign-cast.js";
 import { CampaignCastError, type CampaignCastRepositoryPort, type CampaignCastWritePort } from "../../application/src/campaign-cast/index.js";
@@ -118,7 +120,7 @@ function protagonistProfile(campaign: Campaign): { name: string; aliases: string
 
 /** Always projects retained authority. A cached profile never hides a corrected source. */
 async function projectJournal(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State | null, boundary: CastBoundary,
-  journal?: z.infer<typeof eventSchema>[]) {
+  journal?: z.infer<typeof eventSchema>[], stateEditPrecedence?: StateEditPrecedence) {
   assertBoundary(campaign, state, boundary);
   const characterRows = (await client.query("SELECT id,origin,first_observed_turn FROM campaign_cast_characters WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY created_at,id", [scope.campaignId, scope.ownerUserId])).rows.map((row) => characterRowSchema.parse(row));
   const events = journal ?? (await client.query("SELECT id,effective_turn_number,payload,receipt,attachment FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY sequence", [scope.campaignId, scope.ownerUserId])).rows.map((row) => eventSchema.parse(row));
@@ -302,7 +304,7 @@ async function projectJournal(client: DatabaseClient, scope: CastScope, campaign
     if (person.origin.kind === "protagonist") continue;
     const ownOverrides = [...(overrides.get(person.id)?.values() ?? [])];
     if (person.campaignProfile) {
-      const resolved = resolveSeededCastProfile({ profile: characterProfileSchema.parse(person.campaignProfile), observations: own, overrides: ownOverrides, retractedObservationIds,
+      const resolved = resolveSeededCastProfile({ profile: characterProfileSchema.parse(person.campaignProfile), observations: own, overrides: ownOverrides, retractedObservationIds, ...(stateEditPrecedence ? { stateEditPrecedence } : {}),
         ...(goalCutoffs.has(person.id) ? { restoreGoalsAfterTurn: goalCutoffs.get(person.id)! } : {}) });
       person.profile = resolved.profile; person.fieldSources = resolved.sources;
       for (const path of castAuthoredPathSchema.options) {
@@ -313,14 +315,14 @@ async function projectJournal(client: DatabaseClient, scope: CastScope, campaign
         } else person.fieldSources[path] ??= "none";
       }
     } else {
-      person.profile = projectCastProfile({ observations: own, overrides: ownOverrides, retractedObservationIds });
+      person.profile = projectCastProfile({ observations: own, overrides: ownOverrides, retractedObservationIds, ...(stateEditPrecedence ? { stateEditPrecedence } : {}) });
       if (person.activeMerges?.length && !ownOverrides.some(item => item.field === "appearance.description")) {
         const superseded = new Set(own.map(item => item.supersedesObservationId).filter(Boolean));
         const latest = own.filter(item => item.field === "appearance.description" && item.mode === "fact" && !superseded.has(item.id) && !retractedObservationIds.has(item.id))
           .sort((a, b) => { const left = castEvidenceOrder(a.evidence), right = castEvidenceOrder(b.evidence); return left[0] - right[0] || left[1] - right[1]; }).at(-1);
         if (latest) person.profile["appearance.description"] = latest.value;
       }
-      const overridden = new Set(ownOverrides.map(item => item.field));
+      const overridden = new Set(ownOverrides.filter(item => stateEditPrecedence === "locked" || stateEditReplacement(item, own, retractedObservationIds) === null).map(item => item.field));
       person.fieldSources = Object.fromEntries(Object.keys(person.profile).map(field => [field, overridden.has(field as CastOverride["field"]) ? "override" : "observation"]));
     }
     validateCastFiction(person.name);
@@ -329,8 +331,8 @@ async function projectJournal(client: DatabaseClient, scope: CastScope, campaign
   return { people, details, retractedObservationIds, authoredEvidenceByCharacter, observationOrder: new Map(observations.map((item, index) => [item.id, index])), goalCutoffs, journal: events };
 }
 
-async function snapshotProjection(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State | null, boundary: CastBoundary) {
-  const { people, ...projection } = await projectJournal(client, scope, campaign, state, boundary);
+async function snapshotProjection(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State | null, boundary: CastBoundary, stateEditPrecedence?: StateEditPrecedence) {
+  const { people, ...projection } = await projectJournal(client, scope, campaign, state, boundary, undefined, stateEditPrecedence);
   const snapshot = castSnapshotSchema.parse({ revision: state?.revision ?? 0, boundary, characters: [...people.values()] });
   return { ...projection, snapshot };
 }
@@ -453,11 +455,12 @@ async function collectDraftEvidence(client: DatabaseClient, scope: CastScope, bo
 
 /** Caller owns the transaction. Lock and read retained authority without initializing cast rows. */
 export async function captureCastGenerationSnapshotWithClient(client: DatabaseClient, rawScope: CastScope,
-  options: { discoveryEnabled: boolean; boundary?: CastBoundary; turnNumber?: number; version?: "cast-context-v1" | "cast-context-v2" }): Promise<{ snapshot: CastGenerationSnapshot; fingerprint: string }> {
+  options: { discoveryEnabled: boolean; boundary?: CastBoundary; turnNumber?: number; version?: "cast-context-v1" | "cast-context-v2"; contextProtocol?: StoryMemoryPolicySnapshot["contextProtocol"] }): Promise<{ snapshot: CastGenerationSnapshot; fingerprint: string }> {
   const scope = castScopeSchema.parse(rawScope);
   const campaign = await lockCampaign(client, scope), state = await readState(client, scope);
   const boundary = options.boundary ?? { turnNumber: options.turnNumber ?? campaign.active_turn_number, timelineRevision: state?.timeline_revision ?? 0 };
-  const projected = await snapshotProjection(client, scope, campaign, state, boundary);
+  const precedence: StateEditPrecedence = options.contextProtocol === CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION || options.contextProtocol === HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION ? "yield" : "locked";
+  const projected = await snapshotProjection(client, scope, campaign, state, boundary, precedence);
   const status = await readCastDiscoveryStatus(client, scope, options.discoveryEnabled, projected.snapshot);
   const coverageStartTurn = status.coverageStartTurn !== null && status.coverageStartTurn <= boundary.turnNumber ? status.coverageStartTurn : null;
   const trackedThroughTurn = coverageStartTurn === null || status.trackedThroughTurn === null ? null : Math.min(status.trackedThroughTurn, boundary.turnNumber);
@@ -480,7 +483,7 @@ export async function captureCastGenerationSnapshotWithClient(client: DatabaseCl
       const value = raw;
       const superseded = new Set(detail.observations.flatMap(item => item.supersedesObservationId ? [item.supersedesObservationId] : []));
       const observation = detail.observations.filter(item => !superseded.has(item.id) && !projected.retractedObservationIds.has(item.id) && item.field === field && item.value === value && item.mode === "fact")
-        .sort((a, b) => castEvidenceOrder(b.evidence)[0] - castEvidenceOrder(a.evidence)[0])[0];
+        .sort((a, b) => { const left = castEvidenceOrder(a.evidence), right = castEvidenceOrder(b.evidence); return left[0] - right[0] || left[1] - right[1]; }).at(-1);
       const evidence = source === "override" ? override?.evidence : source === "observation" ? observation?.evidence : undefined;
       const evidenceId = sourceId(evidence?.kind === "user" ? evidence.editId : source === "observation" ? observation?.id : authoredEvidence?.get(field), field);
       add(field, value, source, evidenceId, evidence ? castEvidenceOrder(evidence)[0] : undefined, evidence?.kind);

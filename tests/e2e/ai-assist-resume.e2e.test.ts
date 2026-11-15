@@ -181,7 +181,7 @@ test("character lost-session recovery explicitly restores parent and returns the
 test("character owner list recovers another browser entry, and cancel leaves recovered workspace", async ({ page, context }) => {
   await fixture(context, [characterJob()]);
   await page.goto(`${base}/app/characters/resume`);
-  await page.getByRole("button", { name: /character-job · awaiting review/ }).click();
+  await page.getByRole("button", { name: /New character · awaiting review · expires/ }).click();
   await page.getByRole("button", { name: "Restore parent draft", exact: true }).click();
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page).toHaveURL(`${base}/app/worlds/new`);
@@ -622,7 +622,7 @@ for (const entry of ["world", "character", "missing-character"] as const) {
     if (entry !== "missing-character") await page.getByRole("button", { name: entry === "world" ? "Show saved proposals" : "Show saved character proposals", exact: true }).click();
     const more = page.getByRole("button", { name: entry === "world" ? "Load more world proposals" : "Load more character proposals", exact: true });
     await more.click();
-    const choice = page.getByRole(entry === "character" ? "link" : "button", { name: new RegExp(`${matching.id} ·`) });
+    const choice = page.getByRole(entry === "character" ? "link" : "button", { name: entry === "world" ? new RegExp(`${matching.id} ·`) : /New character · awaiting review · expires/ });
     await expect(choice).toBeVisible(); await expect(more).toBeHidden(); expect(cursors).toEqual([null, "page-two"]);
     await evidence(page, testInfo, `${entry}-second-page`, errors);
     await choice.click();

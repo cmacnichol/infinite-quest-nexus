@@ -1,9 +1,11 @@
-import { MAX_PLAYABLE_CHARACTERS } from "@infinite-quest/contracts";
+import "./styles.css";
+import { MAX_PLAYABLE_CHARACTERS, playableCharacterSchema } from "@infinite-quest/contracts";
 import { openCastSuggestions } from "./character-editor/suggest-cast.js";
 import { createLegacyCastPanel } from "./campaign-cast-panel.js";
 import { mountCharacterWorkspace } from "./character-editor/workspace.js";
 import { mountMainCharacterWorkspace } from "./character-editor/main-workspace.js";
 import { mountQuickCharacterCreate } from "./character-editor/quick-create.js";
+import { mountSectionRefine } from "./character-editor/section-refine.js";
 import { createWorldFormSession } from "./character-editor/world-form-session.js";
 import { renderCharacterEditor } from "./character-editor/renderer.js";
 import { buildCampaignProfileUpdate, createCampaignMainController } from "./character-editor/campaign-main-form.js";
@@ -12,6 +14,7 @@ import { createCampaignCastApi, createStoryMemoryApi, createNexusApiClient, crea
 import { mountLegacyDeviceProfile } from "../../shared-ui/profile/legacy-device-profile.js";
 import { mountReaderPreferenceFields } from "../../shared-ui/profile/profile-controls.js";
 import {
+  sectionRefineRequest,
   filterWorldCharacters,
   worldCharacterSummary,
   editorSectionForPath,
@@ -637,7 +640,7 @@ const modalBaselines = new WeakMap();
 let discardModalTarget = null;
 
 function modalFormSnapshot(dialog) {
-  return [...dialog.querySelectorAll("input, select, textarea")].filter(control => !control.closest(".character-workspace-narrow")).map((control) => {
+  return [...dialog.querySelectorAll("input, select, textarea")].filter(control => !control.closest(".character-workspace-narrow, [data-refine-panel]")).map((control) => {
     if (control instanceof HTMLInputElement && ["checkbox", "radio"].includes(control.type)) {
       return `${control.id}:${control.checked}`;
     }
@@ -3163,7 +3166,7 @@ function openCharacterDialog(characterId = "", preview = null, apply = null) {
   updateCharacterGeneratorAvailability();
   elements.characterGenerator.open = false;
   openEditDialog(elements.characterDialog);
-  mountWorldCharacterPresentation(Boolean(character));
+  mountWorldCharacterPresentation(Boolean(character), readOnly);
   if (elements.characterGenerator.open) elements.characterGeneratorPrompt.focus();
   else if (!readOnly) elements.characterName.focus();
 }
@@ -3181,7 +3184,7 @@ function captureWorldCharacterForm() {
     alwaysInContext: elements.characterAlwaysInContext.checked, statRows: rows("stat"), trackerRows: rows("tracker") });
 }
 
-function mountWorldCharacterPresentation(detailed) {
+function mountWorldCharacterPresentation(detailed, readOnly) {
   worldCharacterMechanicsRecovery = false;
   const form = elements.characterForm;
   const storage = document.createElement("div"); storage.className = "character-presentation-storage";
@@ -3260,8 +3263,44 @@ function mountWorldCharacterPresentation(detailed) {
     presentation = mountQuickCharacterCreate(form, { context: "world-draft", port, fields: quickFields, aiTools: elements.characterGenerator, onContinue: continueDetailed });
     worldCharacterPresentation = presentation; attachActionIds();
   }
+  // A section owns its proposal only while it is visible in this dialog session.
+  const refinementSession = editDialogSessions.get(elements.characterDialog);
+  const refinementOwner = worldSelectionEpoch;
+  const isCurrentGeneration = () => elements.characterDialog.open && editDialogSessions.get(elements.characterDialog) === refinementSession && worldSelectionEpoch === refinementOwner;
+  const refinements = new Map();
+  for (const section of ["identity", "story", "appearance"]) {
+    const stage = sections.get(section === "story" ? "personality" : section);
+    const host = document.createElement("div"); host.dataset.refinePanel = section; stage.append(host);
+    const entry = { host, stage, panel: null, visible: false }; refinements.set(section, entry);
+  }
+  const resetRefinement = (section) => {
+    const entry = refinements.get(section); entry.panel?.dispose(); entry.panel = null; entry.host.replaceChildren();
+    if (!entry.visible) return;
+    entry.panel = mountSectionRefine(entry.host, {
+      section, current: () => playableCharacterSchema.parse(characterFromForm({ forRefinement: true })),
+      available: !readOnly && !suggestionApply && Boolean(configuredDefaultTextProvider()),
+      unavailableText: "To refine with AI, choose a default text provider and model in Provider Setup.",
+      generate: async (current, instruction, signal) => {
+        const progressKey = `character-refine:${opaqueCharacterId()}`;
+        const result = await characterApi.worlds.generateCharacterPreview(sectionRefineRequest(worldContentFromForm(), current, section, instruction, progressKey), signal);
+        if (!isCurrentGeneration()) throw new Error("Character editor closed.");
+        return result.character;
+      },
+      onApply: next => { if (isCurrentGeneration()) { populateCharacterForm(next, false); worldCharacterPresentation?.refresh?.(); } }
+    });
+  };
+  const syncRefinements = () => {
+    for (const [section, entry] of refinements) {
+      const visible = !entry.stage.hidden;
+      if (entry.visible !== visible) { entry.visible = visible; resetRefinement(section); }
+    }
+  };
+  const refinementObserver = new MutationObserver(syncRefinements);
+  for (const entry of refinements.values()) refinementObserver.observe(entry.stage, { attributes: true, attributeFilter: ["hidden"] });
+  syncRefinements();
   const captureInput = (event) => {
     if (event.target.closest(".character-workspace-narrow")) return;
+    if (!event.target.closest("[data-refine-panel]")) for (const section of refinements.keys()) resetRefinement(section);
     worldCharacterInvalidControl?.removeAttribute("aria-invalid");
     worldCharacterInvalidControl = null;
     captureWorldCharacterForm();
@@ -3269,6 +3308,8 @@ function mountWorldCharacterPresentation(detailed) {
   };
   form.addEventListener("input", captureInput);
   worldCharacterPresentationCleanup = () => {
+    refinementObserver.disconnect();
+    for (const entry of refinements.values()) { entry.panel?.dispose(); entry.host.remove(); }
     presentation?.dispose(); worldCharacterPresentation = null;
     form.removeEventListener("input", captureInput);
     quickFields?.remove();
@@ -3320,7 +3361,8 @@ function characterRowsFromForm(kind, characterId) {
       throw error;
     }
     const original = characterRowOriginals.get(editor) || {};
-    const id = String(original.id || opaqueCharacterId());
+    editor.dataset.worldRowId ||= String(original.id || opaqueCharacterId());
+    const id = String(original.id || editor.dataset.worldRowId);
     if (isStat) {
       const numeric = values.value === "" ? 50 : Number(values.value);
       if (!Number.isInteger(numeric) || numeric < 1 || numeric > 99) {
@@ -3342,7 +3384,7 @@ function characterRowsFromForm(kind, characterId) {
   return result;
 }
 
-function characterFromForm({ forOrganization = false } = {}) {
+function characterFromForm({ forOrganization = false, forRefinement = false } = {}) {
   const name = elements.characterName.value.trim();
   const characterText = elements.characterGuidance.value.trim();
   const profile = profileFromForm();
@@ -3351,7 +3393,7 @@ function characterFromForm({ forOrganization = false } = {}) {
     error.control = elements.characterName;
     throw error;
   }
-  if ((forOrganization || characterModalScope !== "campaign" && elements.characterCampaignUse.value !== "supporting") && !profileHasGuidance(profile) && !characterText && !(forOrganization && String(profile.unclassifiedNotes || "").trim())) {
+  if (!forRefinement && (forOrganization || characterModalScope !== "campaign" && elements.characterCampaignUse.value !== "supporting") && !profileHasGuidance(profile) && !characterText && !(forOrganization && String(profile.unclassifiedNotes || "").trim())) {
     const error = new Error(forOrganization
       ? "Add notes, imported source guidance, or story details to organize."
       : "Add at least one story detail, such as a role or background, before saving.");
@@ -8073,6 +8115,7 @@ const campaignCastPanel = createLegacyCastPanel({
   generationActive: () => false,
   checkLock: async id => campaignCharacterGenerationLocked(await characterApi.generation.syncStatus(id)),
   getProfile: id => characterApi.campaigns.getCharacterProfile(id),
+  saveProfile: (campaign, update) => characterApi.campaigns.updateCharacterProfile(campaign, update),
   openProtagonist: afterClose => {
     elements.characterDialog.addEventListener("close", () => afterClose?.(elements.characterDialog.returnValue === "saved"), { once: true });
     void openCampaignCharacterDialog();

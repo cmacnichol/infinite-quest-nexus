@@ -547,6 +547,7 @@ export function createPostgresGenerationCommandRepository(
           ...(storyMemoryPolicy ? {
             baseIdentityVersion: storyMemoryPolicy.castContext ? "generation-base-v4" as const : "generation-base-v3" as const,
             castContextVersion: isCastV2ContextProtocol(storyMemoryPolicy.contextProtocol) ? "cast-context-v2" as const : "cast-context-v1" as const,
+            contextProtocol: storyMemoryPolicy.contextProtocol,
             ...(storyMemoryPolicy.castDiscoveryEnabled === undefined ? {} : { castDiscoveryEnabled: storyMemoryPolicy.castDiscoveryEnabled }),
             captureRecentWindow: isHistoryCoverageContextProtocol(storyMemoryPolicy.contextProtocol)
               ? storyMemoryPolicy.policy.capability !== "r1"
@@ -751,6 +752,7 @@ export function createPostgresGenerationCommandRepository(
           ...(storyMemoryPolicy ? {
             baseIdentityVersion: storyMemoryPolicy.castContext ? "generation-base-v4" as const : "generation-base-v3" as const,
             castContextVersion: isCastV2ContextProtocol(storyMemoryPolicy.contextProtocol) ? "cast-context-v2" as const : "cast-context-v1" as const,
+            contextProtocol: storyMemoryPolicy.contextProtocol,
             ...(storyMemoryPolicy.castDiscoveryEnabled === undefined ? {} : { castDiscoveryEnabled: storyMemoryPolicy.castDiscoveryEnabled }),
             captureRecentWindow: isHistoryCoverageContextProtocol(storyMemoryPolicy.contextProtocol)
               ? storyMemoryPolicy.policy.capability !== "r1"

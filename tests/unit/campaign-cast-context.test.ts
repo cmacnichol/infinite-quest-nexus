@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { castGenerationSnapshotSchema, castGenerationSnapshotFingerprint } from "../../packages/contracts/src/campaign-cast-context.js";
 import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
+import { CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { estimateTokens } from "../../packages/domain/src/text.js";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -30,6 +31,16 @@ describe("captured cast context", () => {
       observations: detail.observations.map((observation) => ({ ...observation,
         evidence: { ...observation.evidence, invalidated: undefined } })) })) };
     expect(castGenerationSnapshotFingerprint(snapshot)).toBe(castGenerationSnapshotFingerprint(JSON.parse(JSON.stringify(snapshot))));
+  });
+  it("cites the later tied observation that replaced a state edit", () => {
+    const input = fixture();
+    const observation = input.details[0]!.observations[1]!;
+    const snapshot = { ...input, details: [{ ...input.details[0],
+      overrides: [{ field: "state.location", value: "the docks", evidence: { kind: "user", editId: id(20), effectiveTurnNumber: 3 } }],
+      observations: [...input.details[0]!.observations, { ...observation, id: id(13) }] }] };
+    const result = selectCastContext({ snapshot: castGenerationSnapshotSchema.parse(snapshot), contextProtocol: CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      direction: "Mara", currentScene: "", openThreads: [], budgetTokens: 3000 });
+    expect(result.records[0]!.fields).toContainEqual(expect.objectContaining({ field: "state.location", value: "the gate", authority: "observation", evidenceId: id(13) }));
   });
   it("keeps the snapshot closed and rejects foreign or duplicate evidence bindings", () => {
     const input = fixture();
@@ -224,4 +235,47 @@ it("reinstates ordinary static conflict in context when a fact is restored", () 
   expect(context(new Set())).not.toContain("brown eyes");
   expect(context(new Set([newer.id]))).toContain("blue eyes");
   expect(context(new Set())).not.toContain("blue eyes");
+});
+
+
+it.each(["current", "pending", "failed", "off"] as const)("selects frozen notices on both cast snapshot paths: %s", (status) => {
+  const old = fixture();
+  const modern = { ...old, version: "cast-context-v2" as const, details: [{ characterId: id(1), observations: [], overrides: [] }],
+    fiction: [{ characterId: id(1), fields: [{ field: "story.role", value: "guardian", source: "authored", evidenceId: id(11) }] }] };
+  const v3 = status === "current" ? "User corrections are portrayal authority from their effective turn. User state edits are authority until later story evidence. Older conflicting facts remain historical evidence."
+    : status === "off" ? "Character discovery is off. User corrections guide portrayal; state edits yield to later recorded story evidence. Observations are dated last-known state; use accepted history for later events."
+      : "Tracking is incomplete. User corrections remain portrayal authority; user state edits are authority until later recorded story evidence. Other observations are dated, lower-authority last-known state; use accepted history for intervening events.";
+  for (const snapshot of [old, modern]) {
+    const captured = castGenerationSnapshotSchema.parse({ ...snapshot, discoveryStatus: status, trackedThroughTurn: status === "current" ? 4 : 1 });
+    const run = (contextProtocol: string) => JSON.parse(selectCastContext({ snapshot: captured, direction: "Mara", currentScene: "", openThreads: [], budgetTokens: 3000, contextProtocol }).content).notice;
+    expect(run(CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION)).toBe(v3);
+    const expectedOld = snapshot.version === "cast-context-v1"
+      ? status === "current" ? "User field overrides are current portrayal authority from their effective turn. Older conflicting facts remain historical evidence." : "Tracking is incomplete. User field overrides remain portrayal authority; stable observations are dated historical evidence. Dynamic observations are omitted. Use accepted history for intervening events."
+      : status === "current" ? "Authored and user-edited fields guide portrayal. Observations are lower-authority evidence." : status === "off" ? "Character discovery is off. Observations are dated, lower-authority last-known state; use accepted history for later events." : "Character tracking is incomplete. Observations are dated, lower-authority last-known state; use accepted history for later events.";
+    expect(run(CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION)).toBe(expectedOld);
+  }
+});
+
+it.each(["state.location", "state.condition", "state.clothing", "story.goals"] as const)("attributes %s to the effective evidence across tracking gaps", (field) => {
+  const input = fixture();
+  const observation = { ...input.details[0]!.observations[1]!, field, value: "the palace", evidence: { ...input.details[0]!.observations[1]!.evidence, turnNumber: 20 } };
+  const edit = { field, value: "the docks", evidence: { kind: "user" as const, editId: id(50), effectiveTurnNumber: 12 } };
+  const snapshot = { ...input, boundary: { turnNumber: 21, timelineRevision: 0 }, trackedThroughTurn: 20, discoveryStatus: "pending" as const,
+    details: [{ characterId: id(1), observations: [observation], overrides: [edit] }] };
+  const run = (value: unknown, protocol: string) => selectCastContext({ snapshot: castGenerationSnapshotSchema.parse(value), contextProtocol: protocol, direction: "Mara", currentScene: "", openThreads: [], budgetTokens: 3000 });
+  const v3 = (value: unknown) => run(value, CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+  expect(v3(snapshot).records[0]!.fields).toContainEqual(expect.objectContaining({ field, value: "the palace", authority: "observation", evidenceId: observation.id }));
+  expect(run(snapshot, CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION).records[0]!.fields).toContainEqual(expect.objectContaining({ field, value: "the docks", authority: "user" }));
+  expect(v3({ ...snapshot, retractedObservationIds: [observation.id] }).records[0]!.fields).toContainEqual(expect.objectContaining({ field, value: "the docks", authority: "user" }));
+  expect(v3({ ...snapshot, details: [{ ...snapshot.details[0], overrides: [{ ...edit, evidence: { ...edit.evidence, effectiveTurnNumber: 21 } }] }] }).records[0]!.fields).toContainEqual(expect.objectContaining({ field, value: "the docks", authority: "user" }));
+  const unedited = v3({ ...snapshot, details: [{ ...snapshot.details[0], overrides: [] }] });
+  expect(unedited.records[0]!.fields).not.toContainEqual(expect.objectContaining({ field }));
+  expect(unedited.omittedFieldCount).toBe(1);
+});
+
+
+it("keeps V3 legacy last-known dynamic observations with discovery off", () => {
+  const input = fixture();
+  const result = selectCastContext({ snapshot: castGenerationSnapshotSchema.parse({ ...input, discoveryStatus: "off", trackedThroughTurn: null, coverageStartTurn: null }), contextProtocol: CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, budgetTokens: 3000, direction: "Mara", currentScene: "", openThreads: [] });
+  expect(result.records[0]!.fields).toContainEqual(expect.objectContaining({ field: "state.location", value: "the gate", authority: "observation" }));
 });

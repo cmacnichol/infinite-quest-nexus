@@ -1,0 +1,84 @@
+{
+  "tabZoom": 2,
+  "baseline": {
+    "innerWidth": 1262,
+    "outerWidth": 1280,
+    "devicePixelRatio": 1
+  },
+  "metrics": {
+    "innerWidth": 631,
+    "innerHeight": 402,
+    "outerWidth": 1280,
+    "devicePixelRatio": 2,
+    "rootZoom": "1",
+    "visualViewportScale": 1,
+    "visualViewportHeight": 402,
+    "content": {
+      "rect": {
+        "x": 0,
+        "y": 127.578125,
+        "width": 631,
+        "height": 191.59375,
+        "top": 127.578125,
+        "right": 631,
+        "bottom": 319.171875,
+        "left": 0
+      },
+      "clientHeight": 192,
+      "scrollHeight": 342,
+      "overflow": "auto"
+    },
+    "scrollWidth": 631,
+    "focused": {
+      "top": 249.40625,
+      "bottom": 314.40625,
+      "height": 65
+    },
+    "footer": {
+      "top": 319.171875,
+      "bottom": 402
+    }
+  },
+  "targets": [
+    {
+      "name": "Back",
+      "width": 67.4375,
+      "height": 44
+    },
+    {
+      "name": "Section",
+      "width": 507,
+      "height": 44
+    },
+    {
+      "name": "Previous section",
+      "width": 44,
+      "height": 44
+    },
+    {
+      "name": "Next section",
+      "width": 44,
+      "height": 44
+    },
+    {
+      "name": "Refine with AI",
+      "width": 113.03125,
+      "height": 44
+    },
+    {
+      "name": "Preview sheet",
+      "width": 198.328125,
+      "height": 44
+    },
+    {
+      "name": "Cancel",
+      "width": 198.3359375,
+      "height": 44
+    },
+    {
+      "name": "Apply to world draft",
+      "width": 198.328125,
+      "height": 44
+    }
+  ]
+}

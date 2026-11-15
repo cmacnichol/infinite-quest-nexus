@@ -4,7 +4,7 @@ import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt
 import { describe, expect, it } from "vitest";
 import { planGenerationPromptContext } from "../../services/runtime/src/generation-context-planner.js";
 import { storyMemoryPolicySchema, defaultStoryMemoryPolicy } from "../../packages/contracts/src/story-memory-policy.js";
-import { HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
+import { CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { estimateStoryTokens, estimatedInputSafetyAllowanceTokens, serializeProviderRequest } from "../../packages/story-engine/src/index.js";
 import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
 import { sha256 } from "../../packages/domain/src/index.js";
@@ -47,6 +47,25 @@ function recentContext() {
 function run(context: any, limit = 32_000) {
   return planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [], { profile: "brief", minWords: 100, maxWords: 120 }, "scene", limit, limit - 100, "attempt", "story_memory", defaultStoryMemoryPolicy("r2"));
 }
+describe("frozen cast notice selection", () => {
+  it.each(["current", "pending", "off"] as const)("passes the saved protocol through planning for %s", (status) => {
+    const context: any = recentContext();
+    const castId = "33333333-3333-4333-8333-333333333333";
+    const snapshot = { version: "cast-context-v2", scope: { ownerUserId: castId, campaignId: castId }, worldVersionId: castId,
+      revision: 1, boundary: { turnNumber: 4, timelineRevision: 0 }, coverageStartTurn: 1, trackedThroughTurn: status === "current" ? 4 : 1, discoveryStatus: status,
+      characters: [{ id: castId, name: "Mara", aliases: [], origin: { kind: "manual" }, profile: {}, pinned: true, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0 }],
+      details: [{ characterId: castId, observations: [], overrides: [] }], fiction: [{ characterId: castId, fields: [] }] };
+    context.authority.castSnapshot = snapshot;
+    Object.assign(context.baseIdentity, { version: "generation-base-v4", castRevision: 1, castTimelineRevision: 0,
+      castFingerprint: castGenerationSnapshotFingerprint(snapshot), castCoverageStartTurn: 1, castTrackedThroughTurn: snapshot.trackedThroughTurn });
+    const plan = (protocol: string) => planGenerationPromptContext(context, plannerProvider(), "System", "Mara", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900, "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined, protocol).storyInput;
+    const v3 = plan(CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    expect(v3).toContain(status === "current" ? "User corrections are portrayal authority" : status === "off" ? "User corrections guide portrayal" : "User corrections remain portrayal authority");
+    expect(plan(CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION)).not.toContain("User corrections");
+  });
+});
+
 describe("layered generation context planner", () => {
   it("serializes v5 layers in stable wire order through the provider body", () => {
     const context: any = recentContext();

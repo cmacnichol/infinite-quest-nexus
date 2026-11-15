@@ -1,6 +1,10 @@
+import { renderCharacterSheetView, type SheetFeedback } from "./character-editor/character-sheet-view.js";
+import { sheetRequest, sheetUndoOperation, sheetSavedMessage, sheetFieldLimit, sheetUndoRequest, sheetMatchesFence, retractionRequest, type SheetTarget, type SheetUndo, type SheetWriteFence, type SheetChange } from "@infinite-quest/client-core";
+import { renderCastRoster } from "./character-editor/cast-roster-view.js";
 import { renderObservationReview } from "./character-editor/observation-review.js";
 import { mountCampaignPresentation } from "./character-editor/campaign-presentation.js";
 import { showLifecycle } from "./character-editor/cast-lifecycle.js";
+import { renderStoryDraftPanel } from "./character-editor/story-draft-panel.js";
 import { createStoryDraftReview } from "./character-editor/story-draft.js";
 import { renderPresetFields } from "./character-editor/preset-fields.js";
 import { renderWorldCastPicker } from "./character-editor/world-cast-picker.js";
@@ -10,7 +14,7 @@ import { renderCastReview } from "./cast-review-queue.js";
 import { buildCharacterSheet, canSaveCastEditor, createCastEditor, changeCastEditor, setCastEditorField, prepareCastSubmission,
   failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, characterProvenanceLabel, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
 import { buildReviewQueue, createCharactersWorkspaceSession, type CampaignCastApi } from "@infinite-quest/client-web";
-import type { CampaignCharacterProfile, CharacterFilter, CastDetail, CastDiscoveryStatus, CastField, CastCandidateList, ResolveCastCandidate, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
+import type { CampaignCharacterProfile, CampaignCharacterProfileUpdate, CharacterFilter, CastDetail, CastDiscoveryStatus, CastField, CastCandidateList, ResolveCastCandidate, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
 import { normalizeCastAlias } from "@infinite-quest/contracts";
 import { castScanRecovery, renderLegacyCastScan } from "./campaign-cast-scan-panel.js";
 
@@ -27,6 +31,7 @@ export function createLegacyCastPanel(options: {
   editorPresentation?: "panel" | "workspace";
   checkLock?(campaign: string): Promise<boolean>;
   getProfile?(campaign: string): Promise<CampaignCharacterProfile & { revision: number; inheritedFromSnapshot?: boolean; storedProfile?: unknown }>;
+  saveProfile?(campaign: string, update: CampaignCharacterProfileUpdate): Promise<CampaignCharacterProfile & { revision: number }>;
   openProtagonist(onClose?: (saved: boolean) => void): void; navigateToTurn(turn: number): Promise<void>;
 }) {
   const dialog = document.createElement("dialog");
@@ -39,6 +44,12 @@ export function createLegacyCastPanel(options: {
   let lockedByServer = false, editingForm = false, saving = false;
   let presentation: ReturnType<typeof mountCampaignPresentation> | null = null;
   let presentationCharacter = "", detailed = false, activeSection = "overview";
+  let rosterView: ReturnType<typeof renderCastRoster> | null = null;
+  let sheetView: ReturnType<typeof renderCharacterSheetView> | null = null;
+  let sheetFeedback: { message: string; undo?: SheetUndo; fence?: SheetWriteFence; deadline: number; key: string; refreshFailed?: boolean } | null = null;
+  let sheetTimer: ReturnType<typeof setTimeout> | undefined;
+  let showEmpty = false;
+  function clearSheetFeedback() { clearTimeout(sheetTimer); sheetFeedback = null; }
   let lockCheck = 0;
   let lockPoll: ReturnType<typeof setInterval> | undefined;
   const locked = () => lockedByServer || options.generationActive();
@@ -89,11 +100,16 @@ export function createLegacyCastPanel(options: {
     result.addEventListener("click", action); return result;
   }
   function closePanel() {
+    rosterView?.dispose(); rosterView = null;
     presentation?.dispose(); presentation = null;
-    storyReview.reset(); epoch++; clearInterval(lockPoll); preset = null; editor = null; workspace.close(); operationKeys.clear(); dialog.close(); returnFocus?.focus();
+    clearSheetFeedback(); sheetView?.dispose(); sheetView = null; storyReview.reset(); epoch++; clearInterval(lockPoll); preset = null; editor = null; workspace.close(); operationKeys.clear(); dialog.close(); returnFocus?.focus();
   }
   function requestNavigation(action: () => void) {
-    if (saving || editor?.saving || dialog.querySelector("[data-cast-confirm]")) return;
+    if (sheetView?.pending() || saving || editor?.saving || dialog.querySelector("[data-cast-confirm]")) return;
+    if (sheetView?.dirty()) {
+      if (!window.confirm("Discard unsaved character changes?")) return;
+      sheetView.discard();
+    }
     if (!dirty()) { action(); return; }
     const previous = document.activeElement as HTMLElement | null;
     const prompt = node("section"); prompt.dataset.castConfirm = ""; prompt.setAttribute("role", "alertdialog"); prompt.setAttribute("aria-modal", "true"); prompt.setAttribute("aria-label", "Unsaved character changes");
@@ -115,6 +131,8 @@ export function createLegacyCastPanel(options: {
   }
   function requestClose() { requestNavigation(closePanel); }
   function shell(title: string) {
+    rosterView?.dispose(); rosterView = null;
+    sheetView?.dispose(); sheetView = null;
     if (presentation) { activeSection = presentation.section(); presentation.dispose(); presentation = null; }
     editingForm = false;
     dialog.classList.remove("cast-sheet-layout"); dialog.replaceChildren();
@@ -126,11 +144,11 @@ export function createLegacyCastPanel(options: {
     const p = node("p", message); p.setAttribute("role", "status"); dialog.append(p); return p;
   }
   const current = (token: number) => token === epoch && campaign === options.campaignId();
-  async function loadRoster(cursor?: string, notice?: string) {
+  async function loadRoster(cursor?: string, notice?: string, keepControls = false) {
     presentationCharacter = ""; detailed = false; activeSection = "overview";
     storyReview.reset();
-    const token = ++epoch; preset = null; editor = null; latest = null; latestRoster = null; rosterVisible = true;
-    shell("Characters"); status("Loading characters…");
+    clearSheetFeedback(); const token = ++epoch; preset = null; editor = null; latest = null; latestRoster = null; rosterVisible = true;
+    if (!keepControls) { shell("Characters"); status("Loading characters…"); }
     try {
       const [rosterResult, discoveryResult, scanResult, workspaceResult] = await Promise.allSettled([
         options.api.list(campaign, { query, filter, ...(cursor ? { cursor } : {}) }), options.api.discoveryStatus(campaign),
@@ -236,13 +254,8 @@ export function createLegacyCastPanel(options: {
     } catch { if (current(token)) results.textContent = "Could not load conflicts. Refresh and try again."; }
   }
   async function openConflict(id: string, field: string) {
-    await openDetail(id);
-    if (!editor || editor.characterId !== id) return;
-    if (editor.loaded?.character.originProfile) preset = createPresetDraft(editor.loaded);
-    renderEditor();
-    const input = dialog.querySelector<HTMLElement>(`#cast-${field.replace(".", "-")}`);
-    const group = input?.closest("details"); if (group) group.open = true;
-    input?.focus();
+    const token = await openDetail(id);
+    if (token !== undefined && current(token)) sheetView?.revealField(field, "conflict");
   }
   function loadReview(initialItem?: string) {
     rosterVisible = false; const token = ++epoch; editor = null; shell("Character review");
@@ -267,34 +280,30 @@ export function createLegacyCastPanel(options: {
       } } catch { result.replaceChildren(node("p", "Estimate unavailable.")); } }), result);
   }
   function renderRoster() {
+    const activeSearch = dialog.querySelector<HTMLInputElement>("#cast-search");
+    const selection = activeSearch && document.activeElement === activeSearch
+      ? { start: activeSearch.selectionStart, end: activeSearch.selectionEnd, direction: activeSearch.selectionDirection } : null;
     shell("Characters");
+    const tools = node("div");
+    const toolStatus = (text: string) => { const p = node("p", text); p.setAttribute("role", "status"); tools.append(p); return p; };
     const narrator = castNarratorNotice(narratorState, campaign);
     if (narrator) {
-      const note = status(narrator.text);
+      const note = toolStatus(narrator.text);
       if (narrator.href) { const link = node("a", narrator.label); link.href = narrator.href; note.append(" ", link); }
     }
     if (!options.campaignPage) renderStoryTools();
-    status(attentionSummary()).dataset.castAttention = "";
-    dialog.append(button("Needs attention", () => { void loadAttention(); }));
+    toolStatus(attentionSummary()).dataset.castAttention = "";
     function renderStoryTools() {
-      if (!discovery) status("Character tracking status is unavailable. Saved characters are still available.");
+      if (!discovery) toolStatus("Character tracking status is unavailable. Saved characters are still available.");
       else {
-        const messages = { disabled: "Automatic character tracking is disabled.", not_enrolled: "Character tracking starts with the next accepted turn.",
-          catching_up: "Character tracking is catching up.", failed: `Character tracking stopped at turn ${discovery.firstGap?.turnNumber}. Your story is saved.`,
-          complete: "Character tracking is up to date." };
-        status(messages[discovery.state]);
-        if (discovery.coverageStartTurn !== null) status(discovery.trackedThroughTurn! >= discovery.coverageStartTurn
-          ? `Tracked turns ${discovery.coverageStartTurn}–${discovery.trackedThroughTurn}. Earlier turns are not included.`
-          : `Tracking starts at turn ${discovery.coverageStartTurn}; no turns in this range are complete yet.`);
         if (discovery.firstGap) {
           const reason = castScanRecovery(discovery, list!.boundary.turnNumber).diagnostic;
-          status(`First tracking gap: turn ${discovery.firstGap.turnNumber} (${discovery.firstGap.status.replaceAll("_", " ")}).${reason ? ` ${reason}` : ""}`);
-          if (recovery?.kind === "scan" && recovery.scanId && recovery.scanStatus !== "cancelled") dialog.append(button("Open tracking recovery", () => { void loadScan(recovery!.scanId!); }));
+          toolStatus(`First tracking gap: turn ${discovery.firstGap.turnNumber} (${discovery.firstGap.status.replaceAll("_", " ")}).${reason ? ` ${reason}` : ""}`);
+          if (recovery?.kind === "scan" && recovery.scanId && recovery.scanStatus !== "cancelled") tools.append(button("Open tracking recovery", () => { void loadScan(recovery!.scanId!); }));
         }
-        if (discovery.unresolvedCount) status(`${discovery.unresolvedCount} character ${discovery.unresolvedCount === 1 ? "match needs" : "matches need"} review.`);
 
         if (discovery.state === "failed" && discovery.firstGap?.diagnosticCode === "source_requires_manual_scan") {
-          status("This turn exceeds automatic tracking limits. Review or add its characters manually.");
+          toolStatus("This turn exceeds automatic tracking limits. Review or add its characters manually.");
         } else if (discovery.enabled && discovery.state === "failed" && discovery.firstGap?.jobId && recovery?.kind === "forward" && recovery.jobId === discovery.firstGap.jobId) {
           const jobId = discovery.firstGap.jobId, token = epoch;
           const request = { expectedCastRevision: list!.revision, expectedBoundary: list!.boundary, idempotencyKey: crypto.randomUUID() };
@@ -316,14 +325,15 @@ export function createLegacyCastPanel(options: {
               retry.disabled = code === 409 || !enabled || options.generationActive();
             }
           }
-          dialog.append(retry, feedback);
+          tools.append(retry, feedback);
         }
       }
-      dialog.append(button("Refresh characters", () => { void loadRoster(); }), button("Likely included for this input", previewContext));
-      if (scanData && (scanData.capabilities.castBackfill || scanData.scan)) dialog.append(button("Scan earlier story", () => { void loadScan(); }));
+      tools.append(button("Refresh characters", () => { void loadRoster(); }), button("Likely included for this input", previewContext));
+      if (scanData && (scanData.capabilities.castBackfill || scanData.scan)) tools.append(button("Scan earlier story", () => { void loadScan(); }));
     }
+    const secondaryActions: HTMLElement[] = [];
     if (list?.capabilities.castPresets && options.api.worldChoices && options.api.fromWorldPreview && options.api.fromWorld) {
-      dialog.append(button("Add from world", async () => {
+      secondaryActions.push(button("Add from world", async () => {
         rosterVisible = false; const token = ++epoch;
         await syncLock(); if (!current(token)) return;
         shell("Add from world"); dialog.append(button("Back to characters", () => void loadRoster()));
@@ -333,40 +343,31 @@ export function createLegacyCastPanel(options: {
           campaign, syncLock, id => void openDetail(id));
       }, !enabled));
     }
-    const controls = node("form"); controls.className = "cast-toolbar";
-    const label = node("label", "Find a character"); label.htmlFor = "cast-search";
-    const search = node("input"); search.id = "cast-search"; search.type = "search"; search.value = query; search.maxLength = 200;
-    const submit = node("button", "Search"); submit.type = "submit";
-    const filterLabel = node("label", "Filter characters"), filterSelect = node("select"); filterLabel.htmlFor = "cast-filter"; filterSelect.id = "cast-filter";
-    for (const [value, label] of [["all", "All"], ["main", "Main"], ["recent", recentFilterLabel(list?.recentWindow)], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"], ...(list?.capabilities.castLifecycle !== undefined ? [["removed", "Removed"]] : [])]) { const option = node("option", label); option.value = value!; option.selected = value === filter; filterSelect.append(option); }
-    filterSelect.addEventListener("change", () => { filter = filterSelect.value as CharacterFilter; query = search.value; workspace.setQuery(query, filter); void loadRoster(); });
-    controls.append(label, search, filterLabel, filterSelect, submit);
-    controls.addEventListener("submit", (event) => { event.preventDefault(); query = search.value; workspace.setQuery(query, filter); void loadRoster(); });
-    dialog.append(controls);
-    if (!enabled) status("Character editing is disabled. Saved characters remain available to read.");
-    else if (!options.campaignPage && locked()) status("Finish or resolve the current generation before editing characters.");
-    else dialog.append(button("Add character", async () => {
-      const token = epoch;
-      if (options.checkLock) await syncLock();
-      if (!current(token)) return;
-      rosterVisible = false; editor = createCastEditor(list!); renderEditor();
-    }));
-    if (filter === "recent") status(recentFilterLabel(list!.recentWindow));
-    const roster = node("ul"); roster.className = "cast-roster";
-    for (const person of [...list!.characters].sort((a, b) => Number(b.origin.kind === "protagonist") - Number(a.origin.kind === "protagonist"))) {
-      const li = node("li"), title = button(person.name, () => { void openDetail(person.id); });
-      const attention = list!.attention?.find((item) => item.characterId === person.id);
-      li.append(title, node("p", [person.profile["story.role"], characterProvenanceLabel(person), `Last observed turn ${person.lastObservedTurn}${person.lastMentionedTurn != null ? ` · Last mentioned turn ${person.lastMentionedTurn}` : ""}`,
-        person.pinned ? "Pinned" : "", person.ignored ? "Ignored" : "", attention?.review ? "Needs review" : "", attention?.conflict ? "Conflicting details" : ""].filter(Boolean).join(" · ")));
-      roster.append(li);
+    const filters: Array<[CharacterFilter, string]> = [["all", "All"], ["main", "Main"], ["recent", recentFilterLabel(list?.recentWindow)], ["pinned", "Pinned"], ["needs_review", "Needs review"], ["conflicts", "Conflicts"], ["ignored", "Ignored"]];
+    if (list?.capabilities.castLifecycle !== undefined) filters.push(["removed", "Removed"]);
+    const host = node("div"); dialog.append(host);
+    const counts = attention && Object.values(attention).every(value => value !== null) ? Object.values(attention).reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
+    rosterView = renderCastRoster(host, { characters: list!.characters, attention: Object.fromEntries((list!.attention ?? []).map(item => [item.characterId, { review: item.review, conflict: item.conflict, ...(item.reviewCount === undefined ? {} : { reviewCount: item.reviewCount }), ...(item.conflictCount === undefined ? {} : { conflictCount: item.conflictCount }) }])),
+      tracking: discovery, attentionTotal: counts, filters, filter, query, secondaryActions, tools: [tools],
+      canAdd: enabled && (options.campaignPage || !locked()),
+      addDisabledReason: !enabled ? "Character editing is disabled. Saved characters remain available to read." : "Finish or resolve the current generation before editing characters.",
+      onInput() { epoch++; },
+      onQuery(nextQuery, nextFilter) { query = nextQuery; filter = nextFilter; workspace.setQuery(query, filter); void loadRoster(undefined, undefined, true); },
+      onOpen(id) { void openDetail(id); }, onAttention() { void loadAttention(); },
+      onAdd() { void (async () => { const token = epoch; if (options.checkLock) await syncLock(); if (!current(token) || locked()) return; rosterVisible = false; editor = createCastEditor(list!); renderEditor(); })(); }
+    });
+    const search = host.querySelector<HTMLInputElement>('input[type="search"]')!; search.id = "cast-search"; search.maxLength = 200;
+    host.querySelector<HTMLSelectElement>("select")!.id = "cast-filter";
+    if (selection) {
+      search.focus({ preventScroll: true });
+      if (selection.start !== null && selection.end !== null) search.setSelectionRange(selection.start, selection.end, selection.direction ?? undefined);
     }
-    dialog.append(roster);
-    if (!list!.characters.length) status(query ? "No characters match this search." : "No supporting characters yet. Add someone from your story.");
     if (list!.nextCursor) dialog.append(button("Load more characters", () => { void loadRoster(list!.nextCursor!); }));
   }
   async function openDetail(id: string) {
-    if (dirty() || editor?.saving || saving) { requestNavigation(() => { void openDetail(id); }); return; }
-    storyReview.reset(); rosterVisible = false; workspace.select(id);
+    if (sheetView?.pending()) return;
+    if (sheetView?.dirty() || dirty() || editor?.saving || saving) { requestNavigation(() => { void openDetail(id); }); return; }
+    clearSheetFeedback(); showEmpty = false; storyReview.reset(); rosterVisible = false; workspace.select(id);
     const token = ++epoch; shell("Character"); status("Loading character…");
     try {
       const [detail] = await Promise.all([options.api.detail(campaign, id), syncLock()]);
@@ -377,6 +378,7 @@ export function createLegacyCastPanel(options: {
       if (detail.character.origin.kind === "protagonist" && options.getProfile) profile = await options.getProfile(campaign).catch(() => null);
       if (!current(token)) return; renderSheet(detail, profile);
       const heading = dialog.querySelector<HTMLElement>("#cast-title"); if (heading) { heading.tabIndex = -1; heading.focus(); }
+      return token;
     } catch (error) {
       if (!current(token)) return;
       shell("Character"); status(`Could not load this character: ${message(error)}`);
@@ -399,16 +401,16 @@ export function createLegacyCastPanel(options: {
       switcher.append(entry);
     }
     dialog.append(sidebar);
-    dialog.append(button("Back to characters", () => { void loadRoster(); }), node("p", `Last observed turn ${detail.character.lastObservedTurn}${detail.character.lastMentionedTurn != null ? ` · Last mentioned turn ${detail.character.lastMentionedTurn}` : ""}`));
+    dialog.append(button("Back to characters", () => requestNavigation(() => { void loadRoster(); })), node("p", `Last observed turn ${detail.character.lastObservedTurn}${detail.character.lastMentionedTurn != null ? ` · Last mentioned turn ${detail.character.lastMentionedTurn}` : ""}`));
     if (options.campaignPage) {
       const link = node("a", "Open in Story"); link.href = "/story/" + encodeURIComponent(campaign) + "?character=" + encodeURIComponent(detail.character.id); dialog.append(link);
     }
     if (detail.character.origin.kind === "protagonist") {
       status(`This is your main character. ${mainProfileSourceLabel(profile)}.`);
-      const opener = button("Edit main character", () => { options.openProtagonist(saved => {
+      const opener = button("Edit main character", () => requestNavigation(() => { options.openProtagonist(saved => {
         if (saved && dialog.open) { void openDetail(detail.character.id).then(() => dialog.querySelector<HTMLButtonElement>("[data-edit-protagonist]")?.focus()); }
         else if (dialog.open && opener.isConnected) opener.focus();
-      }); });
+      }); }));
       opener.dataset.editProtagonist = ""; dialog.append(opener);
     } else if (!detail.character.mergedIntoCharacterId) {
       const lifecycle = options.api.lifecycle;
@@ -416,13 +418,13 @@ export function createLegacyCastPanel(options: {
       if (lifecycleEnabled === false) status("Removing and restoring characters is disabled on this server. Character merging is disabled on this server.");
       else if (!enabled) status("Removing and restoring characters is unavailable while character editing is disabled.");
       if (lifecycle && lifecycleEnabled) {
-        const launch = (action: Parameters<typeof showLifecycle>[0], mergeEventId?: string) => showLifecycle(action, {
+        const launch = (action: Parameters<typeof showLifecycle>[0], mergeEventId?: string) => requestNavigation(() => showLifecycle(action, {
           api: lifecycle, campaign, detail, list: options.api.list, lock: syncLock, ...(mergeEventId ? { mergeEventId } : {}),
           finished(id, notice) {
             if (!id) void loadRoster(undefined, notice);
             else void openDetail(id).then(() => { if (dialog.open) status(notice); });
           }
-        });
+        }));
         const actions = node("div"); actions.className = "cast-lifecycle-actions";
         if (detail.character.removed) actions.append(button("Restore", () => launch("restore"), locked()));
         else {
@@ -434,47 +436,87 @@ export function createLegacyCastPanel(options: {
         }
         dialog.append(actions);
       }
-      if (!detail.character.removed) dialog.append(button("Edit character", async () => {
+      if (!detail.character.removed) dialog.append(button("Edit character", () => requestNavigation(() => { void (async () => {
         const token = epoch; if (options.checkLock) await syncLock(); if (!current(token)) return;
-        if (detail.character.originProfile) preset = createPresetDraft(detail);
-        workspace.setDraft(editor); renderEditor();
-      }, !enabled || options.generationActive()));
+        requestNavigation(() => {
+          if (detail.character.originProfile) preset = createPresetDraft(detail);
+          workspace.setDraft(editor); renderEditor();
+        });
+      })(); }), !enabled || options.generationActive()));
     }
-    let showEmpty = false;
-    const fieldGroups = node("div"), toggle = button("Show empty fields", () => {
-      showEmpty = !showEmpty; toggle.textContent = showEmpty ? "Hide empty fields" : "Show empty fields";
-      toggle.setAttribute("aria-pressed", String(showEmpty)); renderFields();
+    const token = epoch, characterId = detail.character.id, main = detail.character.origin.kind === "protagonist";
+    const target: SheetTarget | null = main ? (profile ? { kind: "main", profile } : null) : { kind: "cast", detail };
+    const stillCurrent = () => current(token) && dialog.hasAttribute("open") && editor?.characterId === characterId;
+    const canEdit = () => Boolean(target && enabled && !locked() && !detail.character.removed && !detail.character.mergedIntoCharacterId && (!main || options.saveProfile) && (main || !detail.character.originProfile || options.api.editAuthoredProfile));
+    const host = node("div"); dialog.append(host);
+    const refresh = async () => {
+      try {
+        const next = await options.api.detail(campaign, characterId);
+        const nextProfile = main && options.getProfile ? await options.getProfile(campaign) : null;
+        if (!stillCurrent()) return;
+        const nextTarget: SheetTarget | null = main ? (nextProfile ? { kind: "main", profile: nextProfile } : null) : { kind: "cast", detail: next };
+        if (sheetFeedback) {
+          sheetFeedback.refreshFailed = false;
+          sheetFeedback.message = sheetFeedback.message.replace(/\. Could not refresh this character\.$/, ".");
+          if (sheetFeedback.undo && sheetFeedback.fence && nextTarget && !sheetMatchesFence(nextTarget, sheetFeedback.fence)) { sheetFeedback.message += " Undo expired: the character was updated after your save."; delete sheetFeedback.undo; }
+        }
+        enabled = next.capabilities.castEditing; editor = createCastEditor(next, next); renderSheet(next, nextProfile);
+      } catch {
+        if (!stillCurrent()) return;
+        if (sheetFeedback) { sheetFeedback.message = sheetFeedback.message.replace(/\. Could not refresh this character\.$/, ".").replace(/\.$/, "") + ". Could not refresh this character."; sheetFeedback.refreshFailed = true; }
+        renderSheet(detail, profile);
+      }
+    };
+    const dispatch = async (request: ReturnType<typeof sheetRequest>) => {
+      if (request.endpoint === "profile") return await options.saveProfile!(campaign, request.body);
+      if (request.endpoint === "editAuthoredProfile") return await options.api.editAuthoredProfile!(campaign, characterId, request.body);
+      return await options.api.edit(campaign, characterId, request.body);
+    };
+    const feedbackOwner = sheetFeedback;
+    const feedback: SheetFeedback | undefined = sheetFeedback ? { message: sheetFeedback.message,
+      ...(sheetFeedback.undo && sheetFeedback.fence && !sheetFeedback.refreshFailed && Date.now() < sheetFeedback.deadline && target && sheetMatchesFence(target, sheetFeedback.fence) ? { undo: async () => {
+        const saved = feedbackOwner;
+        const valid = () => saved && sheetFeedback === saved && saved.undo && saved.fence && Date.now() < saved.deadline;
+        if (!valid()) return { ok: true as const };
+        try {
+          if (options.checkLock && !await syncLock() || !stillCurrent()) return { ok: false as const, conflict: false, message: "Character editing is unavailable." };
+          if (!valid()) return { ok: true as const };
+          await dispatch(sheetUndoRequest(target, saved!.undo!, saved!.fence!, saved!.key));
+          if (!stillCurrent()) return { ok: true as const };
+          clearSheetFeedback(); sheetFeedback = { message: "Undone", deadline: 0, key: "" }; await refresh(); return { ok: true as const };
+        } catch (error) {
+          if (!stillCurrent()) return { ok: true as const };
+          if ((error as { statusCode?: number }).statusCode === 409) { clearSheetFeedback(); sheetFeedback = { message: "Could not undo. The character changed; review the latest values.", deadline: 0, key: "" }; renderSheet(detail, profile); return { ok: true as const }; }
+          return { ok: false as const, conflict: false, message: message(error) };
+        }
+      } } : {}) } : undefined;
+    sheetView = renderCharacterSheetView(host, {
+      sheet, kind: main ? "main" : "supporting", editable: canEdit, lockedReason: null, limit: path => sheetFieldLimit(target, path),
+      ...(!main && canEdit() ? { toggles: { pinned: detail.character.pinned, ignored: detail.character.ignored } } : {}),
+      ...(feedback ? { feedback } : {}), onEditStart: clearSheetFeedback, showEmpty, onShowEmpty(value) { showEmpty = value; renderSheet(detail, profile); dialog.querySelector<HTMLElement>("[data-show-empty-toggle]")?.focus(); },
+      compareLabel: main ? "Load latest version" : "Compare latest", onCompareLatest() { void refresh(); },
+      confirmDiscard: () => window.confirm("Discard unsaved character changes?"), isCurrent: stillCurrent,
+      async onChange(change: SheetChange) {
+        if (!target || !canEdit()) return { ok: false, conflict: false, message: "Character editing is unavailable." };
+        clearSheetFeedback();
+        try {
+          const inverse = sheetUndoOperation(target, change), request = sheetRequest(target, change, operationKey("sheet", [characterId, change, detail.revision]));
+          if (options.checkLock && !await syncLock() || !stillCurrent()) return { ok: false, conflict: false, message: "Character editing is unavailable." };
+          const result = await dispatch(request);
+          if (!stillCurrent()) return { ok: true };
+          const fence: SheetWriteFence = request.endpoint === "profile" ? { kind: "main", revision: result.revision } : { kind: "cast", revision: result.revision, characterRevision: (result as CastDetail).character.revision, boundary: (result as CastDetail).boundary };
+          const label = change.kind === "toggle" ? "" : sheet.sections.flatMap(section => section.fields).find(field => field.path === change.path)?.label ?? change.path;
+          sheetFeedback = { message: sheetSavedMessage(change, label), undo: inverse, fence, deadline: Date.now() + 30000, key: crypto.randomUUID() };
+          sheetTimer = setTimeout(() => { if (!stillCurrent() || !sheetFeedback) return; delete sheetFeedback.undo; sheetView?.setFeedback({ message: sheetFeedback.message }); }, 30000);
+          await refresh(); return { ok: true };
+        } catch (error) { if (!stillCurrent()) return { ok: true }; const conflict = (error as { statusCode?: number }).statusCode === 409; return { ok: false, conflict, message: conflict ? "This character changed. Your edit is kept; compare the latest before saving." : message(error) }; }
+      },
+      ...(!main && (detail.capabilities ?? list?.capabilities)?.castObservationDecisions ? { retraction: {
+        async preview(id: string) { const request = retractionRequest(detail, id, operationKey("retract", [characterId, id, detail.revision])); const result = await options.api.previewObservationDecision!(campaign, characterId, id, request); const observation = detail.observations.find(item => item.id === id); return { currentValue: result.currentValue, projectedValue: result.projectedValue, quote: observation?.evidence.kind === "turn" ? observation.evidence.quote : "", turn: observation?.evidence.kind === "turn" ? observation.evidence.turnNumber : 0 }; },
+        async apply(id: string) { try { if (options.checkLock && !await syncLock() || !stillCurrent()) return { ok: false as const, conflict: false, message: "Character editing is unavailable." }; await options.api.applyObservationDecision!(campaign, characterId, id, retractionRequest(detail, id, operationKey("retract", [characterId, id, detail.revision]))); if (stillCurrent()) { clearSheetFeedback(); await refresh(); } return { ok: true as const }; } catch (error) { return { ok: false as const, conflict: (error as { statusCode?: number }).statusCode === 409, message: message(error) }; } }
+      } } : {})
     });
-    toggle.setAttribute("aria-pressed", "false"); dialog.append(toggle, fieldGroups);
-    function renderFields() {
-      fieldGroups.replaceChildren();
-      if (detail.character.originProfile) {
-        for (const field of presetFields) {
-          const info = presetField(detail, field.path);
-          if (!showEmpty && !info.effective.length) continue;
-          const row = node("p"); row.append(node("strong", field.label + ": "), node("span", Array.isArray(info.effective) ? info.effective.join(", ") : info.effective || "Unknown"), node("small", " " + info.badge));
-          if (!options.campaignPage && (info.differs || field.path === "appearance.description" && Boolean(info.effective.length))) {
-            const source = node("a", info.differs ? "Story differs" : "View source"); source.href = "#cast-sources";
-            source.onclick = event => { event.preventDefault(); const details = dialog.querySelector<HTMLDetailsElement>("#cast-sources"); if (details) { details.open = true; details.querySelector("summary")?.focus(); } };
-            row.append(" ", source);
-          }
-          fieldGroups.append(row);
-        }
-        return;
-      }
-      for (const section of sheet.sections) {
-        const group = node("section"); group.className = "cast-sheet-section"; group.append(node("h3", section.name));
-        for (const field of section.fields) {
-          const value = Array.isArray(field.value) ? field.value.join(", ") : field.value;
-          if (!showEmpty && !value && field.origin === "unknown") continue;
-          const row = node("p"), label = node("strong", `${field.label}: `);
-          const origin = sheet.kind === "protagonist" ? "" : ({ unknown: "", observed: "From story", claim: "Unverified claim", user: "Your edit", conflicted: "Conflicting observations" })[field.origin];
-          row.append(label, node("span", value || (field.origin === "conflicted" ? "Conflicting observations" : field.origin === "claim" ? "Unverified claim" : "Unknown")), node("small", origin ? ` · ${origin}` : "")); group.append(row);
-        }
-        if (group.children.length > 1) fieldGroups.append(group);
-      }
-    }
-    renderFields();
+    if (sheetFeedback?.refreshFailed) dialog.append(button("Reload", () => { void refresh(); }));
     for (const match of detail.autoMatches) {
       const row = node("section"); row.append(node("p", `${match.basis === "unique_world_name" ? "Unique world name" : "Unique campaign name"} · turn ${match.turnNumber}: “${match.quote}”`));
       row.append(button("Not this character", async () => {
@@ -498,9 +540,8 @@ export function createLegacyCastPanel(options: {
       const current = state ? state.draft.values[path] : editor?.draft.profile[path as CastField];
       return Array.isArray(current) ? current.join("\n") : current ?? "";
     };
-    storyReview.render(form, {
-      eligible: Boolean(api && detail.draftFromStoryEligible), locked: readonly || Boolean(editor?.conflict),
-      value, label: path => availableFields.find(field => field.path === path)?.label ?? path,
+    renderStoryDraftPanel(form, { detail, readonly: readonly || Boolean(editor?.conflict), draftPreview: api, campaign, review: storyReview,
+      current: value, label: path => availableFields.find(field => field.path === path)?.label ?? path,
       fetch: async direction => {
         const token = epoch, activeCampaign = campaign;
         if (!await syncLock() || !current(token)) throw new Error("Character editing is unavailable");
@@ -517,11 +558,12 @@ export function createLegacyCastPanel(options: {
         return api!(campaign, detail.character.id, { expectedCastRevision: detail.revision, expectedBoundary: detail.boundary,
           expectedCharacterRevision: detail.character.revision, ...(direction ? { direction } : {}) });
       },
-      apply: (path, text) => {
+      apply: (path, value) => {
+        const text = Array.isArray(value) ? value.join("\n") : value;
         if (state) changePresetField(state, path, text);
         else editor = setCastEditorField(editor!, path as CastField, text);
       },
-      turn: turn => requestNavigation(() => { closePanel(); void options.navigateToTurn(turn); }), refresh: renderEditor
+      turn: turn => requestNavigation(() => { closePanel(); void options.navigateToTurn(turn); }), changed: renderEditor
     });
   }
   function collectedFences() {

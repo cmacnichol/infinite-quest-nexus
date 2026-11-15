@@ -1,3 +1,4 @@
+import { castStoryMemoryProtocolVersion } from "../../../packages/contracts/src/story-prompt.js";
 import {
   createGenerationApplication,
   GenerationApplicationError,
@@ -450,13 +451,14 @@ export function createApiGenerationApplication(
   const repository = factories === productionFactories
     ? createPostgresGenerationCommandRepository(pool, {
       resolvePromptSnapshot: async (client, ownerUserId, campaignId, storyMemoryPolicy) => storyMemoryPolicy
-        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId, scope: "campaign", campaignId }, storyMemoryPolicy.policy.continuityReview, storyMemoryPolicy.castContext === true)
+        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId, scope: "campaign", campaignId }, storyMemoryPolicy.policy.continuityReview, storyMemoryPolicy.castContext === true, castStoryMemoryProtocolVersion(storyMemoryPolicy.promptProtocol))
         : resolveStoryPromptSnapshot(client, { ownerUserId, scope: "campaign", campaignId }),
       promptProtocolVersion: providers.promptTools.protocolVersion,
       resolveStoryMemoryPolicySnapshot: (client, scope) => resolveStoryMemoryPolicySnapshot(client, scope, {
          installedCapability: resolvedOperatorConfig.installedCapability,
          enforceEnabled: resolvedOperatorConfig.enforceEnabled,
          castContextEnabled: resolvedOperatorConfig.castContextEnabled === true,
+         castEditingEnabled: resolvedOperatorConfig.castEditingEnabled === true,
          castDiscoveryEnabled: resolvedOperatorConfig.castDiscoveryEnabled === true,
          historyCoverageEnabled: resolvedOperatorConfig.historyCoverageEnabled !== false
       }),

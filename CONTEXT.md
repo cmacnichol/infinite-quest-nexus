@@ -83,3 +83,45 @@ _Avoid_: Primary instance, authoritative instance
 **Destination Instance**:
 The installation that validates and imports a portable archive under its own ownership and security authority.
 _Avoid_: Replica, synchronized instance
+
+## Characters and cast
+
+**Cast**:
+The set of characters a campaign tracks, made up of its Main Character and its Supporting Characters.
+_Avoid_: Roster (reserved for a world's character list), NPC list
+
+**Main Character**:
+The character the player plays in a campaign, selected from a world's playable characters when the campaign starts.
+_Avoid_: Protagonist, player character, PC
+
+**Supporting Character**:
+Any Cast member other than the Main Character.
+_Avoid_: NPC, side character
+
+**Starting Cast Character**:
+A Supporting Character the campaign began with from its world's roster, carrying that world's authored profile as its origin.
+_Avoid_: Preset, seeded character, Discovered Character
+
+**Discovered Character**:
+A Supporting Character first found in accepted story narration by character tracking.
+_Avoid_: Auto character, detected character
+
+**Added Character**:
+A Supporting Character the user created directly in the campaign.
+_Avoid_: Manual character, custom character
+
+**Observation**:
+A fact or claim about a Supporting Character, recorded from one passage of accepted narration.
+_Avoid_: Discovered value, detected fact
+
+**Correction**:
+A user edit to a Supporting Character's stable field. It stays in force until the user clears it.
+_Avoid_: Override, lock, manual correction
+
+**State Edit**:
+A user edit to a Supporting Character's current location, condition, clothing or goals. It stays in force until an Observation from a strictly later turn replaces it.
+_Avoid_: Override, current-state correction
+
+**Retraction**:
+The user's ruling that one Observation is wrong, so it stops contributing to the character's profile while remaining in history.
+_Avoid_: Delete fact, dismissal (reserved for pending review proposals)

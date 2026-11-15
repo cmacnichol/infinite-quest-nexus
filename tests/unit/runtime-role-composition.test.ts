@@ -141,6 +141,18 @@ describe("runtime role generation composition", () => {
     await dispatchRuntimeRole({ ...config(role), castContextEnabled: true }, pool, controller.signal, values, providerTransport, generationEvents);
     expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders, expect.objectContaining({ castContextEnabled: true }));
   });
+  it.each(["api", "all"] as const)("enables V3 only when the %s role has editing and a cast API", async (role) => {
+    for (const [editing, hasCast] of [[false, true], [true, false], [true, true]] as const) {
+      const controller = new AbortController(), { values } = dependencies(controller);
+      const createApiCast = vi.fn(() => ({} as never));
+      await dispatchRuntimeRole({ ...config(role), castContextEnabled: true, castEditingEnabled: editing }, pool, controller.signal,
+        { ...values, ...(hasCast ? { createApiCast } : {}) }, providerTransport, generationEvents);
+      expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders,
+        expect.objectContaining({ castContextEnabled: true, castEditingEnabled: editing && hasCast }));
+      expect(values.createApiProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport,
+        expect.objectContaining({ castEditingEnabled: editing && hasCast }));
+    }
+  });
   it.each(["api", "all"] as const)("supplies API discovery recovery collaborators in the %s role", async (role) => {
     const controller = new AbortController(), { values } = dependencies(controller), roleConfig = config(role);
     const cast = { retryDiscovery: async () => ({ jobId: "fixture", retryGeneration: 1 }) } as never;

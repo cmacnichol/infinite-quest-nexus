@@ -2,6 +2,7 @@ import { browserDeviceStorage } from "@infinite-quest/client-web";
 import { loadUserProfile } from "./user-profile-menu";
 import { parseSettingsRoute } from "./settings/sections";
 import "./styles.css";
+import "../../web/src/character-editor/cast-roster.css";
 import { generateWorldPreview } from "./world-creation-api";
 import { createAuthoringJobsApi } from "./authoring-jobs-api";
 import { mountCampaignEditorPage } from "./campaign-editor-page";

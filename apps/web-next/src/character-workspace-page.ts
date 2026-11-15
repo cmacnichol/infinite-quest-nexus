@@ -1,4 +1,10 @@
-import { playableCharacterSchema, worldContentSchema } from "../../../packages/contracts/src/world-library";
+import { mountSectionRefine } from "../../web/src/character-editor/section-refine";
+import { sectionRefineRequest, type RefineSection } from "../../../packages/client-core/src/characters/section-refine";
+import { authoringJobLabel } from "./authoring-job-label";
+import { createNexusApiClient, createNoopSessionPort } from "@infinite-quest/client-web";
+import { renderOrganizePanel } from "./character-organize-panel";
+import { WORLD_EDITOR_FIELDS } from "../../../packages/client-core/src/characters/profile-fields";
+import { MAX_CHARACTER_MECHANICS_ITEMS, playableCharacterSchema, worldContentSchema } from "../../../packages/contracts/src/world-library";
 import type { AuthoringJobView, AuthoringSubmit } from "../../../packages/contracts/src/authoring";
 import type { AuthoringJobsApi } from "./authoring-jobs-api";
 import { createAuthoringJobSession, type AuthoringJobSession } from "./authoring-job-session";
@@ -6,6 +12,7 @@ import { renderAuthoringComparison } from "./authoring-comparison";
 import { mountAppShell } from "./app-shell-lifecycle";
 import {
   generateCharacterPreview as generateCharacterPreviewRequest,
+  sanitizeCharacterGenerationContent,
   loadCharacterGenerationProgress as loadCharacterGenerationProgressRequest,
   CharacterWorkspaceApiError
 } from "./character-workspace-api";
@@ -25,10 +32,12 @@ import {
   type CharacterWorkspaceSession,
   type CharacterWorkspaceSessionStore
 } from "./character-workspace-session";
-import { mergeStructuredFields, structuredFieldsFor } from "./world-editor-fields";
+import { renderMechanicsTable } from "./character-mechanics-table";
+import { structuredFieldsFor } from "./world-editor-fields";
 import type { MountedPage } from "./world-library-page";
 
 export interface CharacterWorkspacePageDependencies {
+  organizeCharacter?: ReturnType<typeof createNexusApiClient>["worlds"]["organizeCharacter"];
   authoringJobsApi?: AuthoringJobsApi;
   resumeJobId?: string;
   recoveredSession?: CharacterWorkspaceSession;
@@ -103,7 +112,7 @@ function workspaceMarkup(returnPath: string): string {
   </main>`;
 }
 
-function textControl(document: Document, name: string, labelText: string, value: string, textarea = false): HTMLLabelElement {
+function textControl(document: Document, name: string, labelText: string, value: string, textarea = false, descriptorPath?: string): HTMLLabelElement {
   const label = document.createElement("label");
   label.className = "character-field";
   const caption = document.createElement("span");
@@ -118,8 +127,18 @@ function textControl(document: Document, name: string, labelText: string, value:
   error.className = "character-field-error";
   error.dataset.fieldError = name;
   error.id = `character-${name.replaceAll(".", "-")}-error`;
-  control.setAttribute("aria-describedby", error.id);
-  label.append(caption, control, error);
+  const descriptor = WORLD_EDITOR_FIELDS.find((field) => field.path === descriptorPath)?.world;
+  const hint = descriptor ? document.createElement("small") : null;
+  if (hint && descriptor) {
+    hint.className = "character-field-hint";
+    hint.id = `character-${name.replaceAll(".", "-")}-hint`;
+    hint.textContent = descriptor.title;
+    control.placeholder = descriptor.placeholder;
+  }
+  control.setAttribute("aria-describedby", hint ? `${hint.id} ${error.id}` : error.id);
+  label.append(caption, control);
+  if (hint) label.append(hint);
+  label.append(error);
   return label;
 }
 
@@ -170,6 +189,7 @@ export function mountCharacterWorkspacePage(
   let state = createCharacterWorkspaceState({
     roster,
     candidate: activeSession.candidate ?? undefined,
+    mode: activeSession.mode,
     method: candidateMethod(activeSession) ?? "ai"
   });
   let prompt = "";
@@ -177,13 +197,13 @@ export function mountCharacterWorkspacePage(
   let candidateDirty = activeSession.candidate !== null;
   let candidateEdited = false;
   let disposed = false;
+  let refinePanel: { dispose(): void } | null = null;
+  let organizePanel: { dispose(): void } | null = null;
   let completed = false;
   let generationSequence = 0;
   let generationController: AbortController | null = null;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let completionTimer: ReturnType<typeof setTimeout> | null = null;
-  let mechanicsCollection: "rpgStats" | "defaultTriggers" = "rpgStats";
-  let mechanicsIndex = 0;
   let dialogOpen = false;
   let fallbackModal = false;
   let fallbackInertStates: Array<{ element: HTMLElement; value: string | null }> = [];
@@ -206,7 +226,7 @@ export function mountCharacterWorkspacePage(
       if (reset) { list.replaceChildren(); listedCharacterIds.clear(); }
       for (const job of page.jobs.filter(job => job.kind === "character" && !listedCharacterIds.has(job.id))) {
         listedCharacterIds.add(job.id);
-        const item = document.createElement("li"); const link = document.createElement("a"); link.href = `/app/characters/resume?authoringJob=${encodeURIComponent(job.id)}`; link.textContent = `${job.id} \u00b7 ${job.status.replaceAll("_", " ")}`; item.append(link); list.append(item);
+        const item = document.createElement("li"); const link = document.createElement("a"); link.href = `/app/characters/resume?authoringJob=${encodeURIComponent(job.id)}`; link.textContent = authoringJobLabel(job); link.title = job.id; item.append(link); list.append(item);
       }
       characterListCursor = page.nextCursor === cursor ? undefined : page.nextCursor;
       more.hidden = !characterListCursor;
@@ -270,6 +290,7 @@ export function mountCharacterWorkspacePage(
     prompt = job.request?.prompt ?? prompt;
     if (pageView.location?.href) { const url = new URL(pageView.location.href); url.searchParams.set("authoringJob", job.id); pageView.history.replaceState(null, "", `${url.pathname}${url.search}`); }
     resumePanel.hidden = false; durableSession.startPolling(); renderDurable();
+    if (refinePanel) render();
   }
   function reviewDurable(): void {
     const snapshot = durableSession?.state();
@@ -329,6 +350,7 @@ export function mountCharacterWorkspacePage(
   function fieldChanged(path: string[], value: unknown): void {
     if (disposed) return;
     state = editCharacterCandidate(state, path, value);
+    if (organizePanel) { organizePanel.dispose(); organizePanel = null; const host = canvas.querySelector<HTMLElement>("[data-organize-panel]"); if (host) mountOrganize(host); }
     candidateEdited = true;
     durableSession?.edit(state.candidate);
     candidateDirty = true;
@@ -369,31 +391,11 @@ export function mountCharacterWorkspacePage(
   }
 
   function renderMethod(): void {
-    canvas.innerHTML = `<div class="character-stage character-method-stage"><header><h2>Start with a character idea</h2><p>Describe your character and generate an editable draft, or choose Manual to write it yourself.</p></header>
-      <label class="character-field"><span>Character use</span><select data-character-use><option value="playable">Playable</option><option value="supporting">Supporting</option><option value="both">Both</option></select></label>
+    canvas.innerHTML = `<div class="character-stage character-method-stage"><header><h2>${activeSession.mode === "edit" ? "Regenerate with AI" : "Start with a character idea"}</h2><p>${activeSession.mode === "edit" ? "Describe changes and generate a replacement draft for review, or return to Review." : "Describe your character and generate an editable draft, or choose Manual to write it yourself."}</p></header>
       <fieldset class="character-method-controls"><legend>Character method</legend><label class="character-method-control"><input type="radio" name="characterMethod" value="manual"><span>Manual</span></label><label class="character-method-control"><input type="radio" name="characterMethod" value="ai"><span>AI-assisted</span></label></fieldset>
       <section class="character-prompt-authoring" data-character-ai-prompt hidden><div class="character-prompt-heading"><div><h3>Character concept</h3><p>Describe this character's role, personality, history, and visual identity.</p></div><div class="character-prompt-tools"><button type="button" data-action="copy-character-prompt" aria-label="Copy character concept">${copyIcon}</button><button type="button" data-action="paste-character-prompt" aria-label="Paste character concept">${pasteIcon}</button><button type="button" data-action="expand-character-prompt">${expandIcon}<span>Expand</span></button></div></div>
       <label class="character-field"><span>Concept prompt</span><textarea rows="7" data-character-prompt="compact"></textarea></label><p data-character-clipboard-status aria-live="polite"></p><div data-character-generation-status role="status" aria-live="polite"></div><div class="character-generation-actions"><button type="button" data-action="generate-character" disabled>Generate character</button><button type="button" data-action="cancel-character-generation" hidden>Cancel generation</button></div></section>
       <div data-character-manual hidden><p>Start with a name and one story detail. Appearance and mechanics are optional.</p></div></div>`;
-    const use = required<HTMLSelectElement>(canvas, "[data-character-use]");
-    use.querySelector(`option[value="${state.candidate.campaignUse}"]`)?.setAttribute("selected", "");
-    use.addEventListener("change", () => {
-      stopGeneration();
-      restoreGenerationActions();
-      if (use.value === "supporting" && durableSession) {
-        durableSession.dispose();
-        durableSession = null;
-        if (pageView.location?.href) {
-          const url = new URL(pageView.location.href);
-          url.searchParams.delete("authoringJob");
-          pageView.history.replaceState(null, "", `${url.pathname}${url.search}`);
-        }
-        durableStatus("Saved proposals remain available. Supporting generation uses a local preview.");
-      }
-      fieldChanged(["campaignUse"], use.value);
-      canvas.querySelector(".character-progress-ledger")?.replaceWith(actions());
-      updateStageIndex();
-    });
     const aiSection = required<HTMLElement>(canvas, "[data-character-ai-prompt]");
     const manual = required<HTMLElement>(canvas, "[data-character-manual]");
     const compact = required<HTMLTextAreaElement>(canvas, '[data-character-prompt="compact"]');
@@ -426,19 +428,70 @@ export function mountCharacterWorkspacePage(
     if (state.method !== null) canvas.append(actions());
   }
 
+  function mountRefine(stage: HTMLElement, section: RefineSection): void {
+    const host = document.createElement("div"); host.dataset.refinePanel = "";
+    stage.querySelector("header")!.append(host);
+    refinePanel = mountSectionRefine(host, {
+      section, current: () => state.candidate,
+      available: !durableSession && !generationController,
+      unavailableText: "Finish or cancel the current AI proposal to refine a section.",
+      generate: async (current, instruction, signal) => {
+        const progressKey = `${activeSession.key}:refine:${Date.now()}`.slice(0, 512);
+        return (await generatePreview(sectionRefineRequest(sanitizeCharacterGenerationContent(activeSession.worldContext), current, section, instruction, progressKey), signal)).character;
+      },
+      onApply: next => {
+        if (disposed) return;
+        state = { ...state, candidate: next }; candidateEdited = true; candidateDirty = true; markDirty(); render();
+      }
+    });
+  }
+
   function renderIdentity(): void {
     const stage = document.createElement("div"); stage.className = "character-stage";
     stage.innerHTML = "<header><h2>Identity</h2><p>Name the character and record the identity readers will recognize.</p></header>";
+    mountRefine(stage, "identity");
     const form = document.createElement("div"); form.className = "character-fields";
     const id = textControl(document, "candidate.id", "Character ID", state.candidate.id);
     required<HTMLInputElement>(id, "input").readOnly = true;
     const technical = document.createElement("details");
     const summary = document.createElement("summary"); summary.textContent = "Technical details";
     technical.append(summary, id);
-    form.append(textControl(document, "candidate.name", "Name", state.candidate.name),
-      textControl(document, "candidate.profile.identity.pronouns", "Pronouns", state.candidate.profile?.identity.pronouns ?? ""),
-      textControl(document, "candidate.profile.identity.aliases", "Aliases (one per line)", state.candidate.profile?.identity.aliases.join("\n") ?? "", true));
+    form.append(textControl(document, "candidate.name", "Name", state.candidate.name, false, "name"),
+      textControl(document, "candidate.profile.identity.pronouns", "Pronouns", state.candidate.profile?.identity.pronouns ?? "", false, "identity.pronouns"),
+      textControl(document, "candidate.profile.identity.aliases", "Aliases (one per line)", state.candidate.profile?.identity.aliases.join("\n") ?? "", true, "identity.aliases"));
+    const useField = document.createElement("label"); useField.className = "character-field";
+    useField.innerHTML = `<span>Character use</span><select data-character-use><option value="playable">Playable</option><option value="supporting">Supporting</option><option value="both">Both</option></select>`;
+    const flags = document.createElement("div"); flags.className = "character-context-flags";
+    flags.innerHTML = `<label><input type="checkbox" data-character-starting-cast> Select by default in starting cast</label><label><input type="checkbox" data-character-always-context> Always include in narrator context</label>`;
+    flags.hidden = state.candidate.campaignUse === "playable";
+    const starting = required<HTMLInputElement>(flags, "[data-character-starting-cast]");
+    const context = required<HTMLInputElement>(flags, "[data-character-always-context]");
+    starting.checked = state.candidate.startingCastDefault;
+    context.checked = state.candidate.alwaysInContext;
+    starting.addEventListener("change", () => fieldChanged(["startingCastDefault"], starting.checked));
+    context.addEventListener("change", () => fieldChanged(["alwaysInContext"], context.checked));
+    form.append(useField, flags);
     stage.append(form, technical); canvas.replaceChildren(stage, actions()); bindCandidateInputs();
+    const use = required<HTMLSelectElement>(canvas, "[data-character-use]");
+    use.querySelector(`option[value="${state.candidate.campaignUse}"]`)?.setAttribute("selected", "");
+    use.addEventListener("change", () => {
+      stopGeneration();
+      restoreGenerationActions();
+      if (use.value === "supporting" && durableSession) {
+        durableSession.dispose();
+        durableSession = null;
+        if (pageView.location?.href) {
+          const url = new URL(pageView.location.href);
+          url.searchParams.delete("authoringJob");
+          pageView.history.replaceState(null, "", `${url.pathname}${url.search}`);
+        }
+        durableStatus("Saved proposals remain available. Supporting generation uses a local preview.");
+      }
+      fieldChanged(["campaignUse"], use.value);
+      flags.hidden = use.value === "playable";
+      canvas.querySelector(".character-progress-ledger")?.replaceWith(actions());
+      updateStageIndex();
+    });
     const aliases = required<HTMLTextAreaElement>(canvas, '[name="candidate.profile.identity.aliases"]');
     function onAliasesInput(): void {
       fieldChanged(["profile", "identity", "aliases"], aliases.value.split("\n").map((v) => v.trim()).filter(Boolean));
@@ -446,18 +499,30 @@ export function mountCharacterWorkspacePage(
     aliases.addEventListener("input", onAliasesInput);
   }
 
+  function mountOrganize(host: HTMLElement): void {
+    if (activeSession.origin === "world-creation") { host.textContent = "Organize is available after the world is saved."; return; }
+    const worldId = decodeURIComponent(new URL(activeSession.parentRoute, "https://local.invalid").pathname.split("/").at(-1)!);
+    const organize = dependencies.organizeCharacter ?? createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort() }).worlds.organizeCharacter;
+    const current = state.candidate;
+    organizePanel = renderOrganizePanel(host, { current, organize: (signal) => organize(worldId, { expectedRevision: activeSession.expectedWorldRevision!, character: current }, signal), onApply: (next) => {
+      if (disposed) return;
+      state = { ...state, candidate: next }; candidateEdited = true; candidateDirty = true; durableSession?.edit(next); markDirty(); render();
+    } });
+  }
+
   function renderStory(): void {
     const stage = document.createElement("div"); stage.className = "character-stage";
     stage.innerHTML = "<header><h2>Story</h2><p>Add at least one story detail. You can leave the rest blank.</p></header>";
+    mountRefine(stage, "story");
     const form = document.createElement("div"); form.className = "character-fields";
     const optional = document.createElement("details");
     const summary = document.createElement("summary"); summary.textContent = "More story details (optional)";
     optional.append(summary);
     for (const [index, [name, label]] of STORY_FIELDS.entries()) {
-      const field = textControl(document, `candidate.profile.story.${name}`, label, state.candidate.profile?.story[name] ?? "", true);
+      const field = textControl(document, `candidate.profile.story.${name}`, label, state.candidate.profile?.story[name] ?? "", true, `story.${name}`);
       (index < 3 ? form : optional).append(field);
     }
-    optional.append(textControl(document, "candidate.profile.unclassifiedNotes", "Additional notes", state.candidate.profile?.unclassifiedNotes ?? "", true));
+    optional.append(textControl(document, "candidate.profile.unclassifiedNotes", "Additional notes", state.candidate.profile?.unclassifiedNotes ?? "", true, "unclassifiedNotes"));
     form.append(optional);
     if (state.candidate.characterText.trim()) {
       const source = document.createElement("details"); source.dataset.characterSource = "";
@@ -466,6 +531,9 @@ export function mountCharacterWorkspacePage(
       const text = document.createElement("p"); text.textContent = state.candidate.characterText;
       source.append(label, guidance, text); form.append(source);
     }
+    // Organize works on the whole profile (notes, retained guidance and world lore), so Story always offers it.
+    const organizeHost = document.createElement("div"); organizeHost.dataset.organizePanel = "";
+    form.append(organizeHost); mountOrganize(organizeHost);
     stage.append(form); canvas.replaceChildren(stage, actions()); bindCandidateInputs();
   }
 
@@ -473,8 +541,9 @@ export function mountCharacterWorkspacePage(
     const stage = document.createElement("div"); stage.className = "character-stage";
     stage.innerHTML = "<header><h2>Appearance</h2><p>Record concrete visual facts without requiring a portrait.</p></header>";
     const form = document.createElement("div"); form.className = "character-fields";
-    for (const [name, label] of APPEARANCE_FIELDS) form.append(textControl(document, `candidate.profile.appearance.${name}`, label, state.candidate.profile?.appearance[name] ?? "", true));
-    form.append(textControl(document, "candidate.profile.appearance.distinguishingFeatures", "Distinguishing features (one per line)", state.candidate.profile?.appearance.distinguishingFeatures.join("\n") ?? "", true));
+    mountRefine(stage, "appearance");
+    for (const [name, label] of APPEARANCE_FIELDS) form.append(textControl(document, `candidate.profile.appearance.${name}`, label, state.candidate.profile?.appearance[name] ?? "", true, `appearance.${name}`));
+    form.append(textControl(document, "candidate.profile.appearance.distinguishingFeatures", "Distinguishing features (one per line)", state.candidate.profile?.appearance.distinguishingFeatures.join("\n") ?? "", true, "appearance.distinguishingFeatures"));
     stage.append(form); canvas.replaceChildren(stage, actions()); bindCandidateInputs();
     const features = required<HTMLTextAreaElement>(canvas, '[name="candidate.profile.appearance.distinguishingFeatures"]');
     function onFeaturesInput(): void {
@@ -485,39 +554,12 @@ export function mountCharacterWorkspacePage(
 
   function renderMechanics(): void {
     const stage = document.createElement("div"); stage.className = "character-stage";
-    stage.innerHTML = `<header><h2>Mechanics</h2><p>Stats and trackers are optional. You can review your character without adding them.</p></header><div class="character-mechanics"><aside class="character-mechanics-master"><div role="group" aria-label="Mechanics collection"><button type="button" data-mechanics-collection="rpgStats" aria-describedby="character-rpgStats-error">Stats</button><button type="button" data-mechanics-collection="defaultTriggers" aria-describedby="character-defaultTriggers-error">Trackers</button></div><small class="character-field-error" id="character-rpgStats-error" data-field-error="candidate.rpgStats"></small><small class="character-field-error" id="character-defaultTriggers-error" data-field-error="candidate.defaultTriggers"></small><ol data-mechanics-list></ol><button type="button" data-action="add-character-mechanic">Add item</button></aside><section class="character-mechanics-detail" aria-label="Selected mechanic"></section></div>`;
+    stage.innerHTML = `<header><h2>Mechanics</h2><p>Statistics and trackers are optional. You can review your character without adding them.</p></header><div class="character-mechanics"><section><h3>Statistics</h3><small class="character-field-error" id="character-rpgStats-error" data-field-error="candidate.rpgStats"></small><div data-mechanics-table="rpgStats"></div></section><section><h3>Trackers</h3><small class="character-field-error" id="character-defaultTriggers-error" data-field-error="candidate.defaultTriggers"></small><div data-mechanics-table="defaultTriggers"></div></section></div>`;
     canvas.replaceChildren(stage, actions());
-    const list = required<HTMLOListElement>(canvas, "[data-mechanics-list]");
-    const detail = required<HTMLElement>(canvas, ".character-mechanics-detail");
-    const items = state.candidate[mechanicsCollection];
-    items.forEach((item, index) => {
-      const fields = structuredFieldsFor(mechanicsCollection === "rpgStats" ? "stat" : "trigger", item);
-      const button = document.createElement("button"); button.type = "button"; button.textContent = String(fields.name || `Item ${index + 1}`); button.dataset.mechanicsIndex = String(index);
-      const row = document.createElement("li"); row.append(button); list.append(row);
-    });
-    mechanicsIndex = Math.min(mechanicsIndex, Math.max(0, items.length - 1));
-    if (items.length === 0) detail.innerHTML = "<p>No item selected.</p>";
-    else {
-      const remove = document.createElement("button");
-      remove.type = "button"; remove.dataset.action = "remove-character-mechanic"; remove.textContent = "Remove selected item";
-      detail.append(remove);
-      const kind = mechanicsCollection === "rpgStats" ? "stat" : "trigger";
-      const fields = structuredFieldsFor(kind, items[mechanicsIndex]);
-      const names = kind === "stat" ? [["name", "Name"], ["value", "Value"], ["note", "Note"]] : [["name", "Name"], ["condition", "Condition"], ["effect", "Effect"]];
-      for (const [name, label] of names) {
-        const field = textControl(document, `mechanic.${name}`, label, String(fields[name] ?? ""), name === "note" || name === "condition" || name === "effect");
-        detail.append(field);
-      }
-      detail.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[name]").forEach((control) => {
-        function onMechanicInput(): void {
-          if (disposed) return;
-          const changed = { [control.name.split(".")[1]!]: control.value };
-          const next = [...state.candidate[mechanicsCollection]];
-          next[mechanicsIndex] = mergeStructuredFields(kind, next[mechanicsIndex], changed);
-          fieldChanged([mechanicsCollection], next);
-        }
-        control.addEventListener("input", onMechanicInput);
-      });
+    for (const [collection, kind] of [["rpgStats", "stat"], ["defaultTriggers", "trigger"]] as const) {
+      const host = required<HTMLElement>(stage, `[data-mechanics-table="${collection}"]`);
+      host.setAttribute("aria-describedby", `character-${collection}-error`);
+      renderMechanicsTable(host, { kind, items: state.candidate[collection], max: MAX_CHARACTER_MECHANICS_ITEMS, onChange: (items) => fieldChanged([collection], items) });
     }
   }
 
@@ -621,6 +663,8 @@ export function mountCharacterWorkspacePage(
   }
 
   function render(): void {
+    refinePanel?.dispose(); refinePanel = null;
+    organizePanel?.dispose(); organizePanel = null;
     canvas.dataset.characterCanvas = state.stage;
     if (state.stage === "method") renderMethod();
     if (state.stage === "identity") renderIdentity();
@@ -638,9 +682,9 @@ export function mountCharacterWorkspacePage(
     function issueControl(path: string): HTMLElement | null {
       if (path === "method") return canvas.querySelector<HTMLElement>('[name="characterMethod"]');
       const mechanic = path.match(/^candidate\.(rpgStats|defaultTriggers)$/)?.[1];
-      if (mechanic) return canvas.querySelector<HTMLElement>(`[data-mechanics-collection="${mechanic}"]`);
+      if (mechanic) return canvas.querySelector<HTMLElement>(`[data-mechanics-table="${mechanic}"] input, [data-mechanics-table="${mechanic}"] button`);
       return canvas.querySelector<HTMLElement>(`[name="${path}"]`) ??
-        canvas.querySelector<HTMLElement>("input[name], textarea[name], button[data-mechanics-collection]");
+        canvas.querySelector<HTMLElement>("input[name], textarea[name], button[data-action]");
     }
     for (const issue of issues) {
       const control = issueControl(issue.path);
@@ -649,7 +693,11 @@ export function mountCharacterWorkspacePage(
       const error = canvas.querySelector<HTMLElement>(`[data-field-error="${issue.path}"]`);
       if (error) error.textContent = issue.message;
     }
-    if (issues.length > 0) issueControl(issues[0]!.path)?.focus();
+    if (issues.length > 0) {
+      const control = issueControl(issues[0]!.path);
+      control?.focus();
+      (control?.closest(".character-field") ?? control)?.scrollIntoView?.({ block: "center" });
+    }
     return issues.length === 0;
   }
 
@@ -934,10 +982,6 @@ export function mountCharacterWorkspacePage(
     if (action === "close-character-prompt") closeDialog();
     if (action === "copy-character-prompt") void clipboard("copy", target);
     if (action === "paste-character-prompt") void clipboard("paste", target);
-    if (action === "remove-character-mechanic") { fieldChanged([mechanicsCollection], state.candidate[mechanicsCollection].filter((_, index) => index !== mechanicsIndex)); render(); }
-    if (action === "add-character-mechanic") { fieldChanged([mechanicsCollection], [...state.candidate[mechanicsCollection], {}]); mechanicsIndex = state.candidate[mechanicsCollection].length - 1; render(); }
-    if (target.dataset.mechanicsCollection) { mechanicsCollection = target.dataset.mechanicsCollection as typeof mechanicsCollection; mechanicsIndex = 0; render(); }
-    if (target.dataset.mechanicsIndex) { mechanicsIndex = Number(target.dataset.mechanicsIndex); render(); }
     if (action === "accept-character" && !completed) {
       const candidate = characterHandoffCandidate(state);
       const status = canvas.querySelector<HTMLElement>("[data-character-acceptance-status]");
@@ -967,6 +1011,7 @@ export function mountCharacterWorkspacePage(
       if (!sessionStore?.complete(activeSession.key, activeSession.workflowId, { status: "accepted", candidate })) { if (status) status.textContent = "This character could not be accepted. Return to the world and try again."; return; }
       completed = true; clearDirty(); navigate(activeSession.parentRoute);
     }
+    if (action === "cancel-character") { refinePanel?.dispose(); refinePanel = null; }
     if (action === "cancel-character" && !completed && (dependencies.recoveredSession || sessionStore?.complete(activeSession.key, activeSession.workflowId, { status: "cancelled" }))) { completed = true; clearDirty(); navigate(activeSession.parentRoute); }
   }
 
@@ -1001,6 +1046,8 @@ export function mountCharacterWorkspacePage(
       if (disposed) return;
       closeDialog(false);
       disposed = true;
+      refinePanel?.dispose(); refinePanel = null;
+      organizePanel?.dispose(); organizePanel = null;
       durableController.abort(); durableSession?.dispose();
       root.removeEventListener("input", onRootInput);
       root.removeEventListener("click", onRootClick);
@@ -1054,7 +1101,7 @@ function mountCharacterRecovery(root: HTMLElement, sessionKey: string, resumeJob
       const list = required<HTMLElement>(root, "[data-recovery-list]");
       for (const job of page.jobs.filter(job => job.kind === "character" && !listedIds.has(job.id))) {
         listedIds.add(job.id);
-        const button = document.createElement("button"); button.textContent = `${job.id} \u00b7 ${job.status.replaceAll("_", " ")}`;
+        const button = document.createElement("button"); button.textContent = authoringJobLabel(job); button.title = job.id;
         button.addEventListener("click", () => { void load(job.id).catch(failed); });
         const item = document.createElement("li"); item.append(button); list.append(item);
       }

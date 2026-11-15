@@ -8,7 +8,7 @@ import { createStoryEvidence, generationEvidenceManifestHash } from "../../packa
 import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt.js";
 import { sha256 } from "../../packages/domain/src/text.js";
 import { serializeProviderRequest } from "../../packages/story-engine/src/provider-request.js";
-import { CAST_STORY_AUTHORITY_CONTRACT, castStoryMemoryPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
+import { CAST_STORY_AUTHORITY_CONTRACT, CAST_V3_STORY_AUTHORITY_CONTRACT, castV3StoryMemoryPromptCompatibilityIdentity, castStoryMemoryPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
 import { continuityReviewOutputLimitFixture, continuityReviewOutputLimitResponse } from "../fixtures/continuity-review-output-limit.js";
 const requestHash = sha256("producing-request");
 const entry = createStoryEvidence({ source: { kind: "state_edit", id: "state", revision: "1", turnNumber: 1 }, semanticRole: "current_continuity", rank: 0, selectionGroup: "protected", sourcePath: "/text", normalizationVersion: "fiction-safe-json-v1", form: "complete", spans: [], canonicalFactId: null }, { text: "Mira waits at the lighthouse." });
@@ -61,6 +61,12 @@ describe("exact continuity review provider request", () => {
       preparedRequest: { body: prepared.body, payloadHash: sha256(prepared.body) }
     }) } as typeof provider, prepared);
     expect(result.review.verdict).toBe("pass");
+  });
+  it("uses the frozen V3 cast authority in review and repair", () => {
+    const prompts = { ...v1PromptSnapshot, storyMemoryCompatibility: { protocolIdentity: castV3StoryMemoryPromptCompatibilityIdentity(),
+      templateHashes: { story_system: promptSnapshot.templates.story_system!.hash, event_extension: promptSnapshot.templates.event_extension!.hash } } };
+    expect(prepare({ promptSnapshot: prompts }).request.systemPrompt).toContain(CAST_V3_STORY_AUTHORITY_CONTRACT);
+    expect(prepareContinuityRepair({ provider, manifest, promptSnapshot: prompts, direction: "Wait", rejectedDraft: draft, findings: [] }).request.systemPrompt).toContain(CAST_V3_STORY_AUTHORITY_CONTRACT);
   });
   it("binds cast precedence to frozen v17 review and repair without changing old prompts", () => {
     const castEntry = createStoryEvidence({ source: { kind: "cast", id: "mara:edit", revision: "1", turnNumber: 1 },

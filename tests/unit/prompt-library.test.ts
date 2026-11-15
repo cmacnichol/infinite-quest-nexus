@@ -16,6 +16,7 @@ import {
   sampleValuesForPrompt
 } from "../../packages/contracts/src/prompt-library.js";
 import {
+  castV3StoryMemoryPromptCompatibilityIdentity, castV2StoryMemoryPromptCompatibilityIdentity,
   STORY_SYSTEM_PROMPT,
   storyPromptCompatibilityIdentity,
   STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
@@ -48,6 +49,17 @@ function snapshotWithRepairIdentity(protocolIdentity: string) {
     repair: { content: repair, hash: createHash("sha256").update(repair).digest("hex"), source: "shipped", protocolIdentity }
   } };
 }
+
+describe("V3 frozen prompt identity", () => {
+  it("resolves and validates explicit V3 and V2 snapshots", async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    const scope = { ownerUserId: crypto.randomUUID(), scope: "application" as const };
+    for (const [version, identity] of [["v2", castV2StoryMemoryPromptCompatibilityIdentity()], ["v3", castV3StoryMemoryPromptCompatibilityIdentity()]] as const) {
+      const snapshot = await resolveStoryMemoryPromptSnapshot({ query } as never, scope, "off", true, version);
+      expect(assertStoryMemoryPromptCompatibility(snapshot).storyMemoryCompatibility?.protocolIdentity).toBe(identity);
+    }
+  });
+});
 
 describe("Prompt Library catalog", () => {
   it("accepts 64,000-character Story Writer overrides but retains other prompt limits", () => {

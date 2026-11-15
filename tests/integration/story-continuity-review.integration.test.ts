@@ -2,6 +2,9 @@ import { vi } from "vitest";
 import { PreparedResponseContractError } from "../../packages/story-engine/src/provider-response-format.js";
 import { PreparedRouteTerminalError } from "../../packages/story-engine/src/preset-route-execution.js";
 import { createPostgresGenerationExecutionRepository, reconcileNextAcceptedStreamingIllustration } from "../../packages/database/src/generation-execution-repository.js";
+import { createCastContextPreview } from "../../services/runtime/src/campaign-cast-context-preview.js";
+import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { createGenerationExecutionCollaborators } from "../../services/runtime/src/generation-worker-composition.js";
 import { createGenerationExecutor } from "../../services/runtime/src/generation-executor-adapter.js";
@@ -41,13 +44,16 @@ import { installIntegrationProviderTransport } from "./provider-transport-test-h
 import { deriveStoryContinuityRunFromExecutorCapture, evaluateStoryContinuity, type StoryContinuityEvidence } from "../../scripts/lib/story-continuity-evaluator.js";
 
 const plannerCalls = vi.hoisted(() => [] as unknown[][]);
+const plannerResults = vi.hoisted(() => [] as Array<{ promptContext: { cast?: unknown } }>);
 vi.mock("../../services/runtime/src/generation-context-planner.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../services/runtime/src/generation-context-planner.js")>();
   return {
     ...actual,
     planGenerationPromptContext(...args: Parameters<typeof actual.planGenerationPromptContext>) {
       plannerCalls.push(args);
-      return actual.planGenerationPromptContext(...args);
+      const result = actual.planGenerationPromptContext(...args);
+      plannerResults.push(result);
+      return result;
     }
   };
 });
@@ -282,7 +288,22 @@ integration("durable continuity review", () => {
     // Dedicated historical fixtures below pin genuine v4/v5 jobs.
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined,
       { installedCapability: "r3", enforceEnabled: true, castContextEnabled, historyCoverageEnabled: false });
-    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action, requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit", providerProfileId: textProviderProfileId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
+    const request = generationRequestSchema.parse({ action, requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit", providerProfileId: textProviderProfileId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } });
+    // These historical V2 scenarios deliberately freeze the pre-activation protocol.
+    const historicalCommands = castContextEnabled ? createPostgresGenerationCommandRepository(pool, {
+      resolvePromptSnapshot: (client, owner, campaignId, policy) => policy
+        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId: owner, campaignId, scope: "campaign" }, policy.policy.continuityReview, true, "v2")
+        : loadPromptSnapshotForTest(client, owner, campaignId),
+      promptProtocolVersion: providerPromptProtocolVersion,
+      readTurnReportedCosts: (owner, _campaign, ids) => readTurnReportedCostsForTest(pool, owner, [...ids]),
+      resolveStoryMemoryPolicySnapshot: async (client, scope) => {
+        const policy = await resolveStoryMemoryPolicySnapshot(client, scope, { installedCapability: "r3", enforceEnabled: true, castContextEnabled: true, historyCoverageEnabled: false });
+        if (!policy) throw new Error("Missing historical policy");
+        return { ...policy, contextProtocol: "current-continuity-v6" as const, promptProtocol: "story-v18-fiction-cast" as const };
+      }
+    }) : null;
+    const job = historicalCommands ? await historicalCommands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request)
+      : await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request);
     return { job, application, campaignId: imported.campaignId };
   }
 
@@ -2406,7 +2427,7 @@ integration("durable continuity review", () => {
     );
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined,
-      { installedCapability: "r3", enforceEnabled: true, castContextEnabled: true }, true);
+      { installedCapability: "r3", enforceEnabled: true, castContextEnabled: true, castEditingEnabled: true }, true);
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
       action: "Wait at the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit",
       providerProfileId: narrowReviewerProvider.id, textSelection: { kind: "openrouter_preset", slug: "keep" },
@@ -2418,22 +2439,13 @@ integration("durable continuity review", () => {
     expect((await pool.query<{ version: string }>(
       "SELECT generation_base_identity->>'version' AS version FROM generation_jobs WHERE id=$1", [job.id]
     )).rows[0]!.version).toMatch(/^generation-base-v[34]$/);
-    const captured = (await pool.query<{ context_options: Record<string, unknown>; prompt_protocol_version: string }>(
-      "SELECT context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [job.id]
-    )).rows[0]!;
-    const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
-    await pool.query(
-      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3,generation_base_identity=generation_base_identity || '{\"recentWindowTurns\":11}'::jsonb WHERE id=$1",
-      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v7" } }),
-        captured.prompt_protocol_version.replace("current-continuity-v6", "current-continuity-v7")]
-    );
     requests.length = 0;
     plannerCalls.length = 0;
     await runGenerationJob(pool, `narrow-reviewer-budget-${randomUUID()}`, 30, credentialSecret);
     const plannerCall = plannerCalls.at(-1);
     expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "context_budget_exceeded" });
     expect(plannerCall?.[14]).toBe(904);
-    expect(plannerCall?.[15]).toBe("current-continuity-v7");
+    expect(plannerCall?.[15]).toBe("current-continuity-v9");
     expect(requests.filter((body) => !body.includes("story-continuity-review-v1"))).toHaveLength(0);
     expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(0);
   });
@@ -2544,6 +2556,133 @@ integration("durable continuity review", () => {
       rejectSceneRewriteResponseFormat = false;
     }
   });
+
+  it.each([true, false])("resumes a frozen V3 cast request through continuity repair (discovery=%s)", async (discoveryEnabled) => {
+    const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    story.world.title = `V3 proof ${randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "v3-proof.story", story }));
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const foreignStory = structuredClone(story);
+    foreignStory.world.title = `Foreign ${randomUUID()}`;
+    const foreign = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "v3-foreign.story", story: foreignStory }));
+    const cast = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+    const foreignState = await cast.initialize({ ownerUserId, campaignId: foreign.campaignId });
+    await cast.create({ ownerUserId, campaignId: foreign.campaignId }, { expectedCastRevision: foreignState.revision, expectedBoundary: foreignState.boundary,
+      idempotencyKey: randomUUID(), name: "Foreign witness", aliases: [], profile: { "story.role": "FOREIGN_CAST_SECRET" } });
+    const current = (await pool.query<{ active_turn_number: number }>("SELECT active_turn_number FROM campaigns WHERE id=$1", [scope.campaignId])).rows[0]!.active_turn_number;
+    expect(current).toBeGreaterThanOrEqual(2);
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [scope.campaignId]);
+    const initial = await cast.initialize(scope);
+    const person = await cast.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary,
+      idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: { "state.location": "OLD_DOCKS", "state.condition": "EDIT_CONDITION", "state.clothing": "EDIT_CLOTHING", "story.goals": "EDIT_GOAL", "story.role": "trusted guide" } });
+    const world = (await pool.query("SELECT w.id,w.content FROM world_versions w JOIN campaigns c ON c.world_version_id=w.id WHERE c.id=$1", [scope.campaignId])).rows[0];
+    world.content.playableCharacters = [{ id: "seed-v3", name: "Iven", campaignUse: "supporting", characterText: "A guide.", profile: { state: { location: "SEED_START" } } }];
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [world.id, JSON.stringify(world.content)]);
+    const seedPreview = await cast.fromWorldPreview!(scope, { characterId: "seed-v3" });
+    const seed = await cast.fromWorld!(scope, { characterId: "seed-v3", expectedWorldVersionId: world.id, previewFingerprint: seedPreview.previewFingerprint, expectedCastRevision: seedPreview.castRevision, expectedBoundary: seedPreview.boundary, idempotencyKey: randomUUID() });
+    await cast.applyBatch(scope, { boundary: seed.boundary, idempotencyKey: randomUUID(), commands: [{ kind: "override", characterId: seed.character.id, field: "state.location", value: "SEED_EDIT" }] });
+    await pool.query("UPDATE campaigns SET active_turn_number=$2 WHERE id=$1", [scope.campaignId, current]);
+    const turn = (await pool.query("SELECT turn_id AS id,effective_narration,correction_revision FROM effective_turn_narrations WHERE campaign_id=$1 AND turn_number=$2", [scope.campaignId, current])).rows[0];
+    const evidence = { kind: "turn" as const, turnId: turn.id, turnNumber: current, narrationRevision: turn.correction_revision, sourceHash: sha256(turn.effective_narration), paragraphId: "p1", quote: turn.effective_narration };
+    const boundary = { turnNumber: current, timelineRevision: initial.boundary.timelineRevision };
+    const observations = await cast.applyBatch(scope, { boundary, idempotencyKey: randomUUID(), commands: [
+      { kind: "observe", characterId: person.character.id, field: "state.location", value: "NEW_PALACE", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence },
+      { kind: "observe", characterId: person.character.id, field: "state.condition", value: "RETRACT_CONDITION", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence },
+      { kind: "observe", characterId: person.character.id, field: "state.clothing", value: "SAME_TURN_OBSERVATION", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence },
+      { kind: "observe", characterId: person.character.id, field: "story.goals", value: "NEW_GOAL", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence },
+      { kind: "observe", characterId: seed.character.id, field: "state.location", value: "SEED_LATER", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence },
+      { kind: "observe", characterId: seed.character.id, field: "state.condition", value: "UNEDITED_CONDITION", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence }
+    ] });
+    await cast.applyBatch(scope, { boundary, idempotencyKey: randomUUID(), commands: [{ kind: "override", characterId: person.character.id, field: "state.clothing", value: "SAME_TURN_EDIT" }] });
+    const detail = await cast.detail(scope, person.character.id);
+    await cast.applyObservationDecision(scope, person.character.id, observations.observationIds[1]!, { action: "retract", expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: boundary, idempotencyKey: randomUUID() });
+    await saveStoryMemoryEnrollment(pool, scope, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
+    const commands = createPostgresGenerationCommandRepository(pool, {
+      resolvePromptSnapshot: (client, owner, campaignId, policy) => policy
+        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId: owner, campaignId, scope: "campaign" }, policy.policy.continuityReview, true, "v3")
+        : loadPromptSnapshotForTest(client, owner, campaignId),
+      promptProtocolVersion: providerPromptProtocolVersion,
+      readTurnReportedCosts: (owner, _campaign, ids) => readTurnReportedCostsForTest(pool, owner, [...ids]),
+      resolveStoryMemoryPolicySnapshot: async (client, requestScope) => {
+        const policy = await resolveStoryMemoryPolicySnapshot(client, requestScope, { installedCapability: "r3", enforceEnabled: true, castContextEnabled: true, castDiscoveryEnabled: discoveryEnabled, historyCoverageEnabled: false });
+        if (!policy) throw new Error("Missing policy");
+        return { ...policy, contextProtocol: CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, promptProtocol: CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION };
+      }
+    });
+    const job = await commands.enqueueAppend(scope, generationRequestSchema.parse({ action: "Ask Mara and Iven.", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000 } }));
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true, castContextEnabled: true });
+    const frozen = (await pool.query("SELECT generation_base_identity,context_options FROM generation_jobs WHERE id=$1", [job.id])).rows[0];
+    expect(frozen.context_options.storyMemoryPolicy).toMatchObject({ contextProtocol: CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, promptProtocol: CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION });
+    expect(frozen.generation_base_identity.castFingerprint).toEqual(expect.any(String));
+    const acceptedBefore = await acceptedAuthoritySnapshot(scope.campaignId);
+    await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [scope.campaignId, providerId]);
+    plannerResults.length = 0;
+    const preview = createCastContextPreview(pool, { castContextEnabled: true, castEditingEnabled: true, castDiscoveryEnabled: discoveryEnabled, storyMemoryCapability: "r3", storyMemoryEnforceEnabled: true, historyCoverageEnabled: false });
+    const previewResult = await preview(ownerUserId, scope.campaignId, { query: "Ask Mara and Iven.", inputMode: "action", budgetTokens: 32000 });
+    expect(previewResult.disabledReason).toBeNull();
+    const previewCast = plannerResults.at(-1)?.promptContext.cast;
+    expect(previewCast).toBeDefined();
+    plannerResults.length = 0;
+    reviewSequence = ["conflict", "pass"];
+    await runGenerationJob(pool, `v3-review-${randomUUID()}`, 30, credentialSecret);
+    const gate = await application.getReview({ ownerUserId, jobId: job.id });
+    expect(gate).toMatchObject({ state: "pending", stage: "continuity" });
+    expect(await acceptedAuthoritySnapshot(scope.campaignId)).toEqual(acceptedBefore);
+    expect(plannerResults[0]?.promptContext.cast).toEqual(previewCast);
+    const writerMessages = (JSON.parse(requests[0]!) as { messages: Array<{ content: string }> }).messages;
+    expect(writerMessages.some(message => message.content.includes(JSON.stringify(previewCast)))).toBe(true);
+    expect(JSON.stringify(previewCast)).toContain("NEW_PALACE");
+    expect(requests[0]).toContain("NEW_PALACE");
+    expect(requests[0]).not.toContain("OLD_DOCKS");
+    const wire = previewCast as { characters: Array<{ characterId: string; fields: Array<{ field: string; value: string; authority: string }> }> };
+    const addedFields = wire.characters.find(character => character.characterId === person.character.id)!.fields;
+    const seedFields = wire.characters.find(character => character.characterId === seed.character.id)!.fields;
+    for (const [field, value, authority] of [["state.location", "NEW_PALACE", "observation"], ["state.condition", "EDIT_CONDITION", "user"], ["state.clothing", "SAME_TURN_EDIT", "user"], ["story.goals", "NEW_GOAL", "observation"]]) {
+      expect(addedFields).toContainEqual(expect.objectContaining({ field, value, authority }));
+      expect(requests[0]).toContain(value);
+    }
+    expect(seedFields).toContainEqual(expect.objectContaining({ field: "state.location", value: "SEED_LATER", authority: "observation" }));
+    expect(requests[0]).toContain("SEED_LATER");
+    expect(requests[0]).not.toContain("RETRACT_CONDITION");
+    expect(requests[0]).not.toContain("SAME_TURN_OBSERVATION");
+    // Unedited current state stays as dated last-known state during tracking gaps (ADR 0045).
+    expect(requests[0]).toContain("UNEDITED_CONDITION");
+    expect(requests.join("\n")).not.toContain("FOREIGN_CAST_SECRET");
+    await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const providers = workerProviderGraph(pool, credentialSecret);
+    const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+    let interrupted = false;
+    const wrapped = { ...repository, async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+      const saved = await repository.saveOrchestration(scope, value);
+      if (!interrupted && value.semanticRepair?.status === "validated") {
+        interrupted = true;
+        await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+        throw Object.assign(new Error("Injected restart after V3 repair"), { code: "generation_cancelled" });
+      }
+      return saved;
+    } };
+    const workerId = `v3-repair-${randomUUID()}`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
+    expect(interrupted).toBe(true);
+    expect(await acceptedAuthoritySnapshot(scope.campaignId)).toEqual(acceptedBefore);
+    const callsBeforeRestart = requests.length;
+    await runGenerationJob(pool, `v3-restart-${randomUUID()}`, 30, credentialSecret);
+    expect(requests.filter(body => body.includes("story-continuity-repair-v1"))).toHaveLength(1);
+    expect(requests.length).toBeGreaterThanOrEqual(callsBeforeRestart);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+    expect((await pool.query("SELECT generation_base_identity,context_options FROM generation_jobs WHERE id=$1", [job.id])).rows[0]).toEqual(frozen);
+    expect(requests.join("\n")).not.toContain("FOREIGN_CAST_SECRET");
+    const incompatible = await commands.enqueueAppend(scope, generationRequestSchema.parse({ action: "Ask Mara again.", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000 } }));
+    await pool.query("UPDATE generation_jobs SET context_options=jsonb_set(context_options,'{storyMemoryPolicy,contextProtocol}',to_jsonb('current-continuity-v6'::text)) WHERE id=$1", [incompatible.id]);
+    const beforeRejected = await acceptedAuthoritySnapshot(scope.campaignId);
+    const callsBeforeRejected = requests.length;
+    await runGenerationJob(pool, `v3-invalid-pair-${randomUUID()}`, 30, credentialSecret);
+    expect(requests).toHaveLength(callsBeforeRejected);
+    expect((await pool.query("SELECT status FROM generation_jobs WHERE id=$1", [incompatible.id])).rows[0].status).toBe("recoverable");
+    expect(await acceptedAuthoritySnapshot(scope.campaignId)).toEqual(beforeRejected);
+  }, 60_000);
 
   it("reserves one semantic repair, replaces the main, and reviews the repaired request before commit", async () => {
     const { job, application } = await enqueue("enforce");

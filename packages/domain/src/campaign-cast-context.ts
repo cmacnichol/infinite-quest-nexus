@@ -1,5 +1,6 @@
+import { CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../contracts/src/story-prompt.js";
 import { castContextFictionFieldSchema, castGenerationSnapshotSchema, type CastGenerationSnapshot } from "../../contracts/src/campaign-cast-context.js";
-import { castFieldSchema, type CastEvidence, type CastField } from "../../contracts/src/campaign-cast.js";
+import { castFieldSchema, stateEditReplacement, type CastEvidence, type CastField } from "../../contracts/src/campaign-cast.js";
 import { castEvidenceOrder, projectCastProfile, validateCastFiction } from "./campaign-cast.js";
 import { buildScopedEntityCatalog, findEntityReferences } from "./entity-references.js";
 import { estimateTokens } from "./text.js";
@@ -11,6 +12,16 @@ export type CastV2ContextField = { field: string; value: string; authority: "use
 export type CastContextRecord = { characterId: string; revision: number; content: string; fields: (CastContextField | CastV2ContextField)[] };
 export type CastContextReason = "direct_reference" | "open_thread" | "pinned" | "recent_observation" | "recent_mention";
 export type CastContextExplanation = { selected: { characterId: string; name: string; reason: CastContextReason }[]; omitted: { characterId: string; reason: "budget" | "ignored" | "ambiguous" | "not_relevant" }[]; omittedFields?: { characterId: string; field: string; reason: "budget" }[] };
+export function castContextNotice(contextVersion: string, status: CastGenerationSnapshot["discoveryStatus"]): string {
+  if (contextVersion === CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION || contextVersion === HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION) {
+    return status === "current" ? "User corrections are portrayal authority from their effective turn. User state edits are authority until later story evidence. Older conflicting facts remain historical evidence."
+      : status === "off" ? "Character discovery is off. User corrections guide portrayal; state edits yield to later recorded story evidence. Observations are dated last-known state; use accepted history for later events."
+        : "Tracking is incomplete. User corrections remain portrayal authority; user state edits are authority until later recorded story evidence. Other observations are dated, lower-authority last-known state; use accepted history for intervening events.";
+  }
+  return status === "current" ? "Authored and user-edited fields guide portrayal. Observations are lower-authority evidence."
+    : status === "off" ? "Character discovery is off. Observations are dated, lower-authority last-known state; use accepted history for later events."
+      : "Character tracking is incomplete. Observations are dated, lower-authority last-known state; use accepted history for later events.";
+}
 export function castContextTokenBudget(contextHeadroom: number, requestHeadroom = contextHeadroom): number {
   return Math.min(3000, Math.floor(0.10 * Math.max(0, Math.min(contextHeadroom, requestHeadroom))));
 }
@@ -26,7 +37,7 @@ function usable(evidence: CastEvidence, baseTurn: number) {
 
 /** Pure selection over captured authority; this function performs no discovery or mutable reads. */
 export function selectCastContext(input: {
-  snapshot: CapturedReadonly<CastGenerationSnapshot>; direction: string; currentScene: string; openThreads: readonly string[]; budgetTokens: number; retractedObservationIds?: ReadonlySet<string>;
+  snapshot: CapturedReadonly<CastGenerationSnapshot>; direction: string; currentScene: string; openThreads: readonly string[]; budgetTokens: number; contextProtocol?: string; retractedObservationIds?: ReadonlySet<string>;
 }): CastContextSelection {
   const snapshot = castGenerationSnapshotSchema.parse(input.snapshot);
   if (snapshot.version === "cast-context-v2") return selectCastContextV2(snapshot, input);
@@ -56,7 +67,7 @@ export function selectCastContext(input: {
     || Math.max(b.person.lastObservedTurn, b.person.lastMentionedTurn ?? 0) - Math.max(a.person.lastObservedTurn, a.person.lastMentionedTurn ?? 0) || a.person.id.localeCompare(b.person.id, "en"));
   const records: CastContextRecord[] = [];
   let omittedFieldCount = 0;
-  const notice = current
+  const notice = input.contextProtocol === CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION || input.contextProtocol === HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION ? castContextNotice(input.contextProtocol, current ? "current" : snapshot.discoveryStatus === "off" ? "off" : "pending") : current
     ? "User field overrides are current portrayal authority from their effective turn. Older conflicting facts remain historical evidence."
     : "Tracking is incomplete. User field overrides remain portrayal authority; stable observations are dated historical evidence. Dynamic observations are omitted. Use accepted history for intervening events.";
   const envelope = () => JSON.stringify({ coverage, notice, characters: records.map((record) => JSON.parse(record.content) as unknown) });
@@ -74,7 +85,8 @@ export function selectCastContext(input: {
     }
     const supported = observations.filter((entry) => ids.has(entry.id));
     const superseded = new Set(supported.flatMap((entry) => entry.supersedesObservationId ? [entry.supersedesObservationId] : []));
-    const profile = projectCastProfile({ observations: supported, overrides, ...(retractedObservationIds ? { retractedObservationIds } : {}) });
+    const v3 = input.contextProtocol === CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION || input.contextProtocol === HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION;
+    const profile = projectCastProfile({ observations: supported, overrides, stateEditPrecedence: v3 ? "yield" : "locked", ...(retractedObservationIds ? { retractedObservationIds } : {}) });
     // New captures retain the already-resolved seeded appearance policy; older v1 captures replay unchanged.
     if (snapshot.retractedObservationIds && person.campaignProfile && person.fieldSources?.["appearance.description"] === "observation") {
       const value = person.profile["appearance.description"];
@@ -85,12 +97,13 @@ export function selectCastContext(input: {
       const value = profile[field];
       if (value === undefined) continue;
       const override = overrides.find((entry) => entry.field === field);
-      const observation = supported.filter((entry) => !superseded.has(entry.id) && !retractedObservationIds?.has(entry.id) && entry.field === field && entry.mode === "fact" && entry.value === value)
+      const replacement = v3 && override ? stateEditReplacement(override, supported, retractedObservationIds) : null;
+      const observation = replacement ?? supported.filter((entry) => !superseded.has(entry.id) && !retractedObservationIds?.has(entry.id) && entry.field === field && entry.mode === "fact" && entry.value === value)
         .sort((a, b) => castEvidenceOrder(b.evidence)[0] - castEvidenceOrder(a.evidence)[0]
           || castEvidenceOrder(b.evidence)[1] - castEvidenceOrder(a.evidence)[1]).at(0);
-      if (!override && (!current || observation?.evidence.kind === "historical_world")
+      if (!override && !(v3 && snapshot.discoveryStatus === "off") && (!current || observation?.evidence.kind === "historical_world")
         && (field.startsWith("state.") || field === "story.goals")) { omittedFieldCount++; continue; }
-      if (override?.evidence.kind === "user") fields.push({ field, value, authority: "user", evidenceId: override.evidence.editId, evidence: override.evidence });
+      if (override?.evidence.kind === "user" && (!v3 || !replacement)) fields.push({ field, value, authority: "user", evidenceId: override.evidence.editId, evidence: override.evidence });
       else if (observation) fields.push({ field, value, authority: "observation", evidenceId: observation.id, evidence: observation.evidence });
     }
     fields.sort((a, b) => Number(b.authority === "user") - Number(a.authority === "user"));
@@ -155,7 +168,7 @@ export function allocateCastFictionContext(candidates: readonly CastFictionCandi
 }
 
 /** New captures use their frozen, fiction-only values. Legacy captures continue through v1 above. */
-function selectCastContextV2(snapshot: CastGenerationSnapshot, input: { direction: string; currentScene: string; openThreads: readonly string[]; budgetTokens: number }): CastContextSelection {
+function selectCastContextV2(snapshot: CastGenerationSnapshot, input: { direction: string; currentScene: string; openThreads: readonly string[]; budgetTokens: number; contextProtocol?: string }): CastContextSelection {
   const baseTurn = snapshot.boundary.turnNumber;
   const current = snapshot.discoveryStatus === "current" && snapshot.trackedThroughTurn === baseTurn;
   const coverage = { fromTurn: snapshot.coverageStartTurn, throughTurn: snapshot.trackedThroughTurn, baseTurn, current };
@@ -183,9 +196,7 @@ function selectCastContextV2(snapshot: CastGenerationSnapshot, input: { directio
     if (rank === 4) omitted.push({ characterId: person.id, reason: ambiguous ? "ambiguous" : "not_relevant" });
     return { person, rank, recent };
   }).filter(item => item.rank < 4).sort((a, b) => a.rank - b.rank || b.recent - a.recent || a.person.id.localeCompare(b.person.id, "en"));
-  const notice = current ? "Authored and user-edited fields guide portrayal. Observations are lower-authority evidence."
-    : snapshot.discoveryStatus === "off" ? "Character discovery is off. Observations are dated, lower-authority last-known state; use accepted history for later events."
-      : "Character tracking is incomplete. Observations are dated, lower-authority last-known state; use accepted history for later events.";
+  const notice = castContextNotice(input.contextProtocol ?? "", current ? "current" : snapshot.discoveryStatus === "off" ? "off" : "pending");
   const candidates = ranked.map(({ person }) => ({ characterId: person.id, revision: person.revision, name: person.name,
     fields: snapshot.fiction!.find(item => item.characterId === person.id)!.fields }));
   const allocated = allocateCastFictionContext(candidates, input.budgetTokens, notice, coverage, !usesPresets);

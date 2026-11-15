@@ -1,5 +1,6 @@
 import {
-  castObservationSchema, castOverrideSchema,
+  castObservationSchema, castOverrideSchema, castEvidenceOrder, isCastStateField, stateEditReplacement,
+  type StateEditPrecedence,
   type CastEvidence, type CastObservation, type CastOverride, type CastProfile
 } from "../../contracts/src/campaign-cast.js";
 import { containsMechanicsLanguage } from "./text.js";
@@ -9,6 +10,7 @@ export type ProjectCastProfileInput = {
   observations: readonly CastObservation[];
   overrides: readonly CastOverride[];
   retractedObservationIds?: ReadonlySet<string>;
+  stateEditPrecedence?: StateEditPrecedence;
 };
 
 export function validateCastFiction(value: string): string {
@@ -18,14 +20,7 @@ export function validateCastFiction(value: string): string {
   return value;
 }
 
-export function castEvidenceOrder(evidence: CastEvidence): readonly [number, number] {
-  switch (evidence.kind) {
-    case "turn": return [evidence.turnNumber, evidence.narrationRevision];
-    case "user": return [evidence.effectiveTurnNumber, 0];
-    case "world": return [0, 0];
-    case "historical_world": return [0, 0];
-  }
-}
+export { castEvidenceOrder } from "../../contracts/src/campaign-cast.js";
 
 function compareEvidence(left: CastEvidence, right: CastEvidence): number {
   const a = castEvidenceOrder(left);
@@ -55,7 +50,7 @@ export function projectCastProfile(input: ProjectCastProfileInput): CastProfile 
   const profile: CastProfile = {};
   const values = new Map<CastObservation["field"], Set<string>>();
   for (const observation of observations.sort((a, b) => compareEvidence(a.evidence, b.evidence))) {
-    if (observation.mode !== "fact" || superseded.has(observation.id) || input.retractedObservationIds?.has(observation.id)) continue;
+    if (observation.mode !== "fact" || observation.evidence.kind === "turn" && observation.evidence.invalidated || superseded.has(observation.id) || input.retractedObservationIds?.has(observation.id)) continue;
     const fieldValues = values.get(observation.field) ?? new Set<string>();
     fieldValues.add(observation.value);
     values.set(observation.field, fieldValues);
@@ -67,7 +62,11 @@ export function projectCastProfile(input: ProjectCastProfileInput): CastProfile 
   }
   const overrides = input.overrides.map((value) => castOverrideSchema.parse(value))
     .sort((a, b) => compareEvidence(a.evidence, b.evidence));
-  for (const override of overrides) profile[override.field] = validateCastFiction(override.value);
+  for (const override of overrides) {
+    const value = validateCastFiction(override.value);
+    if (input.stateEditPrecedence !== "locked" && stateEditReplacement(override, observations, input.retractedObservationIds)) continue;
+    profile[override.field] = value;
+  }
   return profile;
 }
 
@@ -79,7 +78,7 @@ export function resolveSeededCastProfile(input: ProjectCastProfileInput & {
   const projected = projectCastProfile({ observations: input.observations, overrides: [], ...(input.retractedObservationIds ? { retractedObservationIds: input.retractedObservationIds } : {}) });
   const superseded = new Set(input.observations.map((item) => item.supersedesObservationId).filter(Boolean));
   const latest = (field: CastObservation["field"], after = -1) => input.observations
-    .filter((item) => item.field === field && item.mode === "fact" && !superseded.has(item.id) && !input.retractedObservationIds?.has(item.id) && castEvidenceOrder(item.evidence)[0] > after)
+    .filter((item) => item.field === field && item.mode === "fact" && !(item.evidence.kind === "turn" && item.evidence.invalidated) && !superseded.has(item.id) && !input.retractedObservationIds?.has(item.id) && castEvidenceOrder(item.evidence)[0] > after)
     .sort((a, b) => compareEvidence(a.evidence, b.evidence)).at(-1)?.value;
   const profile: CastProfile = {};
   const sources: Partial<Record<keyof CastProfile, "authored" | "observation" | "override">> = {};
@@ -96,6 +95,12 @@ export function resolveSeededCastProfile(input: ProjectCastProfileInput & {
     else if (field === "story.goals" && input.profile.story.goals.trim()) { profile[field] = input.profile.story.goals; sources[field] = "authored"; }
   }
   for (const override of input.overrides) {
+    const excluded = override.field === "story.goals" && input.restoreGoalsAfterTurn !== undefined
+      ? new Set([...input.retractedObservationIds ?? [], ...input.observations
+        .filter((item) => castEvidenceOrder(item.evidence)[0] <= input.restoreGoalsAfterTurn!)
+        .map((item) => item.id)])
+      : input.retractedObservationIds;
+    if (input.stateEditPrecedence !== "locked" && stateEditReplacement(override, input.observations, excluded)) continue;
     if (!(override.field in profile) && !["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(override.field)) continue;
     if (["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(override.field)) {
       profile[override.field] = validateCastFiction(override.value); sources[override.field] = "override";
@@ -107,7 +112,7 @@ export function resolveSeededCastProfile(input: ProjectCastProfileInput & {
 /** Authority class for the shared editor and server write guards. */
 /** Paths that update from the story, which Draft from story must never propose. */
 export function isCastUpdatingPath(path: string): boolean {
-  return path.startsWith("state.") || path === "story.goals";
+  return isCastStateField(path);
 }
 
 /** The per-path character limit for an authored campaign value. */

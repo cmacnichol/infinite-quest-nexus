@@ -186,10 +186,9 @@ for (const width of [1440, 390]) test(`AI character creation goes from concept t
   }
   if (screenshots) await page.screenshot({ path: `${screenshots}/character-review-${width}.png`, fullPage: width !== 390 });
   await page.locator('[data-character-edit-stage="mechanics"]').click();
-  await page.locator('[data-action="remove-character-mechanic"]').click();
-  await expect(page.locator("[data-mechanics-list]")).not.toContainText("Resolve");
-  await page.locator('[data-mechanics-collection="defaultTriggers"]').click();
-  await expect(page.locator("[data-mechanics-list]")).toContainText("Light");
+  await page.getByRole("button", { name: "Remove Resolve" }).click();
+  await expect(page.locator('[data-mechanics-table="rpgStats"]').getByRole("textbox", { name: "Name for row 1" })).toHaveCount(0);
+  await expect(page.locator('[data-mechanics-table="defaultTriggers"]').getByRole("textbox", { name: "Name for row 1" })).toHaveValue("Light");
   await page.locator('[data-character-stage="review"]').click();
   await expect(page.getByRole("button", { name: "Add to world draft", exact: true })).toBeVisible();
   expect(writes).toEqual(["/api/v1/worlds/playable-characters/generate-preview"]);
@@ -290,11 +289,14 @@ for (const existing of [false, true]) test(`Web-Next Supporting preview preserve
   await page.route("**/app/worlds/new", route => route.fulfill({ contentType: "text/html", body: "<title>Returned to draft</title>" }));
   if (!existing) await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${origin}/app/characters/supporting-proof`);
+  if (!existing) { await page.getByRole("radio", { name: "Manual" }).check(); await page.getByRole("button", { name: "Continue", exact: true }).click(); }
+  else await page.locator('[data-character-stage="identity"]').click();
   await page.locator("[data-character-use]").selectOption("supporting");
   if (!existing && screenshots) {
     await page.locator("[data-character-use]").evaluate(element => element.scrollIntoView({ block: "center" }));
     await page.screenshot({ path: `${screenshots}/web-next-supporting-generation-390.png` });
   }
+  await page.locator('[data-character-stage="method"]').click();
   await page.locator('[name="characterMethod"][value="ai"]').check();
   await page.locator('[data-character-prompt="compact"]').fill("A lighthouse guide");
   page.once("dialog", confirm => confirm.accept());

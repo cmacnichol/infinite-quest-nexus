@@ -1,3 +1,4 @@
+import { authoringJobLabel } from "../../apps/web-next/src/authoring-job-label.js";
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
 import type { PlayableCharacter } from "../../packages/contracts/src/world-library.js";
@@ -5,6 +6,7 @@ import type {
   CharacterWorkspaceSession,
   CharacterWorkspaceSessionStore
 } from "../../apps/web-next/src/character-workspace-session.js";
+import { WORLD_EDITOR_FIELDS } from "../../packages/client-core/src/characters/profile-fields.js";
 import { mountCharacterWorkspacePage } from "../../apps/web-next/src/character-workspace-page.js";
 
 const draft = () => ({
@@ -102,12 +104,76 @@ function key(window: Window, value: string, shiftKey = false): Event {
 }
 
 describe("Character Workspace page", () => {
+  it("shows registry guidance and associates it with every world character field", () => {
+    const { document, root } = fixture();
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(generatedCharacter)), navigate: vi.fn() });
+    for (const stage of ["identity", "story", "appearance"]) {
+      click(document, `[data-character-stage="${stage}"]`);
+      const descriptors = WORLD_EDITOR_FIELDS.filter((field) => {
+        const group = field.world!.group;
+        return stage === "identity" ? ["name", "identity"].includes(group) : stage === "story" ? ["core", "story", "notes"].includes(group) : group === "appearance";
+      });
+      for (const descriptor of descriptors) {
+        const name = descriptor.path === "name" ? "candidate.name" : `candidate.profile.${descriptor.path}`;
+        const control = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[name="${name}"]`)!;
+        expect(control, name).not.toBeNull();
+        const hint = control.parentElement!.querySelector<HTMLElement>("small.character-field-hint")!;
+        const error = control.parentElement!.querySelector<HTMLElement>("small.character-field-error")!;
+        expect(control.placeholder, name).toBe(descriptor.world!.placeholder);
+        expect(hint?.textContent, name).toBe(descriptor.world!.title);
+        expect(hint?.id, name).toBeTruthy();
+        expect(control.getAttribute("aria-describedby"), name).toBe(`${hint.id} ${error.id}`);
+      }
+    }
+  });
+  it("edits character use and supporting context flags on Identity", () => {
+    const { document, window, root } = fixture();
+    const sessionStore = store(session(generatedCharacter));
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore, navigate: vi.fn() });
+    click(document, '[data-character-stage="method"]');
+    expect(document.querySelector('[data-character-use]')).toBeNull();
+    click(document, '[data-character-stage="identity"]');
+    const use = document.querySelector<HTMLSelectElement>('[data-character-use]')!;
+    expect(use.value).toBe("playable");
+    expect(document.querySelector('[data-character-starting-cast]')?.parentElement?.parentElement?.hasAttribute('hidden')).toBe(true);
+    use.querySelector('option[value="both"]')!.setAttribute("selected", ""); use.dispatchEvent(new window.Event("change", { bubbles: true }));
+    const starting = document.querySelector<HTMLInputElement>('[data-character-starting-cast]')!;
+    const context = document.querySelector<HTMLInputElement>('[data-character-always-context]')!;
+    expect(starting.checked).toBe(true); expect(context.checked).toBe(false);
+    starting.checked = false; starting.dispatchEvent(new window.Event("change", { bubbles: true }));
+    context.checked = true; context.dispatchEvent(new window.Event("change", { bubbles: true }));
+    const updatedUse = document.querySelector<HTMLSelectElement>('[data-character-use]')!;
+    updatedUse.querySelectorAll("option[selected]").forEach((option) => option.removeAttribute("selected"));
+    updatedUse.querySelector('option[value="supporting"]')!.setAttribute("selected", ""); updatedUse.dispatchEvent(new window.Event("change", { bubbles: true }));
+    expect(document.querySelector('[data-character-stage="mechanics"]')?.hasAttribute('hidden')).toBe(true);
+    click(document, '[data-character-stage="review"]'); click(document, '[data-action="accept-character"]');
+    expect(sessionStore.complete.mock.calls[0]?.[2].candidate).toMatchObject({ campaignUse: "supporting", startingCastDefault: false, alwaysInContext: true });
+  });
+
+  it("opens an existing character on Review with unlocked stages and edit-specific Method copy", () => {
+    const { document, root } = fixture();
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(generatedCharacter)) });
+    expect(document.querySelector("[data-character-review]")).not.toBeNull();
+    expect([...document.querySelectorAll<HTMLButtonElement>("[data-character-stage]")].every((button) => !button.disabled)).toBe(true);
+    click(document, '[data-character-stage="method"]');
+    expect(root.textContent).toContain("Regenerate with AI");
+    expect(root.textContent).toContain("Describe changes and generate a replacement draft for review, or return to Review.");
+  });
+
+  it("focuses the missing story field when accepting an incomplete existing character", () => {
+    const { document, root } = fixture();
+    const candidate = { ...generatedCharacter, profile: { ...generatedCharacter.profile!, story: { ...generatedCharacter.profile!.story, role: "", personality: "" } } };
+    mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(candidate)) });
+    expect(document.querySelector("[data-character-review]")?.textContent).toContain("story");
+    click(document, '[data-action="accept-character"]');
+    expect(document.activeElement).toBe(document.querySelector('[name="candidate.profile.story.role"]'));
+  });
+
   it("opens optional story details when validation targets a hidden field", () => {
     const { document, root } = fixture();
     const candidate = { ...generatedCharacter, profile: { ...generatedCharacter.profile!, story: { ...generatedCharacter.profile!.story, goals: "x".repeat(200_001) } } };
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(candidate)) });
-    click(document, '[data-action="continue-character"]'); click(document, '[data-action="continue-character"]');
-    click(document, '[data-action="continue-character"]');
+    click(document, '[data-action="accept-character"]');
     const goals = document.querySelector('[name="candidate.profile.story.goals"]');
     expect(goals?.closest('details')?.hasAttribute('open')).toBe(true);
     expect(document.activeElement).toBe(goals);
@@ -164,9 +230,9 @@ describe("Character Workspace page", () => {
     const { document, root } = fixture();
     const sessionStore = store(session(generatedCharacter));
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore, navigate: vi.fn() });
-    for (let index = 0; index < 4; index += 1) click(document, '[data-action="continue-character"]');
-    expect(document.querySelector('[data-action="remove-character-mechanic"]')).not.toBeNull();
-    click(document, '[data-action="remove-character-mechanic"]');
+    click(document, '[data-character-stage="mechanics"]');
+    expect(document.querySelector('[data-mechanics-table="rpgStats"] button[aria-label^="Remove"]')).not.toBeNull();
+    click(document, '[data-mechanics-table="rpgStats"] button[aria-label^="Remove"]');
     click(document, '[data-action="continue-character"]'); click(document, '[data-action="accept-character"]');
     expect(sessionStore.complete.mock.calls[0]?.[2].candidate.rpgStats).toEqual([]);
     expect(sessionStore.complete.mock.calls[0]?.[2].candidate.defaultTriggers).toEqual(generatedCharacter.defaultTriggers);
@@ -234,6 +300,7 @@ describe("Character Workspace page", () => {
       loadGenerationProgress: vi.fn().mockResolvedValue({ status: "processing", phase: "generating", progressPercent: 35, message: "Generating" }),
       generationPollIntervalMs: 1
     });
+    click(document, '[data-character-stage="method"]');
     const ai = document.querySelector<HTMLInputElement>('[value="ai"]')!;
     ai.checked = true;
     ai.dispatchEvent(new window.Event("change", { bubbles: true }));
@@ -511,7 +578,7 @@ describe("Character Workspace page", () => {
     const edited = session(generatedCharacter);
     edited.worldContext.playableCharacters = [generatedCharacter];
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(edited) });
-    click(document, '[data-action="continue-character"]');
+    click(document, '[data-character-stage="identity"]');
     expect(document.querySelector('[name="candidate.id"]')?.getAttribute("aria-invalid")).toBeNull();
     click(document, '[data-action="continue-character"]');
     expect(document.querySelector('[name="candidate.profile.story.role"]')).not.toBeNull();
@@ -524,9 +591,9 @@ describe("Character Workspace page", () => {
       rpgStats: Array.from({ length: 10_001 }, (_, index) => ({ name: `Stat ${index}`, value: index }))
     });
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(overfull) });
-    for (let index = 0; index < 4; index += 1) click(document, '[data-action="continue-character"]');
+    click(document, '[data-character-stage="mechanics"]');
     click(document, '[data-action="continue-character"]');
-    const target = document.querySelector<HTMLButtonElement>('[data-mechanics-collection="rpgStats"]');
+    const target = document.querySelector<HTMLInputElement>('[data-mechanics-table="rpgStats"] input');
     const error = document.querySelector<HTMLElement>('[data-field-error="candidate.rpgStats"]');
     expect(document.activeElement).toBe(target);
     expect(target?.getAttribute("aria-invalid")).toBe("true");
@@ -548,9 +615,9 @@ describe("Character Workspace page", () => {
     const { document, window, root } = fixture();
     const edited = { ...generatedCharacter, source: {}, profile: { ...generatedCharacter.profile!, story: { ...generatedCharacter.profile!.story, personality: "" } } };
     mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(edited)) });
-    for (const stage of ["identity", "story", "appearance", "mechanics"] as const) click(document, '[data-action="continue-character"]');
-    expect(document.querySelector(".character-mechanics-master")).not.toBeNull();
-    expect(document.querySelector(".character-mechanics-detail")).not.toBeNull();
+    click(document, '[data-character-stage="mechanics"]');
+    expect(document.querySelector('[data-mechanics-table="rpgStats"]')).not.toBeNull();
+    expect(document.querySelector('[data-mechanics-table="defaultTriggers"]')).not.toBeNull();
     click(document, '[data-action="continue-character"]');
     const review = document.querySelector("[data-character-review]");
     expect(review?.textContent).toContain("Manual");
@@ -589,6 +656,7 @@ describe("Character Workspace page", () => {
     const sessionStore = store(session(generatedCharacter));
     const navigate = vi.fn();
     const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore, navigate });
+    click(document, '[data-character-stage="method"]');
     const ai = document.querySelector<HTMLInputElement>('[value="ai"]')!;
     ai.checked = true;
     ai.dispatchEvent(new window.Event("change", { bubbles: true }));
@@ -639,6 +707,29 @@ describe("durable character recovery", () => {
     return { id: "character-job", revision: 2, status: "awaiting_review" as const, target: { kind: "new_world" as const }, stages: [], expiresAt: "2026-09-13T00:00:00.000Z", canApply: false, incomplete: false, kind: "character" as const,
       request: { kind: "character" as const, idempotencyKey: "submission", target: { kind: "new_world" as const }, prompt: "A guide", content: draft() }, result: generatedCharacter };
   }
+
+  it("leaves the durable proposal when changing to supporting and retains the current copy", async () => {
+    const { root, document, window } = fixture(); const active = session();
+    active.origin = "world-creation"; active.parentRoute = "/app/worlds/new"; active.expectedWorldRevision = null;
+    const sessionStore = store(active);
+    const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore, navigate: vi.fn(), resumeJobId: "character-job", authoringJobsApi: {
+      loadAuthoringCapabilities: async () => ({ enabled: true, supportedKinds: ["character"] }), loadAuthoringJob: async () => durableJob()
+    } as never });
+    try {
+      await vi.waitFor(() => expect(root.textContent).toContain("Review available results"));
+      click(document, '[data-action="review-character-job"]');
+      click(document, '[data-character-stage="identity"]');
+      input(document, window, '[name="candidate.name"]', "Edited name");
+      const use = document.querySelector<HTMLSelectElement>('[data-character-use]')!;
+      use.querySelectorAll("option[selected]").forEach((option) => option.removeAttribute("selected"));
+      use.querySelector('option[value="supporting"]')!.setAttribute("selected", "");
+      use.dispatchEvent(new window.Event("change", { bubbles: true }));
+      expect(root.textContent).toContain("Saved proposals remain available. Supporting generation uses a local preview.");
+      click(document, '[data-character-stage="review"]'); click(document, '[data-action="accept-character"]');
+      expect(sessionStore.complete.mock.calls[0]?.[2].candidate).toMatchObject({ name: "Edited name", campaignUse: "supporting" });
+    } finally { mounted.dispose(); }
+  });
+
   it("offers explicit parent restoration before mounting a lost local character session", async () => {
     const { root, document } = fixture();
     const mounted = mountCharacterWorkspacePage(root, "lost", { sessionStore: store(null), resumeJobId: "character-job", authoringJobsApi: {
@@ -704,13 +795,90 @@ it("cancel leaves a recovered workspace even when its local session is gone", as
 
 it.each([false, true])("P27-F4 character list reaches page two with an unrelated first page (missing session %s)", async missing => {
   const { root, document } = fixture();
-  const list = vi.fn().mockResolvedValueOnce({ jobs: [{ id: "other-world", kind: "world_concept", status: "applied" }], nextCursor: "characters-page-two" }).mockResolvedValueOnce({ jobs: [{ id: "saved-character", kind: "character", status: "awaiting_review" }] });
+  const job = { id: "saved-character", kind: "character", status: "awaiting_review", target: { kind: "new_world" as const }, expiresAt: "2026-11-20T10:00:00.000Z" };
+  const list = vi.fn().mockResolvedValueOnce({ jobs: [{ id: "other-world", kind: "world_concept", status: "applied" }], nextCursor: "characters-page-two" }).mockResolvedValueOnce({ jobs: [job] });
   const mounted = mountCharacterWorkspacePage(root, "local", { sessionStore: store(missing ? null : session()), authoringJobsApi: { loadAuthoringCapabilities: vi.fn().mockResolvedValue({ enabled: true, supportedKinds: ["character"] }), listAuthoringJobs: list } as never });
   if (!missing) { await settle(); click(document, '[data-action="list-character-jobs"]'); }
   await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(1));
   const more = document.querySelector<HTMLButtonElement>('[data-action="more-character-jobs"]'); expect(more).not.toBeNull(); expect(more!.hidden).toBe(false);
   more!.click();
-  await vi.waitFor(() => expect(root.textContent).toContain("saved-character"));
+  await vi.waitFor(() => expect(root.textContent).toContain(authoringJobLabel(job)));
+  const proposal = document.querySelector<HTMLElement>(missing ? "[data-recovery-list] button" : "[data-character-jobs] a")!;
+  expect(proposal.textContent).toBe(authoringJobLabel(job)); expect(proposal.textContent).not.toContain(job.id); expect(proposal.title).toBe(job.id);
   expect(list).toHaveBeenLastCalledWith("characters-page-two", expect.any(AbortSignal)); expect(more!.hidden).toBe(true);
   expect(root.textContent).not.toContain("other-world"); mounted.dispose();
+});
+
+
+it("organizes the current unsaved candidate and invalidates stale results on edit", async () => {
+  const { document, window, root } = fixture();
+  const pending = deferred<any>();
+  const organizeCharacter = vi.fn((_worldId: string, _request: unknown, _signal?: AbortSignal) => pending.promise);
+  const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(generatedCharacter)), organizeCharacter });
+  click(document, '[data-character-stage="story"]');
+  input(document, window as unknown as Window, '[name="candidate.profile.story.role"]', "Unsaved role");
+  click(document, '[data-organize-panel] button');
+  expect(organizeCharacter.mock.calls[0]![0]).toBe("world-1");
+  expect((organizeCharacter.mock.calls[0]![1] as any).character.profile.story.role).toBe("Unsaved role");
+  const signal = organizeCharacter.mock.calls[0]![2] as AbortSignal;
+  input(document, window as unknown as Window, '[name="candidate.profile.story.role"]', "Newer role");
+  expect(signal.aborted).toBe(true);
+  pending.resolve({ candidate: generatedCharacter.profile, evidence: [], unassignedText: [], conflicts: [], warnings: [], protocolVersion: "v3" });
+  await settle();
+  expect(document.querySelector('[data-action="apply-organize"]')).toBeNull();
+  expect(document.querySelector<HTMLInputElement>('[name="candidate.profile.story.role"]')!.value).toBe("Newer role");
+  mounted.dispose();
+});
+
+it("offers Organize notes with AI… even without retained guidance", () => {
+  const { document, root } = fixture();
+  const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session({ ...generatedCharacter, characterText: "" })), organizeCharacter: vi.fn() });
+  click(document, '[data-character-stage="story"]');
+  expect(document.querySelector('[data-character-source]')).toBeNull();
+  expect(document.querySelector('[data-organize-panel] button')?.textContent).toBe("Organize notes with AI…");
+  mounted.dispose();
+});
+
+it("explains that Organize requires a saved world", () => {
+  const { document, root } = fixture();
+  const created = { ...session(generatedCharacter), origin: "world-creation" as const, parentRoute: "/app/worlds/new", expectedWorldRevision: null };
+  mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(created) });
+  click(document, '[data-character-stage="story"]');
+  expect(document.querySelector('[data-organize-panel]')?.textContent).toBe("Organize is available after the world is saved.");
+});
+
+it("refines the unsaved workspace candidate without changing its roster", async () => {
+  const { document, window, root } = fixture();
+  const original = structuredClone(generatedCharacter); original.id = "existing";
+  const context = session(original); context.worldContext = { ...draft(), playableCharacters: [structuredClone(original)] } as any;
+  const preview = vi.fn(async (request) => { const result = structuredClone(request.content.playableCharacters[0]); result.profile.story.role = "Sailor"; return { character: result }; });
+  mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(context), generateCharacterPreview: preview as any, navigate: vi.fn() });
+  click(document, '[data-character-stage="story"]'); input(document, window as unknown as Window, '[name="candidate.profile.story.role"]', 'Unsaved');
+  click(document, '[data-refine-open]'); input(document, window as unknown as Window, '[data-refine-panel] textarea', 'Make bolder'); click(document, '[data-refine-generate]'); await settle();
+  expect(preview.mock.calls[0]![0].characterId).toBe('existing'); expect(preview.mock.calls[0]![0].content.playableCharacters[0].profile.story.role).toBe('Unsaved');
+  expect(context.worldContext.playableCharacters[0]!.profile!.story.role).toBe('Guide'); click(document, '[data-refine-apply]'); expect(document.querySelector<HTMLTextAreaElement>('[name="candidate.profile.story.role"]')!.value).toBe('Sailor');
+});
+
+it("discards a late refinement when navigating to another stage", async () => {
+  const { document, window, root } = fixture();
+  const pending = deferred<{ character: PlayableCharacter }>();
+  const preview = vi.fn((_request, _signal) => pending.promise);
+  const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(generatedCharacter)), generateCharacterPreview: preview as any, navigate: vi.fn() });
+  click(document, '[data-character-stage="story"]');
+  input(document, window as unknown as Window, '[name="candidate.profile.story.role"]', "Unsaved role");
+  click(document, '[data-refine-open]');
+  input(document, window as unknown as Window, '[data-refine-panel] textarea', "Make bolder");
+  click(document, '[data-refine-generate]');
+  const panel = document.querySelector<HTMLElement>('[data-refine-panel]')!;
+  const signal = preview.mock.calls[0]![1] as AbortSignal;
+  click(document, '[data-character-stage="appearance"]');
+  expect(signal.aborted).toBe(true);
+  const proposed = structuredClone(generatedCharacter); proposed.profile!.story.role = "Late proposal";
+  pending.resolve({ character: proposed }); await settle();
+  expect(panel.querySelector('[data-refine-apply]')).toBeNull();
+  expect(panel.textContent).not.toContain("Late proposal");
+  click(document, '[data-character-stage="story"]');
+  expect(document.querySelector('[data-refine-apply]')).toBeNull();
+  expect(document.querySelector<HTMLTextAreaElement>('[name="candidate.profile.story.role"]')!.value).toBe("Unsaved role");
+  mounted.dispose();
 });

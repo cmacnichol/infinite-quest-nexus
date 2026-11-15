@@ -26,6 +26,11 @@ const completeCharacter = (overrides: Partial<PlayableCharacter> = {}): Playable
 });
 
 describe("character workspace model", () => {
+  it("starts editing on review with every stage unlocked", () => {
+    const state = createCharacterWorkspaceState({ roster: [], candidate: completeCharacter(), mode: "edit" });
+    expect(state).toMatchObject({ stage: "review", furthestStageIndex: 5 });
+  });
+
   it("does not use unknown retained profile fields as authored story", () => {
     const state = createCharacterWorkspaceState({ roster: [], method: "manual", candidate: completeCharacter({ profile: characterProfileSchema.parse({ story: { importedText: "retained" } }) }) });
     expect(characterHandoffCandidate(state)).toBeNull();

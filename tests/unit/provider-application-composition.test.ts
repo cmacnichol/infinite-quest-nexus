@@ -99,13 +99,27 @@ describe("provider application composition capability cache transactions", () =>
       return { rows: [] };
     });
     const composition = createApiProviderApplicationComposition({ query } as never, {
-      credentialSecret: "test-secret", transport: {} as never, castContextEnabled
+      credentialSecret: "test-secret", transport: {} as never, castContextEnabled, castEditingEnabled: true
     });
     const preview = await composition.application.previewPrompt({
       ownerUserId, campaignId: "00000000-0000-4000-8000-000000000003", key: "story_system", content: "WRITER"
     });
     const system = preview.sections.find((section) => section.label === "System prompt preview (output encoding pending)")!;
     expect(system.content.includes("Campaign cast authority:")).toBe(castContextEnabled);
+    expect(system.content.includes("User corrections govern current portrayal from their effective turn, including intentional empty values; user state edits govern until later story evidence")).toBe(castContextEnabled);
+  });
+
+  it("uses the V2 preview contract when cast editing is unavailable", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
+      if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
+      return { rows: [] };
+    });
+    const composition = createApiProviderApplicationComposition({ query } as never, { credentialSecret: "test-secret", transport: {} as never, castContextEnabled: true, castEditingEnabled: false });
+    const preview = await composition.application.previewPrompt({ ownerUserId, campaignId: "00000000-0000-4000-8000-000000000003", key: "story_system", content: "WRITER" });
+    const system = preview.sections.find(section => section.label === "System prompt preview (output encoding pending)")!;
+    expect(system.content).toContain("User field overrides govern current portrayal");
+    expect(system.content).not.toContain("User corrections govern current portrayal");
   });
 
   it("allows image and embedding execution while text capacity is exhausted", async () => {
