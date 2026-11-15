@@ -1,3 +1,5 @@
+import { createNexusApiClient, createNoopSessionPort } from "@infinite-quest/client-web";
+import { renderOrganizePanel } from "./character-organize-panel";
 import { WORLD_EDITOR_FIELDS } from "../../../packages/client-core/src/characters/profile-fields";
 import { MAX_CHARACTER_MECHANICS_ITEMS, playableCharacterSchema, worldContentSchema } from "../../../packages/contracts/src/world-library";
 import type { AuthoringJobView, AuthoringSubmit } from "../../../packages/contracts/src/authoring";
@@ -31,6 +33,7 @@ import { structuredFieldsFor } from "./world-editor-fields";
 import type { MountedPage } from "./world-library-page";
 
 export interface CharacterWorkspacePageDependencies {
+  organizeCharacter?: ReturnType<typeof createNexusApiClient>["worlds"]["organizeCharacter"];
   authoringJobsApi?: AuthoringJobsApi;
   resumeJobId?: string;
   recoveredSession?: CharacterWorkspaceSession;
@@ -190,6 +193,7 @@ export function mountCharacterWorkspacePage(
   let candidateDirty = activeSession.candidate !== null;
   let candidateEdited = false;
   let disposed = false;
+  let organizePanel: { dispose(): void } | null = null;
   let completed = false;
   let generationSequence = 0;
   let generationController: AbortController | null = null;
@@ -340,6 +344,7 @@ export function mountCharacterWorkspacePage(
   function fieldChanged(path: string[], value: unknown): void {
     if (disposed) return;
     state = editCharacterCandidate(state, path, value);
+    if (organizePanel) { organizePanel.dispose(); organizePanel = null; const host = canvas.querySelector<HTMLElement>("[data-organize-panel]"); if (host) mountOrganize(host); }
     candidateEdited = true;
     durableSession?.edit(state.candidate);
     candidateDirty = true;
@@ -469,6 +474,17 @@ export function mountCharacterWorkspacePage(
     aliases.addEventListener("input", onAliasesInput);
   }
 
+  function mountOrganize(host: HTMLElement): void {
+    if (activeSession.origin === "world-creation") { host.textContent = "Organize is available after the world is saved."; return; }
+    const worldId = decodeURIComponent(new URL(activeSession.parentRoute, "https://local.invalid").pathname.split("/").at(-1)!);
+    const organize = dependencies.organizeCharacter ?? createNexusApiClient({ basePath: "/api/v1", session: createNoopSessionPort() }).worlds.organizeCharacter;
+    const current = state.candidate;
+    organizePanel = renderOrganizePanel(host, { current, organize: (signal) => organize(worldId, { expectedRevision: activeSession.expectedWorldRevision!, character: current }, signal), onApply: (next) => {
+      if (disposed) return;
+      state = { ...state, candidate: next }; candidateEdited = true; candidateDirty = true; durableSession?.edit(next); markDirty(); render();
+    } });
+  }
+
   function renderStory(): void {
     const stage = document.createElement("div"); stage.className = "character-stage";
     stage.innerHTML = "<header><h2>Story</h2><p>Add at least one story detail. You can leave the rest blank.</p></header>";
@@ -487,7 +503,8 @@ export function mountCharacterWorkspacePage(
       const label = document.createElement("summary"); label.textContent = "Retained guidance (source only)";
       const guidance = document.createElement("p"); guidance.textContent = "This text is preserved as source material. Add any facts you want to use to the structured story fields above; it is not promoted automatically.";
       const text = document.createElement("p"); text.textContent = state.candidate.characterText;
-      source.append(label, guidance, text); form.append(source);
+      const panel = document.createElement("div"); panel.dataset.organizePanel = "";
+      source.append(label, guidance, text, panel); form.append(source); mountOrganize(panel);
     }
     stage.append(form); canvas.replaceChildren(stage, actions()); bindCandidateInputs();
   }
@@ -617,6 +634,7 @@ export function mountCharacterWorkspacePage(
   }
 
   function render(): void {
+    organizePanel?.dispose(); organizePanel = null;
     canvas.dataset.characterCanvas = state.stage;
     if (state.stage === "method") renderMethod();
     if (state.stage === "identity") renderIdentity();
@@ -997,6 +1015,7 @@ export function mountCharacterWorkspacePage(
       if (disposed) return;
       closeDialog(false);
       disposed = true;
+      organizePanel?.dispose(); organizePanel = null;
       durableController.abort(); durableSession?.dispose();
       root.removeEventListener("input", onRootInput);
       root.removeEventListener("click", onRootClick);

@@ -84,3 +84,24 @@ test("mechanics pagination preserves keyboard focus and reports its range", asyn
   await page.keyboard.press("Enter");
   await expect(page.getByRole("textbox", { name: "Name for row 1", exact: true })).toBeFocused();
 });
+
+
+for (const width of [1280, 390]) test(`organize retained guidance at ${width}px`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 900 });
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  const draft = { schemaVersion: 5, world: { title: "Glass Atlas", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} };
+  const candidate = { id: "hero", name: "Ilyra", characterText: "A patient guide.", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: [], defaultTriggers: [], source: {} };
+  await page.addInitScript((session) => sessionStorage.setItem("iqn:character-workspace:session:local", JSON.stringify(session)), { version: 1, key: "local", origin: "world-editor", mode: "edit", workflowId: "workflow-1", parentRoute: "/app/worlds/world-1?tab=characters", expectedWorldRevision: 4, parentDraft: draft, worldContext: draft, rosterSummaries: [], candidate, expiresAt: Date.now() + 60_000 });
+  await page.route("**/draft/playable-characters/organize", route => route.fulfill({ json: { candidate: { story: { role: "Guide" } }, evidence: [{ path: "story.role", source: "notes", quote: "A patient guide." }], unassignedText: [], conflicts: [], warnings: [], protocolVersion: "v3" } }));
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/characters/local`);
+  await page.locator('[data-character-stage="story"]').click();
+  await page.locator('summary', { hasText: 'Retained guidance' }).click();
+  await page.getByRole('button', { name: 'Organize notes with AI' }).click();
+  await expect(page.getByText('Proposed: Guide')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath(`organize-${width}.png`), fullPage: true });
+  await page.getByRole('button', { name: 'Apply selected' }).click();
+  await expect(page.locator('[name="candidate.profile.story.role"]')).toHaveValue('Guide');
+  expect(errors).toEqual([]);
+});

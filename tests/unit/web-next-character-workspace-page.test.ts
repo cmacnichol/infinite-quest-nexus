@@ -804,3 +804,32 @@ it.each([false, true])("P27-F4 character list reaches page two with an unrelated
   expect(list).toHaveBeenLastCalledWith("characters-page-two", expect.any(AbortSignal)); expect(more!.hidden).toBe(true);
   expect(root.textContent).not.toContain("other-world"); mounted.dispose();
 });
+
+
+it("organizes the current unsaved candidate and invalidates stale results on edit", async () => {
+  const { document, window, root } = fixture();
+  const pending = deferred<any>();
+  const organizeCharacter = vi.fn((_worldId: string, _request: unknown, _signal?: AbortSignal) => pending.promise);
+  const mounted = mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(session(generatedCharacter)), organizeCharacter });
+  click(document, '[data-character-stage="story"]');
+  input(document, window as unknown as Window, '[name="candidate.profile.story.role"]', "Unsaved role");
+  click(document, '[data-organize-panel] button');
+  expect(organizeCharacter.mock.calls[0]![0]).toBe("world-1");
+  expect((organizeCharacter.mock.calls[0]![1] as any).character.profile.story.role).toBe("Unsaved role");
+  const signal = organizeCharacter.mock.calls[0]![2] as AbortSignal;
+  input(document, window as unknown as Window, '[name="candidate.profile.story.role"]', "Newer role");
+  expect(signal.aborted).toBe(true);
+  pending.resolve({ candidate: generatedCharacter.profile, evidence: [], unassignedText: [], conflicts: [], warnings: [], protocolVersion: "v3" });
+  await settle();
+  expect(document.querySelector('[data-action="apply-organize"]')).toBeNull();
+  expect(document.querySelector<HTMLInputElement>('[name="candidate.profile.story.role"]')!.value).toBe("Newer role");
+  mounted.dispose();
+});
+
+it("explains that Organize requires a saved world", () => {
+  const { document, root } = fixture();
+  const created = { ...session(generatedCharacter), origin: "world-creation" as const, parentRoute: "/app/worlds/new", expectedWorldRevision: null };
+  mountCharacterWorkspacePage(root, "opaque-key", { sessionStore: store(created) });
+  click(document, '[data-character-stage="story"]');
+  expect(document.querySelector('[data-organize-panel]')?.textContent).toBe("Organize is available after the world is saved.");
+});
