@@ -1,6 +1,6 @@
 # Character Review Dismissal and Retraction Implementation Plan
 
-**Status:** Implemented and acceptance evidence recorded; final whole-branch review is pending. See [acceptance record](../../review/character-review-dismissal-and-retraction-acceptance.md).
+**Status:** Implemented and independently reviewed; the requested fixes were approved. See the [acceptance record](../../review/character-review-dismissal-and-retraction-acceptance.md) for evidence, remaining scaling limits, and unverified platform and provider coverage. No deployment or activation is implied.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -12,7 +12,7 @@
 
 **Spec:** [Character review dismissal and fact retraction](../specs/2026-11-14-character-review-dismissal-and-retraction-design.md).
 
-Status: proposed plan; not implemented. Existing editor work is committed as `8eeecef3`. Complete Stage A before Stage B; each is independently releasable after its verification gate. No deployment or capability activation is authorized by this plan.
+Historical plan baseline: the editor work was committed as `8eeecef3` when this plan was proposed. Stage A preceded Stage B, with separate verification gates. The task checkboxes below record the original plan, not current implementation status. No deployment or capability activation was authorized by this plan.
 
 ## Global Constraints
 
