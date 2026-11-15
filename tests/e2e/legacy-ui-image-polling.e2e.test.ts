@@ -200,24 +200,38 @@ test("pending_jobs_keep_the_five_second_poll_cadence", async ({ page }) => {
   const id = campaignId(fixture);
   const pending = makeImageJob(fixture, "generating");
   let jobsReads = 0;
+  const releaseFirstRead = deferred<void>();
   await page.route("**/api/v1/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === campaignPath(id, "illustration-config")) return route.fulfill({ json: enabledConfig });
     if (path === campaignPath(id, "illustration-segments")) return route.fulfill({ json: { segments: [] } });
     if (path === campaignPath(id, "image-jobs")) {
       jobsReads += 1;
+      if (jobsReads === 1) await releaseFirstRead.promise;
       return route.fulfill({ json: { jobs: [pending] } });
     }
     return route.fallback();
   });
-  await page.clock.install();
+  await page.clock.install({ time: new Date(timestamp) });
+  await page.clock.pauseAt(new Date(timestamp));
   await prepareStoryPage(page, [id]);
   await page.goto(`${origin}/story/${id}`);
   await expect.poll(() => jobsReads).toBe(1);
+  await page.evaluate(() => {
+    const originalSetTimeout = window.setTimeout.bind(window);
+    (window as Window & { __imagePollTimers?: number }).__imagePollTimers = 0;
+    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      if (timeout === 5_000) (window as Window & { __imagePollTimers: number }).__imagePollTimers += 1;
+      return originalSetTimeout(handler, timeout, ...args);
+    }) as typeof window.setTimeout;
+  });
+  releaseFirstRead.resolve();
+  await expect.poll(() => page.evaluate(() => (window as Window & { __imagePollTimers: number }).__imagePollTimers)).toBe(1);
   await page.clock.runFor(4_999);
   expect(jobsReads).toBe(1);
   await page.clock.runFor(1);
   await expect.poll(() => jobsReads).toBe(2);
+  await expect.poll(() => page.evaluate(() => (window as Window & { __imagePollTimers: number }).__imagePollTimers)).toBe(2);
   await page.clock.runFor(5_000);
   await expect.poll(() => jobsReads).toBe(3);
 });

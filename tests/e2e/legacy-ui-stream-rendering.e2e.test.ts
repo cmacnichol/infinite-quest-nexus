@@ -458,8 +458,15 @@ test("manual wheel scrolling pauses auto-follow until the reader resumes it", as
   const followButton = page.getByRole("button", { name: "Resume following live narration", exact: true });
   await expect(followButton).toBeHidden();
   const beforeManualWheel = await page.evaluate(() => window.scrollY);
+  await page.evaluate(() => {
+    (window as Window & { __manualWheelSettled?: boolean }).__manualWheelSettled = false;
+    window.addEventListener("scrollend", () => {
+      (window as Window & { __manualWheelSettled?: boolean }).__manualWheelSettled = true;
+    }, { once: true });
+  });
   await page.mouse.wheel(0, 700);
   await expect(followButton).toBeVisible();
+  await page.waitForFunction(() => (window as Window & { __manualWheelSettled?: boolean }).__manualWheelSettled);
   const pausedScrollY = await page.evaluate(() => window.scrollY);
   expect(pausedScrollY).toBeGreaterThan(beforeManualWheel);
 
