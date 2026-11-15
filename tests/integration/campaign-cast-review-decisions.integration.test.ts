@@ -158,6 +158,10 @@ describe('cast review decisions', () => {
     const legacy = await repo.resolveDetail!(scope, id, legacyRequest);
     expect(legacy.disposition).toBe('dismiss');
     expect(await repo.resolveDetail!(scope, id, legacyRequest)).toEqual(legacy);
+    const equivalent = { action: 'dismiss_detail' as const, observationIndex: 0, expectedCastRevision: result.revision, expectedBoundary: result.boundary,
+      expectedReviewRevision: 2, sourceHash: source.sourceHash, idempotencyKey: legacyRequest.idempotencyKey };
+    expect(await repo.reviewDecision(scope, id, equivalent)).toMatchObject({ candidateId: id, disposition: 'dismiss_detail', reviewRevision: 3 });
+    await expect(repo.reviewDecision(scope, id, { ...equivalent, observationIndex: 1 })).rejects.toMatchObject({ code: 'cast_idempotency_conflict' });
     await expect(repo.resolveDetail!(scope, id, { ...legacyRequest, action: 'confirm' })).rejects.toMatchObject({ code: 'cast_idempotency_conflict' });
     const listed = await repo.dismissedReview(scope, {});
     expect(listed.decisions).toHaveLength(1);

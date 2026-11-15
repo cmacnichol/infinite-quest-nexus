@@ -73,7 +73,7 @@ export async function reviewDecisionWithClient(client: DatabaseClient, scope: Ca
   if (!row) throw new CampaignCastError("cast_not_found");
   const requestHash = sha256(stableStringify({ id, request }));
   const prior = (await client.query("SELECT request_hash,result_receipt FROM campaign_cast_review_decisions WHERE campaign_id=$1 AND owner_user_id=$2 AND idempotency_key=$3", [scope.campaignId, scope.ownerUserId, request.idempotencyKey])).rows[0];
-  if (prior) { if (prior.request_hash !== requestHash) throw new CampaignCastError("cast_idempotency_conflict"); return reviewDecisionResultSchema.parse(prior.result_receipt); }
+  if (prior) { if (prior.request_hash !== requestHash) throw new CampaignCastError("cast_idempotency_conflict"); const { decisionId, candidateId, reviewRevision, revision, boundary, disposition } = prior.result_receipt; return reviewDecisionResultSchema.parse({ decisionId, candidateId, reviewRevision, revision, boundary, disposition }); }
   const revision = await readReviewRevision(client, scope);
   if (!await currentSource(client, scope, cast, row) || request.sourceHash !== row.source.sourceHash || request.expectedCastRevision !== cast.revision || stableStringify(request.expectedBoundary) !== stableStringify(cast.boundary) || request.expectedReviewRevision !== revision) throw new CampaignCastError("cast_revision_conflict");
   if ((await client.query("SELECT 1 FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1", [scope.campaignId, scope.ownerUserId])).rowCount) throw new CampaignCastError("cast_generation_active");

@@ -1,3 +1,4 @@
+import { reviewDecisionRequestSchema, reviewDecisionResultSchema, dismissedReviewQuerySchema, dismissedReviewPageSchema, type ReviewDecisionRequest } from "@infinite-quest/contracts";
 import { castPromotionPreviewSchema, castPromoteSchema, castPromoteResultSchema, type CastPromote } from "@infinite-quest/contracts";
 import { castMergePreviewSchema, castMergeRequestSchema, castUnmergePreviewSchema, castUnmergeRequestSchema, type CastMergeRequest, type CastUnmergeRequest } from "@infinite-quest/contracts";
 import { castWorldChoicesSchema, castFromWorldPreviewQuerySchema, castFromWorldPreviewSchema, castFromWorldSchema, editAuthoredCastProfileSchema,
@@ -60,6 +61,13 @@ export function createCampaignCastApplication(repository: CampaignCastWritePort,
     },
     async detachAttachment(scope: CastScope, characterId: string, eventId: string, input: DetachCastAttachment) {
       return detachCastAttachmentResultSchema.parse(await repository.detachAttachment(castScopeSchema.parse(scope), characterId, eventId, detachCastAttachmentSchema.parse(input)));
+    },
+    async reviewDecision(scope: CastScope, id: string, request: ReviewDecisionRequest) {
+      return reviewDecisionResultSchema.parse(await repository.reviewDecision(castScopeSchema.parse(scope), id, reviewDecisionRequestSchema.parse(request)));
+    },
+    async dismissedReview(scope: CastScope, query: { cursor?: string; limit?: number } = {}) {
+      const parsed = dismissedReviewQuerySchema.parse(query);
+      return dismissedReviewPageSchema.parse(await repository.dismissedReview(castScopeSchema.parse(scope), { limit: parsed.limit, ...(parsed.cursor ? { cursor: parsed.cursor } : {}) }));
     },
     async candidates(scope: CastScope, query: Partial<CastCandidateQuery> = {}) {
       return castCandidateListSchema.parse(await repository.candidates(castScopeSchema.parse(scope), castCandidateQuerySchema.parse(query)));
