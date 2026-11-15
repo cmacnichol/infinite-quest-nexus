@@ -1,0 +1,50 @@
+{
+  "tabZoom": 2,
+  "baseline": {
+    "innerWidth": 1262,
+    "outerWidth": 1280,
+    "devicePixelRatio": 1
+  },
+  "metrics": {
+    "innerWidth": 631,
+    "outerWidth": 1280,
+    "devicePixelRatio": 2,
+    "scrollWidth": 631,
+    "rootZoom": "1",
+    "scale": 1
+  },
+  "targets": [
+    {
+      "width": 67.703125,
+      "height": 44
+    },
+    {
+      "width": 50.1953125,
+      "height": 44
+    },
+    {
+      "width": 75.3828125,
+      "height": 44
+    },
+    {
+      "width": 543,
+      "height": 44
+    },
+    {
+      "width": 106.3203125,
+      "height": 44
+    },
+    {
+      "width": 94.8203125,
+      "height": 44
+    },
+    {
+      "width": 146.1171875,
+      "height": 44
+    },
+    {
+      "width": 153.5,
+      "height": 44
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted 2026-11-15. Not yet implemented. Phase 0 of the [character editor usability plan](../superpowers/plans/2026-11-15-character-editor-usability.md).
+Accepted and implemented 2026-11-15; release activation remains gated. Phase 0 of the [character editor usability plan](../superpowers/plans/2026-11-15-character-editor-usability.md).
 
 ## Context
 
