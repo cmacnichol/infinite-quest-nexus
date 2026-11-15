@@ -220,6 +220,8 @@ export function renderCastReview(options: { document: Document; container: HTMLE
           label.append(value); disclosure.append(summary, node("p", "An override takes precedence until you clear it in the character editor."), label);
           const protagonist = person?.origin?.kind === "protagonist";
           const permits = (action: "accept" | "confirm" | "dismiss") => detail.allowedActions ? detail.allowedActions.includes(action) : action === "dismiss" || !protagonist && (action !== "accept" || detail.canAcceptObservation === true);
+          if (detail.acceptDisabledReason === "retracted_source") row.append(node("p", "This source was retracted and cannot be accepted again as a fact. You can explicitly set an override instead."));
+          else if (detail.acceptDisabledReason === "source_not_eligible") row.append(node("p", "This source is no longer eligible to be accepted as a fact."));
           if (permits("confirm")) row.append(disclosure);
           else if (protagonist) row.append(node("p", "Use the main character profile to change this field, or dismiss the suggestion."));
           else if (!permits("accept")) row.append(node("p", "This field belongs to the authored character profile."));

@@ -1,3 +1,4 @@
+import { renderObservationReview } from "./character-editor/observation-review.js";
 import { mountCampaignPresentation } from "./character-editor/campaign-presentation.js";
 import { showLifecycle } from "./character-editor/cast-lifecycle.js";
 import { createStoryDraftReview } from "./character-editor/story-draft.js";
@@ -718,7 +719,6 @@ export function createLegacyCastPanel(options: {
     if (!editor?.loaded || options.campaignPage) return;
     const details = node("details"), summary = node("summary", "Sources and edit history"); details.id = "cast-sources"; details.append(summary);
     for (const item of [...editor.loaded.identityEvents.map((event) => ({ label: `Name: ${event.name}`, evidence: event.evidence })),
-      ...editor.loaded.observations.map((observation) => ({ label: `${observation.mode === "claim" ? "Claim" : "Observation"}: ${fieldLabel(observation.field)} — ${observation.value}`, evidence: observation.evidence })),
       ...editor.loaded.overrides.map((override) => ({ label: `Your override: ${fieldLabel(override.field)} — ${override.value || "(blank)"}`, evidence: override.evidence }))]) {
       const row = node("p", item.label); const evidence = item.evidence;
       if (evidence.kind === "turn") {
@@ -729,6 +729,15 @@ export function createLegacyCastPanel(options: {
       } else row.append(node("span", evidence.kind === "user" ? ` — Your edit at turn ${evidence.effectiveTurnNumber}` : " — World source"));
       details.append(row);
     }
+    const sourceDetail = editor.loaded;
+    renderObservationReview({ document, container: details, detail: sourceDetail,
+      supported: Boolean(((sourceDetail as CastDetail & { capabilities?: List["capabilities"] }).capabilities ?? list?.capabilities)?.castObservationDecisions),
+      editing: () => enabled && !locked() && !dirty() && !saving, current: () => dialog.open && editor?.loaded === sourceDetail,
+      lock: syncLock,
+      preview: (id, request) => options.api.previewObservationDecision!(campaign, sourceDetail.character.id, id, request),
+      apply: (id, request) => options.api.applyObservationDecision!(campaign, sourceDetail.character.id, id, request),
+      refresh: async () => { await openDetail(sourceDetail.character.id); const sources = dialog.querySelector<HTMLDetailsElement>("#cast-sources"); if (sources) { sources.open = true; sources.querySelector<HTMLElement>("summary")?.focus(); } },
+      navigate: turn => requestNavigation(() => { closePanel(); void options.navigateToTurn(turn); }) });
     for (const edit of editor.loaded.authoredHistory ?? []) {
       for (const [path, value] of Object.entries(edit.set)) details.append(node("p", `Campaign edit at turn ${edit.effectiveTurnNumber}: ${presetFields.find(field => field.path === path)?.label ?? path} — ${Array.isArray(value) ? value.join(", ") : value}`));
       for (const path of edit.reset) details.append(node("p", `Reset at turn ${edit.effectiveTurnNumber}: ${presetFields.find(field => field.path === path)?.label ?? path}`));
