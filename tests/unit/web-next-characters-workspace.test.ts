@@ -317,17 +317,20 @@ it.each([
   } finally { workspace.dispose(); }
 });
 
-it("reconciles a deferred poll after a failed Pin write", async () => {
+it.each(["none", "clean", "dirty"] as const)("handles a deferred poll after a failed Pin write with %s editor", async editor => {
   let poll!: () => void, revision = 1, reject!: (error: Error) => void;
   const schedule = { set: (callback: () => void) => { poll = callback; return 1; }, clear: () => {}, visible: () => true, onVisibilityChange: () => () => {} };
   const latest = () => ({ ...person, name: revision === 1 ? "Mara" : "Updated Mara", revision });
   const read = vi.fn(async () => ({ ...detail, revision, character: latest() }));
   const edit = vi.fn(() => new Promise((_resolve, fail) => { reject = fail; }));
-  const { document, workspace, click } = setup({ workspaceStatus: async () => ({ ...status, revision }), list: async () => ({ ...page, revision, characters: [latest()] }), detail: read, edit }, { schedule });
+  const { document, workspace, click, confirm } = setup({ workspaceStatus: async () => ({ ...status, revision }), list: async () => ({ ...page, revision, characters: [latest()] }), detail: read, edit }, { schedule });
   try {
     workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("Pin"));
+    if (editor !== "none") { click("Edit Name"); if (editor === "dirty") { const input = document.querySelector<HTMLInputElement>('[data-path="name"] input')!; input.value = "Draft"; input.dispatchEvent(new document.defaultView!.Event("input")); confirm.mockReturnValue(true); } }
     click("Pin"); revision = 2; poll(); await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2)); await new Promise(resolve => setTimeout(resolve, 0));
-    reject(new Error("offline")); await vi.waitFor(() => expect(document.querySelector("dialog h2")?.textContent).toBe("Updated Mara"));
+    reject(new Error("offline"));
+    if (editor === "dirty") { await vi.waitFor(() => expect(document.body.textContent).toContain("Could not save.")); expect(document.querySelector<HTMLInputElement>('[data-path="name"] input')!.value).toBe("Draft"); expect(document.querySelector("dialog h2")?.textContent).toBe("Mara"); }
+    else await vi.waitFor(() => expect(document.querySelector("dialog h2")?.textContent).toBe("Updated Mara"));
   } finally { workspace.dispose(); }
 });
 
@@ -351,17 +354,19 @@ it("explains disabled lifecycle capabilities", async () => {
 });
 
 
-it("reconciles a deferred poll after a failed retraction preview", async () => {
+it.each([false, true])("reconciles a deferred poll after a failed retraction preview in conflict mode: %s", async conflict => {
   let poll!: () => void, revision = 1, reject!: (error: Error) => void;
   const schedule = { set: (callback: () => void) => { poll = callback; return 1; }, clear: () => {}, visible: () => true, onVisibilityChange: () => () => {} };
   const observationId = "22222222-2222-4222-8222-222222222222";
   const observation = { id: observationId, characterId: person.id, field: "story.role" as const, value: "Guard", mode: "fact" as const, speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn" as const, turnNumber: 1, turnId: person.id, quote: "Mara is a guard", startOffset: 0, endOffset: 15, invalidated: false } };
-  const latest = () => ({ ...person, name: revision === 1 ? "Mara" : "Updated Mara", revision, profile: { "story.role": "Guard" } });
-  const read = vi.fn(async () => ({ ...detail, revision, character: latest(), observations: [observation], observationDecisionStatus: [{ observationId, state: "eligible" as const, retractionEventId: null, reason: null }] }));
+  const other = { ...observation, id: "33333333-3333-4333-8333-333333333333", value: "Captain" };
+  const latest = () => ({ ...person, name: revision === 1 ? "Mara" : "Updated Mara", revision, profile: conflict ? {} : { "story.role": "Guard" } });
+  const read = vi.fn(async () => ({ ...detail, revision, character: latest(), observations: conflict ? [observation, other] : [observation], observationDecisionStatus: (conflict ? [observation, other] : [observation]).map(item => ({ observationId: item.id, state: "eligible" as const, retractionEventId: null, reason: null })) }));
   const { document, workspace, click } = setup({ workspaceStatus: async () => ({ ...status, revision, capabilities: { ...status.capabilities, observationDecisions: true } }), list: async () => ({ ...page, revision, characters: [latest()] }), detail: read, previewObservationDecision: () => new Promise((_resolve, fail) => { reject = fail; }) }, { schedule });
   try {
-    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("This is wrong"));
-    click("This is wrong"); revision = 2; poll(); await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2)); await new Promise(resolve => setTimeout(resolve, 0));
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara");
+    if (conflict) { await vi.waitFor(() => expect(document.body.textContent).toContain("Resolve conflict")); click("Resolve conflict"); }
+    await vi.waitFor(() => expect(document.body.textContent).toContain("This is wrong")); click("This is wrong"); revision = 2; poll(); await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2)); await new Promise(resolve => setTimeout(resolve, 0));
     reject(new Error("offline")); await vi.waitFor(() => expect(document.querySelector("dialog h2")?.textContent).toBe("Updated Mara")); expect(document.body.textContent).toContain("Could not preview this change.");
   } finally { workspace.dispose(); }
 });
