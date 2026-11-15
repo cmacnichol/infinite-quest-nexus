@@ -270,6 +270,24 @@ integration("campaign cast portable authority", () => {
     expect(restored.map((c) => c.profile)).toContainEqual({ "appearance.description": "" });
     expect(restored.map((c) => c.id)).not.toContain(first.character.id);
   });
+
+  it.each([1, 2] as const)("imports and re-exports historical format %s without changing cast behavior", async formatVersion => {
+    const source = await fixture(), destination = await fixture(), final = await fixture();
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    await repo.create(source, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 0, timelineRevision: 0 }, idempotencyKey: randomUUID(),
+      name: "Mara", aliases: ["M"], profile: { "story.role": "guide", "appearance.description": "" } });
+    const current = (await withTransaction(pool, client => exportCampaignCast(client, source)))!;
+    expect(current.formatVersion).toBe(2);
+    await withTransaction(pool, client => importCampaignCast(client, destination, { ...current, formatVersion }, { turns: new Map(), worlds: new Map() }));
+    const once = (await repo.current(destination)).characters.find(person => person.name === "Mara")!;
+    expect(once).toMatchObject({ aliases: ["M"], profile: { "story.role": "guide", "appearance.description": "" } });
+    const exported = await withTransaction(pool, client => exportCampaignCast(client, destination));
+    expect(exported?.formatVersion).toBe(2);
+    await withTransaction(pool, client => importCampaignCast(client, final, exported, { turns: new Map(), worlds: new Map() }));
+    const twice = (await repo.current(final)).characters.find(person => person.name === "Mara")!;
+    expect(twice).toMatchObject({ aliases: once.aliases, profile: once.profile });
+    expect(twice.id).not.toBe(once.id);
+  });
   it("rejects newer formats, forged ownership and foreign references before inserting cast rows", async () => {
     const scope = await fixture();
     for (const payload of [ { formatVersion: 99 }, { formatVersion: 1, revision: 0, characters: [], events: [], ownerUserId: randomUUID() } ]) {

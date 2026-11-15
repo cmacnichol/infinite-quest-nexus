@@ -258,7 +258,7 @@ integration("cast observation decisions", () => {
     const f = await projectionFixture();
     const observationId = await f.observe("state.location", "harbor", 0);
     const detail = await f.repo.detail(f.scope, f.characterId);
-    await f.repo.applyObservationDecision(f.scope, f.characterId, observationId, { action: "retract", expectedCastRevision: detail.revision,
+    const retraction = await f.repo.applyObservationDecision(f.scope, f.characterId, observationId, { action: "retract", expectedCastRevision: detail.revision,
       expectedCharacterRevision: detail.character.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID() });
     const archive = await withTransaction(pool, client => exportCampaignCast(client, f.scope));
     expect(archive?.formatVersion).toBe(5);
@@ -293,7 +293,12 @@ integration("cast observation decisions", () => {
     const original = f.evidence[0]!;
     await pool.query(`INSERT INTO turn_narration_corrections(owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,source,created_by_user_id)
       VALUES($1,$2,$3,1,'Mara stays home.',$4,'user_edit',$1)`, [ownerUserId, f.scope.campaignId, original.turnId, original.sourceHash]);
-    expect((await f.repo.detail(f.scope, f.characterId)).character.profile["state.location"]).toBeUndefined();
+    const afterCorrection = await f.repo.detail(f.scope, f.characterId);
+    expect(afterCorrection.character.profile["state.location"]).toBeUndefined();
+    const restoreRequest = { action: "restore" as const, retractionEventId: retraction.decisionEventId, expectedCastRevision: afterCorrection.revision,
+      expectedCharacterRevision: afterCorrection.character.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID() };
+    await expect(f.repo.previewObservationDecision(f.scope, f.characterId, observationId, restoreRequest)).rejects.toMatchObject({ code: "cast_invalid_request" });
+    await expect(f.repo.applyObservationDecision(f.scope, f.characterId, observationId, restoreRequest)).rejects.toMatchObject({ code: "cast_invalid_request" });
     const corrected = await withTransaction(pool, client => exportCampaignCast(client, f.scope));
     expect(corrected?.formatVersion).toBe(5);
     expect(corrected?.events.flatMap(event => event.commands).some(item => item.command.kind === "retract_observation")).toBe(true);
