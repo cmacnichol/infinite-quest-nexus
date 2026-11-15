@@ -6,7 +6,7 @@
 
 **Scope:** Nexus (`apps/web`) World Library and campaign management. Shared code must remain compatible with Story and Web-Next; this release does not redesign either client's Story experience.
 
-**References:** [Current critique](../../../.impeccable/critique/2026-11-14T21-02-32Z__apps-web-src-character-editor-renderer-ts.md), [conformance review and fixes](../../review/2026-11-14-character-editor-tracker-conformance.md), [approved character design](2026-11-08-unified-character-editor-and-starting-cast-design.md), [ADR 0042](../../architecture/0042-unified-character-editor-and-starting-cast.md), [implementation plan](../plans/2026-11-14-nexus-character-authoring-workspace.md).
+**References:** [Current critique](https://github.com/cmacnichol/infinite-quest-nexus/blob/601c998f8ff57d9caab010691492a04867505dd8/.impeccable/critique/2026-11-14T21-02-32Z__apps-web-src-character-editor-renderer-ts.md), [conformance review and fixes](../../review/2026-11-14-character-editor-tracker-conformance.md), [approved character design](2026-11-08-unified-character-editor-and-starting-cast-design.md), [ADR 0042](../../architecture/0042-unified-character-editor-and-starting-cast.md), [implementation plan](../plans/2026-11-14-nexus-character-authoring-workspace.md).
 
 ## Outcome and boundaries
 

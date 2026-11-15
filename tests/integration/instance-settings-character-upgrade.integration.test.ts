@@ -49,6 +49,7 @@ it("upgrades an active local v1 seed and keeps character preferences across rest
   await pool.query(`UPDATE instance_settings_state SET installation_id=$1,active_revision=1,requested_revision=1,mode='database',activation_epoch=1,seed_digest=$2`, [installationId, settingsDigest(snapshot)]);
   await pool.query(`INSERT INTO instance_settings_events(kind,revision,actor_user_id,local_single_user,reason_code) VALUES('seed',1,$1,true,'seed_import')`, [owner]);
   await migrateDatabase(pool, historicalMigrations);
+  await migrateDatabase(pool, resolve("database/migrations"));
   const policy = await loadLocalSingleUserPolicy(pool, config);
   expect(settingsDigest(policy)).toBe(policyDigest);
   const actor = { userId: owner, localSingleUser: true as const };
@@ -76,6 +77,7 @@ it("upgrades an active local v1 seed and keeps character preferences across rest
     await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title) VALUES($1,$2,$3,'Merge fixture')", [campaign, owner, version]);
     const url = `/api/v1/campaigns/${campaign}/cast`;
     const roster = await app.inject({ method: "GET", url });
+    expect(roster.statusCode, roster.body).toBe(200);
     expect(roster.json().capabilities.castLifecycle).toBe(true);
     const create = async (name: string, revision: number) => {
       const response = await app.inject({ method: "POST", url, payload: { expectedCastRevision: revision,
@@ -120,6 +122,7 @@ it("upgrades a managed v1 policy only after explicit v2 reissue and matching env
     await managed.query(`UPDATE instance_settings_state SET installation_id=$1,active_revision=1,requested_revision=1,mode='database',activation_epoch=1,seed_digest=$2`, [installationId, settingsDigest(snapshot)]);
     await managed.query(`INSERT INTO instance_settings_events(kind,revision,actor_user_id,cli_reference,reason_code) VALUES('seed',1,$1,'upgrade-test','seed_import')`, [owner]);
     await migrateDatabase(managed, historicalMigrations);
+    await migrateDatabase(managed, resolve("database/migrations"));
     const oldRunning = await loadActiveRuntimeSettings(managed, config, oldPolicy);
     const environmentEnabled = await loadActiveRuntimeSettings(managed, { ...config, castLifecycleEnabled: true }, oldPolicy);
     expect(environmentEnabled.config.castLifecycleEnabled).toBe(true);
