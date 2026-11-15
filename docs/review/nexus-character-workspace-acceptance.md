@@ -56,6 +56,12 @@ The final browser selection includes `nexus-character-workspace`, `nexus-protago
 
 ## Failures found and resolved
 
+### PR CI follow-up
+
+The full Chromium run on the PR found four stale expectations after the editor redesign: quick-create's Add label and new-row focus, plus Mechanics and History navigation in two existing journeys. It finished with 793 passed, four failed and three skipped. The three skips require, respectively, Chromium BFCache admission, the separate web-awesome Vite server, and the seeded loopback-TLS Compose Settings fixture. After updating those interactions, all 30 tests in the three affected browser files passed; parent draft cancellation, no-write, persistence and campaign-version pin assertions remain in place.
+
+The historical Settings upgrade fixture now applies current migrations after replaying the frozen pre-baseline history. Its focused real-PostgreSQL run passed both scenarios, including migration 0134 and the roster request. The design's critique link now points to the immutable repository source; the documentation build passed. Two full-production-source architecture scans exceeded the default five-second unit-test timeout under CI concurrency, so their individual limits are 20 seconds; the focused graph tests passed. Remote CI must run again for the final branch before claiming it passes.
+
 Task reviews caught unknown extension text satisfying guidance validation, mismatched presentation types, disabled-control restoration after AI, blocked-save focus timing, missing refresh after policy actions, and lost adjacent-section selection. Browser work also found production-host footer clipping, text-blur navigation refresh, hidden duplicate warnings and sparse profile access. Each received a regression and scoped rerun.
 
 Final broad checks caught Vite-only literal test imports and a CSP source-scanner false positive on a local `onInput` variable. Runtime URL imports and a neutral local name resolved them without weakening checks. The native 200% test exposed only 53px of editing space; short-height selector/footer layout now provides 192px, keeping the focused aliases field above the footer with all actions reachable. Final visual inspection also caught a populated-section summary lag; capturing the form before presentation refresh fixes it, while ignoring the section selector preserves navigation. The regression passes with 17 native-zoom/workspace browser cases and 141 focused unit tests; repository checks and the affected web build pass again.

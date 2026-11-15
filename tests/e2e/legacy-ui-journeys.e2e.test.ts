@@ -826,6 +826,7 @@ test("advanced_experience_edit_and_save: mechanics edits persist in a saved draf
   await page.locator("#editWorldDraft").click();
   await page.locator('[data-world-author-step="character"]').click();
   await page.getByRole("button", { name: "Edit Mira Vale" }).click();
+  await page.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: /^Mechanics ·/ }).click();
   await page.locator("#characterMechanics > summary").click();
   await page.locator("#addCharacterStat").click();
   const lastStat = page.locator("#characterStats .character-edit-row").last();
@@ -842,6 +843,7 @@ test("advanced_experience_edit_and_save: mechanics edits persist in a saved draf
   await page.locator("#editWorldDraft").click();
   await page.locator('[data-world-author-step="character"]').click();
   await page.getByRole("button", { name: "Edit Mira Vale" }).click();
+  await page.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: /^Mechanics ·/ }).click();
   await page.locator("#characterMechanics > summary").click();
   const reopenedStat = page.locator("#characterStats .character-edit-row").last();
   await expect(reopenedStat.locator('[data-character-field="name"]')).toHaveValue("Resolve");

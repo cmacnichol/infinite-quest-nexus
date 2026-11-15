@@ -12,7 +12,7 @@ const { checkLegacyAuthorityRemoval, readLegacyAuthoritySources } = legacyAuthor
 describe("Task 14e3h legacy authority removal", () => {
   it("keeps every production graph free of the retired API authority modules", () => {
     expect(checkLegacyAuthorityRemoval(readLegacyAuthoritySources(process.cwd()))).toEqual([]);
-  });
+  }, 20_000); // Parses the full production source graph; CI runs tests concurrently.
 
   it("rejects a retired authority even when nothing imports it", () => {
     expect(checkLegacyAuthorityRemoval([{
