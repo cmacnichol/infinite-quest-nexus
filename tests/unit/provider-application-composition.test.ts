@@ -106,6 +106,7 @@ describe("provider application composition capability cache transactions", () =>
     });
     const system = preview.sections.find((section) => section.label === "System prompt preview (output encoding pending)")!;
     expect(system.content.includes("Campaign cast authority:")).toBe(castContextEnabled);
+    expect(system.content.includes("User corrections govern current portrayal from their effective turn; user state edits govern until later story evidence")).toBe(castContextEnabled);
   });
 
   it("allows image and embedding execution while text capacity is exhausted", async () => {

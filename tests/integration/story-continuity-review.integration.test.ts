@@ -284,7 +284,22 @@ integration("durable continuity review", () => {
     // Dedicated historical fixtures below pin genuine v4/v5 jobs.
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined,
       { installedCapability: "r3", enforceEnabled: true, castContextEnabled, historyCoverageEnabled: false });
-    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action, requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit", providerProfileId: textProviderProfileId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
+    const request = generationRequestSchema.parse({ action, requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit", providerProfileId: textProviderProfileId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } });
+    // These historical V2 scenarios deliberately freeze the pre-activation protocol.
+    const historicalCommands = castContextEnabled ? createPostgresGenerationCommandRepository(pool, {
+      resolvePromptSnapshot: (client, owner, campaignId, policy) => policy
+        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId: owner, campaignId, scope: "campaign" }, policy.policy.continuityReview, true, "v2")
+        : loadPromptSnapshotForTest(client, owner, campaignId),
+      promptProtocolVersion: providerPromptProtocolVersion,
+      readTurnReportedCosts: (owner, _campaign, ids) => readTurnReportedCostsForTest(pool, owner, [...ids]),
+      resolveStoryMemoryPolicySnapshot: async (client, scope) => {
+        const policy = await resolveStoryMemoryPolicySnapshot(client, scope, { installedCapability: "r3", enforceEnabled: true, castContextEnabled: true, historyCoverageEnabled: false });
+        if (!policy) throw new Error("Missing historical policy");
+        return { ...policy, contextProtocol: "current-continuity-v6" as const, promptProtocol: "story-v18-fiction-cast" as const };
+      }
+    }) : null;
+    const job = historicalCommands ? await historicalCommands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request)
+      : await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request);
     return { job, application, campaignId: imported.campaignId };
   }
 
@@ -2420,22 +2435,13 @@ integration("durable continuity review", () => {
     expect((await pool.query<{ version: string }>(
       "SELECT generation_base_identity->>'version' AS version FROM generation_jobs WHERE id=$1", [job.id]
     )).rows[0]!.version).toMatch(/^generation-base-v[34]$/);
-    const captured = (await pool.query<{ context_options: Record<string, unknown>; prompt_protocol_version: string }>(
-      "SELECT context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [job.id]
-    )).rows[0]!;
-    const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
-    await pool.query(
-      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3,generation_base_identity=generation_base_identity || '{\"recentWindowTurns\":11}'::jsonb WHERE id=$1",
-      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v7" } }),
-        captured.prompt_protocol_version.replace("current-continuity-v6", "current-continuity-v7")]
-    );
     requests.length = 0;
     plannerCalls.length = 0;
     await runGenerationJob(pool, `narrow-reviewer-budget-${randomUUID()}`, 30, credentialSecret);
     const plannerCall = plannerCalls.at(-1);
     expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "context_budget_exceeded" });
     expect(plannerCall?.[14]).toBe(904);
-    expect(plannerCall?.[15]).toBe("current-continuity-v7");
+    expect(plannerCall?.[15]).toBe("current-continuity-v9");
     expect(requests.filter((body) => !body.includes("story-continuity-review-v1"))).toHaveLength(0);
     expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(0);
   });

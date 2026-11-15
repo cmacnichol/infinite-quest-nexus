@@ -23,7 +23,7 @@ import { createProvider, loadPromptSnapshotForTest, providerPromptProtocolVersio
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
 import { sha256 } from "../../packages/domain/src/text.js";
-import { CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, HISTORY_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
+import { CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, HISTORY_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
 import type { StreamingIllustrationConfig } from "../../packages/application/src/illustration/types.js";
 
@@ -61,6 +61,7 @@ integration("campaign cast composed generation", () => {
         const policy = await resolveStoryMemoryPolicySnapshot(client, scope,
           { installedCapability: "r3", enforceEnabled: false, castContextEnabled: enabled, castDiscoveryEnabled: enabled });
         if (policy && v3 && policy.castContext) return { ...policy, contextProtocol: HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, promptProtocol: CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION };
+        if (policy && !legacy && policy.castContext) return { ...policy, contextProtocol: HISTORY_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, promptProtocol: CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION };
         if (!policy || !legacy || !policy.castContext) return policy;
         const { castDiscoveryEnabled: _discovery, ...old } = policy;
         return { ...old, contextProtocol: "current-continuity-v5" as const, promptProtocol: "story-v17-campaign-cast" as const };

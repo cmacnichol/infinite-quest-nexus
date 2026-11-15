@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { resolveStoryMemoryPolicySnapshot, type StoryMemoryOperatorConfig } from "../../packages/database/src/story-memory-policy-repository.js";
 
 describe("Story Memory new-job enrollment", () => {
-  it("captures v7 only for a newly eligible cast-enabled snapshot", async () => {
+  it("captures V3 history for a newly eligible cast-enabled snapshot", async () => {
     const client = {
       query: async () => ({ rows: [{
         capability: "r2", review_mode: "off", model: "writer", provider_type: "openai_compatible",
@@ -17,10 +17,10 @@ describe("Story Memory new-job enrollment", () => {
       providerProfileId: "00000000-0000-4000-8000-000000000003",
       requestedModel: ""
     }, { installedCapability: "r3", enforceEnabled: false, castContextEnabled: true }))
-      .resolves.toMatchObject({ castContext: true, contextProtocol: "current-continuity-v7", promptProtocol: "story-v18-fiction-cast" });
+      .resolves.toMatchObject({ castContext: true, contextProtocol: "current-continuity-v9", promptProtocol: "story-v19-state-edit-precedence" });
   });
 
-  it("uses v6 when history coverage is disabled without rewriting a captured v7 snapshot", async () => {
+  it("uses V3 cast context when history coverage is disabled without rewriting a captured V3 history snapshot", async () => {
     const client = {
       query: async () => ({ rows: [{
         capability: "r2", review_mode: "off", model: "writer", provider_type: "openai_compatible",
@@ -34,14 +34,14 @@ describe("Story Memory new-job enrollment", () => {
       providerProfileId: "00000000-0000-4000-8000-000000000003",
       requestedModel: ""
     };
-    const v5Config = { installedCapability: "r3", enforceEnabled: false, castContextEnabled: true } satisfies StoryMemoryOperatorConfig;
-    const v4DefaultConfig = { ...v5Config, historyCoverageEnabled: false } satisfies StoryMemoryOperatorConfig;
+    const historyConfig = { installedCapability: "r3", enforceEnabled: false, castContextEnabled: true } satisfies StoryMemoryOperatorConfig;
+    const castOnlyConfig = { ...historyConfig, historyCoverageEnabled: false } satisfies StoryMemoryOperatorConfig;
 
-    const v5 = await resolveStoryMemoryPolicySnapshot(client as never, scope, v5Config);
-    const v4 = await resolveStoryMemoryPolicySnapshot(client as never, scope, v4DefaultConfig);
+    const history = await resolveStoryMemoryPolicySnapshot(client as never, scope, historyConfig);
+    const castOnly = await resolveStoryMemoryPolicySnapshot(client as never, scope, castOnlyConfig);
 
-    expect(v5).toMatchObject({ contextProtocol: "current-continuity-v7" });
-    expect(v4).toMatchObject({ castContext: true, contextProtocol: "current-continuity-v6", promptProtocol: "story-v18-fiction-cast" });
-    expect(v5).toMatchObject({ contextProtocol: "current-continuity-v7" });
+    expect(history).toMatchObject({ contextProtocol: "current-continuity-v9" });
+    expect(castOnly).toMatchObject({ castContext: true, contextProtocol: "current-continuity-v8", promptProtocol: "story-v19-state-edit-precedence" });
+    expect(history).toMatchObject({ contextProtocol: "current-continuity-v9" });
   });
 });
