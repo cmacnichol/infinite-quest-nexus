@@ -4,6 +4,8 @@ import type { CreateCastCharacter, EditCastCharacter, CastWriteResult, CastDetai
   CastCandidateList, CastCandidateQuery, ResolveCastCandidate, CastCandidateResolution } from "@infinite-quest/contracts";
 
 export interface CampaignCastWritePort {
+  previewObservationDecision?(scope: CastScope, characterId: string, observationId: string, request: import("@infinite-quest/contracts").ObservationDecisionRequest): Promise<import("@infinite-quest/contracts").ObservationDecisionPreview>;
+  applyObservationDecision?(scope: CastScope, characterId: string, observationId: string, request: import("@infinite-quest/contracts").ObservationDecisionRequest): Promise<import("@infinite-quest/contracts").ObservationDecisionResult>;
   promotionPreview?(scope: CastScope, id: string, worldId: string): Promise<import("@infinite-quest/contracts").CastPromotionPreview>;
   promote?(scope: CastScope, id: string, request: import("@infinite-quest/contracts").CastPromote): Promise<import("@infinite-quest/contracts").CastPromoteResult>;
   unmergePreview?(scope: CastScope, targetId: string, mergeEventId: string): Promise<import("@infinite-quest/contracts").CastUnmergePreview>;

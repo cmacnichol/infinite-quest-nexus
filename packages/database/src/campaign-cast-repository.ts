@@ -1,5 +1,5 @@
 import { observationFieldConflicts } from "./campaign-cast-observation-decision-repository.js";
-import { activeRetractedObservationIds } from "../../domain/src/campaign-cast-observation-decisions.js";
+import { activeRetractionEvents, activeRetractedObservationIds } from "../../domain/src/campaign-cast-observation-decisions.js";
 import { observationDecisionRequestSchema, observationDecisionPreviewSchema, observationDecisionResultSchema, type ObservationDecisionRequest, type ObservationDecisionPreview, type ObservationDecisionResult } from "../../contracts/src/campaign-cast-observation-decisions.js";
 import { castPromoteSchema, castPromoteResultSchema, type CastPromotionPreview } from "../../contracts/src/campaign-cast-promotion.js";
 import { castMergeRequestSchema, castUnmergePreviewSchema, castUnmergeRequestSchema } from "../../contracts/src/campaign-cast-merge.js";
@@ -710,6 +710,11 @@ function suppressRetractedDiscoveryFacts(batch: CastBatch, projected: Awaited<Re
   return { ...batch, commands };
 }
 
+export async function retractedDiscoveryFactFilterWithClient(client: DatabaseClient, scope: CastScope, boundary: CastBoundary) {
+  const campaign = await lockCampaign(client, scope), state = await readState(client, scope);
+  const projected = await snapshotProjection(client, scope, campaign, state, boundary);
+  return (command: CastCommand) => suppressRetractedDiscoveryFacts({ boundary, idempotencyKey: "eligibility", commands: [command] }, projected).commands.length > 0;
+}
 /** Discovery publication and its receipt share the caller's transaction. */
 export async function applyCastBatchWithClient(client: DatabaseClient, rawScope: CastScope, rawBatch: CastBatch,
   options: { suppressRetractedFacts?: boolean; deferMetadataRefresh?: boolean; attachment?: { characterId: string; basis: "unique_name" | "unique_world_name"; sourceRanges: import("../../contracts/src/campaign-cast.js").CastSourceRange[] } } = {}): Promise<CastBatchReceipt> {
@@ -1138,11 +1143,8 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
       const detail = projected.details.find(item => item.characterId === id)!;
       const source = detail.observations.find(item => item.id === observationId);
       if (!source || source.mode !== "fact" || source.evidence.kind !== "turn") throw new CampaignCastError("cast_invalid_request");
-      let activeEvent: string | undefined;
-      for (const event of projected.journal) if (event.effective_turn_number <= request.expectedBoundary.turnNumber) for (const { command } of event.payload) {
-        if (command.kind === "retract_observation" && command.observationId === observationId) activeEvent = event.id;
-        if (command.kind === "restore_observation" && command.observationId === observationId && command.retractionEventId === activeEvent) activeEvent = undefined;
-      }
+      if (isSeededFixedCandidateHidden(person.campaignProfile && characterProfileSchema.parse(person.campaignProfile), source.field) || person.originProfile && !["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(source.field)) throw new CampaignCastError("cast_fixed_field_override");
+      const activeEvent = activeRetractionEvents(projected.journal.filter(event => event.effective_turn_number <= request.expectedBoundary.turnNumber)).get(observationId);
       if (request.action === "retract" ? Boolean(activeEvent) : !activeEvent || activeEvent !== request.retractionEventId) throw new CampaignCastError("cast_invalid_request");
       const command: CastCommand = request.action === "retract" ? { kind: "retract_observation", characterId: id, observationId } : { kind: "restore_observation", characterId: id, observationId, retractionEventId: request.retractionEventId };
       const eventId = randomUUID(), hypothetical = eventSchema.parse({ id: eventId, effective_turn_number: request.expectedBoundary.turnNumber, payload: [{ command }], receipt: { eventId, revision: state.revision + 1, characterIds: [], observationIds: [] } });
@@ -1587,8 +1589,25 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
               set: command.set, reset: command.reset });
           }
         }
+        const activeRetractions = activeRetractionEvents(events);
+        const retained = (await client.query(`SELECT id,character_id AS "characterId",field,value,mode,
+          speaker_character_id AS "speakerCharacterId",evidence,supersedes_observation_id AS "supersedesObservationId"
+          FROM campaign_cast_observations WHERE campaign_id=$1 AND owner_user_id=$2 AND id=ANY($3::uuid[]) ORDER BY sequence`,
+          [scope.campaignId, scope.ownerUserId, [...activeRetractions.keys()]])).rows.map(row => castObservationSchema.parse(row));
+        const retractedObservationHistory = retained.filter(item => {
+          const owner = value.characters.find(person => person.id === item.characterId);
+          return (character.mergedIntoCharacterId ? item.characterId : owner?.mergedIntoCharacterId ?? item.characterId) === id;
+        });
+        const currentIds = new Set(observations.map(item => item.id));
+        const history = [...observations, ...retractedObservationHistory.filter(item => !currentIds.has(item.id))];
+        const observationDecisionStatus: NonNullable<CastDetail["observationDecisionStatus"]> = history.map(item => {
+          const retractionEventId = activeRetractions.get(item.id) ?? null;
+          const reason = !currentIds.has(item.id) ? "source_invalid" : character.removed ? "removed" : character.mergedIntoCharacterId ? "merged"
+            : character.origin.kind === "protagonist" ? "protagonist" : isSeededFixedCandidateHidden(character.campaignProfile && characterProfileSchema.parse(character.campaignProfile), item.field) || character.originProfile && !["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(item.field) ? "fixed_field" : item.mode !== "fact" || item.evidence.kind !== "turn" ? "not_turn_fact" : null;
+          return { observationId: item.id, state: reason ? "read_only" : retractionEventId ? "retracted" : "eligible", retractionEventId, reason };
+        });
         const unresolvedCandidateIds = (await currentCastReviewCandidates(client, scope, value)).filter(item => item.characterId === id).map(item => item.id);
-        return { character, revision: value.revision, boundary, draftFromStoryEligible, observations, overrides: activeOverrides, autoMatches, identityEvents, authoredHistory, unresolvedCandidateIds,
+        return { character, revision: value.revision, boundary, draftFromStoryEligible, observations, observationDecisionStatus, retractedObservationHistory, overrides: activeOverrides, autoMatches, identityEvents, authoredHistory, unresolvedCandidateIds,
           editorDestination: character.origin.kind === "protagonist" ? `/api/v1/campaigns/${scope.campaignId}/character-profile` : null };
       });
     },

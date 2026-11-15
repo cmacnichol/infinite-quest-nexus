@@ -199,7 +199,7 @@ export const castListQuerySchema = z.object({ limit: z.coerce.number().int().min
   expectedRevision: z.coerce.number().int().nonnegative().optional(),
   expectedTurnNumber: z.coerce.number().int().nonnegative().optional(),
   expectedTimelineRevision: z.coerce.number().int().nonnegative().optional() }).strict();
-export const castDetailSchema = castWriteResultSchema.extend({ draftFromStoryEligible: z.boolean().optional(), observations: z.array(castObservationSchema),
+export const castDetailSchema = castWriteResultSchema.extend({ observationDecisionStatus: z.array(z.object({ observationId: z.uuid(), state: z.enum(["eligible", "retracted", "read_only"]), retractionEventId: z.uuid().nullable(), reason: z.enum(["source_invalid", "not_turn_fact", "protagonist", "removed", "merged", "fixed_field"]).nullable() }).strict()).optional(), retractedObservationHistory: z.array(castObservationSchema).optional(), draftFromStoryEligible: z.boolean().optional(), observations: z.array(castObservationSchema),
   overrides: z.array(castOverrideSchema), autoMatches: z.array(castAttachmentSchema.extend({ turnNumber: ordinal, quote: z.string() })).default([]), identityEvents: z.array(z.object({
     eventId: z.uuid(), effectiveTurnNumber: ordinal, name, aliases: z.array(name).max(20), evidence: castEvidenceSchema
   }).strict()), authoredHistory: z.array(z.object({ eventId: z.uuid(), seedEventId: z.uuid(), effectiveTurnNumber: ordinal,

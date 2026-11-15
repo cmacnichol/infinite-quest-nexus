@@ -1200,6 +1200,7 @@ describe("durable cast discovery", () => {
     const inbox = await editor.candidates(f.scope, {}), id = inbox.candidates[0]!.id;
     await editor.resolveCandidate(f.scope, id, { action: "attach", characterId: person.character.id, expectedCastRevision: inbox.revision, expectedBoundary: boundary, idempotencyKey: randomUUID() });
     const pending = (await editor.candidates(f.scope, { view: "review" })).candidates[0]!.details![0]!;
+    expect(pending).toMatchObject({ canAcceptObservation: false, acceptDisabledReason: "retracted_source", allowedActions: ["dismiss", "confirm"] });
     const current = await editor.detail(f.scope, person.character.id);
     const review = { expectedCastRevision: current.revision, expectedCharacterRevision: current.character.revision, expectedBoundary: boundary, observationIndex: pending.observationIndex, sourceHash: pending.sourceHash, idempotencyKey: randomUUID() };
     await expect(editor.resolveDetail!(f.scope, id, { ...review, action: "accept" })).rejects.toMatchObject({ code: "cast_invalid_request" });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeRetractedObservationIds } from "../../packages/domain/src/campaign-cast-observation-decisions.js";
+import { activeRetractionEvents, activeRetractedObservationIds } from "../../packages/domain/src/campaign-cast-observation-decisions.js";
 import { observationDecisionRequestSchema, observationDecisionPreviewSchema, observationDecisionResultSchema } from "../../packages/contracts/src/campaign-cast-observation-decisions.js";
 import { castCommandSchema, portableCampaignCastSchema, type CastCommand } from "../../packages/contracts/src/campaign-cast.js";
 
@@ -12,6 +12,7 @@ describe("observation decisions", () => {
     const event = (n: number, command: CastCommand) => ({ id: id(n), payload: [{ command }] });
     const retract = { kind: "retract_observation", characterId: id(1), observationId: id(2) } as const;
     const restore = { kind: "restore_observation", characterId: id(1), observationId: id(2), retractionEventId: id(3) } as const;
+    expect([...activeRetractionEvents([event(3, retract), event(4, restore), event(5, retract), event(6, restore)])]).toEqual([[id(2), id(5)]]);
     expect([...activeRetractedObservationIds([event(3, retract), event(4, restore), event(5, retract), event(6, restore)])]).toEqual([id(2)]);
     expect([...activeRetractedObservationIds([event(3, retract), event(4, restore)])]).toEqual([]);
     expect(castCommandSchema.safeParse(retract).success).toBe(true);

@@ -119,7 +119,7 @@ integration("campaign cast editing API", () => {
       const restored = await app.inject({ method: "POST", url, payload: { ...payload, action: "restore", decisionId: first.json().decisionId, expectedReviewRevision: 1, idempotencyKey: randomUUID() } });
       expect(restored.statusCode).toBe(200);
       expect((await app.inject({ url: `${base}/review-decisions?view=dismissed` })).json().decisions).toEqual([]);
-      expect((await app.inject({ url: base })).json().capabilities).toMatchObject({ castReviewDecisions: true, castObservationDecisions: false, castReviewDecisionReadVersion: 1 });
+      expect((await app.inject({ url: base })).json().capabilities).toMatchObject({ castReviewDecisions: true, castObservationDecisions: true, castReviewDecisionReadVersion: 1 });
     } finally { await app.close(); }
   });
   it("maps corrected draft evidence to 409 without applying edits", async () => {

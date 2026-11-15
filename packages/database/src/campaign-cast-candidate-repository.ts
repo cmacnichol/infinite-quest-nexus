@@ -12,7 +12,7 @@ import { CampaignCastError } from "../../application/src/campaign-cast/ports.js"
 import { buildCastDiscoverySource, canAcceptReviewedCastObservation, resolveCastDiscoveryEvidence } from "../../domain/src/campaign-cast-discovery.js";
 import { normalizeEntityTerm } from "../../domain/src/entity-references.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
-import { initializeCastWithClient, applyCastBatchWithClient, seedCampaignCastWithClient } from "./campaign-cast-repository.js";
+import { initializeCastWithClient, applyCastBatchWithClient, seedCampaignCastWithClient, retractedDiscoveryFactFilterWithClient } from "./campaign-cast-repository.js";
 import { withTransaction, type DatabasePool } from "./pool.js";
 import { readActiveReviewDismissals, isReviewDismissed, readReviewRevision, reviewDecisionWithClient } from "./campaign-cast-review-decision-repository.js";
 import { pendingCastDetailSql } from "./campaign-cast-review-sql.js";
@@ -55,6 +55,7 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
           row.pending_indexes = row.pending_indexes.filter((index: number) => !isReviewDismissed(active, row.source, { kind: "detail", proposal: row.proposal, observation: row.proposal.observations[index] }));
           return !row.resolution_receipt || row.pending_indexes.length > 0;
         }).slice(0, query.limit + 1);
+        const notRetracted = await retractedDiscoveryFactFilterWithClient(client, scope, cast.boundary);
         const candidates = rows.slice(0, query.limit).map((row) => {
           const saved = row.resolution_receipt ? castCandidateResolutionSchema.parse(row.resolution_receipt.result) : null;
           const pending = saved?.pendingObservations?.filter(item => row.pending_indexes.includes(item.index));
@@ -63,6 +64,14 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
             [person.name, ...person.aliases].some(name => normalizeEntityTerm(name) === normalizeEntityTerm(row.proposal.name))) : [];
           const suggested = exactMatches.length === 1 && !exactMatches[0]!.ignored && !exactMatches[0]!.removed
             && (!row.proposal.existingCharacterId || row.proposal.existingCharacterId === exactMatches[0]!.id) ? exactMatches[0]!.id : undefined;
+          const canAccept = (item: NonNullable<typeof pending>[number]) => {
+            const observation = row.proposal.observations[item.index], source = castDiscoverySourceSchema.parse(row.source);
+            return Boolean(currentCharacter) && currentCharacter?.origin.kind !== "protagonist" && !(currentCharacter?.originProfile && !["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(observation.field)) && canAcceptReviewedCastObservation(source, row.effective_narration, observation, item.reason)
+              && notRetracted({ kind: "observe", characterId: currentCharacter!.id, field: observation.field, value: observation.value,
+                mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: source.turnId,
+                  turnNumber: source.turnNumber, narrationRevision: source.narrationRevision, sourceHash: source.sourceHash,
+                  paragraphId: observation.paragraphId, quote: observation.quote } });
+          };
           return { id: row.id, reason: row.reason, reviewRevision,
             ...(!saved ? { reviewDetails: row.proposal.observations.flatMap((observation: any, observationIndex: number) => isReviewDismissed(active, row.source, { kind: "detail", proposal: row.proposal, observation }) ? [] : [{ observationIndex, observation }]) } : {}), ...(suggested ? { suggestedCharacterId: suggested } : {}),
             proposal: { ...row.proposal, existingCharacterId: effective(row.proposal.existingCharacterId) ?? null, ...(pending ? { observations: pending.map(item => row.proposal.observations[item.index]) } : {}) },
@@ -71,7 +80,7 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
               quote: row.proposal.observations[item.index].quote, reason: item.reason,
               allowedActions: currentCharacter?.originProfile && !["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(row.proposal.observations[item.index].field)
                 ? ["dismiss"] : currentCharacter?.origin.kind === "protagonist" ? ["dismiss"]
-                : ["dismiss", "confirm", ...(canAcceptReviewedCastObservation(castDiscoverySourceSchema.parse(row.source), row.effective_narration, row.proposal.observations[item.index], item.reason) ? ["accept"] : [])], ...(query.view === "review" ? { canAcceptObservation: cast.characters.find(person => person.id === saved.character.id)?.origin.kind !== "protagonist" && canAcceptReviewedCastObservation(castDiscoverySourceSchema.parse(row.source), row.effective_narration, row.proposal.observations[item.index], item.reason) } : {}), sourceHash: row.source.sourceHash })) ?? [] } : {}),
+                : ["dismiss", "confirm", ...(canAccept(item) ? ["accept"] : [])], ...(query.view === "review" ? { canAcceptObservation: canAccept(item), ...(!canAccept(item) ? { acceptDisabledReason: canAcceptReviewedCastObservation(castDiscoverySourceSchema.parse(row.source), row.effective_narration, row.proposal.observations[item.index], item.reason) && Boolean(currentCharacter) && currentCharacter?.origin.kind !== "protagonist" && !(currentCharacter?.originProfile && !["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(row.proposal.observations[item.index].field)) ? "retracted_source" : "source_not_eligible" } : {}) } : {}), sourceHash: row.source.sourceHash })) ?? [] } : {}),
             source: { turnId: row.source.turnId, turnNumber: row.source.turnNumber, narrationRevision: row.source.narrationRevision, ...(query.view === "review" ? { sourceHash: row.source.sourceHash } : {}) } };
         });
         return castCandidateListSchema.parse({ revision: cast.revision, boundary: cast.boundary, candidates,

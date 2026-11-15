@@ -76,7 +76,7 @@ export const castPendingCandidateSchema = z.object({ id: z.uuid(), reason: z.str
   reviewRevision: z.number().int().nonnegative().optional(),
   reviewDetails: z.array(z.object({ observationIndex: z.number().int().min(0).max(19), observation: castDiscoveryCandidateSchema.shape.observations.element }).strict()).max(20).optional(),
   details: z.array(z.object({ observationIndex: z.number().int().min(0).max(19), field: castFieldSchema,
-    value: z.string().max(2000), quote: z.string().max(1000), reason: z.string(), canAcceptObservation: z.boolean().optional(), allowedActions: z.array(z.enum(["accept", "confirm", "dismiss"])).optional(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict()).optional(),
+    value: z.string().max(2000), quote: z.string().max(1000), reason: z.string(), canAcceptObservation: z.boolean().optional(), acceptDisabledReason: z.enum(["retracted_source", "source_not_eligible"]).optional(), allowedActions: z.array(z.enum(["accept", "confirm", "dismiss"])).optional(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict()).optional(),
   source: z.object({ turnId: z.uuid(), turnNumber: z.number().int().positive(), narrationRevision: z.number().int().nonnegative(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u).optional() }).strict() }).strict();
 export const castCandidateListSchema = z.object({ revision: z.number().int().nonnegative(), boundary: castBoundarySchema,
   candidates: z.array(castPendingCandidateSchema).max(50), nextCursor: z.uuid().nullable() }).strict();

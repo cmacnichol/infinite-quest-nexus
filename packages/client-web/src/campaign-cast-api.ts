@@ -1,3 +1,4 @@
+import { observationDecisionRequestSchema, observationDecisionPreviewSchema, observationDecisionResultSchema, type ObservationDecisionRequest } from "@infinite-quest/contracts";
 import { reviewDecisionRequestSchema, reviewDecisionResultSchema, dismissedReviewQuerySchema, dismissedReviewPageSchema, type ReviewDecisionRequest } from "@infinite-quest/contracts";
 import { castLifecycleChangeSchema, castMergeRequestSchema, castMergePreviewSchema, castUnmergePreviewSchema, castUnmergeRequestSchema,
   castPromotionPreviewSchema, castPromoteSchema, castPromoteResultSchema, type CastLifecycleChange, type CastMergeRequest,
@@ -108,6 +109,16 @@ export function createCampaignCastApi(options: NexusHttpClientOptions = {
       const path = `${pathFor(campaignId)}/candidates`, query = validatedRequest(castCandidateQuerySchema, input, "GET", path);
       const search = new URLSearchParams({ limit: String(query.limit), view: query.view, ...(query.cursor ? { cursor: query.cursor } : {}) });
       return http.request({ method: "GET", path: `${path}?${search}`, responseSchema: castCandidateListSchema });
+    },
+    async previewObservationDecision(campaignId: string, characterId: string, observationId: string, input: ObservationDecisionRequest) {
+      const path = `${pathFor(campaignId)}/characters/${encodeURIComponent(characterId)}/observations/${encodeURIComponent(observationId)}/decision-preview`;
+      const value = validatedRequest(observationDecisionRequestSchema, input, "POST", path);
+      return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: observationDecisionPreviewSchema });
+    },
+    async applyObservationDecision(campaignId: string, characterId: string, observationId: string, input: ObservationDecisionRequest) {
+      const path = `${pathFor(campaignId)}/characters/${encodeURIComponent(characterId)}/observations/${encodeURIComponent(observationId)}/decision`;
+      const value = validatedRequest(observationDecisionRequestSchema, input, "POST", path);
+      return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: observationDecisionResultSchema });
     },
     reviewDecision: (campaignId: string, id: string, input: ReviewDecisionRequest) => {
       const path = `${pathFor(campaignId)}/candidates/${encodeURIComponent(id)}/review-decisions`, value = validatedRequest(reviewDecisionRequestSchema, input, "POST", path);

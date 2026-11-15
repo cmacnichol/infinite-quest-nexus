@@ -60,6 +60,24 @@ describe("cast browser adapter", () => {
       expect((await app.inject({ method: "POST", url: base + "/candidates/11111111-1111-4111-8111-111111111111/review-decisions", payload: {} })).statusCode).toBe(503);
     } finally { await app.close(); }
   });
+  it("gates observation preview and apply routes when editing is disabled", async () => {
+    const app = Fastify();
+    await app.register(registerCampaignCastRoutes, { application: {} as never, enabled: false,
+      resolveOwner: async () => ({ ownerUserId: "22222222-2222-4222-8222-222222222222" }) });
+    try {
+      const base = "/api/v1/campaigns/11111111-1111-4111-8111-111111111111/cast/11111111-1111-4111-8111-111111111111/observations/11111111-1111-4111-8111-111111111111";
+      for (const suffix of ["/decision-preview", "/decision"]) {
+        expect((await app.inject({ method: "POST", url: base + suffix, payload: {} })).statusCode).toBe(503);
+      }
+    } finally { await app.close(); }
+  });
+  it("validates observation decision requests before dispatch", async () => {
+    let called = false;
+    const api = createCampaignCastApi({ basePath: "/api/v1", session: { authorization: async () => ({}), onUnauthorized: async () => false },
+      fetchImpl: async () => { called = true; return new Response("{}", { headers: { "content-type": "application/json" } }); } });
+    await expect(api.previewObservationDecision("campaign", "character", "observation", { action: "restore" } as never)).rejects.toMatchObject({ phase: "request" });
+    expect(called).toBe(false);
+  });
   it("requests the filtered matches view", async () => {
     let requested = "";
     const api = createCampaignCastApi({ basePath: "/api/v1", session: { authorization: async () => ({}), onUnauthorized: async () => false },
