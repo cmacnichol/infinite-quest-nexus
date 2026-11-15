@@ -470,12 +470,16 @@ export function createLegacyCastPanel(options: {
       if (request.endpoint === "editAuthoredProfile") return await options.api.editAuthoredProfile!(campaign, characterId, request.body);
       return await options.api.edit(campaign, characterId, request.body);
     };
+    const feedbackOwner = sheetFeedback;
     const feedback: SheetFeedback | undefined = sheetFeedback ? { message: sheetFeedback.message,
       ...(sheetFeedback.undo && sheetFeedback.fence && !sheetFeedback.refreshFailed && Date.now() < sheetFeedback.deadline && target && sheetMatchesFence(target, sheetFeedback.fence) ? { undo: async () => {
-        const saved = sheetFeedback!;
+        const saved = feedbackOwner;
+        const valid = () => saved && sheetFeedback === saved && saved.undo && saved.fence && Date.now() < saved.deadline;
+        if (!valid()) return { ok: true as const };
         try {
           if (options.checkLock && !await syncLock() || !stillCurrent()) return { ok: false as const, conflict: false, message: "Character editing is unavailable." };
-          await dispatch(sheetUndoRequest(target, saved.undo!, saved.fence!, saved.key));
+          if (!valid()) return { ok: true as const };
+          await dispatch(sheetUndoRequest(target, saved!.undo!, saved!.fence!, saved!.key));
           if (!stillCurrent()) return { ok: true as const };
           clearSheetFeedback(); sheetFeedback = { message: "Undone", deadline: 0, key: "" }; await refresh(); return { ok: true as const };
         } catch (error) {
@@ -501,7 +505,7 @@ export function createLegacyCastPanel(options: {
           const fence: SheetWriteFence = request.endpoint === "profile" ? { kind: "main", revision: result.revision } : { kind: "cast", revision: result.revision, characterRevision: (result as CastDetail).character.revision, boundary: (result as CastDetail).boundary };
           const label = change.kind === "toggle" ? change.key : sheet.sections.flatMap(section => section.fields).find(field => field.path === change.path)?.label ?? change.path;
           sheetFeedback = { message: `Saved ${label}.`, undo: inverse, fence, deadline: Date.now() + 30000, key: crypto.randomUUID() };
-          sheetTimer = setTimeout(() => { if (!stillCurrent() || !sheetFeedback) return; delete sheetFeedback.undo; const undo = [...dialog.querySelectorAll("button")].find(item => item.textContent === "Undo"); undo?.remove(); }, 30000);
+          sheetTimer = setTimeout(() => { if (!stillCurrent() || !sheetFeedback) return; delete sheetFeedback.undo; sheetView?.setFeedback({ message: sheetFeedback.message }); }, 30000);
           await refresh(); return { ok: true };
         } catch (error) { if (!stillCurrent()) return { ok: true }; const conflict = (error as { statusCode?: number }).statusCode === 409; return { ok: false, conflict, message: conflict ? "This character changed. Your edit is kept; compare the latest before saving." : message(error) }; }
       },

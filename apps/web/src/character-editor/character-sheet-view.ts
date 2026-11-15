@@ -20,7 +20,7 @@ export type CharacterSheetViewOptions = {
 };
 
 let viewSequence = 0;
-export function renderCharacterSheetView(host: HTMLElement, options: CharacterSheetViewOptions): { revealField(path: string, mode?: "edit" | "conflict"): void; dirty(): boolean; dispose(): void } {
+export function renderCharacterSheetView(host: HTMLElement, options: CharacterSheetViewOptions): { revealField(path: string, mode?: "edit" | "conflict"): void; dirty(): boolean; setFeedback(feedback?: SheetFeedback): void; dispose(): void } {
   const doc = host.ownerDocument, idPrefix = `character-sheet-${++viewSequence}`;
   let disposed = false, pending = false, feedbackVisible = true, editor: { path: string; input: HTMLInputElement | HTMLTextAreaElement; initial: string } | null = null;
   let activePath: string | null = null, mode: "edit" | "conflict" = "edit", error: SheetResult | null = null;
@@ -41,7 +41,7 @@ export function renderCharacterSheetView(host: HTMLElement, options: CharacterSh
     if (!current()) return;
     host.replaceChildren(); const root = el("div"); root.className = "character-sheet-view"; host.append(root);
     if (options.lockedReason) root.append(el("p", options.lockedReason));
-    if (feedbackVisible && options.feedback) { const notice = el("div"); notice.setAttribute("role", "status"); notice.append(el("span", options.feedback.message)); if (options.feedback.undo) notice.append(button("Undo", () => { if (allowRefresh()) void run(options.feedback!.undo!); })); root.append(notice); }
+    if (feedbackVisible && options.feedback) { const notice = el("div"); notice.setAttribute("role", "status"); notice.append(el("span", options.feedback.message)); const undo = options.feedback.undo; if (undo) notice.append(button("Undo", () => { if (allowRefresh()) void run(undo); })); root.append(notice); }
     const errorRegion = el("div"); errorRegion.className = "character-sheet-error"; errorRegion.setAttribute("role", "alert"); root.append(errorRegion); if (error && !error.ok) showError(error);
     if (options.toggles && options.kind === "supporting") {
       const group = el("div"); group.className = "character-sheet-toggles";
@@ -88,5 +88,5 @@ export function renderCharacterSheetView(host: HTMLElement, options: CharacterSh
     }
   }
   render();
-  return { revealField(path, next = "edit") { open(path, next); Array.from(host.querySelectorAll<HTMLElement>("[data-path]")).find(row => row.dataset.path === path)?.scrollIntoView?.({ block: "nearest" }); }, dirty, dispose() { disposed = true; } };
+  return { revealField(path, next = "edit") { open(path, next); Array.from(host.querySelectorAll<HTMLElement>("[data-path]")).find(row => row.dataset.path === path)?.scrollIntoView?.({ block: "nearest" }); }, dirty, setFeedback(feedback) { if (feedback) options.feedback = feedback; else delete options.feedback; render(); }, dispose() { disposed = true; } };
 }

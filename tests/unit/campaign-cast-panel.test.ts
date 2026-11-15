@@ -67,6 +67,30 @@ describe("legacy cast panel", () => {
     expect(edit.mock.calls[1]![2]).toEqual({ expectedCastRevision: 2, expectedCharacterRevision: 2, expectedBoundary: boundary, idempotencyKey: expect.any(String), clearOverrides: ["story.role"] });
     panel.requestClose();
   });
+  it("does not restore or execute expired Undo when a Retraction preview rerenders the sheet", async () => {
+    const { document, window } = parseHTML("<html><body></body></html>");
+    vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
+    const id = "11111111-1111-4111-8111-111111111111", observationId = "22222222-2222-4222-8222-222222222222", boundary = { turnNumber: 1, timelineRevision: 0 }, capabilities = { castEditing: true, castObservationDecisions: true };
+    const person = { id, name: "Marin", aliases: [], origin: { kind: "manual" as const }, profile: { "story.role": "Guard" }, pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 1, lastMentionedTurn: null };
+    const observation = { id: observationId, characterId: id, field: "story.role" as const, value: "Guard", mode: "fact" as const, speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn" as const, turnNumber: 1, turnId: id, quote: "A guard appeared", startOffset: 0, endOffset: 16, invalidated: false } };
+    let detail = { revision: 1, boundary, capabilities, character: person, observations: [observation], observationDecisionStatus: [{ observationId, state: "eligible" as const, retractionEventId: null, reason: null }], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null };
+    const edit = vi.fn(async (_campaign: string, _id: string, body: { name?: string }) => { detail = { ...detail, revision: 2, character: { ...person, name: body.name ?? person.name, revision: 2 } }; return { revision: 2, boundary, character: detail.character }; });
+    const previewObservationDecision = vi.fn(async () => ({ currentValue: "Guard", projectedValue: null }));
+    const api = { list: async () => ({ revision: 1, boundary, capabilities, characters: [person], nextCursor: null }), detail: async () => detail, edit, previewObservationDecision, discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} });
+    const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    await panel.open(); [...dialog.querySelectorAll("button")].find(button => button.textContent?.includes("Marin"))!.click(); await new Promise(resolve => setTimeout(resolve, 0));
+    vi.useFakeTimers();
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Edit Name")!.click();
+    const input = dialog.querySelector<HTMLInputElement>('[data-path="name"] input')!; input.value = "Mara"; input.dispatchEvent(new window.Event("input"));
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Save")!.click(); await vi.advanceTimersByTimeAsync(0);
+    const oldUndo = [...dialog.querySelectorAll("button")].find(button => button.textContent === "Undo")!; expect(oldUndo).toBeTruthy();
+    await vi.advanceTimersByTimeAsync(30000); expect([...dialog.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(false);
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "This is wrong")!.click(); await vi.advanceTimersByTimeAsync(0);
+    expect(dialog.textContent).toContain("After this"); expect([...dialog.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(false);
+    oldUndo.click(); await vi.advanceTimersByTimeAsync(0); expect(edit).toHaveBeenCalledTimes(1);
+    panel.requestClose(); vi.useRealTimers();
+  });
   it.each(["before refresh", "after refresh", "refresh fails"] as const)("handles %s without rebasing Undo", async scenario => {
     const { document, window } = parseHTML("<html><body></body></html>");
     vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
