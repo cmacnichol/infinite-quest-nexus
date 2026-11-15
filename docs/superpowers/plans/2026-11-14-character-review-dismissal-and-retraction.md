@@ -1,5 +1,7 @@
 # Character Review Dismissal and Retraction Implementation Plan
 
+**Status:** Implemented and acceptance evidence recorded; final whole-branch review is pending. See [acceptance record](../../review/character-review-dismissal-and-retraction-acceptance.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let users dismiss unwanted discoveries/details, retract incorrect recorded facts, and find existing cast removal without losing history or safeguards.

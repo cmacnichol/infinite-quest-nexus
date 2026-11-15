@@ -10,6 +10,7 @@ it("previews before retracting and cancellation makes no write", async () => {
   const apply = vi.fn();
   renderObservationReview({ document, container: document.body, detail: detail as never, supported: true, editing: () => true, current: () => true, preview, apply, refresh: async () => {}, navigate() {} });
   expect(document.querySelector("captain")).toBeNull();
+  expect(document.body.textContent).toContain("Observation: Role \u2014 <captain>");
   [...document.querySelectorAll("button")].find(b => b.textContent === "Retract fact")!.click();
   await vi.waitFor(() => expect(document.body.textContent).toContain("Conflicting observations"));
   [...document.querySelectorAll("button")].find(b => b.textContent === "Cancel")!.click();

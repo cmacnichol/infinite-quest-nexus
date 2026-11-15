@@ -1,5 +1,7 @@
 # Character review dismissal and fact retraction
 
+**Status:** Implemented and acceptance evidence recorded; final whole-branch review is pending. See [acceptance record](../../review/character-review-dismissal-and-retraction-acceptance.md).
+
 Status: proposed design for implementation; no new behavior implemented or deployed. Baseline: `8eeecef3`.
 
 ## Problem and current evidence

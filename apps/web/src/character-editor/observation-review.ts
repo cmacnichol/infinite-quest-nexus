@@ -1,3 +1,4 @@
+import { SUPPORTING_FIELDS } from "@infinite-quest/client-core";
 import type { CastDetail, ObservationDecisionRequest, ObservationDecisionPreview, ObservationDecisionResult } from "@infinite-quest/contracts";
 
 type Options = {
@@ -15,7 +16,8 @@ export function renderObservationReview(options: Options) {
   const button = (label: string, run: () => void) => { const el = node("button", label); el.type = "button"; el.addEventListener("click", run); return el; };
   const observations = new Map([...detail.observations, ...(detail.retractedObservationHistory ?? [])].map(item => [item.id, item]));
   for (const observation of observations.values()) {
-    const row = node("section"), description = node("p", `${observation.mode === "claim" ? "Claim" : "Observation"}: ${observation.field} — ${observation.value}`);
+    const fieldLabel = SUPPORTING_FIELDS.find(field => field.path === observation.field)?.label ?? observation.field;
+    const row = node("section"), description = node("p", `${observation.mode === "claim" ? "Claim" : "Observation"}: ${fieldLabel} — ${observation.value}`);
     if (observation.evidence.kind === "turn") {
       const evidence = observation.evidence;
       description.append(node("span", ` — “${evidence.quote}” `));

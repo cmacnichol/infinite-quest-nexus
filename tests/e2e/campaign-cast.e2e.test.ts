@@ -1728,4 +1728,3 @@ for (const surface of ["legacy", "next"] as const) test(`pending retracted sourc
   const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace"); await openReview(dialog);
   await expect(dialog).toContainText("This source was retracted"); await expect(dialog.getByRole("button", { name: "Apply and next" })).toHaveCount(0); await dialog.getByText("Set an override", { exact: true }).click(); await expect(dialog.getByRole("button", { name: "Keep as override" })).toBeVisible(); expect(api.writes).toHaveLength(0);
 });
-
