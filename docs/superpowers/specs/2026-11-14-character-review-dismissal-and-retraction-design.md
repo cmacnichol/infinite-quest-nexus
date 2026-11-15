@@ -2,9 +2,9 @@
 
 **Status:** Implemented and acceptance evidence recorded; final whole-branch review is pending. See [acceptance record](../../review/character-review-dismissal-and-retraction-acceptance.md).
 
-Status: proposed design for implementation; no new behavior implemented or deployed. Baseline: `8eeecef3`.
+Historical baseline: this design was proposed against `8eeecef3` before implementation. No deployment is implied by the implementation status above.
 
-## Problem and current evidence
+## Problem and evidence at the historical baseline
 
 The shared review renderer in `apps/web/src/cast-review-queue.ts` offers unresolved identities only Attach, Create separate character, and Skip for this pass. Skip is a renderer-local Set and does not persist. Details under an unresolved identity are plain text. Resolved details support accept, confirm (override), and dismiss through `packages/database/src/campaign-cast-candidate-repository.ts`; dismissals already suppress equivalent retained-source details through `campaign-cast-review-sql.ts`. Existing candidate resolution can apply eligible observations when creating/attaching an identity, so hiding a detail only in the browser would not prevent its application.
 
