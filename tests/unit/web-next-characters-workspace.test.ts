@@ -299,3 +299,69 @@ it("uses refreshed values when switching directly to another field", async () =>
     expect(document.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!.value).toBe("Captain");
   } finally { workspace.dispose(); }
 });
+
+
+it.each([
+  ["available", {}, ["Merge with another character", "Remove from cast", "Add to world draft"]],
+  ["removed", { removed: true }, ["Restore"]],
+  ["main", { origin: { kind: "protagonist" } }, []],
+  ["merged away", { mergedIntoCharacterId: "other" }, []],
+] as const)("shows lifecycle actions for %s", async (_label, changes, expected) => {
+  const character = { ...person, ...changes };
+  const { document, workspace, click } = setup({ detail: async () => ({ ...detail, character, capabilities: { castEditing: true, castLifecycle: true } }), lifecycle: {} });
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Sources and edit history"));
+    const labels = [...document.querySelectorAll(".cast-lifecycle-actions button")].map(button => button.textContent);
+    expect(labels).toEqual(expected);
+  } finally { workspace.dispose(); }
+});
+
+it("reconciles a deferred poll after a failed Pin write", async () => {
+  let poll!: () => void, revision = 1, reject!: (error: Error) => void;
+  const schedule = { set: (callback: () => void) => { poll = callback; return 1; }, clear: () => {}, visible: () => true, onVisibilityChange: () => () => {} };
+  const latest = () => ({ ...person, name: revision === 1 ? "Mara" : "Updated Mara", revision });
+  const read = vi.fn(async () => ({ ...detail, revision, character: latest() }));
+  const edit = vi.fn(() => new Promise((_resolve, fail) => { reject = fail; }));
+  const { document, workspace, click } = setup({ workspaceStatus: async () => ({ ...status, revision }), list: async () => ({ ...page, revision, characters: [latest()] }), detail: read, edit }, { schedule });
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("Pin"));
+    click("Pin"); revision = 2; poll(); await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2)); await new Promise(resolve => setTimeout(resolve, 0));
+    reject(new Error("offline")); await vi.waitFor(() => expect(document.querySelector("dialog h2")?.textContent).toBe("Updated Mara"));
+  } finally { workspace.dispose(); }
+});
+
+
+it.each([false, true])("gates undo and lifecycle actions during generation: %s", async active => {
+  const merged = { ...person, activeMerges: [{ mergeEventId: "event", sourceCharacterId: "other", sourceName: "<Sera>", canUndo: false }] };
+  const { document, workspace, click } = setup({ detail: async () => ({ ...detail, character: merged, capabilities: { castEditing: true, castLifecycle: true } }), lifecycle: {} }, { generationActive: () => active });
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("Merged from <Sera>"));
+    expect(document.querySelector(".cast-lifecycle-actions p")!.textContent).toBe("Merged from <Sera>");
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>(".cast-lifecycle-actions button")];
+    expect(buttons.find(button => button.textContent === "Undo merge")!.disabled).toBe(true);
+    expect(buttons.find(button => button.textContent === "Remove from cast")!.disabled).toBe(active);
+  } finally { workspace.dispose(); }
+});
+
+it("explains disabled lifecycle capabilities", async () => {
+  const { document, workspace, click } = setup();
+  try { workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("Removing and restoring characters is disabled on this server. Character merging is disabled on this server.")); }
+  finally { workspace.dispose(); }
+});
+
+
+it("reconciles a deferred poll after a failed retraction preview", async () => {
+  let poll!: () => void, revision = 1, reject!: (error: Error) => void;
+  const schedule = { set: (callback: () => void) => { poll = callback; return 1; }, clear: () => {}, visible: () => true, onVisibilityChange: () => () => {} };
+  const observationId = "22222222-2222-4222-8222-222222222222";
+  const observation = { id: observationId, characterId: person.id, field: "story.role" as const, value: "Guard", mode: "fact" as const, speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn" as const, turnNumber: 1, turnId: person.id, quote: "Mara is a guard", startOffset: 0, endOffset: 15, invalidated: false } };
+  const latest = () => ({ ...person, name: revision === 1 ? "Mara" : "Updated Mara", revision, profile: { "story.role": "Guard" } });
+  const read = vi.fn(async () => ({ ...detail, revision, character: latest(), observations: [observation], observationDecisionStatus: [{ observationId, state: "eligible" as const, retractionEventId: null, reason: null }] }));
+  const { document, workspace, click } = setup({ workspaceStatus: async () => ({ ...status, revision, capabilities: { ...status.capabilities, observationDecisions: true } }), list: async () => ({ ...page, revision, characters: [latest()] }), detail: read, previewObservationDecision: () => new Promise((_resolve, fail) => { reject = fail; }) }, { schedule });
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("This is wrong"));
+    click("This is wrong"); revision = 2; poll(); await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2)); await new Promise(resolve => setTimeout(resolve, 0));
+    reject(new Error("offline")); await vi.waitFor(() => expect(document.querySelector("dialog h2")?.textContent).toBe("Updated Mara")); expect(document.body.textContent).toContain("Could not preview this change.");
+  } finally { workspace.dispose(); }
+});

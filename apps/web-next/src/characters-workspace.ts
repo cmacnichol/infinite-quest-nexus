@@ -1,3 +1,4 @@
+import { showLifecycle } from "../../web/src/character-editor/cast-lifecycle.js";
 import { renderCastRoster } from "../../web/src/character-editor/cast-roster-view.js";
 import { renderWorldCastPicker } from "../../web/src/character-editor/world-cast-picker.js";
 import { renderCastEditor } from "./characters-workspace-editor";
@@ -32,12 +33,13 @@ export function createCharactersWorkspace(document: Document, generationActive: 
   let rosterView: ReturnType<typeof renderCastRoster> | null = null;
   let searchPending = false;
   let showEmpty = false;
+  let lifecycleNotice = "";
   let sheetRenderPending = false;
   let sheetView: ReturnType<typeof renderCharacterSheetView> | null = null;
   let sheetTimer: ReturnType<typeof setTimeout> | undefined;
   let sheetFeedback: { message: string; undo?: SheetUndo; fence?: SheetWriteFence; deadline: number; key: string; refreshFailed?: boolean } | null = null;
   function clearSheetFeedback() { clearTimeout(sheetTimer); sheetFeedback = null; }
-  function selectCharacter(id: string | null) { if (id === state.selectedId) return; if (!discard()) return; sheetView?.dispose(); sheetView = null; clearSheetFeedback(); openEpoch++; showEmpty = false; protagonist = null; protagonistLoading = false; session.select(id); }
+  function selectCharacter(id: string | null) { if (id === state.selectedId) return; if (!discard()) return; lifecycleNotice = ""; sheetView?.dispose(); sheetView = null; clearSheetFeedback(); openEpoch++; showEmpty = false; protagonist = null; protagonistLoading = false; session.select(id); }
   const operationKeys = new Map<string, string>();
   function operationKey(operation: string, payload: unknown) { const key = `${operation}:${JSON.stringify(payload)}`; let id = operationKeys.get(key); if (!id) { id = crypto.randomUUID(); operationKeys.set(key, id); } return id; }
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => { const el = document.createElement(tag); el.textContent = text; return el; };
@@ -56,6 +58,7 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     dialog.classList.toggle("characters-sheet-layout", Boolean(state.selectedId));
     sheetView?.dispose(); sheetView = null;
     dialog.replaceChildren(); const head = node("header"); head.append(node("h2", state.detail?.character.name ?? "Characters"), button("Close", close)); dialog.append(head);
+    if (lifecycleNotice) { const notice = node("p", lifecycleNotice); notice.setAttribute("role", "status"); dialog.append(notice); }
     if (state.error) dialog.append(node("p", "Characters could not be refreshed. Try again."), button("Retry", () => { void session.refresh(); }));
     if (!state.status) { dialog.append(node("p", "Loading characters…")); return; }
     if (state.selectedId) {
@@ -71,8 +74,32 @@ export function createCharactersWorkspace(document: Document, generationActive: 
       dialog.append(node("p", `Last observed turn ${detail.character.lastObservedTurn}${detail.character.lastMentionedTurn != null ? ` · Last mentioned turn ${detail.character.lastMentionedTurn}` : ""}`));
       if (detail.character.origin.kind === "protagonist") dialog.append(button("Edit main character", () => { if (discard() && protagonist && state.campaignId) renderProfileEditor(state.campaignId, protagonist); }, generationActive() || !protagonist));
       else dialog.append(button("Edit character", () => { if (!discard()) return; editor = createCastEditor(detail, detail); session.setDraft(editor); renderEditor(); }, state.status.capabilities.editing !== true || generationActive()));
-      if (detail.character.origin.kind !== "protagonist" && !detail.character.mergedIntoCharacterId && detail.capabilities.castLifecycle === false) dialog.append(node("p", "Removing and restoring characters is disabled on this server."));
-      else if (detail.character.origin.kind !== "protagonist" && state.status.capabilities.editing !== true) dialog.append(node("p", "Removing and restoring characters is unavailable while character editing is disabled."));
+      if (detail.character.origin.kind !== "protagonist" && !detail.character.mergedIntoCharacterId) {
+        if (detail.capabilities.castLifecycle === false) dialog.append(node("p", "Removing and restoring characters is disabled on this server. Character merging is disabled on this server."));
+        else if (state.status.capabilities.editing !== true) dialog.append(node("p", "Removing and restoring characters is unavailable while character editing is disabled."));
+        if (detail.capabilities.castLifecycle && api.lifecycle) {
+          const campaign = state.campaignId!, epoch = openEpoch;
+          const launch = (action: Parameters<typeof showLifecycle>[0], mergeEventId?: string) => {
+            if (generationActive() || state.status?.capabilities.editing !== true || !discard()) return;
+            if (sheetView?.dirty() || sheetRenderPending) { sheetView?.dispose(); sheetView = null; render(); }
+            const latest = state.detail; if (!latest || latest.character.id !== detail.character.id || !latest.capabilities.castLifecycle || latest.character.mergedIntoCharacterId || (action === "restore") !== Boolean(latest.character.removed)) return;
+            showLifecycle(action, { api: api.lifecycle!, list: api.list, campaign, detail: latest, lock: async () => !generationActive(), ...(mergeEventId ? { mergeEventId } : {}),
+              finished(id, message) {
+                if (epoch !== openEpoch || state.campaignId !== campaign || !dialog.open) return;
+                sheetView?.dispose(); sheetView = null; clearSheetFeedback(); lifecycleNotice = message; openEpoch++;
+                if (id === state.selectedId) { render(); void session.refresh(); } else session.select(id || null);
+              } });
+          };
+          const actions = node("div"); actions.className = "cast-lifecycle-actions";
+          const disabled = state.status.capabilities.editing !== true || generationActive();
+          if (detail.character.removed) actions.append(button("Restore", () => launch("restore"), disabled));
+          else {
+            actions.append(button("Merge with another character", () => launch("merge"), disabled), button("Remove from cast", () => launch("remove"), disabled), button("Add to world draft", () => launch("promote"), disabled));
+            for (const merge of detail.character.activeMerges ?? []) actions.append(node("p", `Merged from ${merge.sourceName}`), button("Undo merge", () => launch("unmerge", merge.mergeEventId), disabled || !merge.canUndo));
+          }
+          dialog.append(actions);
+        }
+      }
       const campaign = state.campaignId!, id = detail.character.id, epoch = openEpoch;
       const main = detail.character.origin.kind === "protagonist";
       const target: SheetTarget | null = main ? (protagonist ? { kind: "main", profile: protagonist } : null) : { kind: "cast", detail };
@@ -114,6 +141,10 @@ export function createCharactersWorkspace(document: Document, generationActive: 
           clearSheetFeedback();
           if (!sheetRenderPending || !current()) return;
           render(); sheetView?.revealField(path, mode); return true;
+        },
+        onIdleError(result) {
+          if (!sheetRenderPending || !current()) return false;
+          render(); sheetView?.showError(result); return true;
         },
         onInteractionEnd(path) {
           if (!sheetRenderPending || !current()) return;
@@ -268,6 +299,6 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     fields.querySelector<HTMLElement>("input, textarea")?.focus();
   }
   dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
-  return { open(campaignId: string, returnFocus?: HTMLElement | null) { clearSheetFeedback(); openEpoch++; toolEpoch++; searchPending = false; rosterView?.dispose(); rosterView = null; protagonist = null; protagonistLoading = false; focus = returnFocus ?? document.activeElement as HTMLElement | null; editor = null; profileEditor = null; reviewing = false; dialog.showModal(); session.open(campaignId); }, dispose() { clearSheetFeedback(); sheetView?.dispose(); rosterView?.dispose(); openEpoch++; toolEpoch++; session.dispose(); dialog.remove(); } };
+  return { open(campaignId: string, returnFocus?: HTMLElement | null) { clearSheetFeedback(); openEpoch++; toolEpoch++; lifecycleNotice = ""; searchPending = false; rosterView?.dispose(); rosterView = null; protagonist = null; protagonistLoading = false; focus = returnFocus ?? document.activeElement as HTMLElement | null; editor = null; profileEditor = null; reviewing = false; dialog.showModal(); session.open(campaignId); }, dispose() { clearSheetFeedback(); sheetView?.dispose(); rosterView?.dispose(); openEpoch++; toolEpoch++; session.dispose(); dialog.remove(); } };
 }
 
