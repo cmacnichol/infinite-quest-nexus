@@ -23,6 +23,7 @@ import { createProvider, loadPromptSnapshotForTest, providerPromptProtocolVersio
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
 import { sha256 } from "../../packages/domain/src/text.js";
+import { CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, HISTORY_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
 import type { StreamingIllustrationConfig } from "../../packages/application/src/illustration/types.js";
 
@@ -50,15 +51,16 @@ integration("campaign cast composed generation", () => {
   afterAll(async () => { await pool?.end(); });
   afterEach(async () => { await pool.query("DELETE FROM campaigns WHERE id=ANY($1::uuid[])", [campaignIds.splice(0)]); });
 
-  function commands(enabled = true, legacy = false) {
+  function commands(enabled = true, legacy = false, v3 = false) {
     return createPostgresGenerationCommandRepository(pool, {
       resolvePromptSnapshot: (client, owner, campaignId, policy) => policy
-        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId: owner, campaignId, scope: "campaign" }, "off", policy.castContext === true, legacy ? "v1" : "v2")
+        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId: owner, campaignId, scope: "campaign" }, "off", policy.castContext === true, legacy ? "v1" : v3 ? "v3" : "v2")
         : loadPromptSnapshotForTest(client, owner, campaignId),
       promptProtocolVersion: providerPromptProtocolVersion,
       resolveStoryMemoryPolicySnapshot: async (client, scope) => {
         const policy = await resolveStoryMemoryPolicySnapshot(client, scope,
           { installedCapability: "r3", enforceEnabled: false, castContextEnabled: enabled, castDiscoveryEnabled: enabled });
+        if (policy && v3 && policy.castContext) return { ...policy, contextProtocol: HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, promptProtocol: CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION };
         if (!policy || !legacy || !policy.castContext) return policy;
         const { castDiscoveryEnabled: _discovery, ...old } = policy;
         return { ...old, contextProtocol: "current-continuity-v5" as const, promptProtocol: "story-v17-campaign-cast" as const };
@@ -77,6 +79,50 @@ integration("campaign cast composed generation", () => {
     await pool.query("UPDATE campaign_memory_configs SET embedding_enabled=false WHERE campaign_id=$1", [imported.campaignId]);
     return { ownerUserId, campaignId: imported.campaignId };
   }
+
+  it.each([false, true])("claims and retries a job using its frozen state-edit precedence (V3=%s)", async (v3) => {
+    const scope = await campaign();
+    const cast = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [scope.campaignId]);
+    const initial = await cast.initialize(scope);
+    const person = await cast.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary,
+      idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: { "state.location": "the docks" } });
+    const turn = (await pool.query("SELECT turn_id AS id,effective_narration,correction_revision FROM effective_turn_narrations WHERE campaign_id=$1 AND turn_number=8", [scope.campaignId])).rows[0];
+    await pool.query("UPDATE campaigns SET active_turn_number=8 WHERE id=$1", [scope.campaignId]);
+    await cast.applyBatch(scope, { boundary: { turnNumber: 8, timelineRevision: initial.boundary.timelineRevision }, idempotencyKey: randomUUID(), commands: [{
+      kind: "observe", characterId: person.character.id, field: "state.location", value: "the road", mode: "fact", speakerCharacterId: null, supersedesObservationId: null,
+      evidence: { kind: "turn", turnId: turn.id, turnNumber: 8, narrationRevision: turn.correction_revision, sourceHash: sha256(turn.effective_narration), paragraphId: "p1", quote: turn.effective_narration }
+    }] });
+    await saveStoryMemoryEnrollment(pool, scope, { capability: "r3", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
+    const queued = await commands(true, false, v3).enqueueAppend(scope, generationRequestSchema.parse({ action: "Ask Mara.", providerProfileId,
+      idempotencyKey: randomUUID(), context: { budgetTokens: 16000 } }));
+    const frozen = (await pool.query("SELECT generation_base_identity,context_options FROM generation_jobs WHERE id=$1", [queued.id])).rows[0];
+    const authority = await withTransaction(pool, client => resolveGenerationAuthoritySnapshot(client, { ...scope, operationKind: "append", expectedTurnNumber: 9,
+      baseIdentityVersion: "generation-base-v4", castContextVersion: "cast-context-v2", castDiscoveryEnabled: true,
+      contextProtocol: v3 ? HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION : HISTORY_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, captureRecentWindow: true, recentWindowTurns: 11 }));
+    expect(frozen.generation_base_identity.castFingerprint).toBe((authority.baseIdentity as { castFingerprint: string }).castFingerprint);
+    expect(authority.castSnapshot!.fiction!.find(item => item.characterId === person.character.id)!.fields).toContainEqual(expect.objectContaining({ field: "state.location", value: v3 ? "the road" : "the docks", source: v3 ? "observation" : "override" }));
+    const execution = createPostgresGenerationExecutionRepository(pool);
+    const firstClaim = await execution.claimNext({ workerId: "v3-resume", leaseSeconds: 30 });
+    expect(firstClaim?.jobId).toBe(queued.id);
+    expect(await execution.loadExecutionPayload({ claim: firstClaim!, workerId: "v3-resume", leaseSeconds: 30 })).not.toBeNull();
+    expect(await execution.markFailed({ ownerUserId, jobId: queued.id, workerId: "v3-resume", errorCode: "generation_failed", errorMessage: "Interrupted", recoveryMetadata: {} })).toBe(true);
+    await commands(true, false, v3).retry({ ownerUserId, jobId: queued.id });
+    const secondClaim = await execution.claimNext({ workerId: "v3-resume", leaseSeconds: 30 });
+    expect(secondClaim?.jobId).toBe(queued.id);
+    expect(await execution.loadExecutionPayload({ claim: secondClaim!, workerId: "v3-resume", leaseSeconds: 30 })).not.toBeNull();
+    expect((await pool.query("SELECT generation_base_identity,context_options FROM generation_jobs WHERE id=$1", [queued.id])).rows[0]).toEqual(frozen);
+    expect(await execution.markFailed({ ownerUserId, jobId: queued.id, workerId: "v3-resume", errorCode: "generation_failed", errorMessage: "Interrupted", recoveryMetadata: {} })).toBe(true);
+    await cast.applyBatch(scope, { boundary: { turnNumber: 8, timelineRevision: initial.boundary.timelineRevision }, idempotencyKey: randomUUID(), commands: [{
+      kind: "observe", characterId: person.character.id, field: "state.location", value: "the lane", mode: "fact", speakerCharacterId: null, supersedesObservationId: null,
+      evidence: { kind: "turn", turnId: turn.id, turnNumber: 8, narrationRevision: turn.correction_revision, sourceHash: sha256(turn.effective_narration), paragraphId: "p1", quote: turn.effective_narration }
+    }] });
+    await commands(true, false, v3).retry({ ownerUserId, jobId: queued.id });
+    const staleClaim = await execution.claimNext({ workerId: "v3-resume", leaseSeconds: 30 });
+    expect(staleClaim?.jobId).toBe(queued.id);
+    expect(await execution.loadExecutionPayload({ claim: staleClaim!, workerId: "v3-resume", leaseSeconds: 30 })).toBeNull();
+    expect((await pool.query("SELECT status,error_code FROM generation_jobs WHERE id=$1", [queued.id])).rows[0]).toEqual({ status: "recoverable", error_code: "generation_authority_stale" });
+  });
 
   it("previews current scoped character selection without dispatch or authority writes", async () => {
     const scope = await campaign(), foreign = await campaign(true);

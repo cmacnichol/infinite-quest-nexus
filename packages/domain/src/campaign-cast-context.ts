@@ -97,12 +97,13 @@ export function selectCastContext(input: {
       const value = profile[field];
       if (value === undefined) continue;
       const override = overrides.find((entry) => entry.field === field);
-      const observation = supported.filter((entry) => !superseded.has(entry.id) && !retractedObservationIds?.has(entry.id) && entry.field === field && entry.mode === "fact" && entry.value === value)
+      const replacement = v3 && override ? stateEditReplacement(override, supported, retractedObservationIds) : null;
+      const observation = replacement ?? supported.filter((entry) => !superseded.has(entry.id) && !retractedObservationIds?.has(entry.id) && entry.field === field && entry.mode === "fact" && entry.value === value)
         .sort((a, b) => castEvidenceOrder(b.evidence)[0] - castEvidenceOrder(a.evidence)[0]
           || castEvidenceOrder(b.evidence)[1] - castEvidenceOrder(a.evidence)[1]).at(0);
       if (!override && !(v3 && snapshot.discoveryStatus === "off") && (!current || observation?.evidence.kind === "historical_world")
         && (field.startsWith("state.") || field === "story.goals")) { omittedFieldCount++; continue; }
-      if (override?.evidence.kind === "user" && (!v3 || !stateEditReplacement(override, supported, retractedObservationIds))) fields.push({ field, value, authority: "user", evidenceId: override.evidence.editId, evidence: override.evidence });
+      if (override?.evidence.kind === "user" && (!v3 || !replacement)) fields.push({ field, value, authority: "user", evidenceId: override.evidence.editId, evidence: override.evidence });
       else if (observation) fields.push({ field, value, authority: "observation", evidenceId: observation.id, evidence: observation.evidence });
     }
     fields.sort((a, b) => Number(b.authority === "user") - Number(a.authority === "user"));

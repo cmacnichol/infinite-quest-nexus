@@ -64,7 +64,7 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   const resolved = await resolveGenerationAuthoritySnapshot(client, {
     ...scope,
     ...(scope.expectedBaseIdentity && hasGenerationCharacterAuthority(scope.expectedBaseIdentity)
-      ? { baseIdentityVersion: scope.expectedBaseIdentity.version, castContextVersion: isCastV2ContextProtocol(scope.storyMemoryPolicy?.contextProtocol) ? "cast-context-v2" as const : "cast-context-v1" as const, ...(scope.storyMemoryPolicy?.castDiscoveryEnabled === undefined ? {} : { castDiscoveryEnabled: scope.storyMemoryPolicy.castDiscoveryEnabled }), captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined,
+      ? { baseIdentityVersion: scope.expectedBaseIdentity.version, castContextVersion: isCastV2ContextProtocol(scope.storyMemoryPolicy?.contextProtocol) ? "cast-context-v2" as const : "cast-context-v1" as const, ...(scope.storyMemoryPolicy?.contextProtocol ? { contextProtocol: scope.storyMemoryPolicy.contextProtocol } : {}), ...(scope.storyMemoryPolicy?.castDiscoveryEnabled === undefined ? {} : { castDiscoveryEnabled: scope.storyMemoryPolicy.castDiscoveryEnabled }), captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined,
         ...(scope.expectedBaseIdentity.recentWindowTurns === undefined ? {} : { recentWindowTurns: scope.expectedBaseIdentity.recentWindowTurns }),
         captureStoryLedger: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol),
         captureProtectedFacts: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol) }

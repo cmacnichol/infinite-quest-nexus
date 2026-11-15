@@ -78,7 +78,7 @@ export function createCastContextPreview(pool: DatabasePool, config: Pick<Runtim
     }
     const history = config.historyCoverageEnabled !== false;
     const scope = { ownerUserId, campaignId, operationKind: "append" as const, expectedTurnNumber: campaign.active_turn_number + 1 };
-    const captured = await resolveGenerationAuthoritySnapshot(client, { ...scope, baseIdentityVersion: "generation-base-v4", castContextVersion: "cast-context-v2", castDiscoveryEnabled: policy.castDiscoveryEnabled === true,
+    const captured = await resolveGenerationAuthoritySnapshot(client, { ...scope, baseIdentityVersion: "generation-base-v4", castContextVersion: "cast-context-v2", contextProtocol: policy.contextProtocol, castDiscoveryEnabled: policy.castDiscoveryEnabled === true,
       captureRecentWindow: history ? policy.policy.capability !== "r1" : policy.policy.recentTurnTarget > 1, ...(history && policy.policy.capability !== "r1" ? { recentWindowTurns: 11 as const } : {}), captureStoryLedger: history, captureProtectedFacts: history });
     const authority = await loadPostgresChronicleGenerationAuthorityContext(client, { ...scope, worldVersionId: campaign.world_version_id,
       query: request.query, expectedBaseIdentity: captured.baseIdentity, storyMemoryPolicy: policy });

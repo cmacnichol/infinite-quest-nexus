@@ -32,6 +32,16 @@ describe("captured cast context", () => {
         evidence: { ...observation.evidence, invalidated: undefined } })) })) };
     expect(castGenerationSnapshotFingerprint(snapshot)).toBe(castGenerationSnapshotFingerprint(JSON.parse(JSON.stringify(snapshot))));
   });
+  it("cites the later tied observation that replaced a state edit", () => {
+    const input = fixture();
+    const observation = input.details[0]!.observations[1]!;
+    const snapshot = { ...input, details: [{ ...input.details[0],
+      overrides: [{ field: "state.location", value: "the docks", evidence: { kind: "user", editId: id(20), effectiveTurnNumber: 3 } }],
+      observations: [...input.details[0]!.observations, { ...observation, id: id(13) }] }] };
+    const result = selectCastContext({ snapshot: castGenerationSnapshotSchema.parse(snapshot), contextProtocol: CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      direction: "Mara", currentScene: "", openThreads: [], budgetTokens: 3000 });
+    expect(result.records[0]!.fields).toContainEqual(expect.objectContaining({ field: "state.location", value: "the gate", authority: "observation", evidenceId: id(13) }));
+  });
   it("keeps the snapshot closed and rejects foreign or duplicate evidence bindings", () => {
     const input = fixture();
     expect(castGenerationSnapshotSchema.safeParse({ ...input, secret: "no" }).success).toBe(false);

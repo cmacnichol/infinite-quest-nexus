@@ -6,6 +6,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { captureCastGenerationSnapshotWithClient, createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
 import { sha256 } from "../../packages/domain/src/text.js";
 import { CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
+import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
 import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
 
 let pool: DatabasePool;
@@ -86,6 +87,14 @@ it("keeps v1 replay stable and captures only bounded v2 fiction with discovery o
   await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,2,$4)", [laterTurn, ownerUserId, campaignId, laterNarration]);
   await repository.applyBatch(scope, { boundary: { turnNumber: 2, timelineRevision: 0 }, idempotencyKey: "location-observation", commands: [{ kind: "observe", characterId: created.character.id, field: "state.location", value: "the palace", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: laterTurn, turnNumber: 2, narrationRevision: 0, sourceHash: sha256(laterNarration), paragraphId: "p1", quote: laterNarration } }] });
   await repository.applyBatch(scope, { boundary: { turnNumber: 2, timelineRevision: 0 }, idempotencyKey: "condition-observation", commands: [{ kind: "observe", characterId: created.character.id, field: "state.condition", value: "well rested", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: laterTurn, turnNumber: 2, narrationRevision: 0, sourceHash: sha256(laterNarration), paragraphId: "p1", quote: laterNarration } }] });
+  await pool.query("INSERT INTO campaign_state(campaign_id,owner_user_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [campaignId, ownerUserId]);
+  for (const [contextProtocol, value] of [[CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, "the docks"], [CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, "the palace"]] as const) {
+    const authority = await withTransaction(pool, client => resolveGenerationAuthoritySnapshot(client, { ...scope, operationKind: "append", expectedTurnNumber: 3,
+      baseIdentityVersion: "generation-base-v4", castContextVersion: "cast-context-v2", castDiscoveryEnabled: false, contextProtocol }));
+    expect(authority.castSnapshot!.fiction!.find(item => item.characterId === created.character.id)!.fields).toContainEqual(expect.objectContaining({ field: "state.location", value }));
+    const direct = await withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled: false, version: "cast-context-v2", contextProtocol }));
+    expect(authority.baseIdentity).toMatchObject({ castFingerprint: direct.fingerprint });
+  }
   const captureGap = (contextProtocol: typeof CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION | typeof CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, discoveryEnabled: boolean) => withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled, version: "cast-context-v2", contextProtocol }));
   const gapV3 = await captureGap(CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, true);
   expect(gapV3.snapshot.discoveryStatus).toBe("failed");
