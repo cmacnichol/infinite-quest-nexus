@@ -271,12 +271,12 @@ async function dispatchResolvedRuntimeRole(
     const providerGraph = dependencies.createApiProviders(
       pool,
       config.credentialEncryptionKey,
-      providerTransport, config
+      providerTransport, { ...config, castEditingEnabled: config.castEditingEnabled === true && !!dependencies.createApiCast }
     );
     const generation = dependencies.createApiGeneration(pool, providerGraph.generation, {
       installedCapability: config.storyMemoryCapability ?? null,
       enforceEnabled: config.storyMemoryEnforceEnabled === true,
-      ...(config.castContextEnabled === true ? { castContextEnabled: true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, historyCoverageEnabled: config.historyCoverageEnabled !== false } : {})
+      ...(config.castContextEnabled === true ? { castContextEnabled: true, castEditingEnabled: config.castEditingEnabled === true && !!dependencies.createApiCast, castDiscoveryEnabled: config.castDiscoveryEnabled === true, historyCoverageEnabled: config.historyCoverageEnabled !== false } : {})
     });
     const illustration = dependencies.createApiIllustration(pool, providerGraph.illustration);
     const memory = dependencies.createApiMemory(pool, providerGraph.chronicle);
@@ -325,13 +325,13 @@ async function dispatchResolvedRuntimeRole(
   const apiProviderGraph = dependencies.createApiProviders(
     pool,
     config.credentialEncryptionKey,
-    providerTransport, config
+    providerTransport, { ...config, castEditingEnabled: config.castEditingEnabled === true && !!dependencies.createApiCast }
   );
   const workerProviderGraph = dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport, config);
   const apiGeneration = dependencies.createApiGeneration(pool, apiProviderGraph.generation, {
     installedCapability: config.storyMemoryCapability ?? null,
     enforceEnabled: config.storyMemoryEnforceEnabled === true,
-    ...(config.castContextEnabled === true ? { castContextEnabled: true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, historyCoverageEnabled: config.historyCoverageEnabled !== false } : {})
+    ...(config.castContextEnabled === true ? { castContextEnabled: true, castEditingEnabled: config.castEditingEnabled === true && !!dependencies.createApiCast, castDiscoveryEnabled: config.castDiscoveryEnabled === true, historyCoverageEnabled: config.historyCoverageEnabled !== false } : {})
   });
   const illustration = dependencies.createApiIllustration(pool, apiProviderGraph.illustration);
   const memory = dependencies.createApiMemory(pool, apiProviderGraph.chronicle);

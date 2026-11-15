@@ -55,7 +55,7 @@ integration("Story Memory enrollment", () => {
     const imported = await importCampaign("cast capability");
     const capture = (castContextEnabled: boolean) => withTransaction(pool, (client) => resolveStoryMemoryPolicySnapshot(client,
       { ownerUserId, campaignId: imported.campaignId, providerProfileId, requestedModel: "" },
-      { installedCapability: "r3", enforceEnabled: true, castContextEnabled }));
+      { installedCapability: "r3", enforceEnabled: true, castContextEnabled, castEditingEnabled: true }));
     const old = await capture(false);
     const enabled = await capture(true);
     expect(enabled).toMatchObject({ castContext: true, contextProtocol: "current-continuity-v9", promptProtocol: "story-v19-state-edit-precedence" });

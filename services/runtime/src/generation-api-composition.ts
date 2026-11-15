@@ -458,6 +458,7 @@ export function createApiGenerationApplication(
          installedCapability: resolvedOperatorConfig.installedCapability,
          enforceEnabled: resolvedOperatorConfig.enforceEnabled,
          castContextEnabled: resolvedOperatorConfig.castContextEnabled === true,
+         castEditingEnabled: resolvedOperatorConfig.castEditingEnabled === true,
          castDiscoveryEnabled: resolvedOperatorConfig.castDiscoveryEnabled === true,
          historyCoverageEnabled: resolvedOperatorConfig.historyCoverageEnabled !== false
       }),

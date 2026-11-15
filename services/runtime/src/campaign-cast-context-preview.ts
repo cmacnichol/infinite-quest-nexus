@@ -23,7 +23,7 @@ import type { RuntimeTextExecution } from "./provider-credential-transport-adapt
 /** Provider-free estimate using current scoped authority and the generation planner.
  * Unsupported routes are explicitly unavailable rather than assigned a guessed budget. */
 export function createCastContextPreview(pool: DatabasePool, config: Pick<RuntimeConfig,
-  "castContextEnabled" | "castDiscoveryEnabled" | "storyMemoryCapability" | "storyMemoryEnforceEnabled" | "historyCoverageEnabled">) {
+  "castContextEnabled" | "castEditingEnabled" | "castDiscoveryEnabled" | "storyMemoryCapability" | "storyMemoryEnforceEnabled" | "historyCoverageEnabled">) {
   return async (ownerUserId: string, campaignId: string, request: CastContextPreviewRequest) => withTransaction(pool, async client => {
     const campaign = (await client.query(`SELECT c.*,s.revision AS cast_revision,s.timeline_revision FROM campaigns c
       LEFT JOIN campaign_cast_state s ON s.campaign_id=c.id AND s.owner_user_id=c.owner_user_id
@@ -71,7 +71,7 @@ export function createCastContextPreview(pool: DatabasePool, config: Pick<Runtim
       maxOutputTokens: route.candidates[0]!.maxOutputTokens, temperature: route.parameters.temperature ?? 0, requestTimeoutMs: route.requestTimeoutMs } : baseProvider;
     const policy = await resolveStoryMemoryPolicySnapshot(client, { ownerUserId, campaignId, providerProfileId: provider.id, requestedModel: provider.model, ...(route ? { textExecutionRouteBasis: route } : {}) }, {
       installedCapability: config.storyMemoryCapability, enforceEnabled: config.storyMemoryEnforceEnabled === true,
-      castContextEnabled: true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, historyCoverageEnabled: config.historyCoverageEnabled !== false });
+      castContextEnabled: true, castEditingEnabled: config.castEditingEnabled === true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, historyCoverageEnabled: config.historyCoverageEnabled !== false });
     if (!policy?.castContext) return disabled("Character context is unavailable for the current Story Memory settings.");
     if (policy.policy.continuityReview !== "off" && providerRow.configuration.continuityReviewExecutionPolicy && !reviewer) {
       return disabled("Preview needs locally saved settings for the configured continuity reviewer.");

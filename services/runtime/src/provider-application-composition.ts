@@ -63,6 +63,7 @@ type ProviderCompositionOptions = Readonly<{
   castAutoMatchEnabled?: boolean;
   castPresetsEnabled?: boolean;
   castContextEnabled?: boolean;
+  castEditingEnabled?: boolean;
   textProviderConcurrency?: number;
 }>;
 
@@ -217,7 +218,7 @@ function createInternals(
   ): ProviderApplicationTransaction {
     const client = database as DatabaseClient;
     const providerRepositories = createPostgresProviderRepositories(client);
-    const prompts = createPromptRepository(client, { castContextEnabled: options.castContextEnabled === true });
+    const prompts = createPromptRepository(client, { castContextEnabled: options.castContextEnabled === true, castEditingEnabled: options.castEditingEnabled === true });
     const costs = createProviderCostRepository(database);
     const runtime = createRuntimeProviderAdapter({
       database: client,

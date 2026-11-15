@@ -21,7 +21,7 @@ import {
   CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   STORY_OUTPUT_ENCODING_CONTRACT_V3,
   STORY_PROMPT_SCHEMA_VERSION,
-  castStoryMemoryPromptCompatibilityIdentity, castV2StoryMemoryPromptCompatibilityIdentity, castV3StoryMemoryPromptCompatibilityIdentity, CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  castStoryMemoryPromptCompatibilityIdentity, castV2StoryMemoryPromptCompatibilityIdentity, castV3StoryMemoryPromptCompatibilityIdentity, CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   storyPromptCompatibilityIdentity,
   storyPromptProtocolIdentity
 } from "../../contracts/src/story-prompt.js";
@@ -253,7 +253,7 @@ function establishedPromptPreview(key: PromptTemplateKey, content: string) {
   return preview;
 }
 
-type PromptPreviewOptions = Readonly<{ castContextEnabled?: boolean }>;
+type PromptPreviewOptions = Readonly<{ castContextEnabled?: boolean; castEditingEnabled?: boolean }>;
 
 /**
  * Adds the effective (post-composition) writer system prompt to a story_system
@@ -284,7 +284,7 @@ async function withEffectiveStorySystemPreview(
   );
   const enrolled = enrollmentResult.rows.length > 0;
   const storyMemoryPromptProtocol = enrolled
-    ? options.castContextEnabled === true ? CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION : STORY_MEMORY_PROMPT_PROTOCOL_VERSION
+    ? options.castContextEnabled === true ? options.castEditingEnabled === true ? CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION : CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION : STORY_MEMORY_PROMPT_PROTOCOL_VERSION
     : null;
 
   const providerResult = campaign.text_provider_profile_id

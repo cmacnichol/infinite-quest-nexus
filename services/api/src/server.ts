@@ -745,7 +745,7 @@ export async function buildServer({
     app.decorate("waitForLocalHttpDrain", installLocalHttpDrain(app, localSettingsRestart.isDraining));
   }
   registerInstanceSettingsRoutes(app, { ...createInstanceSettingsHttpComposition(pool, settingsBootstrap ?? config, config, { loadDeploymentSettingsPolicy, projectRuntimeSettings, settingsDigest, localPolicy: settingsLocalPolicy }), resolveActor: async () => initialOwnerId(pool), accessMode: config.instanceSettingsAccessMode, localSettingsRestart });
-  const memoryAdapter = createMemoryApplicationAdapter(pool, memory, createCastContextPreview(pool, config));
+  const memoryAdapter = createMemoryApplicationAdapter(pool, memory, createCastContextPreview(pool, { ...config, castEditingEnabled: config.castEditingEnabled === true && !!cast }));
   const turnCorrections = createTurnCorrectionApplication({
     corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation,
       castLexicalMentionsEnabled: config.castAutoMatchEnabled === true && config.castDiscoveryEnabled === true })
