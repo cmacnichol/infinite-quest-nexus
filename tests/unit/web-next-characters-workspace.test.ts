@@ -38,6 +38,23 @@ describe("web-next characters workspace", () => {
     document.querySelector("form")!.dispatchEvent(new document.defaultView!.Event("submit", { cancelable: true }));
     await vi.waitFor(() => expect(api.create).toHaveBeenCalled()); expect(api.create.mock.calls[0]![0]).toBe("one"); expect((api.create.mock.calls[0]![1] as any).name).toBe("Nia"); workspace.dispose();
   });
+  it.each(["success", "failure"] as const)("keeps a newer campaign draft when an earlier save ends in %s", async outcome => {
+    let finish!: (value: typeof detail) => void; let fail!: (error: Error) => void;
+    const { document, workspace, click } = setup({ create: () => new Promise((resolve, reject) => { finish = resolve; fail = reject; }) });
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Add character");
+    await vi.waitFor(() => expect(document.querySelector('[aria-label="Name"]')).not.toBeNull());
+    let name = document.querySelector<HTMLInputElement>('[aria-label="Name"]')!; name.value = "Nia"; name.dispatchEvent(new document.defaultView!.Event("input"));
+    document.querySelector("form")!.dispatchEvent(new document.defaultView!.Event("submit", { cancelable: true }));
+    expect([...document.querySelectorAll("button")].find(button => button.textContent === "Cancel")!.disabled).toBe(true);
+    workspace.open("two"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Add character");
+    await vi.waitFor(() => expect(document.querySelector('[aria-label="Name"]')).not.toBeNull());
+    name = document.querySelector<HTMLInputElement>('[aria-label="Name"]')!; name.value = "New draft"; name.dispatchEvent(new document.defaultView!.Event("input"));
+    if (outcome === "success") finish(detail); else fail(new Error("offline"));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(document.querySelector<HTMLInputElement>('[aria-label="Name"]')?.value).toBe("New draft");
+    expect(document.body.textContent).not.toContain("Saved Mara");
+    expect(document.body.textContent).not.toContain("offline"); workspace.dispose();
+  });
   it("ignores a response from a previously opened campaign", async () => {
     let release!: (value: typeof status) => void; const pending = new Promise<typeof status>(resolve => { release = resolve; });
     const { document, workspace } = setup({ workspaceStatus: (campaign: string) => campaign === "old" ? pending : Promise.resolve(status), list: async (campaign: string) => ({ ...page, characters: [{ ...person, name: campaign }] }) });
