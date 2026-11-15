@@ -8,14 +8,14 @@ const person = { id: "11111111-1111-4111-8111-111111111111", name: "Mara", alias
 const status = { revision: 1, boundary, capabilities: { editing: true, discovery: false, autoMatch: false, backfill: false, context: false }, contextDisabledReason: null, counts: { identities: 0, details: 0, conflicts: 0 }, tracking: null };
 const page = { revision: 1, boundary, characters: [person], nextCursor: null, capabilities: { castEditing: true } };
 const detail = { ...page, character: person, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null, capabilities: { castEditing: true, castLifecycle: false } };
-function setup(overrides: Record<string, unknown> = {}, options: { saveProfile?: any; getProfile?: any; generationActive?: () => boolean } = {}) {
+function setup(overrides: Record<string, unknown> = {}, options: { saveProfile?: any; getProfile?: any; generationActive?: () => boolean; schedule?: any } = {}) {
   const { document } = parseHTML("<html><body></body></html>");
   Object.defineProperty(document.defaultView!.HTMLSelectElement.prototype, "value", { configurable: true, get() { return this.getAttribute("value") ?? ""; }, set(value: string) { this.setAttribute("value", value); } });
   const proto = document.defaultView!.HTMLElement.prototype as any;
   proto.showModal = function () { this.open = true; }; proto.close = function () { this.open = false; }; proto.focus = function () {};
   const api = { workspaceStatus: vi.fn(async () => status), list: vi.fn(async () => page), detail: vi.fn(async () => detail), create: vi.fn(async () => detail), ...overrides };
   const confirm = vi.fn(() => false);
-  const schedule = { set: () => 1, clear: () => {}, visible: () => true, onVisibilityChange: () => () => {} };
+  const schedule = options.schedule ?? { set: () => 1, clear: () => {}, visible: () => true, onVisibilityChange: () => () => {} };
   const workspace = createCharactersWorkspace(document, options.generationActive ?? (() => false), options.saveProfile ?? vi.fn(), vi.fn(), options.getProfile ?? vi.fn(), undefined, { api: api as any, confirm, schedule });
   const click = (text: string) => [...document.querySelectorAll("button")].find(button => button.textContent === text)!.click();
   return { document, workspace, api, confirm, click };
@@ -159,7 +159,8 @@ it("does not announce a late save after switching away and back", async () => {
   const other = { ...person, id: "22222222-2222-4222-8222-222222222222", name: "Nia" };
   let finish!: (value: any) => void;
   const edit = vi.fn(() => new Promise(resolve => { finish = resolve; }));
-  const { document, workspace, click } = setup({ list: async () => ({ ...page, characters: [person, other] }), detail: async (_campaign: string, id: string) => ({ ...detail, character: id === person.id ? person : other }), edit });
+  const { document, workspace, click, confirm } = setup({ list: async () => ({ ...page, characters: [person, other] }), detail: async (_campaign: string, id: string) => ({ ...detail, character: id === person.id ? person : other }), edit });
+  confirm.mockReturnValue(true);
   workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("Edit Name"));
   click("Edit Name"); const input = document.querySelector<HTMLInputElement>('[data-path="name"] input')!; input.value = "Marin"; input.dispatchEvent(new document.defaultView!.Event("input")); click("Save");
   click("Nia"); await vi.waitFor(() => expect(document.querySelector("dialog h2")?.textContent).toBe("Nia")); click("Mara"); await vi.waitFor(() => expect(document.querySelector("dialog h2")?.textContent).toBe("Mara"));
@@ -223,5 +224,43 @@ it("keeps a Main Character save and its receipt when the profile refresh fails",
     click("Reload"); await vi.waitFor(() => expect([...document.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(true));
     expect(saveProfile).toHaveBeenCalledTimes(1); click("Undo"); await vi.waitFor(() => expect(document.body.textContent).toContain("Undone"));
     expect(saveProfile.mock.calls[1]![1]).toEqual({ name: "Mara", profile: characterProfileSchema.parse({ story: { role: "Scout" } }), expectedRevision: 2, editSource: "manual" });
+  } finally { workspace.dispose(); }
+});
+
+it.each([false, true])("preserves an active inline editor on refresh and confirms discarding it when dirty: %s", async dirty => {
+  const other = { ...person, id: "22222222-2222-4222-8222-222222222222", name: "Nia" };
+  let poll!: () => void, revision = 1;
+  const schedule = { set: (callback: () => void) => { poll = callback; return 1; }, clear: () => {}, visible: () => true, onVisibilityChange: () => () => {} };
+  const { document, workspace, click, confirm, api } = setup({ workspaceStatus: async () => ({ ...status, revision }), list: async () => ({ ...page, revision, characters: [person, other] }), detail: vi.fn(async (_campaign: string, id: string) => ({ ...detail, revision, character: id === person.id ? person : other })) }, { schedule });
+  const proto = document.defaultView!.HTMLElement.prototype as any;
+  proto.focus = function () { Object.defineProperty(document, "activeElement", { configurable: true, value: this }); };
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("Edit Name")); click("Edit Name");
+    const input = document.querySelector<HTMLInputElement>('[data-path="name"] input')!;
+    if (dirty) { input.value = "Draft Mara"; input.dispatchEvent(new document.defaultView!.Event("input")); }
+    input.focus(); const previousReads = api.detail.mock.calls.length; revision = 2; poll();
+    await vi.waitFor(() => expect(api.detail.mock.calls.length).toBeGreaterThan(previousReads)); await new Promise(resolve => setTimeout(resolve, 0));
+    expect(document.querySelector('[data-path="name"] input')).toBe(input); expect(document.activeElement).toBe(input); expect(input.value).toBe(dirty ? "Draft Mara" : "Mara");
+    if (dirty) {
+      click("Nia"); expect(confirm).toHaveBeenCalledTimes(1); expect(document.querySelector('[data-path="name"] input')).toBe(input);
+      click("Close"); expect(confirm).toHaveBeenCalledTimes(2); expect(document.querySelector("dialog")!.open).toBe(true);
+      confirm.mockReturnValue(true); click("Nia"); await vi.waitFor(() => expect(document.querySelector("dialog h2")?.textContent).toBe("Nia"));
+    }
+  } finally { workspace.dispose(); }
+});
+
+it("keeps a successful receipt when refresh is skipped while hidden", async () => {
+  let onVisibilityChange!: () => void;
+  let visible = true, current = { ...detail, character: { ...person, profile: { "story.role": "Guard" } } };
+  const schedule = { set: () => 1, clear: () => {}, visible: () => visible, onVisibilityChange: (callback: () => void) => { onVisibilityChange = callback; return () => {}; } };
+  const edit = vi.fn(async (_campaign: string, _id: string, body: any) => { current = { ...current, revision: 2, character: { ...current.character, revision: 2, profile: { "story.role": body.setOverrides["story.role"] } } }; visible = false; onVisibilityChange(); return current; });
+  const { document, workspace, click } = setup({ detail: async () => current, edit, workspaceStatus: async () => ({ ...status, revision: current.revision }), list: async () => ({ ...page, revision: current.revision, characters: [current.character] }) }, { schedule });
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("Edit Role")); click("Edit Role");
+    const input = document.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!; input.value = "Captain"; input.dispatchEvent(new document.defaultView!.Event("input")); click("Save");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Saved Role. Could not refresh this character."));
+    expect(document.body.textContent).not.toContain("Undo expired"); expect([...document.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(false);
+    visible = true; click("Reload"); await vi.waitFor(() => expect([...document.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(true));
+    expect(edit).toHaveBeenCalledTimes(1);
   } finally { workspace.dispose(); }
 });

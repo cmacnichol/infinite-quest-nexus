@@ -65,3 +65,17 @@ it("waits for an in-flight poll before an explicit refresh", async () => {
   const session = createCharactersWorkspaceSession({ api: { workspaceStatus: async () => { calls++; if (calls === 1) await pending; return status; }, list: async () => ({ revision: 1, boundary, characters: [], nextCursor: null }), detail: async () => { throw new Error("no selection"); } }, onChange: () => {} });
   session.open("campaign"); const refresh = session.refresh(); release(); await refresh; expect(calls).toBe(2); session.dispose();
 });
+
+it("reports a skipped hidden refresh and confirms the next visible read", async () => {
+  let visible = true;
+  const schedule = { set: () => 1, clear: () => {}, visible: () => visible, onVisibilityChange: () => () => {} };
+  const boundary = { turnNumber: 0, timelineRevision: 0 };
+  const status = { revision: 1, boundary, capabilities: { editing: true, discovery: false, autoMatch: false, backfill: false, context: false }, contextDisabledReason: null, counts: { identities: 0, details: 0, conflicts: 0 }, tracking: null };
+  const read = vi.fn(async () => status);
+  const session = createCharactersWorkspaceSession({ api: { workspaceStatus: read, list: async () => ({ revision: 1, boundary, characters: [], nextCursor: null }), detail: async () => { throw new Error("no selection"); } }, schedule, onChange: () => {} });
+  try {
+    session.open("campaign"); await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    visible = false; expect(await session.refresh()).toBe(false); expect(read).toHaveBeenCalledTimes(1);
+    visible = true; expect(await session.refresh()).toBe(true); expect(read).toHaveBeenCalledTimes(2);
+  } finally { session.dispose(); }
+});

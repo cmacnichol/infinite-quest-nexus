@@ -20,7 +20,7 @@ export type CharacterSheetViewOptions = {
 };
 
 let viewSequence = 0;
-export function renderCharacterSheetView(host: HTMLElement, options: CharacterSheetViewOptions): { revealField(path: string, mode?: "edit" | "conflict"): void; dirty(): boolean; setFeedback(feedback?: SheetFeedback): void; dispose(): void } {
+export function renderCharacterSheetView(host: HTMLElement, options: CharacterSheetViewOptions): { revealField(path: string, mode?: "edit" | "conflict"): void; dirty(): boolean; active(): boolean; setFeedback(feedback?: SheetFeedback): void; dispose(): void } {
   const doc = host.ownerDocument, idPrefix = `character-sheet-${++viewSequence}`;
   let disposed = false, pending = false, feedbackVisible = true, editor: { path: string; input: HTMLInputElement | HTMLTextAreaElement; initial: string } | null = null;
   let activePath: string | null = null, mode: "edit" | "conflict" = "edit", error: SheetResult | null = null;
@@ -88,5 +88,5 @@ export function renderCharacterSheetView(host: HTMLElement, options: CharacterSh
     }
   }
   render();
-  return { revealField(path, next = "edit") { open(path, next); Array.from(host.querySelectorAll<HTMLElement>("[data-path]")).find(row => row.dataset.path === path)?.scrollIntoView?.({ block: "nearest" }); }, dirty, setFeedback(feedback) { if (feedback) options.feedback = feedback; else delete options.feedback; render(); }, dispose() { disposed = true; } };
+  return { revealField(path, next = "edit") { open(path, next); Array.from(host.querySelectorAll<HTMLElement>("[data-path]")).find(row => row.dataset.path === path)?.scrollIntoView?.({ block: "nearest" }); }, dirty, active: () => Boolean(activePath || preview || pending), setFeedback(feedback) { if (feedback) options.feedback = feedback; else delete options.feedback; render(); }, dispose() { disposed = true; } };
 }

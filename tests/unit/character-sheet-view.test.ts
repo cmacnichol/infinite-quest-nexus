@@ -86,3 +86,9 @@ describe("character sheet view", () => {
     const onChange = vi.fn().mockResolvedValue({ ok: true }); const a = setup({ sheet, onChange }); expect(a.host.textContent).toContain("Reset to world"); expect(a.host.textContent).toContain("Story differs: Smith · turn 20"); a.click("Use story value"); await Promise.resolve(); expect(onChange).toHaveBeenCalledWith({ kind: "field", path: "story.role", value: null });
   });
 });
+
+it("reports an open sheet interaction independently of dirty state", () => {
+  const { view, click } = setup();
+  expect(view.active()).toBe(false); click("Edit Pronouns"); expect(view.active()).toBe(true); expect(view.dirty()).toBe(false);
+  click("Cancel"); expect(view.active()).toBe(false); view.dispose();
+});
