@@ -1,28 +1,29 @@
+import { renderCastEditor } from "./characters-workspace-editor";
+import { openCastTool } from "./characters-workspace-tools";
 import { renderObservationReview } from "../../web/src/character-editor/observation-review.js";
-import { renderCastReview } from "../../web/src/cast-review-queue.js";
-import { castScanRecovery, renderLegacyCastScan } from "./campaign-cast-scan-panel";
+import { castScanRecovery } from "./campaign-cast-scan-panel";
 import { createCharacterProfileForm } from "./character-profile-form";
-import { buildCharacterSheet, createCastEditor, changeCastEditor, setCastEditorField, canSaveCastEditor, prepareCastSubmission, failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, SUPPORTING_FIELDS, characterProvenanceLabel, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
-import { createCampaignCastApi, createCharactersWorkspaceSession, type CharactersWorkspaceState } from "@infinite-quest/client-web";
-import type { CampaignCharacterProfile, CampaignCharacterProfileUpdate, CastCharacter, CharacterFilter, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
+import { buildCharacterSheet, createCastEditor, characterProvenanceLabel, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
+import { createCampaignCastApi, createCharactersWorkspaceSession, type CharactersWorkspaceState, type CampaignCastApi, type CharactersWorkspaceSessionOptions } from "@infinite-quest/client-web";
+import type { CampaignCharacterProfile, CampaignCharacterProfileUpdate, CharacterFilter } from "@infinite-quest/contracts";
 
 type ProtagonistProfile = CampaignCharacterProfile & { revision: number };
 
 export function createCharactersWorkspace(document: Document, generationActive: () => boolean,
   saveProfile: (campaign: string, update: CampaignCharacterProfileUpdate) => Promise<ProtagonistProfile>,
   navigateToTurn: (turn: number) => void, getProfile: (campaign: string) => Promise<ProtagonistProfile>,
-  onProfileSaved: (campaign: string) => void = () => {}) {
-  const api = createCampaignCastApi();
+  onProfileSaved: (campaign: string) => void = () => {}, dependencies?: { api?: CampaignCastApi; confirm?: (message: string) => boolean; schedule?: CharactersWorkspaceSessionOptions<CastEditorState>["schedule"] }) {
+  const api = dependencies?.api ?? createCampaignCastApi();
   const dialog = document.createElement("dialog"); dialog.className = "characters-workspace"; document.body.append(dialog);
   let openEpoch = 0; let toolEpoch = 0; let protagonist: ProtagonistProfile | null = null; let protagonistLoading = false;
   let profileEditor: { form: ReturnType<typeof createCharacterProfileForm>; saving: boolean } | null = null;
   let state: CharactersWorkspaceState<CastEditorState>, editor: CastEditorState | null = null, filter: CharacterFilter = "all", query = "", focus: HTMLElement | null = null, reviewing = false;
-  const session = createCharactersWorkspaceSession<CastEditorState>({ api, onChange(next) { state = next; render(); } });
+  const session = createCharactersWorkspaceSession<CastEditorState>({ api, ...(dependencies?.schedule ? { schedule: dependencies.schedule } : {}), onChange(next) { state = next; render(); } });
   const operationKeys = new Map<string, string>();
   function operationKey(operation: string, payload: unknown) { const key = `${operation}:${JSON.stringify(payload)}`; let id = operationKeys.get(key); if (!id) { id = crypto.randomUUID(); operationKeys.set(key, id); } return id; }
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => { const el = document.createElement(tag); el.textContent = text; return el; };
   const button = (text: string, action: () => void, disabled = false) => { const el = node("button", text); el.type = "button"; el.disabled = disabled; el.addEventListener("click", action); return el; };
-  const discard = () => !(editor?.dirty || profileEditor?.form.dirty) || (document.defaultView?.confirm("Discard unsaved character changes?") ?? false);
+  const discard = () => !(editor?.dirty || profileEditor?.form.dirty) || (dependencies?.confirm?.("Discard unsaved character changes?") ?? document.defaultView?.confirm("Discard unsaved character changes?") ?? false);
   function close() { if (editor?.saving || profileEditor?.saving || !discard()) return; openEpoch++; toolEpoch++; editor = null; profileEditor = null; reviewing = false; session.close(); operationKeys.clear(); dialog.close(); focus?.focus(); }
   function render() {
     if (!state || !dialog.open || reviewing || profileEditor) return;
@@ -119,101 +120,15 @@ export function createCharactersWorkspace(document: Document, generationActive: 
     }
     if (filter === "recent") dialog.append(node("p", recentFilterLabel(state.recentWindow))); dialog.append(roster); if (!state.characters.length) dialog.append(node("p", "No characters match."));
   }
-  async function scan(scanId?: string) {
-    if (!state.campaignId) return; const campaign = state.campaignId, tool = ++toolEpoch; reviewing = true; dialog.classList.remove("characters-sheet-layout");
-    try {
-      const [latestData, authority, discovery] = await Promise.all([api.scans.latest(campaign), api.list(campaign), api.discoveryStatus(campaign)]);
-      const data = scanId && scanId !== latestData.scan?.id ? { ...latestData, scan: await api.scans.get(campaign, scanId) } : latestData;
-      if (!reviewing || tool !== toolEpoch || state.campaignId !== campaign || !dialog.open) return;
-      dialog.replaceChildren(node("h2", "Scan earlier story"), button("Back to characters", () => { reviewing = false; toolEpoch++; render(); }));
-      renderLegacyCastScan(dialog, { api: api.scans, readDiscovery: () => api.discoveryStatus(campaign), campaignId: campaign, authority, data, discovery, current: () => reviewing && tool === toolEpoch && state.campaignId === campaign && dialog.open, generationActive, refresh: (id = scanId) => scan(id) });
-    } catch { if (!reviewing || tool !== toolEpoch || state.campaignId !== campaign || !dialog.open) return; dialog.replaceChildren(node("p", "Could not load scan."), button("Retry", () => { void scan(); }), button("Back to characters", () => { reviewing = false; toolEpoch++; render(); })); }
-  }
-  async function preview() {
-    if (!state.campaignId) return; const campaign = state.campaignId, tool = ++toolEpoch; reviewing = true; dialog.classList.remove("characters-sheet-layout");
-    dialog.replaceChildren(node("h2", "Likely included for this input"), button("Back to characters", () => { reviewing = false; toolEpoch++; render(); }));
-    const label = node("label", "Story input"), input = node("textarea"), result = node("section"); label.append(input);
-    dialog.append(label, button("Refresh estimate", async () => { try { const data = await api.contextPreview(campaign, { query: input.value }); if (!reviewing || tool !== toolEpoch || state.campaignId !== campaign || !dialog.open) return; result.replaceChildren(node("p", `Estimate at turn ${data.boundary.turnNumber}, cast revision ${data.castRevision}. Refresh after your story or characters change.`)); result.append(node("p", `Estimated usage: ${data.usedTokens.toLocaleString()} of ${data.budgetTokens.toLocaleString()} tokens.`));
-      if (data.note) result.append(node("p", data.note)); if (data.disabledReason) result.append(node("p", data.disabledReason));
-      if (!data.selected.length && !data.omitted.length && !data.disabledReason) result.append(node("p", "No characters are likely to be included for this input."));
-      for (const item of data.selected) result.append(node("p", `Included: ${item.name} · ${item.reason.replaceAll("_", " ")}`));
-      if (data.omitted.length) {
-        const names = new Map<string, string>(); let cursor: string | undefined;
-        try { do { const page = await api.list(campaign, { limit: 50, ...(cursor ? { cursor, expectedRevision: data.castRevision } : {}) }); if (page.revision !== data.castRevision) break; for (const person of page.characters) names.set(person.id, person.name); cursor = page.nextCursor ?? undefined; } while (cursor); } catch { /* The estimate is still useful if names cannot be loaded. */ }
-        if (!(reviewing && tool === toolEpoch && state.campaignId === campaign && dialog.open)) return;
-        for (const item of data.omitted) result.append(node("p", `Omitted: ${names.get(item.characterId) ?? "Character unavailable"} · ${item.reason.replaceAll("_", " ")}`));
-      } } catch { if (reviewing && tool === toolEpoch && state.campaignId === campaign && dialog.open) result.replaceChildren(node("p", "Estimate unavailable.")); } }), result);
-  }
-  async function review(_view: "matches" | "details") {
+  function renderEditor() { renderCastEditor(dialog, { document, api, session, getState: () => state, getEditor: () => editor, setEditor: next => { editor = next; }, generationActive, epoch: () => openEpoch, confirm: message => dependencies?.confirm?.(message) ?? document.defaultView?.confirm(message) ?? false }); }
+  function openTool(kind: "scan" | "preview" | "review", scanId?: string) {
     if (!state.campaignId) return; const campaign = state.campaignId, epoch = openEpoch, tool = ++toolEpoch; reviewing = true; dialog.classList.remove("characters-sheet-layout");
-    renderCastReview({ document, container: dialog, api, campaign, current: () => reviewing && tool === toolEpoch && state.campaignId === campaign && epoch === openEpoch && dialog.open,
-      reviewReadVersion: state.status?.capabilities.reviewDecisionReadVersion, reviewWrites: state.status?.capabilities.reviewDecisions,
-      autoMatch: state.status?.capabilities.autoMatch, editing: () => state.status?.capabilities.editing === true && !generationActive(), navigate: turn => { close(); navigateToTurn(turn); },
-      back: () => { reviewing = false; toolEpoch++; render(); }, key: operationKey, clearKeys: () => operationKeys.clear() });
+    void openCastTool(kind, { api, campaignId: campaign, dialog, generationActive, current: () => reviewing && tool === toolEpoch && state.campaignId === campaign && epoch === openEpoch && dialog.open,
+      back: () => { reviewing = false; toolEpoch++; render(); }, navigateToTurn: turn => { close(); navigateToTurn(turn); }, operationKey, clearKeys: () => operationKeys.clear(), get capabilities() { return state.status; } }, scanId);
   }
-  function renderEditor() {
-    if (!editor) return;
-    const expanded = new Map([...dialog.querySelectorAll<HTMLDetailsElement>("[data-cast-group]")].map(group => [group.dataset.castGroup!, group.open]));
-    dialog.classList.remove("characters-sheet-layout"); dialog.replaceChildren(); dialog.append(node("h2", editor.characterId ? "Edit character" : "Add character")); const form = node("form"), save = node("button", "Save character"); save.type = "submit";
-    form.append(node("p", editor.characterId ? "Saved facts are filled in. Edit only what needs changing." : "Only a name is required. Add details you know, or review story matches to fill characters from evidence."));
-    const syncSave = () => { save.disabled = !canSaveCastEditor(editor!) || generationActive() || state.changedWhileEditing; };
-    const input = (label: string, value: string, change: (value: string) => void, multiline = true) => { const wrap = node("label", label), control = multiline ? node("textarea") : node("input"); control.value = value; control.maxLength = label === "Name" ? 200 : label.startsWith("Aliases") ? 4020 : 2000; control.setAttribute("aria-label", label); control.disabled = generationActive() || editor!.saving; control.addEventListener("input", () => { change(control.value); syncSave(); }); wrap.append(control); form.append(wrap); return wrap; };
-    input("Name", editor.draft.name, value => { editor = changeCastEditor(editor!, { name: value }); }, false);
-    input("Aliases (one per line)", editor.draft.aliases.join("\n"), value => { editor = changeCastEditor(editor!, { aliases: value.split("\n").map(v => v.trim()).filter(Boolean) }); });
-    const groups = new Map<string, HTMLDetailsElement>();
-    for (const [key, title] of [["story", "Story profile"], ["appearance", "Appearance details"], ["state", "Current state"]]) {
-      const group = node("details"); group.className = "characters-editor-group"; group.dataset.castGroup = key!;
-      group.open = expanded.get(key!) ?? (key === "story" || Boolean(editor.characterId) && key === "appearance");
-      group.append(node("summary", title)); groups.set(key!, group); form.append(group);
-    }
-    for (const field of SUPPORTING_FIELDS) {
-      const path = field.path as Parameters<typeof setCastEditorField>[1];
-      const wrap = input(field.label, editor.draft.profile[path] ?? "", value => { editor = setCastEditorField(editor!, path, value); }, field.input !== "text");
-      const fieldStatus = node("span"); wrap.append(fieldStatus);
-      function syncFieldStatus() {
-        const overriding = Object.hasOwn(editor!.setOverrides, path) || editor!.loaded?.overrides.some(override => override.field === path);
-        fieldStatus.replaceChildren();
-        if (editor!.clearOverrides.includes(path)) fieldStatus.append(node("small", "Will use the discovered value after saving."));
-        else if (overriding) fieldStatus.append(node("small", "Your override"));
-        if (editor!.characterId && overriding && !editor!.clearOverrides.includes(path)) fieldStatus.append(button(`Use discovered value for ${field.label.toLowerCase()}`, () => { editor = setCastEditorField(editor!, path, null); renderEditor(); }, generationActive() || editor!.saving));
-      }
-      wrap.querySelector("textarea, input")!.addEventListener("input", syncFieldStatus); syncFieldStatus();
-      groups.get(field.path.split(".")[0]!)?.append(wrap);
-    }
-    if (editor.characterId) for (const [key, label] of [["pinned", "Pin character"], ["ignored", "Ignore character"]] as const) {
-      const wrap = node("label", label), control = node("input"); control.type = "checkbox"; control.checked = editor.draft[key]; control.disabled = generationActive() || editor.saving; control.addEventListener("change", () => { editor = changeCastEditor(editor!, { [key]: control.checked }); syncSave(); }); wrap.prepend(control); form.append(wrap);
-    }
-    if (editor.characterId) form.append(node("small", "Pin prioritizes this character in story context. Ignore excludes this supporting character from story context."));
-    if (editor.error) form.append(node("p", editor.error));
-    if (editor.conflict || state.changedWhileEditing) {
-      form.append(node("p", "The saved character changed. Your edits are still here."));
-      form.append(button("Compare latest", async () => {
-        if (!editor || !state.campaignId) return;
-        const draft = editor, campaign = state.campaignId, epoch = openEpoch;
-        try {
-        if (!draft.characterId) {
-          const latest = await api.list(campaign);
-          if (epoch !== openEpoch || editor !== draft || state.campaignId !== campaign) return;
-          const comparison = node("section");
-          comparison.append(node("p", "Your new character has not been saved. Your draft is preserved."));
-          comparison.append(node("p", `Latest characters: ${latest.characters.map(person => person.name).join(", ") || "None"}`));
-          comparison.append(button("Reapply my changes", () => {
-            if (editor !== draft || generationActive()) return;
-            editor = reapplyNewCastDraft(editor, latest); session.setDraft(null); session.setDraft(editor); renderEditor();
-          }, !latest.capabilities.castEditing || generationActive()));
-          form.append(comparison); return;
-        }
-        const latest = await api.detail(campaign, draft.characterId);
-        if (epoch !== openEpoch || editor !== draft || state.campaignId !== campaign) return;
-        const comparison = node("section"); comparison.append(node("h3", "Latest saved character"), node("p", `Name: ${latest.character.name}`));
-        for (const field of SUPPORTING_FIELDS) comparison.append(node("p", `${field.label}: ${latest.character.profile[field.path as keyof typeof latest.character.profile] ?? "Unknown"}`));
-        comparison.append(button("Reapply my changes", () => { if (editor !== draft || generationActive()) return; editor = reapplyCastDraft(editor!, latest); session.setDraft(null); session.setDraft(editor); renderEditor(); }, !latest.capabilities.castEditing || generationActive())); form.append(comparison);
-        } catch { if (epoch === openEpoch && editor === draft) form.append(node("p", "Could not load the latest characters. Your draft is kept; try Compare latest again.")); }
-      }));
-    }
-    save.disabled = !canSaveCastEditor(editor) || generationActive() || state.changedWhileEditing; form.append(save, button("Cancel", () => { if (!discard()) return; editor = null; session.setDraft(null); }));
-    form.addEventListener("submit", async event => { event.preventDefault(); if (!editor || !state.campaignId || generationActive() || !canSaveCastEditor(editor) || state.changedWhileEditing) return; const campaign = state.campaignId, id = editor.characterId; try { editor = prepareCastSubmission(editor, crypto.randomUUID()); renderEditor(); const result = id ? await api.edit(campaign, id, editor.submission as EditCastCharacter) : await api.create(campaign, editor.submission as CreateCastCharacter); editor = null; session.setDraft(null); session.select(result.character.id); } catch (error) { if (!editor) return; editor = failCastSubmission(editor, error instanceof Error ? error.message : "Could not save character.", (error as { statusCode?: number }).statusCode === 409); renderEditor(); } }); dialog.append(form);
-  }
+  function scan(scanId?: string) { openTool("scan", scanId); }
+  function preview() { openTool("preview"); }
+  function review(_view: "matches" | "details") { openTool("review"); }
   /** Edit the main character in the sheet through the existing revisioned profile endpoint. */
   function renderProfileEditor(campaign: string, profile: ProtagonistProfile, message = "") {
     const epoch = openEpoch;
