@@ -645,7 +645,11 @@ export function mountCharacterWorkspacePage(
       const error = canvas.querySelector<HTMLElement>(`[data-field-error="${issue.path}"]`);
       if (error) error.textContent = issue.message;
     }
-    if (issues.length > 0) issueControl(issues[0]!.path)?.focus();
+    if (issues.length > 0) {
+      const control = issueControl(issues[0]!.path);
+      control?.focus();
+      (control?.closest(".character-field") ?? control)?.scrollIntoView?.({ block: "center" });
+    }
     return issues.length === 0;
   }
 

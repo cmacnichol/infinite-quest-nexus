@@ -20,6 +20,15 @@ for (const width of [1280, 390]) test(`existing world character opens Review at 
   const role = page.locator('[name="candidate.profile.story.role"]');
   await expect(role).toHaveAttribute("placeholder", "e.g., Expedition leader and reluctant guide");
   await expect(page.locator(".character-field-hint", { hasText: "Their current story function" })).toBeVisible();
+  const visibility = await role.evaluate((control) => {
+    const field = control.getBoundingClientRect();
+    const hint = control.parentElement!.querySelector(".character-field-hint")!.getBoundingClientRect();
+    const ledger = document.querySelector(".character-progress-ledger")!.getBoundingClientRect();
+    return { fieldTop: field.top, fieldBottom: field.bottom, hintBottom: hint.bottom, ledgerTop: ledger.top, viewportHeight: innerHeight };
+  });
+  expect(visibility.fieldTop).toBeGreaterThanOrEqual(0);
+  expect(visibility.fieldBottom).toBeLessThanOrEqual(visibility.ledgerTop);
+  expect(visibility.hintBottom).toBeLessThanOrEqual(Math.min(visibility.ledgerTop, visibility.viewportHeight));
   await page.screenshot({ path: info.outputPath(`guidance-${width}.png`), fullPage: true });
   await role.fill("Guide");
   await page.locator('[data-character-stage="mechanics"]').click();
