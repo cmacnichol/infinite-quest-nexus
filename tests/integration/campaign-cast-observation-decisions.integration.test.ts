@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { captureCastGenerationSnapshotWithClient, createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
+import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import type { CastEvidence } from "../../packages/contracts/src/campaign-cast.js";
 import { sha256 } from "../../packages/domain/src/text.js";
@@ -89,7 +90,7 @@ integration("cast observation decisions", () => {
     await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title,active_turn_number,character_profile) VALUES($1,$2,$3,'Decision',2,'{}')", [campaignId, ownerUserId, versionId]);
     const evidence: Extract<CastEvidence, { kind: "turn" }>[] = [];
     for (const turnNumber of [1, 2]) {
-      const turnId = randomUUID(), narration = `Mara appears in scene ${turnNumber}.`;
+      const turnId = randomUUID(), narration = `Mara has blue hair in scene ${turnNumber}.`;
       await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,$4,$5)", [turnId, ownerUserId, campaignId, turnNumber, narration]);
       evidence.push({ kind: "turn" as const, turnId, turnNumber, narrationRevision: 0, sourceHash: sha256(narration), paragraphId: "p1", quote: narration });
     }
@@ -154,6 +155,51 @@ integration("cast observation decisions", () => {
     await f.observe("appearance.description", "blue coat", 0);
     const latest = await f.observe("appearance.description", "green coat", 1);
     await verifyDecisionCycle(f, latest, "appearance.description", "green coat", "blue coat");
+  });
+
+
+  it.each([false, true])("freezes retraction-aware context and evidence for seeded=%s", async seeded => {
+    const f = await projectionFixture(seeded);
+    const older = await f.observe("appearance.description", "blue hair", 0);
+    const newer = await f.observe("appearance.description", "blue hair", 1);
+    const capture = (version: "cast-context-v1" | "cast-context-v2") => withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, f.scope, { discoveryEnabled: false, version }));
+    const oldV1 = await capture("cast-context-v1"), oldV2 = await capture("cast-context-v2");
+    const detail = await f.repo.detail(f.scope, f.characterId);
+    const beforeContext = await f.repo.draftPreviewContext!(f.scope, f.characterId, { expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: f.boundary });
+    expect(beforeContext.evidence.map(e => e.evidenceId)).toContain(newer);
+    const request = { action: "retract" as const, expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID() };
+    const result = await f.repo.applyObservationDecision(f.scope, f.characterId, newer, request);
+    const v1 = await capture("cast-context-v1"), v2 = await capture("cast-context-v2");
+    const select = (snapshot: typeof v1.snapshot) => selectCastContext({ snapshot, direction: "Mara", currentScene: "", openThreads: [], budgetTokens: 3000 });
+    expect(select(v1.snapshot).records.find(r => r.characterId === f.characterId)?.fields.find(x => x.field === "appearance.description")?.evidenceId).toBe(older);
+    expect(v2.snapshot.fiction!.find(r => r.characterId === f.characterId)?.fields.find(x => x.field === "appearance.description")?.evidenceId).toBe(`${older}:appearance.description`);
+    expect(select(oldV1.snapshot).records.find(r => r.characterId === f.characterId)?.fields.find(x => x.field === "appearance.description")?.evidenceId).toBe(newer);
+    expect(oldV2.snapshot.fiction!.find(r => r.characterId === f.characterId)?.fields.find(x => x.field === "appearance.description")?.evidenceId).toBe(`${newer}:appearance.description`);
+    expect(v1.fingerprint).not.toBe(oldV1.fingerprint);
+    const context = await f.repo.draftPreviewContext!(f.scope, f.characterId, { expectedCastRevision: result.revision, expectedCharacterRevision: result.character.revision, expectedBoundary: f.boundary });
+    expect(context.evidence.map(e => e.evidenceId)).not.toContain(newer);
+    const restored = await f.repo.applyObservationDecision(f.scope, f.characterId, newer, { action: "restore", retractionEventId: result.decisionEventId, expectedCastRevision: result.revision, expectedCharacterRevision: result.character.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID() });
+    expect(restored.character.profile["appearance.description"]).toBe("blue hair");
+    expect((await capture("cast-context-v2")).snapshot.fiction!.find(r => r.characterId === f.characterId)?.fields.find(x => x.field === "appearance.description")?.evidenceId).toBe(`${newer}:appearance.description`);
+    expect(select(v1.snapshot).records.find(r => r.characterId === f.characterId)?.fields.find(x => x.field === "appearance.description")?.evidenceId).toBe(older);
+  });
+
+  it("captures the seeded latest appearance on both sides of retraction", async () => {
+    const f = await projectionFixture(true);
+    const older = await f.observe("appearance.description", "blue coat", 0);
+    const newer = await f.observe("appearance.description", "green coat", 1);
+    const capture = (version: "cast-context-v1" | "cast-context-v2") => withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, f.scope, { discoveryEnabled: false, version }));
+    const selection = (snapshot: Awaited<ReturnType<typeof capture>>["snapshot"]) => selectCastContext({ snapshot, direction: "Mara", currentScene: "", openThreads: [], budgetTokens: 3000 }).records.find(r => r.characterId === f.characterId)?.fields.find(x => x.field === "appearance.description");
+    const before = await capture("cast-context-v1");
+    expect(selection(before.snapshot)).toMatchObject({ value: "green coat", evidenceId: newer });
+    const detail = await f.repo.detail(f.scope, f.characterId);
+    const result = await f.repo.applyObservationDecision(f.scope, f.characterId, newer, { action: "retract", expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID() });
+    const after = await capture("cast-context-v1"), modern = await capture("cast-context-v2");
+    expect(selection(after.snapshot)).toMatchObject({ value: "blue coat", evidenceId: older });
+    expect(modern.snapshot.fiction!.find(r => r.characterId === f.characterId)?.fields.find(x => x.field === "appearance.description")).toMatchObject({ value: "blue coat", evidenceId: `${older}:appearance.description` });
+    await f.repo.applyObservationDecision(f.scope, f.characterId, newer, { action: "restore", retractionEventId: result.decisionEventId, expectedCastRevision: result.revision, expectedCharacterRevision: result.character.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID() });
+    expect(selection((await capture("cast-context-v1")).snapshot)).toMatchObject({ value: "green coat", evidenceId: newer });
+    expect(selection(after.snapshot)).toMatchObject({ value: "blue coat", evidenceId: older });
   });
 
 });

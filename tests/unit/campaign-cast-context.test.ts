@@ -206,6 +206,11 @@ it("selects only unretracted context contributions without reviving superseded f
   expect(selectWith([]).content).toContain("green eyes");
   expect(selectWith([newer.id]).content).not.toContain("green eyes");
   expect(selectWith([newer.id]).content).not.toContain("blue eyes");
+  const captured = castGenerationSnapshotSchema.parse({ ...snapshot, retractedObservationIds: [newer.id] });
+  const replay = selectCastContext({ snapshot: captured, budgetTokens: 3000, direction: "Mara", currentScene: "", openThreads: [], retractedObservationIds: new Set() });
+  expect(replay.content).not.toContain("green eyes");
+  expect(replay.content).not.toContain("blue eyes");
+  expect(castGenerationSnapshotFingerprint(captured)).not.toBe(castGenerationSnapshotFingerprint(snapshot));
 });
 
 it("reinstates ordinary static conflict in context when a fact is restored", () => {

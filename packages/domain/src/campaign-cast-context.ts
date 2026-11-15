@@ -30,6 +30,7 @@ export function selectCastContext(input: {
 }): CastContextSelection {
   const snapshot = castGenerationSnapshotSchema.parse(input.snapshot);
   if (snapshot.version === "cast-context-v2") return selectCastContextV2(snapshot, input);
+  const retractedObservationIds = snapshot.retractedObservationIds ? new Set(snapshot.retractedObservationIds) : input.retractedObservationIds;
   const budget = Number.isFinite(input.budgetTokens) ? Math.max(0, Math.floor(input.budgetTokens)) : 0;
   const baseTurn = snapshot.boundary.turnNumber;
   const current = snapshot.discoveryStatus === "current" && snapshot.trackedThroughTurn === baseTurn;
@@ -73,13 +74,18 @@ export function selectCastContext(input: {
     }
     const supported = observations.filter((entry) => ids.has(entry.id));
     const superseded = new Set(supported.flatMap((entry) => entry.supersedesObservationId ? [entry.supersedesObservationId] : []));
-    const profile = projectCastProfile({ observations: supported, overrides, ...(input.retractedObservationIds ? { retractedObservationIds: input.retractedObservationIds } : {}) });
+    const profile = projectCastProfile({ observations: supported, overrides, ...(retractedObservationIds ? { retractedObservationIds } : {}) });
+    // New captures retain the already-resolved seeded appearance policy; older v1 captures replay unchanged.
+    if (snapshot.retractedObservationIds && person.campaignProfile && person.fieldSources?.["appearance.description"] === "observation") {
+      const value = person.profile["appearance.description"];
+      if (value !== undefined) profile["appearance.description"] = value;
+    }
     const fields: CastContextField[] = [];
     for (const field of castFieldSchema.options) {
       const value = profile[field];
       if (value === undefined) continue;
       const override = overrides.find((entry) => entry.field === field);
-      const observation = supported.filter((entry) => !superseded.has(entry.id) && !input.retractedObservationIds?.has(entry.id) && entry.field === field && entry.mode === "fact" && entry.value === value)
+      const observation = supported.filter((entry) => !superseded.has(entry.id) && !retractedObservationIds?.has(entry.id) && entry.field === field && entry.mode === "fact" && entry.value === value)
         .sort((a, b) => castEvidenceOrder(b.evidence)[0] - castEvidenceOrder(a.evidence)[0]
           || castEvidenceOrder(b.evidence)[1] - castEvidenceOrder(a.evidence)[1]).at(0);
       if (!override && (!current || observation?.evidence.kind === "historical_world")
