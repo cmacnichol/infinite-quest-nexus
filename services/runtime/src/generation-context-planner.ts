@@ -475,7 +475,7 @@ export function planGenerationPromptContext(
       let budgetTokens = castAllocatedTokens;
       for (;;) {
         castSelection = selectCastContext({ snapshot: castSnapshot, direction: action,
-          currentScene: authority.latestTurn?.narration ?? "", openThreads: authority.openThreads, budgetTokens });
+          currentScene: authority.latestTurn?.narration ?? "", openThreads: authority.openThreads, budgetTokens, ...(frozenContextProtocol ? { contextProtocol: frozenContextProtocol } : {}) });
         if (!castSelection.content) break;
         const block = { id: "cast-context", revision: sha256(castSelection.content), content: castSelection.content,
           protected: false, priority: 0, ordinal: 0, scope: "cast" };

@@ -1,0 +1,20 @@
+import { expect, it } from "vitest";
+import { CAST_V3_STORY_MEMORY_PROMPT_PROTOCOL_VERSION as prompt, CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION as cast, HISTORY_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION as history, CAST_V2_STORY_MEMORY_PROMPT_PROTOCOL_VERSION as oldPrompt, CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION as oldCast, CAST_V3_STORY_AUTHORITY_CONTRACT, storyMemoryMandatoryContract } from "../../packages/contracts/src/story-prompt.js";
+import { defaultStoryMemoryPolicy, storyMemoryPolicyHash, storyMemoryPolicySnapshotSchema, isCastV2ContextProtocol, isHistoryCoverageContextProtocol } from "../../packages/contracts/src/story-memory-policy.js";
+import { castContextNotice } from "../../packages/domain/src/campaign-cast-context.js";
+it("reads only matching V3 protocol pairs and preserves V2", () => {
+ const policy = defaultStoryMemoryPolicy("r2");
+ const snapshot = { policy, policyHash: storyMemoryPolicyHash(policy), providerConfigurationFingerprint: "a".repeat(64), castContext: true, castDiscoveryEnabled: true, promptProtocol: prompt, contextProtocol: cast };
+ for (const contextProtocol of [cast, history]) expect(storyMemoryPolicySnapshotSchema.safeParse({ ...snapshot, contextProtocol }).success).toBe(true);
+ expect(storyMemoryPolicySnapshotSchema.safeParse({ ...snapshot, promptProtocol: oldPrompt }).success).toBe(false);
+ expect(storyMemoryPolicySnapshotSchema.safeParse({ ...snapshot, contextProtocol: oldCast }).success).toBe(false);
+ expect(storyMemoryPolicySnapshotSchema.safeParse({ ...snapshot, contextProtocol: oldCast, promptProtocol: oldPrompt }).success).toBe(true);
+ expect(isCastV2ContextProtocol(history)).toBe(true); expect(isHistoryCoverageContextProtocol(history)).toBe(true);
+ expect(storyMemoryMandatoryContract(prompt)).toContain(CAST_V3_STORY_AUTHORITY_CONTRACT);
+ expect(CAST_V3_STORY_AUTHORITY_CONTRACT).not.toContain("User field overrides");
+ expect(castContextNotice(cast, "current")).toBe("User corrections are portrayal authority from their effective turn. User state edits are authority until later story evidence. Older conflicting facts remain historical evidence.");
+ expect(castContextNotice(cast, "off")).toBe("Character discovery is off. User corrections guide portrayal; state edits yield to later recorded story evidence. Observations are dated last-known state; use accepted history for later events.");
+ expect(castContextNotice(cast, "failed")).toBe("Tracking is incomplete. User corrections remain portrayal authority; user state edits are authority until later recorded story evidence. Stable observations are dated historical evidence. Other dynamic observations are omitted. Use accepted history for intervening events.");
+ expect(castContextNotice(cast, "failed")).toBe(castContextNotice(cast, "pending"));
+ expect(castContextNotice(oldCast, "off")).toBe("Character discovery is off. Observations are dated, lower-authority last-known state; use accepted history for later events.");
+});

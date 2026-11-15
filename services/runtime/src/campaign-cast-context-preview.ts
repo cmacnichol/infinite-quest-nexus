@@ -1,3 +1,4 @@
+import { castStoryMemoryProtocolVersion } from "../../../packages/contracts/src/story-prompt.js";
 import { randomUUID } from "node:crypto";
 import { estimateContinuityReviewPlanningTokens } from "./story-continuity-review-adapter.js";
 import { readTextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
@@ -81,7 +82,7 @@ export function createCastContextPreview(pool: DatabasePool, config: Pick<Runtim
       captureRecentWindow: history ? policy.policy.capability !== "r1" : policy.policy.recentTurnTarget > 1, ...(history && policy.policy.capability !== "r1" ? { recentWindowTurns: 11 as const } : {}), captureStoryLedger: history, captureProtectedFacts: history });
     const authority = await loadPostgresChronicleGenerationAuthorityContext(client, { ...scope, worldVersionId: campaign.world_version_id,
       query: request.query, expectedBaseIdentity: captured.baseIdentity, storyMemoryPolicy: policy });
-    const prompts = await resolveStoryMemoryPromptSnapshot(client, { scope: "campaign", ownerUserId, campaignId }, policy.policy.continuityReview, true);
+    const prompts = await resolveStoryMemoryPromptSnapshot(client, { scope: "campaign", ownerUserId, campaignId }, policy.policy.continuityReview, true, castStoryMemoryProtocolVersion(policy.promptProtocol));
     const frozenContracts = frozenJob?.orchestration_private?.frozenResponseContracts;
     const streaming = provider.providerType === "lmstudio" || provider.providerType === "openai_compatible"
       || provider.providerType === "openrouter" && (provider.configuration.streaming === true || provider.configuration.streamingSupport === true);
