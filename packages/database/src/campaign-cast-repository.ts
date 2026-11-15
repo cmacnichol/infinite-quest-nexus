@@ -1396,7 +1396,8 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         const decisionCounts = (await client.query(`SELECT
           LEAST(10000,count(*) FILTER (WHERE p.resolution_receipt IS NOT NULL))::integer AS identities,
           LEAST(10000,COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p.detail_decisions) d WHERE d->'result'->>'disposition' IN ('confirm','accept'))),0))::integer AS confirmed,
-          LEAST(10000,COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p.detail_decisions) d WHERE d->'result'->>'disposition'='dismiss')),0))::integer AS dismissed
+          LEAST(10000,COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p.detail_decisions) d WHERE d->'result'->>'disposition'='dismiss')),0)
+            + COALESCE(sum((SELECT count(*) FROM campaign_cast_review_decisions d WHERE d.candidate_id=p.id AND d.campaign_id=p.campaign_id AND d.owner_user_id=p.owner_user_id AND d.action='dismiss' AND d.target_kind='detail')),0))::integer AS dismissed
           FROM campaign_cast_discovery_candidates p JOIN effective_turn_narrations n
             ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
           WHERE p.campaign_id=$1 AND p.owner_user_id=$2 AND p.status<>'cancelled'

@@ -65,41 +65,45 @@ async function alreadyResolved(client: DatabaseClient, scope: CastScope, source:
     });
   });
 }
+/** Run a review decision inside the caller's existing campaign transaction. */
+export async function reviewDecisionWithClient(client: DatabaseClient, scope: CastScope, id: string, request: ReviewDecisionRequest, editingEnabled: boolean, receiptExtra?: Record<string, unknown>) {
+  const cast = await initializeCastWithClient(client, scope);
+  if (!editingEnabled) throw new CampaignCastError("cast_editing_disabled");
+  const row = (await client.query("SELECT * FROM campaign_cast_discovery_candidates WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3 FOR UPDATE", [id, scope.campaignId, scope.ownerUserId])).rows[0];
+  if (!row) throw new CampaignCastError("cast_not_found");
+  const requestHash = sha256(stableStringify({ id, request }));
+  const prior = (await client.query("SELECT request_hash,result_receipt FROM campaign_cast_review_decisions WHERE campaign_id=$1 AND owner_user_id=$2 AND idempotency_key=$3", [scope.campaignId, scope.ownerUserId, request.idempotencyKey])).rows[0];
+  if (prior) { if (prior.request_hash !== requestHash) throw new CampaignCastError("cast_idempotency_conflict"); return reviewDecisionResultSchema.parse(prior.result_receipt); }
+  const revision = await readReviewRevision(client, scope);
+  if (!await currentSource(client, scope, cast, row) || request.sourceHash !== row.source.sourceHash || request.expectedCastRevision !== cast.revision || stableStringify(request.expectedBoundary) !== stableStringify(cast.boundary) || request.expectedReviewRevision !== revision) throw new CampaignCastError("cast_revision_conflict");
+  if ((await client.query("SELECT 1 FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1", [scope.campaignId, scope.ownerUserId])).rowCount) throw new CampaignCastError("cast_generation_active");
+  const active = await readActiveReviewDismissals(client, scope);
+  const proposal = castDiscoveryCandidateSchema.parse(row.proposal);
+  let target: ReviewTarget, index: number | null, restores: string | null = null;
+  if (request.action === "restore") {
+    const decision = active.rows.find(item => item.id === request.decisionId && item.candidate_id === id);
+    if (!decision) throw new CampaignCastError("cast_invalid_request");
+    target = decision.target_payload; index = decision.observation_index; restores = decision.id;
+    if (canonicalReviewTarget(row.source, target) !== canonicalReviewTarget(decision.source, target) || !eligible(row, target, index) || await alreadyResolved(client, scope, row.source, target)) throw new CampaignCastError("cast_invalid_request");
+  } else {
+    index = request.action === "dismiss_detail" ? request.observationIndex : null;
+    if (index !== null && !proposal.observations[index]) throw new CampaignCastError("cast_invalid_request");
+    target = index === null ? { kind: "identity", proposal } : { kind: "detail", proposal, observation: proposal.observations[index]! };
+    if (!eligible(row, target, index) || isReviewDismissed(active, row.source, target)) throw new CampaignCastError("cast_invalid_request");
+  }
+  const next = revision + 1, decisionId = randomUUID();
+  const result = reviewDecisionResultSchema.parse({ decisionId, candidateId: id, reviewRevision: next, revision: cast.revision, boundary: cast.boundary, disposition: request.action });
+  await client.query(`INSERT INTO campaign_cast_review_sequences(campaign_id,owner_user_id,revision) VALUES($1,$2,$3) ON CONFLICT(campaign_id,owner_user_id) DO UPDATE SET revision=EXCLUDED.revision`, [scope.campaignId, scope.ownerUserId, next]);
+  await client.query(`INSERT INTO campaign_cast_review_decisions(id,campaign_id,owner_user_id,candidate_id,turn_id,narration_revision,timeline_revision,source_hash,source,target_kind,observation_index,target_payload,target_fingerprint,action,restores_decision_id,revision,request_hash,idempotency_key,result_receipt)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`, [decisionId, scope.campaignId, scope.ownerUserId, id, row.source.turnId, row.source.narrationRevision, row.source.timelineRevision, row.source.sourceHash, JSON.stringify(row.source), target.kind, index, JSON.stringify(target), reviewTargetFingerprint(row.source, target), restores ? "restore" : "dismiss", restores, next, requestHash, request.idempotencyKey, JSON.stringify({ ...result, ...receiptExtra })]);
+  return result;
+}
 export function createCastReviewDecisionRepository(pool: DatabasePool, editingEnabled: boolean) {
   return {
     async reviewDecision(rawScope: CastScope, rawId: string, rawRequest: ReviewDecisionRequest) {
       const scope = castScopeSchema.parse(rawScope), id = z.uuid().parse(rawId), request = reviewDecisionRequestSchema.parse(rawRequest);
       return withTransaction(pool, async client => {
-        const cast = await initializeCastWithClient(client, scope);
-        if (!editingEnabled) throw new CampaignCastError("cast_editing_disabled");
-        const row = (await client.query("SELECT * FROM campaign_cast_discovery_candidates WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3 FOR UPDATE", [id, scope.campaignId, scope.ownerUserId])).rows[0];
-        if (!row) throw new CampaignCastError("cast_not_found");
-        const requestHash = sha256(stableStringify({ id, request }));
-        const prior = (await client.query("SELECT request_hash,result_receipt FROM campaign_cast_review_decisions WHERE campaign_id=$1 AND owner_user_id=$2 AND idempotency_key=$3", [scope.campaignId, scope.ownerUserId, request.idempotencyKey])).rows[0];
-        if (prior) { if (prior.request_hash !== requestHash) throw new CampaignCastError("cast_idempotency_conflict"); return reviewDecisionResultSchema.parse(prior.result_receipt); }
-        const revision = await readReviewRevision(client, scope);
-        if (!await currentSource(client, scope, cast, row) || request.sourceHash !== row.source.sourceHash || request.expectedCastRevision !== cast.revision || stableStringify(request.expectedBoundary) !== stableStringify(cast.boundary) || request.expectedReviewRevision !== revision) throw new CampaignCastError("cast_revision_conflict");
-        if ((await client.query("SELECT 1 FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1", [scope.campaignId, scope.ownerUserId])).rowCount) throw new CampaignCastError("cast_generation_active");
-        const active = await readActiveReviewDismissals(client, scope);
-        const proposal = castDiscoveryCandidateSchema.parse(row.proposal);
-        let target: ReviewTarget, index: number | null, restores: string | null = null;
-        if (request.action === "restore") {
-          const decision = active.rows.find(item => item.id === request.decisionId && item.candidate_id === id);
-          if (!decision) throw new CampaignCastError("cast_invalid_request");
-          target = decision.target_payload; index = decision.observation_index; restores = decision.id;
-          if (canonicalReviewTarget(row.source, target) !== canonicalReviewTarget(decision.source, target) || !eligible(row, target, index) || await alreadyResolved(client, scope, row.source, target)) throw new CampaignCastError("cast_invalid_request");
-        } else {
-          index = request.action === "dismiss_detail" ? request.observationIndex : null;
-          if (index !== null && !proposal.observations[index]) throw new CampaignCastError("cast_invalid_request");
-          target = index === null ? { kind: "identity", proposal } : { kind: "detail", proposal, observation: proposal.observations[index]! };
-          if (!eligible(row, target, index) || isReviewDismissed(active, row.source, target)) throw new CampaignCastError("cast_invalid_request");
-        }
-        const next = revision + 1, decisionId = randomUUID();
-        const result = reviewDecisionResultSchema.parse({ decisionId, candidateId: id, reviewRevision: next, revision: cast.revision, boundary: cast.boundary, disposition: request.action });
-        await client.query(`INSERT INTO campaign_cast_review_sequences(campaign_id,owner_user_id,revision) VALUES($1,$2,$3) ON CONFLICT(campaign_id,owner_user_id) DO UPDATE SET revision=EXCLUDED.revision`, [scope.campaignId, scope.ownerUserId, next]);
-        await client.query(`INSERT INTO campaign_cast_review_decisions(id,campaign_id,owner_user_id,candidate_id,turn_id,narration_revision,timeline_revision,source_hash,source,target_kind,observation_index,target_payload,target_fingerprint,action,restores_decision_id,revision,request_hash,idempotency_key,result_receipt)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`, [decisionId, scope.campaignId, scope.ownerUserId, id, row.source.turnId, row.source.narrationRevision, row.source.timelineRevision, row.source.sourceHash, JSON.stringify(row.source), target.kind, index, JSON.stringify(target), reviewTargetFingerprint(row.source, target), restores ? "restore" : "dismiss", restores, next, requestHash, request.idempotencyKey, JSON.stringify(result)]);
-        return result;
+        return reviewDecisionWithClient(client, scope, id, request, editingEnabled);
       });
     },
     async dismissedReview(rawScope: CastScope, input: { cursor?: string; limit?: number } = {}) {

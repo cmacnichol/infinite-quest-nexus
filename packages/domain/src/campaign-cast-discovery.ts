@@ -114,7 +114,7 @@ const speech = /[“”"]|\b(?:says?|said|claims?|claimed|rumou?r|alleges?|belie
 /** Review can resolve attribution, but cannot turn unsafe or unsupported source into a fact. */
 export function canAcceptReviewedCastObservation(source: CastDiscoverySource, narration: string,
   observation: CastDiscoveryCandidate["observations"][number], reason: string): boolean {
-  if (!["identity_not_supported", "unsupported_subject", "unsupported_field"].includes(reason)
+  if (!["identity_not_supported", "unsupported_subject", "unsupported_field", "dismissed"].includes(reason)
     || observation.mode !== "fact" || observation.speakerCharacterId !== null || sha256(narration) !== source.sourceHash) return false;
   const paragraph = source.paragraphs.find(item => item.id === observation.paragraphId)?.text;
   if (!paragraph || !narration.includes(paragraph) || !paragraph.includes(observation.quote)

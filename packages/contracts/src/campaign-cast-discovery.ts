@@ -81,8 +81,8 @@ export const castPendingCandidateSchema = z.object({ id: z.uuid(), reason: z.str
 export const castCandidateListSchema = z.object({ revision: z.number().int().nonnegative(), boundary: castBoundarySchema,
   candidates: z.array(castPendingCandidateSchema).max(50), nextCursor: z.uuid().nullable() }).strict();
 export const resolveCastCandidateSchema = z.discriminatedUnion("action", [
-  z.object({ ...castWriteBase, action: z.literal("attach"), characterId: z.uuid() }).strict(),
-  z.object({ ...castWriteBase, action: z.literal("create") }).strict()
+  z.object({ ...castWriteBase, expectedReviewRevision: z.number().int().nonnegative().optional(), action: z.literal("attach"), characterId: z.uuid() }).strict(),
+  z.object({ ...castWriteBase, expectedReviewRevision: z.number().int().nonnegative().optional(), action: z.literal("create") }).strict()
 ]);
 export const castCandidateResolutionSchema = castWriteResultSchema.extend({ candidateId: z.uuid(), observationIds: z.array(z.uuid()).max(20),
   pendingObservations: z.array(z.object({ index: z.number().int().min(0).max(19), reason: z.string().min(1).max(100) }).strict()).max(20).optional() });
@@ -91,7 +91,7 @@ export type CastCandidateList = z.infer<typeof castCandidateListSchema>;
 export type ResolveCastCandidate = z.infer<typeof resolveCastCandidateSchema>;
 export type CastCandidateResolution = z.infer<typeof castCandidateResolutionSchema>;
 
-const reviewDetailBase = { ...castWriteBase, expectedCharacterRevision: z.number().int().nonnegative(),
+const reviewDetailBase = { ...castWriteBase, expectedReviewRevision: z.number().int().nonnegative().optional(), expectedCharacterRevision: z.number().int().nonnegative(),
   observationIndex: z.number().int().min(0).max(19), sourceHash: z.string().regex(/^[a-f0-9]{64}$/u) };
 export const reviewCastDetailSchema = z.discriminatedUnion("action", [
   z.object({ ...reviewDetailBase, action: z.literal("confirm"), confirmedValue: z.string().max(2000).optional() }).strict(),

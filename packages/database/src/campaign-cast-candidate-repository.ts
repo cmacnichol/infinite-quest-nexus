@@ -14,7 +14,7 @@ import { normalizeEntityTerm } from "../../domain/src/entity-references.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import { initializeCastWithClient, applyCastBatchWithClient, seedCampaignCastWithClient } from "./campaign-cast-repository.js";
 import { withTransaction, type DatabasePool } from "./pool.js";
-import { readActiveReviewDismissals, isReviewDismissed, readReviewRevision } from "./campaign-cast-review-decision-repository.js";
+import { readActiveReviewDismissals, isReviewDismissed, readReviewRevision, reviewDecisionWithClient } from "./campaign-cast-review-decision-repository.js";
 import { pendingCastDetailSql } from "./campaign-cast-review-sql.js";
 
 export function createCastCandidateRepository(pool: DatabasePool, editingEnabled: boolean, castPresetsEnabled = false) {
@@ -97,6 +97,11 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
           if (prior.requestHash !== requestHash) throw new CampaignCastError("cast_idempotency_conflict");
           return reviewCastDetailResultSchema.parse(prior.result);
         }
+        const priorJournal = (await client.query("SELECT result_receipt FROM campaign_cast_review_decisions WHERE campaign_id=$1 AND owner_user_id=$2 AND idempotency_key=$3", [scope.campaignId, scope.ownerUserId, request.idempotencyKey])).rows[0];
+        if (priorJournal) {
+          if (priorJournal.result_receipt.legacyRequestHash !== requestHash) throw new CampaignCastError("cast_idempotency_conflict");
+          return reviewCastDetailResultSchema.parse(priorJournal.result_receipt.legacyDetail);
+        }
         const resolution = row.resolution_receipt ? castCandidateResolutionSchema.parse(row.resolution_receipt.result) : null;
         const original = cast.characters.find(item => item.id === resolution?.character.id);
         const character = cast.characters.find(item => item.id === (original?.mergedIntoCharacterId ?? original?.id));
@@ -104,6 +109,7 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
         if (!character || !resolution?.pendingObservations?.some(item => item.index === request.observationIndex)
           || decisions.some(item => item.observationIndex === request.observationIndex)) throw new CampaignCastError("cast_invalid_request");
         if (character.origin.kind === "protagonist" && request.action !== "dismiss") throw new CampaignCastError("cast_protagonist_read_only");
+        if (request.expectedReviewRevision !== undefined && request.expectedReviewRevision !== await readReviewRevision(client, scope)) throw new CampaignCastError("cast_revision_conflict");
         if (row.status !== "pending" || character.revision !== request.expectedCharacterRevision || cast.revision !== request.expectedCastRevision
           || stableStringify(cast.boundary) !== stableStringify(request.expectedBoundary)) throw new CampaignCastError("cast_revision_conflict");
         const stillPending = await client.query(`SELECT 1 FROM campaign_cast_discovery_candidates p
@@ -116,6 +122,15 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
         const observation = row.proposal.observations[request.observationIndex];
         if (isSeededFixedCandidateHidden(character.campaignProfile && characterProfileSchema.parse(character.campaignProfile), observation.field)) throw new CampaignCastError("cast_fixed_field_override", [{ path: observation.field, code: "fixed_field" }]);
         if (character.originProfile && request.action !== "dismiss" && !["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(observation.field)) throw new CampaignCastError("cast_fixed_field_override", [{ path: observation.field, code: "fixed_field" }]);
+        if (request.action === "dismiss") {
+          const result = reviewCastDetailResultSchema.parse({ character, revision: cast.revision, boundary: cast.boundary, candidateId: id,
+            observationIndex: request.observationIndex, disposition: "dismiss" });
+          await reviewDecisionWithClient(client, scope, id, { action: "dismiss_detail", observationIndex: request.observationIndex,
+            expectedCastRevision: request.expectedCastRevision, expectedBoundary: request.expectedBoundary, sourceHash: request.sourceHash,
+            expectedReviewRevision: await readReviewRevision(client, scope), idempotencyKey: request.idempotencyKey }, editingEnabled,
+            { legacyDetail: result, legacyRequestHash: requestHash });
+          return result;
+        }
         let observationId: string | undefined;
         if (request.action === "accept") {
           const reason = resolution.pendingObservations.find(item => item.index === request.observationIndex)!.reason;
@@ -168,6 +183,7 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
         const proposedBeforeFence = cast.characters.find(person => person.id === row.proposal.existingCharacterId);
         const selectedBeforeFence = request.action === "attach" ? cast.characters.find(person => person.id === request.characterId) : undefined;
         if ([proposedBeforeFence, selectedBeforeFence].some(person => person && cast.characters.find(target => target.id === (person.mergedIntoCharacterId ?? person.id))?.removed)) throw new CampaignCastError("cast_character_removed");
+        if (request.expectedReviewRevision !== undefined && request.expectedReviewRevision !== await readReviewRevision(client, scope)) throw new CampaignCastError("cast_revision_conflict");
         if (row.status !== "pending" || cast.revision !== request.expectedCastRevision
           || stableStringify(cast.boundary) !== stableStringify(request.expectedBoundary)) throw new CampaignCastError("cast_revision_conflict");
         if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2
@@ -179,10 +195,16 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
         const proposed = cast.characters.find(person => person.id === row.proposal.existingCharacterId);
         const proposedTarget = cast.characters.find(person => person.id === (proposed?.mergedIntoCharacterId ?? proposed?.id));
         if (resolved?.removed || proposedTarget?.removed) throw new CampaignCastError("cast_character_removed");
+        const activeDismissals = await readActiveReviewDismissals(client, scope);
+        if (isReviewDismissed(activeDismissals, source, { kind: "identity", proposal: row.proposal })) throw new CampaignCastError("cast_invalid_request");
         const validated = resolveCastDiscoveryEvidence({ source, candidate: { ...row.proposal, existingCharacterId: proposedTarget?.id ?? row.proposal.existingCharacterId }, knownCharacters: cast.characters.filter(person => !person.mergedIntoCharacterId),
           characterId: resolved?.id ?? null });
-        const candidate = validated.candidate;
-        if (!candidate) throw new CampaignCastError("cast_invalid_request");
+        if (!validated.candidate) throw new CampaignCastError("cast_invalid_request");
+        const dismissedIndexes = row.proposal.observations.flatMap((observation: any, index: number) =>
+          isReviewDismissed(activeDismissals, source, { kind: "detail", proposal: row.proposal, observation }) ? [index] : []);
+        const candidate = { ...validated.candidate, observations: validated.candidate.observations.filter(observation =>
+          !isReviewDismissed(activeDismissals, source, { kind: "detail", proposal: row.proposal, observation })) };
+        for (const index of dismissedIndexes) if (!validated.pendingObservations.some(item => item.index === index)) validated.pendingObservations.push({ index, reason: "dismissed" });
         const evidence = (quote: { paragraphId: string; quote: string }): Extract<CastEvidence, { kind: "turn" }> => ({ kind: "turn",
           turnId: source.turnId, turnNumber: source.turnNumber, narrationRevision: source.narrationRevision, sourceHash: source.sourceHash, ...quote });
         const key = `candidate:${id}:${sha256(request.idempotencyKey)}`;
