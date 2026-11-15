@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import type { CastEvidence } from "../../packages/contracts/src/campaign-cast.js";
 import { sha256 } from "../../packages/domain/src/text.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -79,4 +80,80 @@ integration("cast observation decisions", () => {
     expect((await pool.query("SELECT narration FROM turns WHERE id=$1", [turnId])).rows[0].narration).toBe(narration);
     expect((await pool.query("SELECT evidence FROM campaign_cast_observations WHERE id=$1", [fact.observationIds[0]])).rows[0].evidence.quote).toBe(narration);
   });
+
+  async function projectionFixture(seeded = false) {
+    const worldId = randomUUID(), versionId = randomUUID(), campaignId = randomUUID();
+    const content = { world: { title: "Decision" }, playableCharacters: [{ id: "mara", name: "Mara", characterText: "", campaignUse: "supporting", profile: { story: { goals: "Find home" } } }] };
+    await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Decision')", [worldId, ownerUserId]);
+    await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) VALUES($1,$2,$3,1,$4)", [versionId, worldId, ownerUserId, JSON.stringify(content)]);
+    await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title,active_turn_number,character_profile) VALUES($1,$2,$3,'Decision',2,'{}')", [campaignId, ownerUserId, versionId]);
+    const evidence: Extract<CastEvidence, { kind: "turn" }>[] = [];
+    for (const turnNumber of [1, 2]) {
+      const turnId = randomUUID(), narration = `Mara appears in scene ${turnNumber}.`;
+      await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,$4,$5)", [turnId, ownerUserId, campaignId, turnNumber, narration]);
+      evidence.push({ kind: "turn" as const, turnId, turnNumber, narrationRevision: 0, sourceHash: sha256(narration), paragraphId: "p1", quote: narration });
+    }
+    const scope = { ownerUserId, campaignId }, boundary = { turnNumber: 2, timelineRevision: 0 };
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+    let characterId: string;
+    if (seeded) {
+      const preview = await repo.fromWorldPreview!(scope, { characterId: "mara" });
+      characterId = (await repo.fromWorld!(scope, { characterId: "mara", expectedWorldVersionId: versionId, previewFingerprint: preview.previewFingerprint, expectedCastRevision: preview.castRevision, expectedBoundary: preview.boundary, idempotencyKey: randomUUID() })).character.id;
+    } else {
+      characterId = (await repo.create(scope, { expectedCastRevision: 0, expectedBoundary: boundary, idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: {} })).character.id;
+    }
+    const observe = async (field: "state.location" | "story.goals" | "appearance.description", value: string, turnIndex: number) => {
+      const receipt = await repo.applyBatch(scope, { boundary, idempotencyKey: randomUUID(), commands: [{ kind: "observe", characterId, field, value, mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: evidence[turnIndex]! }] });
+      return receipt.observationIds[0]!;
+    };
+    return { scope, boundary, repo, characterId, observe };
+  }
+
+  async function verifyDecisionCycle(f: Awaited<ReturnType<typeof projectionFixture>>, observationId: string,
+    field: "state.location" | "story.goals" | "appearance.description", before: string, after: string) {
+    const { scope, boundary, repo, characterId } = f;
+    const detail = await repo.detail(scope, characterId);
+    const request = { action: "retract" as const, expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: boundary, idempotencyKey: randomUUID() };
+    const preview = await repo.previewObservationDecision(scope, characterId, observationId, request);
+    expect(preview).toMatchObject({ field, currentValue: before, projectedValue: after, currentConflict: false, projectedConflict: false });
+    const result = await repo.applyObservationDecision(scope, characterId, observationId, request);
+    expect(result.character.profile[field]).toBe(preview.projectedValue);
+    expect((await repo.current(scope)).characters.find(item => item.id === characterId)?.profile[field]).toBe(preview.projectedValue);
+    expect((await repo.detail(scope, characterId)).character.profile[field]).toBe(preview.projectedValue);
+    expect((await repo.workspaceRead!(scope)).conflictIds).not.toContain(characterId);
+    const restore = { action: "restore" as const, retractionEventId: result.decisionEventId, expectedCastRevision: result.revision, expectedCharacterRevision: result.character.revision, expectedBoundary: boundary, idempotencyKey: randomUUID() };
+    const restorePreview = await repo.previewObservationDecision(scope, characterId, observationId, restore);
+    expect(restorePreview).toMatchObject({ field, currentValue: after, projectedValue: before, currentConflict: false, projectedConflict: false });
+    const restored = await repo.applyObservationDecision(scope, characterId, observationId, restore);
+    expect(restored.character.profile[field]).toBe(restorePreview.projectedValue);
+    expect((await repo.current(scope)).characters.find(item => item.id === characterId)?.profile[field]).toBe(restorePreview.projectedValue);
+    expect((await repo.detail(scope, characterId)).character.profile[field]).toBe(restorePreview.projectedValue);
+    expect((await repo.workspaceRead!(scope)).conflictIds).not.toContain(characterId);
+  }
+
+  it("reveals an older dynamic fact when the latest is retracted and restores the latest", async () => {
+    const f = await projectionFixture();
+    await f.observe("state.location", "forest", 0);
+    const latest = await f.observe("state.location", "harbor", 1);
+    await verifyDecisionCycle(f, latest, "state.location", "harbor", "forest");
+  });
+
+  it("retains an explicit override through retraction and restoration", async () => {
+    const f = await projectionFixture();
+    await f.observe("state.location", "forest", 0);
+    const latest = await f.observe("state.location", "harbor", 1);
+    const detail = await f.repo.detail(f.scope, f.characterId);
+    await f.repo.edit(f.scope, f.characterId, { expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: f.boundary, idempotencyKey: randomUUID(), setOverrides: { "state.location": "tower" } });
+    await verifyDecisionCycle(f, latest, "state.location", "tower", "tower");
+  });
+
+  it("uses authored goals fallback and latest observed appearance for a seeded character", async () => {
+    const f = await projectionFixture(true);
+    const goal = await f.observe("story.goals", "Sail away", 1);
+    await verifyDecisionCycle(f, goal, "story.goals", "Sail away", "Find home");
+    await f.observe("appearance.description", "blue coat", 0);
+    const latest = await f.observe("appearance.description", "green coat", 1);
+    await verifyDecisionCycle(f, latest, "appearance.description", "green coat", "blue coat");
+  });
+
 });
