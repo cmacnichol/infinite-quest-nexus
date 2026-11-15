@@ -38,6 +38,18 @@ describe("web-next characters workspace", () => {
     document.querySelector("form")!.dispatchEvent(new document.defaultView!.Event("submit", { cancelable: true }));
     await vi.waitFor(() => expect(api.create).toHaveBeenCalled()); expect(api.create.mock.calls[0]![0]).toBe("one"); expect((api.create.mock.calls[0]![1] as any).name).toBe("Nia"); workspace.dispose();
   });
+  it("keeps an invalid alias draft and displays its validation error", async () => {
+    const { document, workspace, click, api } = setup(); workspace.open("one");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Add character");
+    await vi.waitFor(() => expect(document.querySelector('[aria-label="Name"]')).not.toBeNull());
+    const name = document.querySelector<HTMLInputElement>('[aria-label="Name"]')!; name.value = "Nia"; name.dispatchEvent(new document.defaultView!.Event("input"));
+    const aliases = document.querySelector<HTMLTextAreaElement>('[aria-label="Aliases (one per line)"]')!;
+    const value = Array.from({ length: 21 }, (_, index) => `Alias ${index}`).join("\n"); aliases.value = value; aliases.dispatchEvent(new document.defaultView!.Event("input"));
+    document.querySelector("form")!.dispatchEvent(new document.defaultView!.Event("submit", { cancelable: true }));
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Too big"));
+    expect(document.querySelector<HTMLTextAreaElement>('[aria-label="Aliases (one per line)"]')!.value).toBe(value);
+    expect(api.create).not.toHaveBeenCalled(); workspace.dispose();
+  });
   it.each(["success", "failure"] as const)("keeps a newer campaign draft when an earlier save ends in %s", async outcome => {
     let finish!: (value: typeof detail) => void; let fail!: (error: Error) => void;
     const { document, workspace, click } = setup({ create: () => new Promise((resolve, reject) => { finish = resolve; fail = reject; }) });
