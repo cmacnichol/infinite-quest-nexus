@@ -262,3 +262,10 @@ it.each(["state.location", "state.condition", "state.clothing", "story.goals"] a
   expect(unedited.records[0]!.fields).not.toContainEqual(expect.objectContaining({ field }));
   expect(unedited.omittedFieldCount).toBe(1);
 });
+
+
+it("keeps V3 legacy last-known dynamic observations with discovery off", () => {
+  const input = fixture();
+  const result = selectCastContext({ snapshot: castGenerationSnapshotSchema.parse({ ...input, discoveryStatus: "off", trackedThroughTurn: null, coverageStartTurn: null }), contextProtocol: CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, budgetTokens: 3000, direction: "Mara", currentScene: "", openThreads: [] });
+  expect(result.records[0]!.fields).toContainEqual(expect.objectContaining({ field: "state.location", value: "the gate", authority: "observation" }));
+});

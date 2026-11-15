@@ -487,7 +487,7 @@ export async function captureCastGenerationSnapshotWithClient(client: DatabaseCl
       const value = raw;
       const superseded = new Set(detail.observations.flatMap(item => item.supersedesObservationId ? [item.supersedesObservationId] : []));
       const observation = detail.observations.filter(item => !superseded.has(item.id) && !projected.retractedObservationIds.has(item.id) && item.field === field && item.value === value && item.mode === "fact")
-        .sort((a, b) => castEvidenceOrder(b.evidence)[0] - castEvidenceOrder(a.evidence)[0])[0];
+        .sort((a, b) => { const left = castEvidenceOrder(a.evidence), right = castEvidenceOrder(b.evidence); return left[0] - right[0] || left[1] - right[1]; }).at(-1);
       const evidence = source === "override" ? override?.evidence : source === "observation" ? observation?.evidence : undefined;
       const evidenceId = sourceId(evidence?.kind === "user" ? evidence.editId : source === "observation" ? observation?.id : authoredEvidence?.get(field), field);
       add(field, value, source, evidenceId, evidence ? castEvidenceOrder(evidence)[0] : undefined, evidence?.kind);

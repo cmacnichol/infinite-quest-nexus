@@ -77,6 +77,10 @@ it("keeps v1 replay stable and captures only bounded v2 fiction with discovery o
 
   // Capture pins the old precedence while V3 yields to later accepted evidence.
   await repository.applyBatch(scope, { boundary: changed.boundary, idempotencyKey: "location-edit", commands: [{ kind: "override", characterId: created.character.id, field: "state.location", value: "the docks" }] });
+  const beforeAdded = await repository.detail(scope, created.character.id);
+  const added = await repository.create(scope, { expectedCastRevision: beforeAdded.revision, expectedBoundary: beforeAdded.boundary, idempotencyKey: "added-cast", name: "Iven", aliases: [], profile: {} });
+  const dynamicFields = ["state.location", "state.condition", "state.clothing", "story.goals"] as const;
+  await repository.applyBatch(scope, { boundary: changed.boundary, idempotencyKey: "added-edits", commands: dynamicFields.map(field => ({ kind: "override" as const, characterId: added.character.id, field, value: "earlier edit" })) });
   const laterTurn = randomUUID(), laterNarration = "Mara waits at the palace.";
   await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [campaignId]);
   await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,2,$4)", [laterTurn, ownerUserId, campaignId, laterNarration]);
@@ -98,6 +102,20 @@ it("keeps v1 replay stable and captures only bounded v2 fiction with discovery o
   for (const result of [await captureGap(CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, true), await captureGap(CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, false)]) {
     expect(result.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields).toContainEqual(expect.objectContaining({ field: "state.condition", value: "well rested", source: "observation" }));
   }
+  const boundary2 = { turnNumber: 2, timelineRevision: 0 };
+  const evidence2 = { kind: "turn" as const, turnId: laterTurn, turnNumber: 2, narrationRevision: 0, sourceHash: sha256(laterNarration), paragraphId: "p1", quote: laterNarration };
+  const observed = await repository.applyBatch(scope, { boundary: boundary2, idempotencyKey: "added-observations", commands: dynamicFields.map(field => ({ kind: "observe" as const, characterId: added.character.id, field, value: "later evidence", mode: "fact" as const, speakerCharacterId: null, supersedesObservationId: null, evidence: evidence2 })) });
+  const tied = await repository.applyBatch(scope, { boundary: boundary2, idempotencyKey: "added-tie", commands: [{ kind: "observe", characterId: added.character.id, field: "state.location", value: "later evidence", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: evidence2 }] });
+  const superseding = await repository.applyBatch(scope, { boundary: boundary2, idempotencyKey: "added-supersede", commands: [{ kind: "observe", characterId: added.character.id, field: "state.clothing", value: "new clothing", mode: "fact", speakerCharacterId: null, supersedesObservationId: observed.observationIds[2]!, evidence: evidence2 }] });
+  const addedCapture = await captureGap(CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, true);
+  const addedFields = addedCapture.snapshot.fiction!.find(item => item.characterId === added.character.id)!.fields;
+  for (const field of dynamicFields) expect(addedFields).toContainEqual(expect.objectContaining({ field, source: "observation", value: field === "state.clothing" ? "new clothing" : "later evidence" }));
+  expect(addedFields).toContainEqual(expect.objectContaining({ field: "state.location", evidenceId: `${tied.observationIds[0]}:state.location` }));
+  expect(addedFields).toContainEqual(expect.objectContaining({ field: "state.clothing", evidenceId: `${superseding.observationIds[0]}:state.clothing` }));
+  const detail = await repository.detail(scope, added.character.id);
+  await repository.applyObservationDecision(scope, added.character.id, observed.observationIds[1]!, { action: "retract", expectedCastRevision: detail.revision, expectedCharacterRevision: detail.character.revision, expectedBoundary: boundary2, idempotencyKey: "added-retract" });
+  const afterRetraction = await captureGap(CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, true);
+  expect(afterRetraction.snapshot.fiction!.find(item => item.characterId === added.character.id)!.fields).toContainEqual(expect.objectContaining({ field: "state.condition", value: "earlier edit", source: "override", evidenceKind: "user" }));
   for (const [contextProtocol, value, source] of [[CAST_V2_STORY_MEMORY_CONTEXT_POLICY_VERSION, "the docks", "override"], [CAST_V3_STORY_MEMORY_CONTEXT_POLICY_VERSION, "the palace", "observation"]] as const) {
     const result = await withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled: false, version: "cast-context-v2", contextProtocol }));
     expect(result.snapshot.fiction!.find(item => item.characterId === created.character.id)!.fields).toContainEqual(expect.objectContaining({ field: "state.location", value, source }));
