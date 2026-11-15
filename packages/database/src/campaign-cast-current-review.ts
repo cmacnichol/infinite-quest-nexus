@@ -20,7 +20,7 @@ export async function currentCastReviewCandidates(client: DatabaseClient | Datab
       AND n.correction_revision=(p.source->>'narrationRevision')::integer
       AND encode(digest(n.effective_narration,'sha256'),'hex')=p.source->>'sourceHash'`,
   [scope.campaignId, scope.ownerUserId, snapshot.boundary.timelineRevision, snapshot.boundary.turnNumber, jobsOnly])).rows;
-  const active = await readActiveReviewDismissals(client, scope);
+  const active = await readActiveReviewDismissals(client, scope, snapshot.characters);
   return rows.flatMap(row => {
     if (!row.resolution_receipt && isReviewDismissed(active, row.source, { kind: "identity", proposal: row.proposal })) return [];
     const originalId = row.resolution_receipt?.result?.character?.id ?? row.proposal?.existingCharacterId;

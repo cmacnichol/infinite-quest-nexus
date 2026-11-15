@@ -1,32 +1,60 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { castScopeSchema, type CastScope } from "../../contracts/src/campaign-cast.js";
+import { castScopeSchema, type CastScope, type CastCharacter } from "../../contracts/src/campaign-cast.js";
 import { castDiscoveryCandidateSchema, castDiscoverySourceSchema } from "../../contracts/src/campaign-cast-discovery.js";
 import { dismissedReviewPageSchema, dismissedReviewQuerySchema, reviewDecisionRequestSchema, reviewDecisionResultSchema, type ReviewDecisionRequest } from "../../contracts/src/campaign-cast-review-decisions.js";
 import { CampaignCastError } from "../../application/src/campaign-cast/ports.js";
 import { canonicalReviewTarget, reviewTargetFingerprint, type ReviewTarget } from "../../domain/src/campaign-cast-review-decisions.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
-import { initializeCastWithClient } from "./campaign-cast-repository.js";
+import { initializeCastWithClient, readCastSnapshotWithClient } from "./campaign-cast-repository.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.js";
 
 type Row = { id: string; candidate_id: string; source: any; target_payload: any; target_kind: string; observation_index: number | null; target_fingerprint: string; revision: string; action: string; restores_decision_id: string | null };
 /** Active operational and legacy dismissals. Caller independently validates candidate source. */
-export async function readActiveReviewDismissals(client: DatabaseClient | DatabasePool, scope: CastScope) {
+export async function readActiveReviewDismissals(client: DatabaseClient | DatabasePool, scope: CastScope, characters: CastCharacter[]) {
   const rows = (await client.query(`SELECT d.* FROM campaign_cast_review_decisions d WHERE d.campaign_id=$1 AND d.owner_user_id=$2 AND d.action='dismiss'
     AND NOT EXISTS (SELECT 1 FROM campaign_cast_review_decisions r WHERE r.campaign_id=d.campaign_id AND r.owner_user_id=d.owner_user_id AND r.restores_decision_id=d.id) ORDER BY d.revision`, [scope.campaignId, scope.ownerUserId])).rows as Row[];
   const legacy = (await client.query(`SELECT p.source,p.proposal,d AS decision FROM campaign_cast_discovery_candidates p CROSS JOIN LATERAL jsonb_array_elements(p.detail_decisions) d
     WHERE p.campaign_id=$1 AND p.owner_user_id=$2 AND p.status<>'cancelled' AND d->'result'->>'disposition'='dismiss'`, [scope.campaignId, scope.ownerUserId])).rows;
-  return { rows, legacy };
+  const bindings = (await client.query(`SELECT source,proposal,resolution_receipt FROM campaign_cast_discovery_candidates
+    WHERE campaign_id=$1 AND owner_user_id=$2 AND status<>'cancelled' AND resolution_receipt IS NOT NULL`, [scope.campaignId, scope.ownerUserId])).rows;
+  const effective = (id: string) => { const character = characters.find(item => item.id === id); return character ? character.mergedIntoCharacterId ?? character.id : null; };
+  const identities = new Map<string, Set<string>>();
+  for (const row of bindings) {
+    if (!castDiscoverySourceSchema.safeParse(row.source).success || !castDiscoveryCandidateSchema.safeParse(row.proposal).success) continue;
+    const resolved = effective(row.resolution_receipt?.result?.character?.id);
+    if (!resolved) continue;
+    const key = canonicalReviewTarget(row.source, { kind: "identity", proposal: { ...row.proposal, existingCharacterId: null } });
+    const ids = identities.get(key) ?? new Set<string>(); ids.add(resolved); identities.set(key, ids);
+  }
+  return { rows, legacy, identities, effective };
+}
+type ActiveReview = Awaited<ReturnType<typeof readActiveReviewDismissals>>;
+function normalizedTarget(active: ActiveReview, source: any, target: ReviewTarget): ReviewTarget {
+  const proposal = target.proposal;
+  const key = canonicalReviewTarget(source, { kind: "identity", proposal: { ...proposal, existingCharacterId: null } });
+  const ids = active.identities.get(key);
+  if (ids?.size !== 1) return target;
+  const resolved = [...ids][0]!;
+  if (proposal.existingCharacterId && active.effective(proposal.existingCharacterId) !== resolved) return target;
+  return { ...target, proposal: { ...proposal, existingCharacterId: resolved } };
+}
+function sameTarget(active: ActiveReview, source: any, target: ReviewTarget, otherSource: any, other: ReviewTarget): boolean {
+  const left = normalizedTarget(active, source, target), right = normalizedTarget(active, otherSource, other);
+  return reviewTargetFingerprint(source, left) === reviewTargetFingerprint(otherSource, right)
+    && canonicalReviewTarget(source, left) === canonicalReviewTarget(otherSource, right);
 }
 export function isReviewDismissed(active: Awaited<ReturnType<typeof readActiveReviewDismissals>>, source: any, target: ReviewTarget): boolean {
   if (!active.rows.length && (target.kind === "identity" || !active.legacy.length)) return false;
   if (!castDiscoverySourceSchema.safeParse(source).success || !castDiscoveryCandidateSchema.safeParse(target.proposal).success) return false;
   const canonical = canonicalReviewTarget(source, target), fingerprint = reviewTargetFingerprint(source, target);
-  if (active.rows.some(row => row.target_fingerprint === fingerprint && canonicalReviewTarget(row.source, row.target_payload) === canonical)) return true;
+  if (active.rows.some(row => row.target_fingerprint === fingerprint && canonicalReviewTarget(row.source, row.target_payload) === canonical
+    || row.target_fingerprint === reviewTargetFingerprint(row.source, row.target_payload)
+      && sameTarget(active, source, target, row.source, row.target_payload))) return true;
   return target.kind === "detail" && active.legacy.some(row => {
     if (!castDiscoverySourceSchema.safeParse(row.source).success || !castDiscoveryCandidateSchema.safeParse(row.proposal).success) return false;
     const observation = row.proposal.observations[row.decision.observationIndex];
-    return observation && canonicalReviewTarget(row.source, { kind: "detail", proposal: row.proposal, observation }) === canonical;
+    return observation && sameTarget(active, source, target, row.source, { kind: "detail", proposal: row.proposal, observation });
   });
 }
 export async function readReviewRevision(client: DatabaseClient | DatabasePool, scope: CastScope): Promise<number> {
@@ -49,16 +77,15 @@ async function currentSource(client: DatabaseClient, scope: CastScope, cast: any
   return !!turn && source.scope.ownerUserId === scope.ownerUserId && source.scope.campaignId === scope.campaignId && source.timelineRevision === cast.boundary.timelineRevision && source.turnNumber <= cast.boundary.turnNumber && turn.turn_number === source.turnNumber && turn.correction_revision === source.narrationRevision && sha256(turn.effective_narration) === source.sourceHash;
 }
 /** Reject restoration if an equivalent proposal has already been accepted or confirmed. */
-async function alreadyResolved(client: DatabaseClient, scope: CastScope, source: any, target: ReviewTarget): Promise<boolean> {
+async function alreadyResolved(client: DatabaseClient, scope: CastScope, source: any, target: ReviewTarget, active: ActiveReview): Promise<boolean> {
   const rows = (await client.query(`SELECT source,proposal,resolution_receipt,detail_decisions FROM campaign_cast_discovery_candidates
     WHERE campaign_id=$1 AND owner_user_id=$2 AND status<>'cancelled' AND source->>'turnId'=$3
       AND source->>'narrationRevision'=$4 AND source->>'sourceHash'=$5`, [scope.campaignId, scope.ownerUserId, source.turnId, String(source.narrationRevision), source.sourceHash])).rows;
-  const canonical = canonicalReviewTarget(source, target);
   return rows.some(row => {
     if (!row.resolution_receipt) return false;
-    if (target.kind === "identity") return canonicalReviewTarget(row.source, { kind: "identity", proposal: row.proposal }) === canonical;
+    if (target.kind === "identity") return sameTarget(active, source, target, row.source, { kind: "identity", proposal: row.proposal });
     return row.proposal.observations.some((observation: any, index: number) => {
-      if (canonicalReviewTarget(row.source, { kind: "detail", proposal: row.proposal, observation }) !== canonical) return false;
+      if (!sameTarget(active, source, target, row.source, { kind: "detail", proposal: row.proposal, observation })) return false;
       const decision = row.detail_decisions.find((item: any) => item.observationIndex === index);
       return decision ? ["accept", "confirm"].includes(decision.result?.disposition)
         : !row.resolution_receipt.result.pendingObservations?.some((item: any) => item.index === index);
@@ -77,14 +104,14 @@ export async function reviewDecisionWithClient(client: DatabaseClient, scope: Ca
   const revision = await readReviewRevision(client, scope);
   if (!await currentSource(client, scope, cast, row) || request.sourceHash !== row.source.sourceHash || request.expectedCastRevision !== cast.revision || stableStringify(request.expectedBoundary) !== stableStringify(cast.boundary) || request.expectedReviewRevision !== revision) throw new CampaignCastError("cast_revision_conflict");
   if ((await client.query("SELECT 1 FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1", [scope.campaignId, scope.ownerUserId])).rowCount) throw new CampaignCastError("cast_generation_active");
-  const active = await readActiveReviewDismissals(client, scope);
+  const active = await readActiveReviewDismissals(client, scope, cast.characters);
   const proposal = castDiscoveryCandidateSchema.parse(row.proposal);
   let target: ReviewTarget, index: number | null, restores: string | null = null;
   if (request.action === "restore") {
     const decision = active.rows.find(item => item.id === request.decisionId && item.candidate_id === id);
     if (!decision) throw new CampaignCastError("cast_invalid_request");
     target = decision.target_payload; index = decision.observation_index; restores = decision.id;
-    if (canonicalReviewTarget(row.source, target) !== canonicalReviewTarget(decision.source, target) || !eligible(row, target, index) || await alreadyResolved(client, scope, row.source, target)) throw new CampaignCastError("cast_invalid_request");
+    if (canonicalReviewTarget(row.source, target) !== canonicalReviewTarget(decision.source, target) || !eligible(row, target, index) || await alreadyResolved(client, scope, row.source, target, active)) throw new CampaignCastError("cast_invalid_request");
   } else {
     index = request.action === "dismiss_detail" ? request.observationIndex : null;
     if (index !== null && !proposal.observations[index]) throw new CampaignCastError("cast_invalid_request");
@@ -110,12 +137,8 @@ export function createCastReviewDecisionRepository(pool: DatabasePool, editingEn
       const scope = castScopeSchema.parse(rawScope), query = dismissedReviewQuerySchema.parse(input);
       return withTransaction(pool, async client => {
         await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
-        const snapshot = (await client.query(`SELECT c.active_turn_number, COALESCE(s.revision, 0) AS revision, COALESCE(s.timeline_revision, 0) AS timeline_revision
-          FROM campaigns c LEFT JOIN campaign_cast_state s ON s.campaign_id=c.id AND s.owner_user_id=c.owner_user_id
-          WHERE c.id=$1 AND c.owner_user_id=$2`, [scope.campaignId, scope.ownerUserId])).rows[0];
-        if (!snapshot) throw new CampaignCastError("cast_not_found");
-        const cast = { revision: Number(snapshot.revision), boundary: { turnNumber: Number(snapshot.active_turn_number), timelineRevision: Number(snapshot.timeline_revision) } };
-        const active = await readActiveReviewDismissals(client, scope);
+        const cast = await readCastSnapshotWithClient(client, scope);
+        const active = await readActiveReviewDismissals(client, scope, cast.characters);
         const entries: { decision: Row; row: any }[] = [];
         for (const decision of active.rows) {
           if (query.cursor && decision.id <= query.cursor) continue;
@@ -127,7 +150,7 @@ export function createCastReviewDecisionRepository(pool: DatabasePool, editingEn
         const page = [];
         for (const { decision, row } of selected) {
           const target: ReviewTarget = decision.target_payload;
-          page.push({ decisionId: decision.id, candidateId: row.id, source: decision.source, target: target.kind === "identity" ? target : { kind: "detail", observationIndex: decision.observation_index, observation: target.observation }, canRestore: eligible(row, target, decision.observation_index) && !await alreadyResolved(client, scope, row.source, target) });
+          page.push({ decisionId: decision.id, candidateId: row.id, source: decision.source, target: target.kind === "identity" ? target : { kind: "detail", observationIndex: decision.observation_index, observation: target.observation }, canRestore: eligible(row, target, decision.observation_index) && !await alreadyResolved(client, scope, row.source, target, active) });
         }
         return dismissedReviewPageSchema.parse({ reviewRevision: await readReviewRevision(client, scope), revision: cast.revision, boundary: cast.boundary, decisions: page, nextCursor: entries.length > query.limit ? page.at(-1)!.decisionId : null });
       });

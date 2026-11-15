@@ -167,6 +167,14 @@ describe('cast review decisions', () => {
     const result = await repo.resolveCandidate!(scope, id, { ...resolution, expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, expectedReviewRevision: 1, idempotencyKey: 'resolve' });
     expect(result.observationIds).toHaveLength(0);
     expect(result.pendingObservations?.map(x => x.index)).toContain(0);
+    const rescannedId = randomUUID(), otherId = randomUUID();
+    for (const [candidateId, candidate] of [[rescannedId, { ...proposal, localKey: 'rescan', existingCharacterId: result.character.id }],
+      [otherId, { ...proposal, localKey: 'other', name: 'Other', existingCharacterId: randomUUID() }]] as const) {
+      await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason) VALUES($1,$2,$3,0,$4,$5,$6,'identity_needs_review')", [candidateId, ownerUserId, campaignId, candidate.localKey, JSON.stringify(source), JSON.stringify(candidate)]);
+    }
+    const visible = await repo.candidates(scope, { view: 'review' });
+    expect(visible.candidates.find(x => x.id === rescannedId)?.reviewDetails?.map(x => x.observationIndex)).not.toContain(0);
+    expect(visible.candidates.find(x => x.id === otherId)?.reviewDetails?.map(x => x.observationIndex)).toContain(0);
     await repo.reviewDecision(scope, id, { action: 'restore', decisionId: dismissed.decisionId, expectedCastRevision: result.revision, expectedBoundary: result.boundary, expectedReviewRevision: 1, sourceHash: source.sourceHash, idempotencyKey: 'restore' });
     const restoredDetail = (await repo.candidates(scope, { view: 'review' })).candidates.find(x => x.id === id)?.details?.find(x => x.observationIndex === 0);
     expect(restoredDetail?.allowedActions).toContain('accept');

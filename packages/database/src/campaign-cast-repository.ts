@@ -508,6 +508,15 @@ async function cacheSnapshot(client: DatabaseClient, scope: CastScope, value: Ca
   }
 }
 
+/** Project current cast without taking locks or initializing state, for read-only review views. */
+export async function readCastSnapshotWithClient(client: DatabaseClient, scope: CastScope): Promise<CastSnapshot> {
+  const row = (await client.query(`SELECT active_turn_number,world_version_id,selected_character_id,selected_character_world_id,character_profile,character_snapshot
+    FROM campaigns WHERE id=$1 AND owner_user_id=$2`, [scope.campaignId, scope.ownerUserId])).rows[0];
+  if (!row) throw new CampaignCastError("cast_not_found");
+  const campaign = campaignSchema.parse(row), state = await readState(client, scope);
+  return snapshot(client, scope, campaign, state, { turnNumber: campaign.active_turn_number, timelineRevision: state?.timeline_revision ?? 0 });
+}
+
 /** Lifecycle callers already own a transaction; never open a nested pool transaction. */
 export async function initializeCastWithClient(client: DatabaseClient, rawScope: CastScope): Promise<CastSnapshot> {
   const scope = castScopeSchema.parse(rawScope), campaign = await lockCampaign(client, scope);
@@ -1373,7 +1382,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         };
         let identities = 0, details = 0, conflicts = 0;
         const byId = new Map(projected.snapshot.characters.map(person => [person.id, person]));
-        const activeReview = await readActiveReviewDismissals(client, scope);
+        const activeReview = await readActiveReviewDismissals(client, scope, projected.snapshot.characters);
         for (const row of rows) {
           if (!row.resolution_receipt && isReviewDismissed(activeReview, row.source, { kind: "identity", proposal: row.proposal })) continue;
           let id = row.resolution_receipt?.result?.character?.id ?? row.proposal?.existingCharacterId;

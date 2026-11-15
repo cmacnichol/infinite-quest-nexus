@@ -79,7 +79,7 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
   const roster = (Array.isArray(pinned.content?.playableCharacters) ? pinned.content.playableCharacters : []).map((entry: unknown) => playableCharacterSchema.safeParse(entry)).map((entry: ReturnType<typeof playableCharacterSchema.safeParse>) => entry.success ? entry.data : null);
   const currentWorldIdentities = castDiscoveryWorldIdentities(pinned.content);
   const rejected = [...first.rejected], unresolved = [...first.unresolved];
-  const activeDismissals = await readActiveReviewDismissals(client, claim.scope);
+  const activeDismissals = await readActiveReviewDismissals(client, claim.scope, current.characters);
   const characterIds: string[] = [], observationIds: string[] = [];
   let accepted = 0;
   const evidence = (citation: { paragraphId: string; quote: string }): Extract<CastEvidence, { kind: "turn" }> => ({ kind: "turn", turnId: claim.source.turnId,

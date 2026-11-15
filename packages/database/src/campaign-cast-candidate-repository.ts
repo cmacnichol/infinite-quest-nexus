@@ -34,7 +34,7 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
         const visiblePending = `${pendingCastDetailSql} AND NOT COALESCE(
           ($10::jsonb -> (p.resolution_receipt #>> '{result,character,id}'))
           ? (p.proposal->'observations'->((item.value->>'index')::integer)->>'field'), false)`;
-        const active = await readActiveReviewDismissals(client, scope), reviewRevision = await readReviewRevision(client, scope);
+        const active = await readActiveReviewDismissals(client, scope, cast.characters), reviewRevision = await readReviewRevision(client, scope);
         const allRows = (await client.query(`SELECT p.id,p.reason,p.proposal,p.source,p.resolution_receipt,p.detail_decisions,n.effective_narration,
           ARRAY(SELECT (pending.item->>'index')::integer FROM (${visiblePending}) pending) AS pending_indexes FROM campaign_cast_discovery_candidates p
           JOIN effective_turn_narrations n ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
@@ -115,7 +115,7 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
         const stillPending = await client.query(`SELECT 1 FROM campaign_cast_discovery_candidates p
           WHERE p.id=$1 AND EXISTS (SELECT 1 FROM (${pendingCastDetailSql}) pending WHERE (pending.item->>'index')::integer=$2)`, [id, request.observationIndex]);
         if (!stillPending.rowCount) throw new CampaignCastError("cast_invalid_request");
-        const activeDismissals = await readActiveReviewDismissals(client, scope);
+        const activeDismissals = await readActiveReviewDismissals(client, scope, cast.characters);
         if (isReviewDismissed(activeDismissals, source, { kind: "detail", proposal: row.proposal,
           observation: row.proposal.observations[request.observationIndex] })) throw new CampaignCastError("cast_invalid_request");
         if ((await client.query("SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1", [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
@@ -195,7 +195,7 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
         const proposed = cast.characters.find(person => person.id === row.proposal.existingCharacterId);
         const proposedTarget = cast.characters.find(person => person.id === (proposed?.mergedIntoCharacterId ?? proposed?.id));
         if (resolved?.removed || proposedTarget?.removed) throw new CampaignCastError("cast_character_removed");
-        const activeDismissals = await readActiveReviewDismissals(client, scope);
+        const activeDismissals = await readActiveReviewDismissals(client, scope, cast.characters);
         if (isReviewDismissed(activeDismissals, source, { kind: "identity", proposal: row.proposal })) throw new CampaignCastError("cast_invalid_request");
         const validated = resolveCastDiscoveryEvidence({ source, candidate: { ...row.proposal, existingCharacterId: proposedTarget?.id ?? row.proposal.existingCharacterId }, knownCharacters: cast.characters.filter(person => !person.mergedIntoCharacterId),
           characterId: resolved?.id ?? null });
