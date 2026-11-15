@@ -606,7 +606,10 @@ integration("World Library and campaign version integration", () => {
     await nextPage.locator("[data-tool-action='open-characters']").click();
     await nextSheet.getByRole("button", { name: "Review Mara", exact: true }).click();
     await nextSheet.getByText("Sources and edit history").click();
-    await browserExpect(nextSheet).toContainText("Retracted fact");
+    const retractedLabel = nextSheet.getByText("Retracted fact", { exact: true });
+    await browserExpect(retractedLabel).toBeVisible();
+    await retractedLabel.scrollIntoViewIfNeeded();
+    await browserExpect(retractedLabel).toBeInViewport();
     await nextSheet.screenshot({ path: resolve(screenshotRoot, "composed-web-next-retracted.png") });
     // Exercise all remaining sheet write paths against the same real database.
     const beforeAdded = await isolationRepository.current(scope);
