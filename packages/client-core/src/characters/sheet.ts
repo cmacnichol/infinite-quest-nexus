@@ -1,5 +1,5 @@
 import { castEvidenceOrder, isCastStateField, stateEditReplacement, type CampaignCharacterProfile, type CastDetail, type CastEvidence, type CastObservation, type CastOverride } from "@infinite-quest/contracts";
-import { PROFILE_FIELDS, SUPPORTING_FIELDS, type CharacterSectionName } from "./profile-fields.js";
+import { PROFILE_FIELDS, SUPPORTING_FIELDS, seededCharacterFieldPolicy, type CharacterSectionName } from "./profile-fields.js";
 import { presetField, presetFields } from "./preset-editor.js";
 
 export type CharacterRecord = { kind: "protagonist"; profile: CampaignCharacterProfile; revision: number } | { kind: "supporting"; detail: CastDetail };
@@ -64,7 +64,7 @@ export function buildCharacterSheet(record: CharacterRecord): CharacterSheet {
       observedTurn = supplying?.evidence.kind === "turn" ? supplying.evidence.turnNumber : null;
       retractableObservationIds = facts.filter(item => eligible.has(item.id)).map(item => item.id);
       if (supplying && eligible.has(supplying.id)) retractable = supplying;
-      if (editInForce && override && !isCastStateField(descriptor.path) && !seeded && editTurn !== null) {
+      if (editInForce && override && !isCastStateField(descriptor.path) && (!seeded || seededCharacterFieldPolicy(descriptor.path) !== "fixed") && editTurn !== null) {
         const differing = facts.filter(item => item.value !== value && item.evidence.kind === "turn" && item.evidence.turnNumber > editTurn!).at(-1);
         if (differing?.evidence.kind === "turn") storyDiffers = { value: differing.value, turn: differing.evidence.turnNumber };
       }
@@ -77,4 +77,3 @@ export function buildCharacterSheet(record: CharacterRecord): CharacterSheet {
     sources: observations.map(item => item.evidence),
     locks: detail ? sections.flatMap(section => section.fields.filter(item => item.override && item.origin === "user").map(item => item.path)) : [], attention: detail?.unresolvedCandidateIds ?? [] };
 }
-

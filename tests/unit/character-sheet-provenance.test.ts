@@ -38,9 +38,16 @@ describe("sheet provenance", () => {
     expect(field(d, "story.role")).toMatchObject({ origin: "user", editTurn: 12, storyDiffers: null });
     expect(field(d, "appearance.eyes")).toBeDefined();
   });
+  it("shows later differing story under a Starting Cast non-fixed Correction", () => {
+    const d = detail(), profile = characterProfileSchema.parse({});
+    d.character.originProfile = { seedEventId: id, worldVersionId: id, entityId: "mira", rosterName: "Mira", rosterAliases: [], legacyCharacterText: "", profile, evidence: { kind: "world", worldVersionId: id, sourcePath: "/x" } };
+    d.character.campaignProfile = profile; d.character.profile["appearance.description"] = "Cloaked";
+    d.overrides = [{ field: "appearance.description", value: "Cloaked", evidence: { kind: "user", editId: id, effectiveTurnNumber: 12 } }];
+    d.observations = [fact("a", "appearance.description", "Armored", 20)];
+    expect(field(d, "appearance.description")).toMatchObject({ origin: "user", storyDiffers: { value: "Armored", turn: 20 } });
+  });
   it("leaves Main Character provenance empty", () => {
     const profile = { name: "Mira", profile: characterProfileSchema.parse({}) } as any;
     for (const f of buildCharacterSheet({ kind: "protagonist", profile, revision: 1 }).sections.flatMap(s => s.fields)) expect(f).toMatchObject({ editTurn: null, observedTurn: null, replacedEditTurn: null, storyDiffers: null, retractable: null, retractableObservationIds: [] });
   });
 });
-
