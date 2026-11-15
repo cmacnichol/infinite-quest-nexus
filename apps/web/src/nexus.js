@@ -640,7 +640,7 @@ const modalBaselines = new WeakMap();
 let discardModalTarget = null;
 
 function modalFormSnapshot(dialog) {
-  return [...dialog.querySelectorAll("input, select, textarea")].filter(control => !control.closest(".character-workspace-narrow")).map((control) => {
+  return [...dialog.querySelectorAll("input, select, textarea")].filter(control => !control.closest(".character-workspace-narrow, [data-refine-panel]")).map((control) => {
     if (control instanceof HTMLInputElement && ["checkbox", "radio"].includes(control.type)) {
       return `${control.id}:${control.checked}`;
     }

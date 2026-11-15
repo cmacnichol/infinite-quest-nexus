@@ -221,6 +221,8 @@ test("world staged Apply and leave keeps invalid input until corrected", async (
   await page.locator("#characterName").fill("Needs guidance");
   await page.locator("#cancelCharacter").click();
   await page.getByRole("button", { name: "Apply and leave" }).click();
+  await expect(page.locator("#characterStatus")).toContainText("Add at least one story detail");
+  await expect(page.locator("#discardChangesDialog")).toBeHidden();
   await expect(page.locator("#characterDialog")).toBeVisible();
   await expect(page.locator("#characterName")).toHaveValue("Needs guidance");
   await page.locator("#characterRole").fill("Guide");

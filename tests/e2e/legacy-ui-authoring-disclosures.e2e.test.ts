@@ -67,7 +67,7 @@ test("new character offers manual fallback and detailed notes while keeping empt
   await expect(page.locator("#discardChangesDialog")).toBeHidden();
 });
 
-test("section changes preserve appearance, mechanics, and imported metadata through Apply and parent Save", async ({ page }) => {
+test("section changes preserve appearance, mechanics, and imported metadata through Apply and parent Save", async ({ page }, info) => {
   const writes: Array<{ method: string; path: string; body: unknown }> = [];
   await openNewWorld(page, writes);
   await page.locator("#addPlayableCharacter").click();
@@ -92,6 +92,9 @@ test("section changes preserve appearance, mechanics, and imported metadata thro
   await worldSection(page, "Identity");
   await expect(page.locator("#characterAliases")).toHaveValue("Wren, the Keeper\nNorth Star");
   await page.locator("#cancelCharacter").click();
+  await expect(page.locator("#characterDialog")).toBeHidden();
+  await expect(page.locator("#discardChangesDialog")).toBeHidden();
+  await page.screenshot({ path: info.outputPath("clean-character-cancel.png") });
   expect(writes).toEqual([]);
   await page.locator("#saveWorldDraft").click();
   await expect(page.locator("#worldAuthorDialog")).toBeHidden();
