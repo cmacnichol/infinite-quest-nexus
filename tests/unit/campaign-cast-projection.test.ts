@@ -176,3 +176,33 @@ it("retains each character's appearance policy across retraction and restoration
     expect(projectCastProfile({ ...inputs, overrides: [override("green eyes")], retractedObservationIds })["appearance.description"]).toBe("green eyes");
   }
 });
+
+
+it("ADR 0045 replaces State Edits only with valid strictly later facts, retaining locked precedence", async () => {
+  const { resolveSeededCastProfile } = await import("../../packages/domain/src/campaign-cast.js");
+  const { stateEditReplacement } = await import("../../packages/contracts/src/campaign-cast.js");
+  const { characterProfileSchema } = await import("../../packages/contracts/src/world-library.js");
+  const edit: CastOverride = { field: "state.location", value: "docks", evidence: { kind: "user", editId: uuid(1000), effectiveTurnNumber: 12 } };
+  const later = observation(20, "palace", { field: edit.field });
+  const earlier = observation(9, "market", { field: edit.field });
+  const same = observation(12, "market", { field: edit.field });
+  if (later.evidence.kind !== "turn") throw new Error("Expected turn evidence");
+  const invalid = observation(21, "invalid", { field: edit.field, evidence: { ...later.evidence, invalidated: true } });
+  const claim = observation(22, "claim", { field: edit.field, mode: "claim" });
+  for (const item of [earlier, same, invalid, claim]) expect(projectCastProfile({ observations: [item], overrides: [edit] })[edit.field]).toBe("docks");
+  expect(projectCastProfile({ observations: [later], overrides: [edit] })[edit.field]).toBe("palace");
+  expect(projectCastProfile({ observations: [later], overrides: [edit], retractedObservationIds: new Set([later.id]) })[edit.field]).toBe("docks");
+  const newest = observation(23, "castle", { field: edit.field, supersedesObservationId: later.id });
+  expect(stateEditReplacement(edit, [later, newest])).toEqual(newest);
+  expect(stateEditReplacement(edit, [later, newest], new Set([newest.id]))).toBeNull();
+  expect(projectCastProfile({ observations: [later, newest], overrides: [edit] })[edit.field]).toBe("castle");
+  expect(projectCastProfile({ observations: [later], overrides: [edit], stateEditPrecedence: "locked" })[edit.field]).toBe("docks");
+  const profile = characterProfileSchema.parse({});
+  expect(resolveSeededCastProfile({ profile, observations: [later], overrides: [edit] })).toMatchObject({ profile: { "state.location": "palace" }, sources: { "state.location": "observation" } });
+  expect(resolveSeededCastProfile({ profile, observations: [later], overrides: [edit], stateEditPrecedence: "locked" })).toMatchObject({ profile: { "state.location": "docks" }, sources: { "state.location": "override" } });
+  const goal = { ...edit, field: "story.goals" as const };
+  expect(projectCastProfile({ observations: [observation(20, "leave", { field: goal.field })], overrides: [goal] })[goal.field]).toBe("leave");
+  const correction = { ...edit, field: "story.role" as const };
+  expect(stateEditReplacement(correction, [observation(20, "Smith", { field: correction.field })])).toBeNull();
+  expect(projectCastProfile({ observations: [observation(20, "Smith", { field: correction.field })], overrides: [correction] })[correction.field]).toBe("docks");
+});

@@ -68,6 +68,33 @@ export const castOverrideSchema = z.object({
   evidence: castEvidenceSchema
 }).strict().refine((value) => value.evidence.kind === "user", "Overrides require user evidence.")
   .refine((value) => value.field === "story.goals" || value.value.length <= 2000, "Override exceeds field limit.");
+export const CAST_STATE_FIELDS = ["state.location", "state.condition", "state.clothing", "story.goals"] as const;
+export function isCastStateField(path: string): boolean {
+  return (CAST_STATE_FIELDS as readonly string[]).includes(path);
+}
+export type StateEditPrecedence = "yield" | "locked";
+export function castEvidenceOrder(evidence: CastEvidence): readonly [number, number] {
+  switch (evidence.kind) {
+    case "turn": return [evidence.turnNumber, evidence.narrationRevision];
+    case "user": return [evidence.effectiveTurnNumber, 0];
+    case "world": case "historical_world": return [0, 0];
+  }
+}
+/** The fact Observation that replaces this State Edit, or null while the edit is in force. Corrections always return null. */
+export function stateEditReplacement(edit: CastOverride, observations: readonly CastObservation[], retracted?: ReadonlySet<string>): CastObservation | null {
+  if (!isCastStateField(edit.field) || edit.evidence.kind !== "user") return null;
+  const superseded = new Set(observations.map((observation) => observation.supersedesObservationId).filter(Boolean));
+  let latest: CastObservation | null = null;
+  for (const observation of observations) {
+    if (observation.field !== edit.field || observation.mode !== "fact" || observation.evidence.kind !== "turn"
+      || observation.evidence.invalidated || observation.evidence.turnNumber <= edit.evidence.effectiveTurnNumber
+      || superseded.has(observation.id) || retracted?.has(observation.id)) continue;
+    if (!latest) { latest = observation; continue; }
+    const a = castEvidenceOrder(observation.evidence), b = castEvidenceOrder(latest.evidence);
+    if (a[0] > b[0] || a[0] === b[0] && a[1] >= b[1]) latest = observation;
+  }
+  return latest;
+}
 export const castAuthoredPathSchema = z.enum([
   "identity.pronouns", "story.role", "story.background", "story.personality", "story.motivations",
   "story.fearsAndConflicts", "story.keyRelationships", "story.narrativeHooks", "story.voiceAndMannerisms", "story.otherGuidance",
