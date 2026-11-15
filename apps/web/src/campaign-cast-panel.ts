@@ -1,3 +1,5 @@
+import { renderCharacterSheetView, type SheetFeedback } from "./character-editor/character-sheet-view.js";
+import { sheetRequest, sheetUndoOperation, sheetUndoRequest, sheetMatchesFence, retractionRequest, type SheetTarget, type SheetUndo, type SheetWriteFence, type SheetChange } from "@infinite-quest/client-core";
 import { renderCastRoster } from "./character-editor/cast-roster-view.js";
 import { renderObservationReview } from "./character-editor/observation-review.js";
 import { mountCampaignPresentation } from "./character-editor/campaign-presentation.js";
@@ -11,7 +13,7 @@ import { renderCastReview } from "./cast-review-queue.js";
 import { buildCharacterSheet, canSaveCastEditor, createCastEditor, changeCastEditor, setCastEditorField, prepareCastSubmission,
   failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, characterProvenanceLabel, recentFilterLabel, type CastEditorState } from "@infinite-quest/client-core";
 import { buildReviewQueue, createCharactersWorkspaceSession, type CampaignCastApi } from "@infinite-quest/client-web";
-import type { CampaignCharacterProfile, CharacterFilter, CastDetail, CastDiscoveryStatus, CastField, CastCandidateList, ResolveCastCandidate, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
+import type { CampaignCharacterProfile, CampaignCharacterProfileUpdate, CharacterFilter, CastDetail, CastDiscoveryStatus, CastField, CastCandidateList, ResolveCastCandidate, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
 import { normalizeCastAlias } from "@infinite-quest/contracts";
 import { castScanRecovery, renderLegacyCastScan } from "./campaign-cast-scan-panel.js";
 
@@ -28,6 +30,7 @@ export function createLegacyCastPanel(options: {
   editorPresentation?: "panel" | "workspace";
   checkLock?(campaign: string): Promise<boolean>;
   getProfile?(campaign: string): Promise<CampaignCharacterProfile & { revision: number; inheritedFromSnapshot?: boolean; storedProfile?: unknown }>;
+  saveProfile?(campaign: string, update: CampaignCharacterProfileUpdate): Promise<CampaignCharacterProfile & { revision: number }>;
   openProtagonist(onClose?: (saved: boolean) => void): void; navigateToTurn(turn: number): Promise<void>;
 }) {
   const dialog = document.createElement("dialog");
@@ -41,6 +44,11 @@ export function createLegacyCastPanel(options: {
   let presentation: ReturnType<typeof mountCampaignPresentation> | null = null;
   let presentationCharacter = "", detailed = false, activeSection = "overview";
   let rosterView: ReturnType<typeof renderCastRoster> | null = null;
+  let sheetView: ReturnType<typeof renderCharacterSheetView> | null = null;
+  let sheetFeedback: { message: string; undo?: SheetUndo; fence?: SheetWriteFence; deadline: number; key: string; refreshFailed?: boolean } | null = null;
+  let sheetTimer: ReturnType<typeof setTimeout> | undefined;
+  let showEmpty = false;
+  function clearSheetFeedback() { clearTimeout(sheetTimer); sheetFeedback = null; }
   let lockCheck = 0;
   let lockPoll: ReturnType<typeof setInterval> | undefined;
   const locked = () => lockedByServer || options.generationActive();
@@ -93,9 +101,10 @@ export function createLegacyCastPanel(options: {
   function closePanel() {
     rosterView?.dispose(); rosterView = null;
     presentation?.dispose(); presentation = null;
-    storyReview.reset(); epoch++; clearInterval(lockPoll); preset = null; editor = null; workspace.close(); operationKeys.clear(); dialog.close(); returnFocus?.focus();
+    clearSheetFeedback(); sheetView?.dispose(); sheetView = null; storyReview.reset(); epoch++; clearInterval(lockPoll); preset = null; editor = null; workspace.close(); operationKeys.clear(); dialog.close(); returnFocus?.focus();
   }
   function requestNavigation(action: () => void) {
+    if (sheetView?.dirty() && !window.confirm("Discard unsaved character changes?")) return;
     if (saving || editor?.saving || dialog.querySelector("[data-cast-confirm]")) return;
     if (!dirty()) { action(); return; }
     const previous = document.activeElement as HTMLElement | null;
@@ -119,6 +128,7 @@ export function createLegacyCastPanel(options: {
   function requestClose() { requestNavigation(closePanel); }
   function shell(title: string) {
     rosterView?.dispose(); rosterView = null;
+    sheetView?.dispose(); sheetView = null;
     if (presentation) { activeSection = presentation.section(); presentation.dispose(); presentation = null; }
     editingForm = false;
     dialog.classList.remove("cast-sheet-layout"); dialog.replaceChildren();
@@ -133,7 +143,7 @@ export function createLegacyCastPanel(options: {
   async function loadRoster(cursor?: string, notice?: string, keepControls = false) {
     presentationCharacter = ""; detailed = false; activeSection = "overview";
     storyReview.reset();
-    const token = ++epoch; preset = null; editor = null; latest = null; latestRoster = null; rosterVisible = true;
+    clearSheetFeedback(); const token = ++epoch; preset = null; editor = null; latest = null; latestRoster = null; rosterVisible = true;
     if (!keepControls) { shell("Characters"); status("Loading characters…"); }
     try {
       const [rosterResult, discoveryResult, scanResult, workspaceResult] = await Promise.allSettled([
@@ -356,8 +366,9 @@ export function createLegacyCastPanel(options: {
     if (list!.nextCursor) dialog.append(button("Load more characters", () => { void loadRoster(list!.nextCursor!); }));
   }
   async function openDetail(id: string) {
+    if (sheetView?.dirty() && !window.confirm("Discard unsaved character changes?")) return;
     if (dirty() || editor?.saving || saving) { requestNavigation(() => { void openDetail(id); }); return; }
-    storyReview.reset(); rosterVisible = false; workspace.select(id);
+    clearSheetFeedback(); showEmpty = false; storyReview.reset(); rosterVisible = false; workspace.select(id);
     const token = ++epoch; shell("Character"); status("Loading character…");
     try {
       const [detail] = await Promise.all([options.api.detail(campaign, id), syncLock()]);
@@ -390,7 +401,7 @@ export function createLegacyCastPanel(options: {
       switcher.append(entry);
     }
     dialog.append(sidebar);
-    dialog.append(button("Back to characters", () => { void loadRoster(); }), node("p", `Last observed turn ${detail.character.lastObservedTurn}${detail.character.lastMentionedTurn != null ? ` · Last mentioned turn ${detail.character.lastMentionedTurn}` : ""}`));
+    dialog.append(button("Back to characters", () => requestNavigation(() => { void loadRoster(); })), node("p", `Last observed turn ${detail.character.lastObservedTurn}${detail.character.lastMentionedTurn != null ? ` · Last mentioned turn ${detail.character.lastMentionedTurn}` : ""}`));
     if (options.campaignPage) {
       const link = node("a", "Open in Story"); link.href = "/story/" + encodeURIComponent(campaign) + "?character=" + encodeURIComponent(detail.character.id); dialog.append(link);
     }
@@ -431,41 +442,75 @@ export function createLegacyCastPanel(options: {
         workspace.setDraft(editor); renderEditor();
       }, !enabled || options.generationActive()));
     }
-    let showEmpty = false;
-    const fieldGroups = node("div"), toggle = button("Show empty fields", () => {
-      showEmpty = !showEmpty; toggle.textContent = showEmpty ? "Hide empty fields" : "Show empty fields";
-      toggle.setAttribute("aria-pressed", String(showEmpty)); renderFields();
+    const token = epoch, characterId = detail.character.id, main = detail.character.origin.kind === "protagonist";
+    const target: SheetTarget | null = main ? (profile ? { kind: "main", profile } : null) : { kind: "cast", detail };
+    const stillCurrent = () => current(token) && dialog.hasAttribute("open") && editor?.characterId === characterId;
+    const canEdit = () => Boolean(target && enabled && !locked() && !detail.character.removed && !detail.character.mergedIntoCharacterId && (!main || options.saveProfile) && (main || !detail.character.originProfile || options.api.editAuthoredProfile));
+    const host = node("div"); dialog.append(host);
+    const refresh = async () => {
+      try {
+        const next = await options.api.detail(campaign, characterId);
+        const nextProfile = main && options.getProfile ? await options.getProfile(campaign) : null;
+        if (!stillCurrent()) return;
+        const nextTarget: SheetTarget | null = main ? (nextProfile ? { kind: "main", profile: nextProfile } : null) : { kind: "cast", detail: next };
+        if (sheetFeedback?.undo && sheetFeedback.fence && nextTarget) {
+          sheetFeedback.refreshFailed = false;
+          sheetFeedback.message = sheetFeedback.message.replace(/\. Could not refresh this character\.$/, ".");
+          if (!sheetMatchesFence(nextTarget, sheetFeedback.fence)) { sheetFeedback.message += " Undo expired: the character was updated after your save."; delete sheetFeedback.undo; }
+        }
+        enabled = next.capabilities.castEditing; editor = createCastEditor(next, next); renderSheet(next, nextProfile);
+      } catch {
+        if (!stillCurrent()) return;
+        if (sheetFeedback) { sheetFeedback.message = sheetFeedback.message.replace(/\. Could not refresh this character\.$/, ".").replace(/\.$/, "") + ". Could not refresh this character."; sheetFeedback.refreshFailed = true; }
+        renderSheet(detail, profile);
+      }
+    };
+    const dispatch = async (request: ReturnType<typeof sheetRequest>) => {
+      if (request.endpoint === "profile") return await options.saveProfile!(campaign, request.body);
+      if (request.endpoint === "editAuthoredProfile") return await options.api.editAuthoredProfile!(campaign, characterId, request.body);
+      return await options.api.edit(campaign, characterId, request.body);
+    };
+    const feedback: SheetFeedback | undefined = sheetFeedback ? { message: sheetFeedback.message,
+      ...(sheetFeedback.undo && sheetFeedback.fence && !sheetFeedback.refreshFailed && Date.now() < sheetFeedback.deadline && target && sheetMatchesFence(target, sheetFeedback.fence) ? { undo: async () => {
+        const saved = sheetFeedback!;
+        try {
+          if (options.checkLock && !await syncLock() || !stillCurrent()) return { ok: false as const, conflict: false, message: "Character editing is unavailable." };
+          await dispatch(sheetUndoRequest(target, saved.undo!, saved.fence!, saved.key));
+          if (!stillCurrent()) return { ok: true as const };
+          clearSheetFeedback(); sheetFeedback = { message: "Undone", deadline: 0, key: "" }; await refresh(); return { ok: true as const };
+        } catch (error) {
+          if (!stillCurrent()) return { ok: true as const };
+          if ((error as { statusCode?: number }).statusCode === 409) { clearSheetFeedback(); sheetFeedback = { message: "Could not undo. The character changed; review the latest values.", deadline: 0, key: "" }; renderSheet(detail, profile); return { ok: true as const }; }
+          return { ok: false as const, conflict: false, message: message(error) };
+        }
+      } } : {}) } : undefined;
+    sheetView = renderCharacterSheetView(host, {
+      sheet, kind: main ? "main" : "supporting", editable: canEdit, lockedReason: null,
+      ...(!main && canEdit() ? { toggles: { pinned: detail.character.pinned, ignored: detail.character.ignored } } : {}),
+      ...(feedback ? { feedback } : {}), onEditStart: clearSheetFeedback, showEmpty, onShowEmpty(value) { showEmpty = value; renderSheet(detail, profile); },
+      compareLabel: main ? "Load latest version" : "Compare latest", onCompareLatest() { void refresh(); },
+      confirmDiscard: () => window.confirm("Discard unsaved character changes?"), isCurrent: stillCurrent,
+      async onChange(change: SheetChange) {
+        if (!target || !canEdit()) return { ok: false, conflict: false, message: "Character editing is unavailable." };
+        clearSheetFeedback();
+        try {
+          const inverse = sheetUndoOperation(target, change), request = sheetRequest(target, change, operationKey("sheet", [characterId, change, detail.revision]));
+          if (options.checkLock && !await syncLock() || !stillCurrent()) return { ok: false, conflict: false, message: "Character editing is unavailable." };
+          const result = await dispatch(request);
+          if (!stillCurrent()) return { ok: true };
+          const fence: SheetWriteFence = request.endpoint === "profile" ? { kind: "main", revision: result.revision } : { kind: "cast", revision: result.revision, characterRevision: (result as CastDetail).character.revision, boundary: (result as CastDetail).boundary };
+          const label = change.kind === "toggle" ? change.key : sheet.sections.flatMap(section => section.fields).find(field => field.path === change.path)?.label ?? change.path;
+          sheetFeedback = { message: `Saved ${label}.`, undo: inverse, fence, deadline: Date.now() + 30000, key: crypto.randomUUID() };
+          sheetTimer = setTimeout(() => { if (!stillCurrent() || !sheetFeedback) return; delete sheetFeedback.undo; const undo = [...dialog.querySelectorAll("button")].find(item => item.textContent === "Undo"); undo?.remove(); }, 30000);
+          await refresh(); return { ok: true };
+        } catch (error) { if (!stillCurrent()) return { ok: true }; const conflict = (error as { statusCode?: number }).statusCode === 409; return { ok: false, conflict, message: conflict ? "This character changed. Your edit is kept; compare the latest before saving." : message(error) }; }
+      },
+      ...(!main && (detail.capabilities ?? list?.capabilities)?.castObservationDecisions ? { retraction: {
+        async preview(id: string) { const request = retractionRequest(detail, id, operationKey("retract", [characterId, id, detail.revision])); const result = await options.api.previewObservationDecision!(campaign, characterId, id, request); const observation = detail.observations.find(item => item.id === id); return { currentValue: result.currentValue, projectedValue: result.projectedValue, quote: observation?.evidence.kind === "turn" ? observation.evidence.quote : "", turn: observation?.evidence.kind === "turn" ? observation.evidence.turnNumber : 0 }; },
+        async apply(id: string) { try { if (options.checkLock && !await syncLock() || !stillCurrent()) return { ok: false as const, conflict: false, message: "Character editing is unavailable." }; await options.api.applyObservationDecision!(campaign, characterId, id, retractionRequest(detail, id, operationKey("retract", [characterId, id, detail.revision]))); if (stillCurrent()) { clearSheetFeedback(); await refresh(); } return { ok: true as const }; } catch (error) { return { ok: false as const, conflict: (error as { statusCode?: number }).statusCode === 409, message: message(error) }; } }
+      } } : {})
     });
-    toggle.setAttribute("aria-pressed", "false"); dialog.append(toggle, fieldGroups);
-    function renderFields() {
-      fieldGroups.replaceChildren();
-      if (detail.character.originProfile) {
-        for (const field of presetFields) {
-          const info = presetField(detail, field.path);
-          if (!showEmpty && !info.effective.length) continue;
-          const row = node("p"); row.append(node("strong", field.label + ": "), node("span", Array.isArray(info.effective) ? info.effective.join(", ") : info.effective || "Unknown"), node("small", " " + info.badge));
-          if (!options.campaignPage && (info.differs || field.path === "appearance.description" && Boolean(info.effective.length))) {
-            const source = node("a", info.differs ? "Story differs" : "View source"); source.href = "#cast-sources";
-            source.onclick = event => { event.preventDefault(); const details = dialog.querySelector<HTMLDetailsElement>("#cast-sources"); if (details) { details.open = true; details.querySelector("summary")?.focus(); } };
-            row.append(" ", source);
-          }
-          fieldGroups.append(row);
-        }
-        return;
-      }
-      for (const section of sheet.sections) {
-        const group = node("section"); group.className = "cast-sheet-section"; group.append(node("h3", section.name));
-        for (const field of section.fields) {
-          const value = Array.isArray(field.value) ? field.value.join(", ") : field.value;
-          if (!showEmpty && !value && field.origin === "unknown") continue;
-          const row = node("p"), label = node("strong", `${field.label}: `);
-          const origin = sheet.kind === "protagonist" ? "" : ({ unknown: "", observed: "From story", claim: "Unverified claim", user: "Your edit", conflicted: "Conflicting observations" })[field.origin];
-          row.append(label, node("span", value || (field.origin === "conflicted" ? "Conflicting observations" : field.origin === "claim" ? "Unverified claim" : "Unknown")), node("small", origin ? ` · ${origin}` : "")); group.append(row);
-        }
-        if (group.children.length > 1) fieldGroups.append(group);
-      }
-    }
-    renderFields();
+    if (sheetFeedback?.refreshFailed) dialog.append(button("Reload", () => { void refresh(); }));
     for (const match of detail.autoMatches) {
       const row = node("section"); row.append(node("p", `${match.basis === "unique_world_name" ? "Unique world name" : "Unique campaign name"} · turn ${match.turnNumber}: “${match.quote}”`));
       row.append(button("Not this character", async () => {

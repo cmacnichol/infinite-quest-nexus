@@ -13,6 +13,29 @@ async function capture(page: Page, info: TestInfo, name: string) {
   await page.screenshot({ path });
 }
 
+for (const width of [1440, 390]) {
+  test(`Nexus sheet saves and undoes an Added Character at ${width}px`, async ({ page }, info) => {
+    const data = legacyUiFixture({ turnCount: 1, campaignCount: 1, worldCount: 1 });
+    await installLegacyUiFixture(page, data);
+    const person = { id: "88888888-8888-4888-8888-888888888888", name: "Mara", aliases: [], origin: { kind: "manual" }, profile: { "story.role": "Scout" }, pinned: false, ignored: false, revision: 0, firstObservedTurn: 1, lastObservedTurn: 1 };
+    const boundary = { turnNumber: 1, timelineRevision: 0 }; let revision = 0;
+    await page.route("**/api/v1/meta", route => route.fulfill({ json: { capabilities: { castEditing: true } } }));
+    await page.route("**/cast?*", route => route.fulfill({ json: { revision, boundary, characters: [person], nextCursor: null, capabilities: { castEditing: true } } }));
+    await page.route(`**/cast/${person.id}`, route => {
+      if (route.request().method() !== "GET") { const body = route.request().postDataJSON(); person.profile["story.role"] = body.setOverrides?.["story.role"] ?? "Scout"; revision++; person.revision++; return route.fulfill({ json: { revision, boundary, character: person } }); }
+      return route.fulfill({ json: { revision, boundary, character: person, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null, capabilities: { castEditing: true } } });
+    });
+    await page.setViewportSize({ width, height: 900 }); await page.goto(`${origin}/nexus/index.html#campaigns`);
+    await page.locator(`#campaignList [data-campaign-id="${data.campaignId}"]`).click(); await page.locator("#editCampaignCharacter").click();
+    const dialog = page.locator("#campaignCastDialog"); await dialog.getByRole("button", { name: "Mara", exact: true }).click();
+    await dialog.getByRole("button", { name: "Edit Role" }).click(); await dialog.getByRole("textbox", { name: "Role", exact: true }).fill("Guide");
+    await dialog.getByRole("button", { name: "Save", exact: true }).click(); await expect(dialog.getByText("Saved Role.")).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Undo", exact: true })).toBeVisible(); await capture(page, info, `nexus-sheet-saved-${width}`);
+    await dialog.getByRole("button", { name: "Undo", exact: true }).click(); await expect(dialog.getByText("Undone", { exact: true })).toBeVisible();
+    await expect(dialog.locator('[data-path="story.role"]')).toContainText("Scout");
+  });
+}
+
 for (const kind of ["main", "supporting"] as const) {
   test(`campaign ${kind} editor checks the generation lock on open and save without idle polling`, async ({ page }, info) => {
     const data = legacyUiFixture({ turnCount: 1, campaignCount: 1, worldCount: 1 });

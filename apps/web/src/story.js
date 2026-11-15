@@ -156,6 +156,7 @@ const castPanel = composition.cast ? createLegacyCastPanel({ api: composition.ca
     return Boolean(status.pendingGeneration || status.generationRecovery?.status === "recoverable");
   },
   getProfile: (campaign) => apiClient.campaigns.getCharacterProfile(campaign),
+  saveProfile: (campaign, update) => apiClient.campaigns.updateCharacterProfile(campaign, update),
   openProtagonist: (onClose) => { void openEditCharacterProfile(onClose); },
   navigateToTurn: async (turn) => { await ensureCompleteTurnHistory(); navigateToTurn(turn); }
 }) : null;

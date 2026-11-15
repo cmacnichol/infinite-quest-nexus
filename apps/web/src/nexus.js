@@ -8074,6 +8074,7 @@ const campaignCastPanel = createLegacyCastPanel({
   generationActive: () => false,
   checkLock: async id => campaignCharacterGenerationLocked(await characterApi.generation.syncStatus(id)),
   getProfile: id => characterApi.campaigns.getCharacterProfile(id),
+  saveProfile: (campaign, update) => characterApi.campaigns.updateCharacterProfile(campaign, update),
   openProtagonist: afterClose => {
     elements.characterDialog.addEventListener("close", () => afterClose?.(elements.characterDialog.returnValue === "saved"), { once: true });
     void openCampaignCharacterDialog();

@@ -10,6 +10,7 @@ export type CharacterSheetViewOptions = {
   sheet: CharacterSheet; kind: "main" | "supporting";
   editable(path: string): boolean; lockedReason: string | null;
   onChange(change: SheetChange): Promise<SheetResult>;
+  onEditStart?(): void;
   feedback?: SheetFeedback;
   retraction?: { preview(observationId: string): Promise<RetractionPreview>; apply(observationId: string): Promise<SheetResult> };
   toggles?: { pinned: boolean; ignored: boolean };
@@ -21,7 +22,7 @@ export type CharacterSheetViewOptions = {
 let viewSequence = 0;
 export function renderCharacterSheetView(host: HTMLElement, options: CharacterSheetViewOptions): { revealField(path: string, mode?: "edit" | "conflict"): void; dirty(): boolean; dispose(): void } {
   const doc = host.ownerDocument, idPrefix = `character-sheet-${++viewSequence}`;
-  let disposed = false, pending = false, editor: { path: string; input: HTMLInputElement | HTMLTextAreaElement; initial: string } | null = null;
+  let disposed = false, pending = false, feedbackVisible = true, editor: { path: string; input: HTMLInputElement | HTMLTextAreaElement; initial: string } | null = null;
   let activePath: string | null = null, mode: "edit" | "conflict" = "edit", error: SheetResult | null = null;
   let preview: { field: CharacterField; id: string; data: RetractionPreview } | null = null;
   const current = () => !disposed && options.isCurrent();
@@ -34,13 +35,13 @@ export function renderCharacterSheetView(host: HTMLElement, options: CharacterSh
   const setPending = (value: boolean) => { pending = value; host.querySelectorAll("button, input, textarea").forEach(node => { (node as HTMLButtonElement).disabled = value; }); };
   const showError = (result: SheetResult) => { if (!current() || result.ok) return; error = result; const region = host.querySelector(".character-sheet-error"); if (region) { region.replaceChildren(); region.append(el("span", result.conflict ? "This character changed. Your edit is kept; compare the latest before saving." : result.message)); region.append(button(options.compareLabel, () => { if (allowRefresh()) options.onCompareLatest(); })); } };
   const run = async (operation: () => Promise<SheetResult>) => { if (pending || !current()) return; setPending(true); let result: SheetResult; try { result = await operation(); } catch { result = { ok: false, conflict: false, message: "Could not save. Please try again." }; } if (!current()) return; setPending(false); if (!result.ok) showError(result); };
-  const open = (path: string, next: "edit" | "conflict") => { if (!current() || pending || !options.editable(path)) return; if (activePath !== path && dirty() && !options.confirmDiscard()) return; activePath = path; mode = next; editor = null; preview = null; error = null; render(); focusField(path, next === "edit" ? "input, textarea" : ".character-sheet-choice button, .character-sheet-write-own"); };
+  const open = (path: string, next: "edit" | "conflict") => { if (!current() || pending || !options.editable(path)) return; if (activePath !== path && dirty() && !options.confirmDiscard()) return; if (options.onEditStart) { feedbackVisible = false; options.onEditStart(); } activePath = path; mode = next; editor = null; preview = null; error = null; render(); focusField(path, next === "edit" ? "input, textarea" : ".character-sheet-choice button, .character-sheet-write-own"); };
   const startRetraction = async (field: CharacterField, id: string) => { if (!options.retraction || pending || !current()) return; if (dirty() && !options.confirmDiscard()) return; setPending(true); try { const data = await options.retraction.preview(id); if (!current()) return; setPending(false); activePath = null; editor = null; preview = { field, id, data }; render(); focusField(field.path, ".character-sheet-confirm button"); } catch { if (!current()) return; setPending(false); showError({ ok: false, conflict: false, message: "Could not preview this change. Please try again." }); } };
   function render() {
     if (!current()) return;
     host.replaceChildren(); const root = el("div"); root.className = "character-sheet-view"; host.append(root);
     if (options.lockedReason) root.append(el("p", options.lockedReason));
-    if (options.feedback) { const notice = el("div"); notice.setAttribute("role", "status"); notice.append(el("span", options.feedback.message)); if (options.feedback.undo) notice.append(button("Undo", () => { if (allowRefresh()) void run(options.feedback!.undo!); })); root.append(notice); }
+    if (feedbackVisible && options.feedback) { const notice = el("div"); notice.setAttribute("role", "status"); notice.append(el("span", options.feedback.message)); if (options.feedback.undo) notice.append(button("Undo", () => { if (allowRefresh()) void run(options.feedback!.undo!); })); root.append(notice); }
     const errorRegion = el("div"); errorRegion.className = "character-sheet-error"; errorRegion.setAttribute("role", "alert"); root.append(errorRegion); if (error && !error.ok) showError(error);
     if (options.toggles && options.kind === "supporting") {
       const group = el("div"); group.className = "character-sheet-toggles";

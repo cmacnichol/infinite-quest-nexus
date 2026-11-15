@@ -1,5 +1,5 @@
 import { castEvidenceOrder, isCastStateField, stateEditReplacement, type CampaignCharacterProfile, type CastDetail, type CastEvidence, type CastObservation, type CastOverride } from "@infinite-quest/contracts";
-import { PROFILE_FIELDS, SUPPORTING_FIELDS, seededCharacterFieldPolicy, type CharacterSectionName } from "./profile-fields.js";
+import { CHARACTER_FIELD_DESCRIPTORS, PROFILE_FIELDS, SUPPORTING_FIELDS, seededCharacterFieldPolicy, type CharacterSectionName } from "./profile-fields.js";
 import { presetField, presetFields } from "./preset-editor.js";
 
 export type CharacterRecord = { kind: "protagonist"; profile: CampaignCharacterProfile; revision: number } | { kind: "supporting"; detail: CastDetail };
@@ -18,7 +18,7 @@ const compare = (a: CastObservation, b: CastObservation) => {
 export function buildCharacterSheet(record: CharacterRecord): CharacterSheet {
   const detail = record.kind === "supporting" ? record.detail : null;
   const seeded = Boolean(detail?.character.originProfile);
-  const descriptors = record.kind === "protagonist" ? PROFILE_FIELDS : seeded ? presetFields : SUPPORTING_FIELDS;
+  const descriptors = record.kind === "protagonist" ? PROFILE_FIELDS : seeded ? presetFields : [...CHARACTER_FIELD_DESCRIPTORS.filter(item => item.path === "name" || item.path === "identity.aliases"), ...SUPPORTING_FIELDS];
   const sections: CharacterSheet["sections"] = [];
   const observations = detail?.observations ?? [];
   const history = [...new Map([...observations, ...(detail?.retractedObservationHistory ?? [])].filter(valid).map(item => [item.id, item])).values()];
@@ -46,7 +46,8 @@ export function buildCharacterSheet(record: CharacterRecord): CharacterSheet {
       const preset = seeded ? presetField(d, descriptor.path) : null;
       const projected = d.character.profile[descriptor.path as keyof typeof d.character.profile];
       const source = d.character.fieldSources?.[descriptor.path as keyof typeof d.character.fieldSources];
-      if (editInForce) { value = override!.value; origin = "user"; editTurn = override!.evidence.kind === "user" ? override!.evidence.effectiveTurnNumber : null; }
+      if (!seeded && (descriptor.path === "name" || descriptor.path === "identity.aliases")) { value = descriptor.path === "name" ? d.character.name : d.character.aliases; origin = "user"; }
+      else if (editInForce) { value = override!.value; origin = "user"; editTurn = override!.evidence.kind === "user" ? override!.evidence.effectiveTurnNumber : null; }
       else if (preset) {
         value = preset.effective;
         if (source === "campaign_edit" || preset.policy === "identity" && preset.badge === "Edited for this campaign") {

@@ -33,6 +33,126 @@ describe("legacy cast panel", () => {
     expect(buildPresetRequest(state, id)).toEqual({ expectedCastRevision: 4, expectedCharacterRevision: 3, expectedBoundary: detail.boundary,
       idempotencyKey: id, resetIdentity: true, reset: ["story.role"], restoreAuthoredGoals: true, setOverrides: { "appearance.description": "" } });
   });
+  it("offers an inline edit on an Added Character sheet", async () => {
+    const { document, window } = parseHTML("<html><body></body></html>");
+    vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
+    const person = { id: "11111111-1111-4111-8111-111111111111", name: "Marin", aliases: [], origin: { kind: "manual" as const }, profile: {}, pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0, lastMentionedTurn: null };
+    const authority = { revision: 1, boundary: { turnNumber: 0, timelineRevision: 0 }, capabilities: { castEditing: true } };
+    const detail = { ...authority, character: person, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null };
+    const api = { list: async () => ({ ...authority, characters: [person], nextCursor: null }), detail: async () => detail, discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} });
+    const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    await panel.open();
+    [...dialog.querySelectorAll("button")].find(button => button.textContent?.includes("Marin"))!.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect([...dialog.querySelectorAll("button")].some(button => button.textContent === "Edit Name")).toBe(true);
+    panel.requestClose();
+  });
+  it("retains a receipt-fenced Undo after saving an Added Character field", async () => {
+    const { document, window } = parseHTML("<html><body></body></html>");
+    vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
+    const boundary = { turnNumber: 0, timelineRevision: 0 }, capabilities = { castEditing: true };
+    const person = { id: "11111111-1111-4111-8111-111111111111", name: "Marin", aliases: [], origin: { kind: "manual" as const }, profile: { "story.role": "Guard" }, pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0, lastMentionedTurn: null };
+    let detail = { revision: 1, boundary, capabilities, character: person, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null };
+    const edit = vi.fn(async (_campaign, _id, body) => { detail = { ...detail, revision: detail.revision + 1, character: { ...detail.character, revision: detail.character.revision + 1, profile: { "story.role": body.setOverrides?.["story.role"] ?? "Guard" } } }; return { revision: detail.revision, boundary, character: detail.character }; });
+    const api = { list: async () => ({ revision: 1, boundary, capabilities, characters: [person], nextCursor: null }), detail: async () => detail, edit, discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} });
+    const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    await panel.open(); [...dialog.querySelectorAll("button")].find(button => button.textContent?.includes("Marin"))!.click(); await new Promise(resolve => setTimeout(resolve, 0));
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Edit Role")!.click();
+    const input = dialog.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!; input.value = "Captain"; input.dispatchEvent(new window.Event("input"));
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Save")!.click(); await vi.waitFor(() => expect(dialog.textContent).toContain("Saved Role."));
+    expect(edit.mock.calls[0]![2]).toEqual({ expectedCastRevision: 1, expectedCharacterRevision: 1, expectedBoundary: boundary, idempotencyKey: expect.any(String), setOverrides: { "story.role": "Captain" } });
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Undo")!.click(); await vi.waitFor(() => expect(dialog.textContent).toContain("Undone"));
+    expect(edit.mock.calls[1]![2]).toEqual({ expectedCastRevision: 2, expectedCharacterRevision: 2, expectedBoundary: boundary, idempotencyKey: expect.any(String), clearOverrides: ["story.role"] });
+    panel.requestClose();
+  });
+  it.each(["before refresh", "after refresh", "refresh fails"] as const)("handles %s without rebasing Undo", async scenario => {
+    const { document, window } = parseHTML("<html><body></body></html>");
+    vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
+    const boundary = { turnNumber: 0, timelineRevision: 0 }, capabilities = { castEditing: true };
+    const person = { id: "11111111-1111-4111-8111-111111111111", name: "Marin", aliases: [], origin: { kind: "manual" as const }, profile: { "story.role": "Guard" }, pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0, lastMentionedTurn: null };
+    let detail = { revision: 1, boundary, capabilities, character: person, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null }, reads = 0;
+    const read = vi.fn(async () => { reads++; if (reads === 2 && scenario === "refresh fails") throw new Error("offline"); if (reads === 2 && scenario === "before refresh") detail = { ...detail, revision: 3 }; return detail; });
+    const edit = vi.fn(async (_campaign, _id, _body) => { if (scenario === "after refresh" && detail.revision === 2) throw Object.assign(new Error("conflict"), { statusCode: 409 }); detail = { ...detail, revision: 2, character: { ...person, revision: 2, profile: { "story.role": "Captain" } } }; return { revision: 2, boundary, character: detail.character }; });
+    const api = { list: async () => ({ revision: 1, boundary, capabilities, characters: [person], nextCursor: null }), detail: read, edit, discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} });
+    const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    await panel.open(); [...dialog.querySelectorAll("button")].find(button => button.textContent?.includes("Marin"))!.click(); await new Promise(resolve => setTimeout(resolve, 0));
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Edit Role")!.click(); const input = dialog.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!; input.value = "Captain"; input.dispatchEvent(new window.Event("input"));
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Save")!.click();
+    if (scenario === "before refresh") { await vi.waitFor(() => expect(dialog.textContent).toContain("Undo expired: the character was updated after your save.")); expect(edit).toHaveBeenCalledTimes(1); expect([...dialog.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(false); }
+    if (scenario === "after refresh") { await vi.waitFor(() => expect(dialog.textContent).toContain("Saved Role.")); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Undo")!.click(); await vi.waitFor(() => expect(dialog.textContent).toContain("Could not undo. The character changed; review the latest values.")); expect(edit).toHaveBeenCalledTimes(2); }
+    if (scenario === "refresh fails") { await vi.waitFor(() => expect(dialog.textContent).toContain("Saved Role. Could not refresh this character.")); expect([...dialog.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(false); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Reload")!.click(); await vi.waitFor(() => expect([...dialog.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(true)); expect(edit).toHaveBeenCalledTimes(1); }
+    panel.requestClose();
+  });
+  it("uses the authored-profile endpoint for a Starting Cast Character", async () => {
+    const { document, window } = parseHTML("<html><body></body></html>"); vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
+    const id = "11111111-1111-4111-8111-111111111111", boundary = { turnNumber: 0, timelineRevision: 0 }, capabilities = { castEditing: true };
+    const profile = characterProfileSchema.parse({ story: { role: "Scout" } });
+    const person = { id, name: "Marin", aliases: [], origin: { kind: "world" as const, entityId: "marin", worldVersionId: id }, originProfile: { seedEventId: id, worldVersionId: id, entityId: "marin", rosterName: "Marin", rosterAliases: [], legacyCharacterText: "", profile, evidence: { kind: "world" as const, worldVersionId: id, sourcePath: "/characters/0" } }, campaignProfile: profile, profile: { "story.role": "Scout" }, revision: 1, pinned: false, ignored: false, firstObservedTurn: 0, lastObservedTurn: 0, lastMentionedTurn: null };
+    const detail = { revision: 1, boundary, capabilities, character: person, observations: [], overrides: [], identityEvents: [], authoredHistory: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null };
+    const editAuthoredProfile = vi.fn(async (_campaign: string, _id: string, _body: unknown) => ({ revision: 2, boundary, character: { ...person, revision: 2 } }));
+    const api = { list: async () => ({ revision: 1, boundary, capabilities, characters: [person], nextCursor: null }), detail: async () => detail, editAuthoredProfile, discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} });
+    const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    await panel.open(); [...dialog.querySelectorAll("button")].find(button => button.textContent?.includes("Marin"))!.click(); await new Promise(resolve => setTimeout(resolve, 0));
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Edit Role")!.click(); const input = dialog.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!; input.value = "Guide"; input.dispatchEvent(new window.Event("input")); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Save")!.click();
+    await vi.waitFor(() => expect(editAuthoredProfile).toHaveBeenCalled()); expect(editAuthoredProfile.mock.calls[0]![2]).toEqual({ expectedCastRevision: 1, expectedCharacterRevision: 1, expectedBoundary: boundary, idempotencyKey: expect.any(String), set: { "story.role": "Guide" } }); await vi.waitFor(() => expect(dialog.textContent).toContain("Undo expired")); panel.requestClose();
+  });
+  it("keeps a Main Character edit on conflict and offers the latest version", async () => {
+    const { document, window } = parseHTML("<html><body></body></html>"); vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
+    const id = "11111111-1111-4111-8111-111111111111", boundary = { turnNumber: 0, timelineRevision: 0 }, capabilities = { castEditing: true };
+    const person = { id, name: "Marin", aliases: [], origin: { kind: "protagonist" as const }, profile: {}, revision: 1, pinned: false, ignored: false, firstObservedTurn: 0, lastObservedTurn: 0, lastMentionedTurn: null };
+    const detail = { revision: 1, boundary, capabilities, character: person, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null };
+    const profile = { name: "Marin", profile: characterProfileSchema.parse({ story: { role: "Scout" } }), revision: 3 };
+    const saveProfile = vi.fn(async () => { throw Object.assign(new Error("conflict"), { statusCode: 409 }); });
+    const api = { list: async () => ({ revision: 1, boundary, capabilities, characters: [person], nextCursor: null }), detail: async () => detail, discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, getProfile: async () => profile, saveProfile, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} });
+    const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    await panel.open(); [...dialog.querySelectorAll("button")].find(button => button.textContent?.includes("Marin"))!.click(); await new Promise(resolve => setTimeout(resolve, 0));
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Edit Role")!.click(); const input = dialog.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!; input.value = "Guide"; input.dispatchEvent(new window.Event("input")); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Save")!.click();
+    await vi.waitFor(() => expect(dialog.textContent).toContain("This character changed. Your edit is kept")); expect(input.value).toBe("Guide"); expect(dialog.textContent).toContain("Load latest version"); expect(saveProfile).toHaveBeenCalledOnce();
+  });
+  it("previews and applies a Retraction before refreshing the sheet", async () => {
+    const { document, window } = parseHTML("<html><body></body></html>"); vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
+    const id = "11111111-1111-4111-8111-111111111111", observationId = "22222222-2222-4222-8222-222222222222", boundary = { turnNumber: 1, timelineRevision: 0 }, capabilities = { castEditing: true, castObservationDecisions: true };
+    const person = { id, name: "Marin", aliases: [], origin: { kind: "manual" as const }, profile: { "story.role": "Guard" }, revision: 1, pinned: false, ignored: false, firstObservedTurn: 0, lastObservedTurn: 1, lastMentionedTurn: null };
+    const observation = { id: observationId, characterId: id, field: "story.role" as const, value: "Guard", mode: "fact" as const, speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn" as const, turnNumber: 1, turnId: id, quote: "A guard appeared", startOffset: 0, endOffset: 16, invalidated: false } };
+    const detail = { revision: 1, boundary, capabilities, character: person, observations: [observation], observationDecisionStatus: [{ observationId, state: "eligible" as const, retractionEventId: null, reason: null }], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null };
+    const previewObservationDecision = vi.fn(async () => ({ currentValue: "Guard", projectedValue: null })); const applyObservationDecision = vi.fn(async (_campaign: string, _id: string, _observation: string, _body: unknown) => ({})); const read = vi.fn(async () => detail);
+    const api = { list: async () => ({ revision: 1, boundary, capabilities, characters: [person], nextCursor: null }), detail: read, previewObservationDecision, applyObservationDecision, discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} }); const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    await panel.open(); [...dialog.querySelectorAll("button")].find(button => button.textContent?.includes("Marin"))!.click(); await new Promise(resolve => setTimeout(resolve, 0));
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "This is wrong")!.click(); await vi.waitFor(() => expect(dialog.textContent).toContain("After this")); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Confirm")!.click();
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2)); expect(previewObservationDecision).toHaveBeenCalledOnce(); expect(applyObservationDecision).toHaveBeenCalledOnce(); expect(applyObservationDecision.mock.calls[0]![3]).toEqual({ action: "retract", expectedCastRevision: 1, expectedCharacterRevision: 1, expectedBoundary: boundary, idempotencyKey: expect.any(String) });
+  });
+  it.each(["before refresh", "after refresh"] as const)("fences Main Character Undo %s", async scenario => {
+    const { document, window } = parseHTML("<html><body></body></html>"); vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
+    const id = "11111111-1111-4111-8111-111111111111", boundary = { turnNumber: 0, timelineRevision: 0 }, capabilities = { castEditing: true };
+    const person = { id, name: "Marin", aliases: [], origin: { kind: "protagonist" as const }, profile: {}, revision: 1, pinned: false, ignored: false, firstObservedTurn: 0, lastObservedTurn: 0, lastMentionedTurn: null };
+    const detail = { revision: 1, boundary, capabilities, character: person, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null };
+    let profile = { name: "Marin", profile: characterProfileSchema.parse({ story: { role: "Scout" } }), revision: 1 }, reads = 0;
+    const getProfile = vi.fn(async () => { reads++; if (reads === 2 && scenario === "before refresh") profile = { ...profile, revision: 3 }; return profile; });
+    const saveProfile = vi.fn(async (_campaign: string, _body: unknown) => { if (scenario === "after refresh" && profile.revision === 2) throw Object.assign(new Error("conflict"), { statusCode: 409 }); profile = { ...profile, revision: 2, profile: characterProfileSchema.parse({ story: { role: "Guide" } }) }; return profile; });
+    const api = { list: async () => ({ revision: 1, boundary, capabilities, characters: [person], nextCursor: null }), detail: async () => detail, discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, getProfile, saveProfile, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} }); const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    await panel.open(); [...dialog.querySelectorAll("button")].find(button => button.textContent?.includes("Marin"))!.click(); await new Promise(resolve => setTimeout(resolve, 0)); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Edit Role")!.click(); const input = dialog.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!; input.value = "Guide"; input.dispatchEvent(new window.Event("input")); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Save")!.click();
+    if (scenario === "before refresh") { await vi.waitFor(() => expect(dialog.textContent).toContain("Undo expired")); expect(saveProfile).toHaveBeenCalledTimes(1); }
+    else { await vi.waitFor(() => expect(dialog.textContent).toContain("Saved Role.")); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Undo")!.click(); await vi.waitFor(() => expect(dialog.textContent).toContain("Could not undo. The character changed")); expect(saveProfile).toHaveBeenCalledTimes(2); }
+    panel.requestClose();
+  });
+  it("does not render a late sheet save after switching character", async () => {
+    const { document, window } = parseHTML("<html><body></body></html>"); vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement); window.confirm = () => true;
+    const boundary = { turnNumber: 0, timelineRevision: 0 }, capabilities = { castEditing: true };
+    const person = (id: string, name: string) => ({ id, name, aliases: [], origin: { kind: "manual" as const }, profile: { "story.role": "Guard" }, revision: 1, pinned: false, ignored: false, firstObservedTurn: 0, lastObservedTurn: 0, lastMentionedTurn: null });
+    const first = person("11111111-1111-4111-8111-111111111111", "Marin"), second = person("22222222-2222-4222-8222-222222222222", "Mara");
+    let finish!: (value: unknown) => void; const edit = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+    const api = { list: async () => ({ revision: 1, boundary, capabilities, characters: [first, second], nextCursor: null }), detail: async (_campaign: string, id: string) => ({ revision: 1, boundary, capabilities, character: id === first.id ? first : second, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null }), edit, discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
+    const panel = createLegacyCastPanel({ api: api as never, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} }); const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
+    await panel.open(); [...dialog.querySelectorAll("button")].find(button => button.textContent?.includes("Marin"))!.click(); await new Promise(resolve => setTimeout(resolve, 0)); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Edit Role")!.click(); const input = dialog.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!; input.value = "Guide"; input.dispatchEvent(new window.Event("input")); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Save")!.click();
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Mara")!.click(); await vi.waitFor(() => expect(dialog.querySelector("#cast-title")?.textContent).toBe("Mara")); finish({ revision: 2, boundary, character: { ...first, revision: 2 } }); await new Promise(resolve => setTimeout(resolve, 0)); expect(dialog.querySelector("#cast-title")?.textContent).toBe("Mara"); expect(dialog.textContent).not.toContain("Saved Role."); panel.requestClose();
+  });
   it("debounces search once and ignores an older response", async () => {
     const { document, window } = parseHTML("<html><body></body></html>");
     vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement);
@@ -113,7 +233,7 @@ describe("legacy cast panel", () => {
     expect(dialog.querySelector('[aria-current="true"]')?.textContent).toContain("<img");
     const toggle = [...dialog.querySelectorAll("button")].find((button) => button.textContent === "Show empty fields")!;
     toggle.click();
-    expect(dialog.textContent).toContain("Pronouns: Unknown");
+    expect(dialog.querySelector('[data-path="identity.pronouns"]')?.textContent).toContain("Unknown");
     [...dialog.querySelectorAll("button")].find((button) => button.textContent === "Edit character")!.click();
     expect([...dialog.querySelectorAll("summary")].map(item => item.textContent)).toContain("Personality and voice");
     const reset = [...dialog.querySelectorAll("button")].find(button => button.textContent === "Use discovered value for role")!;
