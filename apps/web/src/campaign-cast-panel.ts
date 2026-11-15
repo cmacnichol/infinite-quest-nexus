@@ -105,8 +105,11 @@ export function createLegacyCastPanel(options: {
     clearSheetFeedback(); sheetView?.dispose(); sheetView = null; storyReview.reset(); epoch++; clearInterval(lockPoll); preset = null; editor = null; workspace.close(); operationKeys.clear(); dialog.close(); returnFocus?.focus();
   }
   function requestNavigation(action: () => void) {
-    if (sheetView?.dirty() && !window.confirm("Discard unsaved character changes?")) return;
-    if (saving || editor?.saving || dialog.querySelector("[data-cast-confirm]")) return;
+    if (sheetView?.pending() || saving || editor?.saving || dialog.querySelector("[data-cast-confirm]")) return;
+    if (sheetView?.dirty()) {
+      if (!window.confirm("Discard unsaved character changes?")) return;
+      sheetView.discard();
+    }
     if (!dirty()) { action(); return; }
     const previous = document.activeElement as HTMLElement | null;
     const prompt = node("section"); prompt.dataset.castConfirm = ""; prompt.setAttribute("role", "alertdialog"); prompt.setAttribute("aria-modal", "true"); prompt.setAttribute("aria-label", "Unsaved character changes");
@@ -362,8 +365,8 @@ export function createLegacyCastPanel(options: {
     if (list!.nextCursor) dialog.append(button("Load more characters", () => { void loadRoster(list!.nextCursor!); }));
   }
   async function openDetail(id: string) {
-    if (sheetView?.dirty() && !window.confirm("Discard unsaved character changes?")) return;
-    if (dirty() || editor?.saving || saving) { requestNavigation(() => { void openDetail(id); }); return; }
+    if (sheetView?.pending()) return;
+    if (sheetView?.dirty() || dirty() || editor?.saving || saving) { requestNavigation(() => { void openDetail(id); }); return; }
     clearSheetFeedback(); showEmpty = false; storyReview.reset(); rosterVisible = false; workspace.select(id);
     const token = ++epoch; shell("Character"); status("Loading character…");
     try {
@@ -404,10 +407,10 @@ export function createLegacyCastPanel(options: {
     }
     if (detail.character.origin.kind === "protagonist") {
       status(`This is your main character. ${mainProfileSourceLabel(profile)}.`);
-      const opener = button("Edit main character", () => { options.openProtagonist(saved => {
+      const opener = button("Edit main character", () => requestNavigation(() => { options.openProtagonist(saved => {
         if (saved && dialog.open) { void openDetail(detail.character.id).then(() => dialog.querySelector<HTMLButtonElement>("[data-edit-protagonist]")?.focus()); }
         else if (dialog.open && opener.isConnected) opener.focus();
-      }); });
+      }); }));
       opener.dataset.editProtagonist = ""; dialog.append(opener);
     } else if (!detail.character.mergedIntoCharacterId) {
       const lifecycle = options.api.lifecycle;
@@ -415,13 +418,13 @@ export function createLegacyCastPanel(options: {
       if (lifecycleEnabled === false) status("Removing and restoring characters is disabled on this server. Character merging is disabled on this server.");
       else if (!enabled) status("Removing and restoring characters is unavailable while character editing is disabled.");
       if (lifecycle && lifecycleEnabled) {
-        const launch = (action: Parameters<typeof showLifecycle>[0], mergeEventId?: string) => showLifecycle(action, {
+        const launch = (action: Parameters<typeof showLifecycle>[0], mergeEventId?: string) => requestNavigation(() => showLifecycle(action, {
           api: lifecycle, campaign, detail, list: options.api.list, lock: syncLock, ...(mergeEventId ? { mergeEventId } : {}),
           finished(id, notice) {
             if (!id) void loadRoster(undefined, notice);
             else void openDetail(id).then(() => { if (dialog.open) status(notice); });
           }
-        });
+        }));
         const actions = node("div"); actions.className = "cast-lifecycle-actions";
         if (detail.character.removed) actions.append(button("Restore", () => launch("restore"), locked()));
         else {
@@ -433,11 +436,13 @@ export function createLegacyCastPanel(options: {
         }
         dialog.append(actions);
       }
-      if (!detail.character.removed) dialog.append(button("Edit character", async () => {
+      if (!detail.character.removed) dialog.append(button("Edit character", () => requestNavigation(() => { void (async () => {
         const token = epoch; if (options.checkLock) await syncLock(); if (!current(token)) return;
-        if (detail.character.originProfile) preset = createPresetDraft(detail);
-        workspace.setDraft(editor); renderEditor();
-      }, !enabled || options.generationActive()));
+        requestNavigation(() => {
+          if (detail.character.originProfile) preset = createPresetDraft(detail);
+          workspace.setDraft(editor); renderEditor();
+        });
+      })(); }), !enabled || options.generationActive()));
     }
     const token = epoch, characterId = detail.character.id, main = detail.character.origin.kind === "protagonist";
     const target: SheetTarget | null = main ? (profile ? { kind: "main", profile } : null) : { kind: "cast", detail };

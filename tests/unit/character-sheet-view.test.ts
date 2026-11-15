@@ -121,3 +121,16 @@ it("notifies the host only after an inline edit is actually cancelled", () => {
   click("Cancel"); expect(onInteractionEnd).not.toHaveBeenCalled();
   confirmDiscard.mockReturnValue(true); click("Cancel"); expect(onInteractionEnd).toHaveBeenCalledExactlyOnceWith("identity.pronouns");
 });
+
+
+it("exposes pending work and discards an accepted inline draft", async () => {
+  let finish!: (result: { ok: false; conflict: boolean; message: string }) => void;
+  const a = setup({ onChange: () => new Promise(resolve => { finish = resolve; }) });
+  a.click("Edit Pronouns"); const input = a.host.querySelector<HTMLInputElement>("input")!; input.value = "unsaved";
+  expect(a.view.dirty()).toBe(true); a.view.discard();
+  expect(a.view.dirty()).toBe(false); expect(a.host.querySelector("input")).toBeNull();
+  a.click("Edit Pronouns"); a.click("Save"); expect(a.view.pending()).toBe(true);
+  a.view.discard(); expect(a.host.querySelector("input")).not.toBeNull();
+  finish({ ok: false, conflict: false, message: "retry" }); await Promise.resolve(); await Promise.resolve();
+  expect(a.view.pending()).toBe(false); expect(a.host.textContent).toContain("retry");
+});

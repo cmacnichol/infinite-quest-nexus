@@ -238,7 +238,7 @@ describe("legacy cast panel", () => {
     else { await vi.waitFor(() => expect(dialog.textContent).toContain("Saved Role.")); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Undo")!.click(); await vi.waitFor(() => expect(dialog.textContent).toContain("Could not undo. The character changed")); expect(saveProfile).toHaveBeenCalledTimes(2); }
     panel.requestClose();
   });
-  it("does not render a late sheet save after switching character", async () => {
+  it("waits for a sheet save before switching character", async () => {
     const { document, window } = parseHTML("<html><body></body></html>"); vi.stubGlobal("document", document); vi.stubGlobal("window", window); vi.stubGlobal("HTMLElement", window.HTMLElement); window.confirm = () => true;
     const boundary = { turnNumber: 0, timelineRevision: 0 }, capabilities = { castEditing: true };
     const person = (id: string, name: string) => ({ id, name, aliases: [], origin: { kind: "manual" as const }, profile: { "story.role": "Guard" }, revision: 1, pinned: false, ignored: false, firstObservedTurn: 0, lastObservedTurn: 0, lastMentionedTurn: null });
@@ -247,7 +247,9 @@ describe("legacy cast panel", () => {
     const api = { list: async () => ({ revision: 1, boundary, capabilities, characters: [first, second], nextCursor: null }), detail: async (_campaign: string, id: string) => ({ revision: 1, boundary, capabilities, character: id === first.id ? first : second, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null }), edit, discoveryStatus: async () => null, workspaceStatus: async () => { throw new Error("unavailable"); } };
     const panel = createLegacyCastPanel({ api: api as never, campaignId: () => "campaign", generationActive: () => false, openProtagonist: () => {}, navigateToTurn: async () => {} }); const dialog = document.querySelector("dialog")!; dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
     await panel.open(); [...dialog.querySelectorAll("button")].find(button => button.textContent?.includes("Marin"))!.click(); await new Promise(resolve => setTimeout(resolve, 0)); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Edit Role")!.click(); const input = dialog.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!; input.value = "Guide"; input.dispatchEvent(new window.Event("input")); [...dialog.querySelectorAll("button")].find(button => button.textContent === "Save")!.click();
-    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Mara")!.click(); await vi.waitFor(() => expect(dialog.querySelector("#cast-title")?.textContent).toBe("Mara")); finish({ revision: 2, boundary, character: { ...first, revision: 2 } }); await new Promise(resolve => setTimeout(resolve, 0)); expect(dialog.querySelector("#cast-title")?.textContent).toBe("Mara"); expect(dialog.textContent).not.toContain("Saved Role."); panel.requestClose();
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Mara")!.click(); expect(dialog.querySelector("#cast-title")?.textContent).toBe("Marin");
+    finish({ revision: 2, boundary, character: { ...first, revision: 2 } }); await vi.waitFor(() => expect(dialog.textContent).toContain("Saved Role."));
+    [...dialog.querySelectorAll("button")].find(button => button.textContent === "Mara")!.click(); await vi.waitFor(() => expect(dialog.querySelector("#cast-title")?.textContent).toBe("Mara")); expect(dialog.textContent).not.toContain("Saved Role."); panel.requestClose();
   });
   it("debounces search once and ignores an older response", async () => {
     const { document, window } = parseHTML("<html><body></body></html>");

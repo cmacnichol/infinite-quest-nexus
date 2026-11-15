@@ -1441,6 +1441,147 @@ for (const width of [1280, 390]) test(`Nexus campaign quick creation keeps one d
 });
 
 
+for (const action of ["Edit character", "Remove from cast"] as const) test(`Nexus inline draft guards ${action}`, async ({ page }, info) => {
+  const api = await fixture(page, false, true);
+  const boundary = { turnNumber: 1, timelineRevision: 0 };
+  const capabilities = { castEditing: true, castLifecycle: true };
+  const person = api.characters.find(item => item.id === candidateId);
+  await page.route("**/cast?*", route => route.fulfill({ json: { revision: 0, boundary, characters: api.characters, nextCursor: null, capabilities } }));
+  await page.route(`**/cast/${candidateId}`, route => route.fulfill({ json: { revision: 0, boundary, character: person, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null, capabilities } }));
+  let removals = 0;
+  await page.route(`**/cast/${candidateId}/remove`, route => { removals++; return route.fulfill({ json: { character: { ...person, removed: true, revision: 1 }, revision: 1, boundary } }); });
+  await openNexusCampaignCharacters(page);
+  const sheet = page.locator("#campaignCastDialog");
+  await sheet.getByRole("button", { name: "Mara", exact: true }).click();
+  await sheet.getByRole("button", { name: "Show empty fields", exact: true }).click();
+  await sheet.getByRole("button", { name: "Edit Role", exact: true }).click();
+  const role = sheet.getByLabel("Role", { exact: true });
+  await role.fill("Uncommitted guide");
+  let confirmations = 0;
+  page.on("dialog", async dialog => { confirmations++; if (confirmations === 1) await dialog.dismiss(); else await dialog.accept(); });
+  await sheet.getByRole("button", { name: action, exact: true }).click();
+  expect(confirmations).toBe(1);
+  await expect(role).toHaveValue("Uncommitted guide");
+  await expect(page.locator("dialog.cast-lifecycle")).toHaveCount(0);
+  expect(removals).toBe(0); expect(api.writes).toEqual([]);
+  await role.scrollIntoViewIfNeeded();
+  if (process.env.CAST_SCREENSHOT_ROOT) await page.screenshot({ path: `${process.env.CAST_SCREENSHOT_ROOT}/inline-draft-${action === "Edit character" ? "editor" : "remove"}.png` });
+  else await page.screenshot({ path: info.outputPath(`inline-draft-${action === "Edit character" ? "editor" : "remove"}.png`) });
+  await sheet.getByRole("button", { name: action, exact: true }).click();
+  expect(confirmations).toBe(2);
+  if (action === "Edit character") await expect(sheet.locator(".character-workspace")).toBeVisible();
+  else {
+    const lifecycle = page.locator("dialog.cast-lifecycle");
+    await expect(lifecycle).toBeVisible(); expect(removals).toBe(0);
+    await lifecycle.getByRole("button", { name: "Confirm remove" }).click();
+    await expect.poll(() => removals).toBe(1);
+    await expect(lifecycle).toHaveCount(0);
+  }
+});
+
+
+test("Nexus inline main character draft guards the profile editor", async ({ page }) => {
+  const api = await fixture(page);
+  await openNexusCampaignCharacters(page);
+  const sheet = page.locator("#campaignCastDialog");
+  await sheet.getByRole("button", { name: "Iven", exact: true }).click();
+  await sheet.getByRole("button", { name: "Show empty fields", exact: true }).click();
+  await sheet.getByRole("button", { name: "Edit Role", exact: true }).click();
+  const role = sheet.getByLabel("Role", { exact: true });
+  await role.fill("Uncommitted main role");
+  let confirmations = 0;
+  page.on("dialog", async dialog => { confirmations++; if (confirmations === 1) await dialog.dismiss(); else await dialog.accept(); });
+  await sheet.getByRole("button", { name: "Edit main character", exact: true }).click();
+  expect(confirmations).toBe(1);
+  await expect(role).toHaveValue("Uncommitted main role");
+  await expect(page.getByRole("dialog", { name: "Edit campaign character profile" })).not.toBeVisible();
+  expect(api.profileWrites).toEqual([]);
+  await sheet.getByRole("button", { name: "Edit main character", exact: true }).click();
+  expect(confirmations).toBe(2);
+  const profile = page.getByRole("dialog", { name: "Edit campaign character profile" });
+  await expect(profile).toBeVisible();
+  await profile.getByLabel("Role", { exact: true }).fill("Saved main role");
+  await profile.getByRole("button", { name: "Save character", exact: true }).click();
+  await expect.poll(() => api.profileWrites.length).toBe(1);
+  await expect(profile).not.toBeVisible();
+  await expect(sheet.getByRole("button", { name: "Show empty fields" })).toBeVisible();
+  expect(confirmations).toBe(2);
+});
+
+
+test("Nexus refreshes after promotion without asking to discard the same inline draft again", async ({ page }) => {
+  const api = await fixture(page, false, true);
+  const boundary = { turnNumber: 1, timelineRevision: 0 }, capabilities = { castEditing: true, castLifecycle: true };
+  const person = api.characters.find(item => item.id === candidateId);
+  await page.route("**/cast?*", route => route.fulfill({ json: { revision: 0, boundary, characters: api.characters, nextCursor: null, capabilities } }));
+  await page.route(`**/cast/${candidateId}`, route => route.fulfill({ json: { revision: 0, boundary, character: person, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null, capabilities } }));
+  await page.route("**/api/v1/worlds", route => route.fulfill({ json: { worlds: [{ id: worldId, title: "Fixture world", status: "active" }] } }));
+  await page.route(`**/cast/${candidateId}/promotion-preview**`, route => route.fulfill({ json: { worldId, draftRevision: 1, characterRevision: 0, castRevision: 0, boundary, destinations: [{ path: "name", candidates: [{ sourcePath: "name", value: "Mara" }], tickedByDefault: true, requiredOnAdd: true }], matches: [] } }));
+  let promotions = 0;
+  await page.route(`**/cast/${candidateId}/promote`, route => { promotions++; return route.fulfill({ json: { worldId, draftRevision: 2, characterId: "new" } }); });
+  await openNexusCampaignCharacters(page); const sheet = page.locator("#campaignCastDialog");
+  await sheet.getByRole("button", { name: "Mara", exact: true }).click();
+  await sheet.getByRole("button", { name: "Show empty fields" }).click();
+  await sheet.getByRole("button", { name: "Edit Role" }).click();
+  await sheet.getByLabel("Role", { exact: true }).fill("Discard for promotion");
+  let confirmations = 0; page.on("dialog", async dialog => { confirmations++; if (confirmations === 1) await dialog.accept(); else await dialog.dismiss(); });
+  await sheet.getByRole("button", { name: "Add to world draft" }).click();
+  const lifecycle = page.locator("dialog.cast-lifecycle");
+  await lifecycle.getByRole("button", { name: "Review fields" }).click();
+  await lifecycle.getByRole("button", { name: "Confirm draft change" }).click();
+  await expect.poll(() => promotions).toBe(1);
+  await expect(lifecycle).toHaveCount(0);
+  await expect(sheet).toContainText("Saved to the world draft.");
+  expect(confirmations).toBe(1);
+});
+
+
+test("Nexus blocks transitions while an inline write is pending", async ({ page }) => {
+  const api = await fixture(page, false, true);
+  const boundary = { turnNumber: 1, timelineRevision: 0 }, capabilities = { castEditing: true, castLifecycle: true };
+  const person = api.characters.find(item => item.id === candidateId);
+  let release!: () => void, started = false;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/cast?*", route => route.fulfill({ json: { revision: 0, boundary, characters: api.characters, nextCursor: null, capabilities } }));
+  await page.route(`**/cast/${candidateId}`, async route => {
+    if (route.request().method() !== "GET") { started = true; await gate; return route.fulfill({ json: { character: { ...person, revision: 1 }, revision: 1, boundary } }); }
+    return route.fulfill({ json: { revision: 0, boundary, character: person, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null, capabilities } });
+  });
+  await openNexusCampaignCharacters(page); const sheet = page.locator("#campaignCastDialog");
+  await sheet.getByRole("button", { name: "Mara", exact: true }).click();
+  await sheet.getByRole("button", { name: "Show empty fields" }).click();
+  await sheet.getByRole("button", { name: "Edit Role" }).click();
+  await sheet.getByLabel("Role", { exact: true }).fill("Pending guide");
+  await sheet.getByRole("button", { name: "Save", exact: true }).click();
+  await expect.poll(() => started).toBe(true);
+  let confirmations = 0; page.on("dialog", async dialog => { confirmations++; await dialog.accept(); });
+  await sheet.getByRole("button", { name: "Edit character", exact: true }).click();
+  await sheet.getByRole("button", { name: "Remove from cast", exact: true }).click();
+  expect(confirmations).toBe(0);
+  await expect(page.locator("dialog.cast-lifecycle")).toHaveCount(0);
+  await expect(sheet.locator(".character-workspace")).toHaveCount(0);
+  await expect(sheet.getByLabel("Role", { exact: true })).toHaveValue("Pending guide");
+  release(); await expect(sheet).toContainText("Saved Role.");
+});
+
+
+test("Nexus checks for inline edits made during the editor lock check", async ({ page }) => {
+  await fixture(page, false, true); await openNexusCampaignCharacters(page);
+  const sheet = page.locator("#campaignCastDialog"); await sheet.getByRole("button", { name: "Mara", exact: true }).click();
+  await sheet.getByRole("button", { name: "Show empty fields" }).click();
+  let release!: () => void, started = false; const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/sync-status", async route => { started = true; await gate; await route.fallback(); });
+  let confirmations = 0; page.on("dialog", async dialog => { confirmations++; await dialog.dismiss(); });
+  await sheet.getByRole("button", { name: "Edit character", exact: true }).click();
+  await expect.poll(() => started).toBe(true);
+  await sheet.getByRole("button", { name: "Edit Role" }).click();
+  const role = sheet.getByLabel("Role", { exact: true }); await role.fill("Typed during lock check");
+  release(); await expect.poll(() => confirmations).toBe(1);
+  await expect(role).toHaveValue("Typed during lock check");
+  await expect(sheet.locator(".character-workspace")).toHaveCount(0);
+});
+
+
 test("Nexus dirty editor stages lifecycle entry and cancellation preserves its draft", async ({ page }) => {
   const api = await fixture(page, false, true);
   await page.route("**/cast?*", route => route.fulfill({ json: { revision: 0, boundary: { turnNumber: 1, timelineRevision: 0 }, characters: api.characters, nextCursor: null, capabilities: { castEditing: true, castLifecycle: true } } }));
