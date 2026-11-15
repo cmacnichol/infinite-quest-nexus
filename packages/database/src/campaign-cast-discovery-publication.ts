@@ -7,6 +7,7 @@ import { normalizeEntityTerm } from "../../domain/src/entity-references.js";
 import { stableStringify } from "../../domain/src/text.js";
 import { randomUUID } from "node:crypto";
 import { playableCharacterSchema } from "../../contracts/src/world-library.js";
+import { readActiveReviewDismissals, isReviewDismissed } from "./campaign-cast-review-decision-repository.js";
 import { readFirstAppearanceDecision } from "./campaign-cast-first-appearance.js";
 import { applyCastBatchWithClient, initializeCastWithClient, seedCampaignCastWithClient } from "./campaign-cast-repository.js";
 import { refreshCastChronicleMetadata } from "./campaign-cast-chronicle-metadata.js";
@@ -78,6 +79,7 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
   const roster = (Array.isArray(pinned.content?.playableCharacters) ? pinned.content.playableCharacters : []).map((entry: unknown) => playableCharacterSchema.safeParse(entry)).map((entry: ReturnType<typeof playableCharacterSchema.safeParse>) => entry.success ? entry.data : null);
   const currentWorldIdentities = castDiscoveryWorldIdentities(pinned.content);
   const rejected = [...first.rejected], unresolved = [...first.unresolved];
+  const activeDismissals = await readActiveReviewDismissals(client, claim.scope, current.characters);
   const characterIds: string[] = [], observationIds: string[] = [];
   let accepted = 0;
   const evidence = (citation: { paragraphId: string; quote: string }): Extract<CastEvidence, { kind: "turn" }> => ({ kind: "turn", turnId: claim.source.turnId,
@@ -85,6 +87,10 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
     paragraphId: sourceParagraphId(citation.paragraphId), quote: citation.quote });
   for (const candidate of first.accepted) {
     const { resolvedOrigin, identityBasis, ...proposal } = candidate;
+    const originalProposal = output.characters.find(item => item.localKey === candidate.localKey)!;
+    if (isReviewDismissed(activeDismissals, claim.source, { kind: "identity", proposal: originalProposal })) continue;
+    const eligibleObservations = candidate.observations.filter(observation =>
+      !isReviewDismissed(activeDismissals, claim.source, { kind: "detail", proposal: originalProposal, observation }));
     const representedId = resolvedOrigin.kind === "world" ? captured.representedWorldCharacters?.find(person => [person.entityId, ...person.equivalentEntityIds ?? []].includes(resolvedOrigin.entityId))?.characterId : undefined;
     if (resolvedOrigin.kind === "world" && captured.worldVersionId !== pinned.world_version_id) {
       const before = validationWorldCharacters.filter(person => person.entityId === resolvedOrigin.entityId).map(person => ({ entityId: person.entityId, ...(person.equivalentEntityIds ? { equivalentEntityIds: person.equivalentEntityIds } : {}), name: person.name, aliases: person.aliases, ...(person.identityHints ? { identityHints: person.identityHints } : {}) }));
@@ -151,7 +157,7 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
             idempotencyKey: `${key}:seed`, narrationAlias: candidate.name,
             attachment: { basis: "unique_world_name", sourceRanges }, evidenceCommands: [
               { kind: "mention", characterId, evidence: evidence(candidate.identityEvidence[0]!) },
-              ...candidate.observations.map(observation => ({ kind: "observe" as const, characterId: characterId!, field: observation.field, value: observation.value,
+              ...eligibleObservations.map(observation => ({ kind: "observe" as const, characterId: characterId!, field: observation.field, value: observation.value,
                 mode: observation.mode, speakerCharacterId: observation.speakerCharacterId, evidence: evidence(observation), supersedesObservationId: null }))
             ] });
           characterIds.push(characterId); observationIds.push(...receipt.observationIds); accepted++;
@@ -167,9 +173,9 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
     }
     const receipt = await applyCastBatchWithClient(client, claim.scope, { boundary: current.boundary, idempotencyKey: `${key}:observations`, commands: [
       { kind: "mention", characterId, evidence: evidence(candidate.identityEvidence[0]!) },
-      ...candidate.observations.map((observation) => ({ kind: "observe" as const, characterId: characterId!, field: observation.field, value: observation.value,
+      ...eligibleObservations.map((observation) => ({ kind: "observe" as const, characterId: characterId!, field: observation.field, value: observation.value,
         mode: observation.mode, speakerCharacterId: observation.speakerCharacterId, evidence: evidence(observation), supersedesObservationId: null }))
-    ] }, automatic ? { attachment: { characterId, basis: identityBasis, sourceRanges } } : {});
+    ] }, automatic ? { suppressRetractedFacts: true, attachment: { characterId, basis: identityBasis, sourceRanges } } : { suppressRetractedFacts: true });
     observationIds.push(...receipt.observationIds);
     accepted++;
     current = await initializeCastWithClient(client, claim.scope);

@@ -4,6 +4,8 @@ import type { CreateCastCharacter, EditCastCharacter, CastWriteResult, CastDetai
   CastCandidateList, CastCandidateQuery, ResolveCastCandidate, CastCandidateResolution } from "@infinite-quest/contracts";
 
 export interface CampaignCastWritePort {
+  previewObservationDecision?(scope: CastScope, characterId: string, observationId: string, request: import("@infinite-quest/contracts").ObservationDecisionRequest): Promise<import("@infinite-quest/contracts").ObservationDecisionPreview>;
+  applyObservationDecision?(scope: CastScope, characterId: string, observationId: string, request: import("@infinite-quest/contracts").ObservationDecisionRequest): Promise<import("@infinite-quest/contracts").ObservationDecisionResult>;
   promotionPreview?(scope: CastScope, id: string, worldId: string): Promise<import("@infinite-quest/contracts").CastPromotionPreview>;
   promote?(scope: CastScope, id: string, request: import("@infinite-quest/contracts").CastPromote): Promise<import("@infinite-quest/contracts").CastPromoteResult>;
   unmergePreview?(scope: CastScope, targetId: string, mergeEventId: string): Promise<import("@infinite-quest/contracts").CastUnmergePreview>;
@@ -19,6 +21,8 @@ export interface CampaignCastWritePort {
   workspaceRead?(scope: CastScope, statusOnly?: boolean): Promise<{ snapshot: CastSnapshot; reviewIds: string[]; conflictIds: string[]; attentionCounts?: Record<string, { review: number; conflict: number }>; status: import("@infinite-quest/contracts").CharactersWorkspaceStatus }>;
   detachAttachment(scope: CastScope, characterId: string, eventId: string, request: import("@infinite-quest/contracts").DetachCastAttachment): Promise<import("@infinite-quest/contracts").DetachCastAttachmentResult>;
   resolveDetail?(scope: CastScope, id: string, request: ReviewCastDetail): Promise<ReviewCastDetailResult>;
+  reviewDecision(scope: CastScope, id: string, request: import("@infinite-quest/contracts").ReviewDecisionRequest): Promise<import("@infinite-quest/contracts").ReviewDecisionResult>;
+  dismissedReview(scope: CastScope, query: { cursor?: string; limit?: number }): Promise<import("@infinite-quest/contracts").DismissedReviewPage>;
   candidates(scope: CastScope, query: Partial<CastCandidateQuery>): Promise<CastCandidateList>;
   resolveCandidate(scope: CastScope, id: string, request: ResolveCastCandidate): Promise<CastCandidateResolution>;
   discoveryStatus(scope: CastScope): Promise<CastDiscoveryStatus>;

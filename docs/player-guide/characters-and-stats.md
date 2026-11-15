@@ -34,6 +34,10 @@ Open **Review character changes** to work through uncertain matches and details.
 
 For a detail supported by the original narration, **Apply and next** accepts the proposed value as an observation from that turn. For example, accepting an older location does not replace a more recent location. Conflicting stable details can still require a decision. **Keep as override** explicitly sets the portrayal you want, even if the story later supplies a different value; clear that field's override in the editor to use discovered evidence again. **Dismiss detail** records no character fact. These choices affect this campaign, not the world version or previously accepted narration.
 
+In character review, **Skip for now** only moves past an item for the current review session. **Dismiss discovery** hides that proposed identity and its details for the same source; **Dismiss detail** hides just that proposed detail, including when you then attach or create the identity. Neither action deletes the story or bans a name. A different turn or corrected narration can produce new evidence to review. Open **Dismissed** and choose **Undo** to return a decision to pending review. Earlier dismissals made before this recovery workflow remain effective but cannot be listed or undone here. Dismissals are operational inbox decisions and do not travel with campaign archives or branches, so imported or branched history can be reviewed again.
+
+If a fact preview or confirmation says the story or character changed, choose **Reload character** to refresh the current character, then review the fact again.
+
 Tracking progress and review progress are separate. When tracking has a gap, open recovery to see the affected turn and reason. Retry failed work when appropriate, resume a paused scan, or preview the suggested missing range. Check the estimate before starting; completed work is preserved. Opening recovery or reviewing a character does not call the text provider.
 
 Use **Likely included for this input** to estimate which characters fit the current story context. Enter the intended story input and refresh the estimate. It explains selection and omissions within the available budget without sending a model request. Refresh after the story or characters change; later routing and action assessment can change the final selection.
@@ -42,6 +46,12 @@ Use **Likely included for this input** to estimate which characters fit the curr
 
 In Nexus, open the campaign and choose **Edit characters…**. Search for a character, open their sheet, and choose **Edit character**. The main character has its own profile editor. **Open in Story** opens the same character in the Story panel, where you can inspect sources and review matches.
 
+Nexus opens existing characters in a full-screen editor. Navigate by section in the left rail, or use the **Section** selector and previous/next buttons on a narrow screen. **Preview sheet** shows your local values without making a model request. The character name, destination and save action remain visible. Story keeps its existing panel presentation.
+
+Creating a manual supporting character starts with a quick form for Name, Role and Personality. **Continue in detailed editor** retains those entries and opens the existing supporting profile fields without creating a record. **Create campaign character** performs the explicit create. Supporting characters keep their current smaller field set; world-seeded characters retain their full authored profile and field-authority controls.
+
+**Save character** writes only to this campaign. An unchanged existing character has Save disabled. Cancel, Back and Escape offer a decision for unsaved edits. If saving fails, keep the editor open and retry or compare the latest version; reapply preserves your changes against that version. Manual drafts do not survive a browser reload or crash.
+
 For a supporting character copied from the world, **World canon** marks a value that the story cannot replace. Editing it affects only this campaign. **Reset to world value** restores the original copy. Resetting the character’s identity restores the roster name and aliases together. A field labeled **Added for this campaign** can be cleared so the story can fill it again.
 
 Goals, location, condition and current clothing update with the story. **Use discovered value** releases a hand edit. **Restore authored goals** returns to the world goals until a later observation changes them. **Observed in story** is separate from the authored appearance. Clearing that line hides it until you release the override.
@@ -49,6 +59,8 @@ Goals, location, condition and current clothing update with the story. **Use dis
 When presets are enabled, **Add from world** shows eligible characters in the campaign’s pinned world version. Review the proposed changes before adding a new character or applying a profile to an existing one. A detached match can receive a fresh copy on the same cast record. The Sources and edit history section keeps earlier edits.
 
 Save and reset actions are available again after pending or recoverable generation is resolved. Keep the editor open to retain your draft.
+
+On the Nexus campaign page, **Check generation status** refreshes a lock. Sources and history contain evidence review and campaign options. Reset, Clear, Restore authored goals and Use discovered value change the local draft; save explicitly to commit them. Entering a lifecycle preview from a dirty editor requires saving or explicitly discarding those edits first; **Keep editing** retains them.
 
 ## Draft a character from story evidence
 
@@ -63,5 +75,7 @@ Open **Characters** in Story or on the Nexus campaign page, then select a suppor
 - **Merge with another character** lets you find a duplicate, compare both records and choose the aliases and conflicting field values to keep. The preview identifies the surviving character. Choose **Confirm merge** to combine their histories. **Undo merge** previews the two restored identities and preserves later independent edits. If restoring the originals would put the surviving character over 20 aliases, choose which aliases to keep before confirming Undo. If another active merge depends on this one, undo that later merge first.
 - **Remove from cast** hides the character from the normal roster, narrator context and Chronicle catalog. The character keeps their history and reserves their name for matching. Choose the **Removed** filter and select **Restore** to return them to the cast. If a new character’s name or alias matches a removed character, the editor offers to restore the existing record. Ignore remains available for a visible character you want to exclude from narrator context.
 - **Add to world draft** opens a choice of active worlds. Review the destination fields, select Add or Replace, and choose one source where several values could fill a field. Add requires a name. Replace can update the original world roster entry even after a rename, or an entry with the same name. It preserves unticked fields and the target's mechanics. **Confirm draft change** updates the draft. Publish it when you want the character available for future campaigns.
+
+If removal is disabled on the server, the sheet explains that removal and restoration are unavailable; existing removed characters remain readable.
 
 These actions require an idle campaign. If the campaign or world draft changes during review, refresh the preview and check the new values before confirming.

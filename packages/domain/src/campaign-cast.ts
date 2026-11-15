@@ -8,6 +8,7 @@ export type ProjectCastProfileInput = {
   /** Repository callers supply persisted sequence order for source-time ties. */
   observations: readonly CastObservation[];
   overrides: readonly CastOverride[];
+  retractedObservationIds?: ReadonlySet<string>;
 };
 
 export function validateCastFiction(value: string): string {
@@ -54,7 +55,7 @@ export function projectCastProfile(input: ProjectCastProfileInput): CastProfile 
   const profile: CastProfile = {};
   const values = new Map<CastObservation["field"], Set<string>>();
   for (const observation of observations.sort((a, b) => compareEvidence(a.evidence, b.evidence))) {
-    if (observation.mode !== "fact" || superseded.has(observation.id)) continue;
+    if (observation.mode !== "fact" || superseded.has(observation.id) || input.retractedObservationIds?.has(observation.id)) continue;
     const fieldValues = values.get(observation.field) ?? new Set<string>();
     fieldValues.add(observation.value);
     values.set(observation.field, fieldValues);
@@ -75,10 +76,10 @@ export function resolveSeededCastProfile(input: ProjectCastProfileInput & {
   profile: import("../../contracts/src/world-library.js").CharacterProfile;
   restoreGoalsAfterTurn?: number;
 }): { profile: CastProfile; sources: Partial<Record<keyof CastProfile, "authored" | "observation" | "override">> } {
-  const projected = projectCastProfile({ observations: input.observations, overrides: [] });
+  const projected = projectCastProfile({ observations: input.observations, overrides: [], ...(input.retractedObservationIds ? { retractedObservationIds: input.retractedObservationIds } : {}) });
   const superseded = new Set(input.observations.map((item) => item.supersedesObservationId).filter(Boolean));
   const latest = (field: CastObservation["field"], after = -1) => input.observations
-    .filter((item) => item.field === field && item.mode === "fact" && !superseded.has(item.id) && castEvidenceOrder(item.evidence)[0] > after)
+    .filter((item) => item.field === field && item.mode === "fact" && !superseded.has(item.id) && !input.retractedObservationIds?.has(item.id) && castEvidenceOrder(item.evidence)[0] > after)
     .sort((a, b) => compareEvidence(a.evidence, b.evidence)).at(-1)?.value;
   const profile: CastProfile = {};
   const sources: Partial<Record<keyof CastProfile, "authored" | "observation" | "override">> = {};

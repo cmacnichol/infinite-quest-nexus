@@ -1,3 +1,5 @@
+import { renderObservationReview } from "./character-editor/observation-review.js";
+import { mountCampaignPresentation } from "./character-editor/campaign-presentation.js";
 import { showLifecycle } from "./character-editor/cast-lifecycle.js";
 import { createStoryDraftReview } from "./character-editor/story-draft.js";
 import { renderPresetFields } from "./character-editor/preset-fields.js";
@@ -20,8 +22,9 @@ export function mainProfileSourceLabel(profile: { inheritedFromSnapshot?: boolea
 }
 type List = Awaited<ReturnType<CampaignCastApi["list"]>>;
 export function createLegacyCastPanel(options: {
-  api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle"> & Partial<Pick<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle">>; campaignId(): string | null; generationActive(): boolean;
+  api: Omit<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle" | "reviewDecision" | "dismissedReview"> & Partial<Pick<CampaignCastApi, "worldChoices" | "scans" | "sourceTurn" | "fromWorld" | "fromWorldPreview" | "editAuthoredProfile" | "draftPreview" | "lifecycle" | "reviewDecision" | "dismissedReview">>; campaignId(): string | null; generationActive(): boolean;
   campaignPage?: boolean;
+  editorPresentation?: "panel" | "workspace";
   checkLock?(campaign: string): Promise<boolean>;
   getProfile?(campaign: string): Promise<CampaignCharacterProfile & { revision: number; inheritedFromSnapshot?: boolean; storedProfile?: unknown }>;
   openProtagonist(onClose?: (saved: boolean) => void): void; navigateToTurn(turn: number): Promise<void>;
@@ -34,6 +37,8 @@ export function createLegacyCastPanel(options: {
   const storyReview = createStoryDraftReview();
   let preset: PresetDraft | null = null;
   let lockedByServer = false, editingForm = false, saving = false;
+  let presentation: ReturnType<typeof mountCampaignPresentation> | null = null;
+  let presentationCharacter = "", detailed = false, activeSection = "overview";
   let lockCheck = 0;
   let lockPoll: ReturnType<typeof setInterval> | undefined;
   const locked = () => lockedByServer || options.generationActive();
@@ -84,6 +89,7 @@ export function createLegacyCastPanel(options: {
     result.addEventListener("click", action); return result;
   }
   function closePanel() {
+    presentation?.dispose(); presentation = null;
     storyReview.reset(); epoch++; clearInterval(lockPoll); preset = null; editor = null; workspace.close(); operationKeys.clear(); dialog.close(); returnFocus?.focus();
   }
   function requestNavigation(action: () => void) {
@@ -109,6 +115,7 @@ export function createLegacyCastPanel(options: {
   }
   function requestClose() { requestNavigation(closePanel); }
   function shell(title: string) {
+    if (presentation) { activeSection = presentation.section(); presentation.dispose(); presentation = null; }
     editingForm = false;
     dialog.classList.remove("cast-sheet-layout"); dialog.replaceChildren();
     const heading = node("header"); heading.className = "cast-heading";
@@ -120,6 +127,7 @@ export function createLegacyCastPanel(options: {
   }
   const current = (token: number) => token === epoch && campaign === options.campaignId();
   async function loadRoster(cursor?: string, notice?: string) {
+    presentationCharacter = ""; detailed = false; activeSection = "overview";
     storyReview.reset();
     const token = ++epoch; preset = null; editor = null; latest = null; latestRoster = null; rosterVisible = true;
     shell("Characters"); status("Loading characters…");
@@ -240,6 +248,7 @@ export function createLegacyCastPanel(options: {
     rosterVisible = false; const token = ++epoch; editor = null; shell("Character review");
     renderCastReview({ document, container: dialog, api: options.api, campaign, current: () => current(token),
       ...(options.campaignPage ? { checkWrite: syncLock } : {}),
+      reviewReadVersion: list?.capabilities.castReviewDecisionReadVersion, reviewWrites: list?.capabilities.castReviewDecisions,
       autoMatch, ...(initialItem ? { initialItem } : {}), editing: () => enabled && !options.generationActive(), navigate: turn => { requestClose(); void options.navigateToTurn(turn); },
       back: () => { void loadAttention(); }, key: operationKey, clearKeys: () => operationKeys.clear() });
   }
@@ -404,7 +413,8 @@ export function createLegacyCastPanel(options: {
     } else if (!detail.character.mergedIntoCharacterId) {
       const lifecycle = options.api.lifecycle;
       const lifecycleEnabled = (detail.capabilities ?? list?.capabilities)?.castLifecycle;
-      if (enabled && lifecycleEnabled === false && !detail.character.removed) status("Character merging is disabled on this server.");
+      if (lifecycleEnabled === false) status("Removing and restoring characters is disabled on this server. Character merging is disabled on this server.");
+      else if (!enabled) status("Removing and restoring characters is unavailable while character editing is disabled.");
       if (lifecycle && lifecycleEnabled) {
         const launch = (action: Parameters<typeof showLifecycle>[0], mergeEventId?: string) => showLifecycle(action, {
           api: lifecycle, campaign, detail, list: options.api.list, lock: syncLock, ...(mergeEventId ? { mergeEventId } : {}),
@@ -530,7 +540,7 @@ export function createLegacyCastPanel(options: {
     const readonly = locked() || !enabled || saving;
     if (locked()) showEditorLock();
     const save = node("button", saving ? "Saving…" : "Save character"); save.type = "submit"; save.id = "cast-save";
-    const changed = () => { save.disabled = readonly || !dirty() || Boolean(editor?.conflict); };
+    const changed = () => { save.disabled = readonly || !dirty() || Boolean(editor?.conflict); presentation?.refresh(); };
     renderPresetFields(form, state, readonly, changed, expanded, options.campaignPage
       ? "/story/" + encodeURIComponent(campaign) + "?character=" + encodeURIComponent(state.detail.character.id) : undefined);
     for (const [key, text] of [["pinned", "Pin character"], ["ignored", "Ignore character"]] as const) {
@@ -557,6 +567,7 @@ export function createLegacyCastPanel(options: {
     changed(); form.append(save, button("Cancel", () => requestNavigation(() => void loadRoster()), saving));
     form.onsubmit = event => { event.preventDefault(); void saveDraft(); }; dialog.append(form);
     if (!options.campaignPage) renderEvidence();
+    presentEditor(form, save);
     const focus = form.querySelector<HTMLElement>('[role="alert"]') ?? document.getElementById(focusId || "cast-name") ?? document.getElementById("cast-name");
     focus?.focus({ preventScroll: true });
   }
@@ -580,13 +591,13 @@ export function createLegacyCastPanel(options: {
     form.dataset.characterContext = "campaign-supporting";
     form.append(node("p", editor.characterId ? "Saved facts are filled in. Edit only what needs changing." : "Only a name is required. Add details you know, or review story matches to fill characters from evidence."));
     const save = node("button", editor.saving ? "Saving…" : "Save character"); save.type = "submit"; save.className = "primary"; save.id = "cast-save";
-    const syncSave = () => { save.disabled = Boolean(locked) || !canSaveCastEditor(editor!) || heldMatches().length > 0; };
+    const syncSave = () => { save.disabled = Boolean(locked) || !canSaveCastEditor(editor!) || heldMatches().length > 0; presentation?.refresh(); };
     function textInput(label: string, id: string, value: string, max: number, changed: (value: string) => void, multiline = false) {
       const wrap = createCastTextField(document, { label, id, value, maxLength: max, multiline, disabled: Boolean(locked), onInput(text) { changed(text); syncSave(); } });
       form.append(wrap); return wrap;
     }
     const nameWrap = textInput("Name", "cast-name", editor.draft.name, 200, (name) => { editor = changeCastEditor(editor!, { name }); updateDuplicateWarning(); });
-    const duplicateWarning = node("p"); duplicateWarning.setAttribute("role", "status"); nameWrap.append(duplicateWarning);
+    const duplicateWarning = node("p"); duplicateWarning.setAttribute("role", "status"); duplicateWarning.dataset.castDuplicate = ""; nameWrap.append(duplicateWarning);
     let duplicateRoster = list?.characters ?? [];
     void (async () => {
       try {
@@ -671,15 +682,43 @@ export function createLegacyCastPanel(options: {
     form.append(button("Cancel", () => requestNavigation(() => { void loadRoster(); }), editor.saving));
     form.addEventListener("submit", (event) => { event.preventDefault(); void saveDraft(); }); dialog.append(form);
     renderEvidence();
+    presentEditor(form, save);
     const focus = form.querySelector<HTMLElement>('[role="alert"]') ?? document.getElementById(focusId) ?? document.getElementById("cast-name");
     if (focus instanceof HTMLElement && !focus.hasAttribute("disabled")) focus.focus({ preventScroll: true });
+  }
+  function presentEditor(form: HTMLFormElement, save: HTMLButtonElement) {
+    if (options.editorPresentation !== "workspace" || !editor || editor.loaded?.character.origin.kind === "protagonist") return;
+    const identity = editor.characterId ?? "new";
+    if (identity !== presentationCharacter) { presentationCharacter = identity; detailed = Boolean(editor.characterId); activeSection = "overview"; }
+    const detail = editor.loaded;
+    if (detail && options.api.lifecycle && ((detail as CastDetail & { capabilities?: List["capabilities"] }).capabilities ?? list?.capabilities)?.castLifecycle && detail.character.origin.kind !== "protagonist" && !detail.character.removed && !detail.character.mergedIntoCharacterId) {
+      const actions = node("div"); actions.className = "cast-lifecycle-actions";
+      for (const [action, label] of [["merge", "Merge with another character"], ["remove", "Remove from cast"], ["promote", "Add to world draft"]] as const) {
+        actions.append(button(label, () => requestNavigation(() => {
+          const token = epoch;
+          void options.api.detail(campaign, detail.character.id).then(latest => {
+            if (!current(token) || !dialog.open) return;
+            editor = createCastEditor(latest, latest); preset = null; renderSheet(latest);
+            showLifecycle(action, { api: options.api.lifecycle!, campaign, detail: latest, list: options.api.list, lock: syncLock,
+              finished(id, notice) { if (!id) void loadRoster(undefined, notice); else void openDetail(id).then(() => { if (dialog.open) status(notice); }); }
+            });
+          }).catch(error => { if (current(token)) status(message(error)); });
+        }), !enabled || locked() || saving));
+      }
+      form.append(actions);
+    }
+    presentation = mountCampaignPresentation(form, {
+      context: preset ? "campaign-preset" : "campaign-supporting", detailed, initialSection: activeSection,
+      snapshot: () => ({ name: preset?.draft.values.name ?? editor?.draft.name ?? "", values: preset?.draft.values ?? { name: editor?.draft.name ?? "", "identity.aliases": editor?.draft.aliases ?? [], ...editor?.draft.profile }, dirty: dirty(), busy: saving || Boolean(editor?.saving), locked: locked(), readOnly: !enabled, status: editor?.error ?? "Changes apply to this campaign." }),
+      async commit() { if (save.disabled || !form.reportValidity()) return "blocked"; const state = editor; await saveDraft(); return editor === state || editor?.error ? "blocked" : "saved"; },
+      close() { const keep = dialog.querySelector<HTMLButtonElement>("[data-cast-confirm] button"); if (keep) keep.click(); else requestNavigation(() => { void loadRoster(); }); }, continued() { detailed = true; }
+    });
   }
   function fieldLabel(path: string) { return fields.find(([field]) => field === path)?.[1] ?? path; }
   function renderEvidence() {
     if (!editor?.loaded || options.campaignPage) return;
     const details = node("details"), summary = node("summary", "Sources and edit history"); details.id = "cast-sources"; details.append(summary);
     for (const item of [...editor.loaded.identityEvents.map((event) => ({ label: `Name: ${event.name}`, evidence: event.evidence })),
-      ...editor.loaded.observations.map((observation) => ({ label: `${observation.mode === "claim" ? "Claim" : "Observation"}: ${fieldLabel(observation.field)} — ${observation.value}`, evidence: observation.evidence })),
       ...editor.loaded.overrides.map((override) => ({ label: `Your override: ${fieldLabel(override.field)} — ${override.value || "(blank)"}`, evidence: override.evidence }))]) {
       const row = node("p", item.label); const evidence = item.evidence;
       if (evidence.kind === "turn") {
@@ -690,6 +729,15 @@ export function createLegacyCastPanel(options: {
       } else row.append(node("span", evidence.kind === "user" ? ` — Your edit at turn ${evidence.effectiveTurnNumber}` : " — World source"));
       details.append(row);
     }
+    const sourceDetail = editor.loaded;
+    renderObservationReview({ document, container: details, detail: sourceDetail,
+      supported: Boolean(((sourceDetail as CastDetail & { capabilities?: List["capabilities"] }).capabilities ?? list?.capabilities)?.castObservationDecisions),
+      editing: () => enabled && !locked() && !dirty() && !saving, current: () => dialog.open && editor?.loaded === sourceDetail,
+      lock: syncLock,
+      preview: (id, request) => options.api.previewObservationDecision!(campaign, sourceDetail.character.id, id, request),
+      apply: (id, request) => options.api.applyObservationDecision!(campaign, sourceDetail.character.id, id, request),
+      refresh: async () => { await openDetail(sourceDetail.character.id); const sources = dialog.querySelector<HTMLDetailsElement>("#cast-sources"); if (sources) { sources.open = true; sources.querySelector<HTMLElement>("summary")?.focus(); } },
+      navigate: turn => requestNavigation(() => { closePanel(); void options.navigateToTurn(turn); }) });
     for (const edit of editor.loaded.authoredHistory ?? []) {
       for (const [path, value] of Object.entries(edit.set)) details.append(node("p", `Campaign edit at turn ${edit.effectiveTurnNumber}: ${presetFields.find(field => field.path === path)?.label ?? path} — ${Array.isArray(value) ? value.join(", ") : value}`));
       for (const path of edit.reset) details.append(node("p", `Reset at turn ${edit.effectiveTurnNumber}: ${presetFields.find(field => field.path === path)?.label ?? path}`));
@@ -768,7 +816,7 @@ export function createLegacyCastPanel(options: {
     }
   }
   function message(error: unknown) { return error instanceof Error ? error.message : "The request failed. Please try again."; }
-  dialog.addEventListener("cancel", (event) => { event.preventDefault(); const keep = dialog.querySelector<HTMLButtonElement>("[data-cast-confirm] button"); if (keep) keep.click(); else requestClose(); });
+  dialog.addEventListener("cancel", (event) => { if (presentation) return; event.preventDefault(); const keep = dialog.querySelector<HTMLButtonElement>("[data-cast-confirm] button"); if (keep) keep.click(); else requestClose(); });
   window.addEventListener("beforeunload", (event) => { if (dirty()) { event.preventDefault(); event.returnValue = ""; } });
   return { requestClose, async open(characterOrOpener?: string | HTMLElement | null, opener?: HTMLElement | null) {
     const id = options.campaignId(); if (!id || dialog.open) return;

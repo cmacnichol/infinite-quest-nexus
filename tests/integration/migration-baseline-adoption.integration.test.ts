@@ -15,8 +15,9 @@ it("adopts the complete historical ledger without replaying SQL against tenant d
     await expect(migrateDatabase(pool, directory)).rejects.toThrow();
     expect((await pool.query("SELECT name FROM schema_migrations")).rowCount).toBe(133);
     await pool.query("UPDATE schema_migrations SET name='0001_initial_nexus' WHERE name='unexpected'");
-    await migrateDatabase(pool, directory);
-    expect((await pool.query("SELECT name FROM schema_migrations")).rows).toEqual([{name:"0133_baseline"}]);
+    expect(await migrateDatabase(pool, directory)).toEqual(["0134_cast_review_decisions"]);
+    expect((await pool.query("SELECT name FROM schema_migrations ORDER BY name")).rows)
+      .toEqual([{name:"0133_baseline"}, {name:"0134_cast_review_decisions"}]);
     expect(await migrateDatabase(pool, directory)).toEqual([]);
     expect(await initialOwnerId(pool)).toBe(owner);
     expect((await pool.query("SELECT owner_user_id,title FROM worlds WHERE id=$1", [world.id])).rows)

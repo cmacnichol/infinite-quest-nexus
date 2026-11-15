@@ -1,3 +1,6 @@
+import { observationFieldConflicts } from "./campaign-cast-observation-decision-repository.js";
+import { activeRetractionEvents, activeRetractedObservationIds } from "../../domain/src/campaign-cast-observation-decisions.js";
+import { observationDecisionRequestSchema, observationDecisionPreviewSchema, observationDecisionResultSchema, type ObservationDecisionRequest, type ObservationDecisionPreview, type ObservationDecisionResult } from "../../contracts/src/campaign-cast-observation-decisions.js";
 import { castPromoteSchema, castPromoteResultSchema, type CastPromotionPreview } from "../../contracts/src/campaign-cast-promotion.js";
 import { castMergeRequestSchema, castUnmergePreviewSchema, castUnmergeRequestSchema } from "../../contracts/src/campaign-cast-merge.js";
 import { previewCastMerge } from "../../domain/src/campaign-cast-merge.js";
@@ -9,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import { refreshCastChronicleMetadata } from "./campaign-cast-chronicle-metadata.js";
 import { castGenerationSnapshotSchema, castGenerationSnapshotFingerprint, type CastGenerationSnapshot } from "../../contracts/src/campaign-cast-context.js";
 import { readCastDiscoveryStatus } from "./campaign-cast-status-repository.js";
+import { createCastReviewDecisionRepository, readActiveReviewDismissals, isReviewDismissed } from "./campaign-cast-review-decision-repository.js";
 import { currentCastReviewCandidates } from "./campaign-cast-current-review.js";
 import { pendingCastDetailSql } from "./campaign-cast-review-sql.js";
 import { createCastCandidateRepository } from "./campaign-cast-candidate-repository.js";
@@ -118,6 +122,7 @@ async function projectJournal(client: DatabaseClient, scope: CastScope, campaign
   assertBoundary(campaign, state, boundary);
   const characterRows = (await client.query("SELECT id,origin,first_observed_turn FROM campaign_cast_characters WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY created_at,id", [scope.campaignId, scope.ownerUserId])).rows.map((row) => characterRowSchema.parse(row));
   const events = journal ?? (await client.query("SELECT id,effective_turn_number,payload,receipt,attachment FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY sequence", [scope.campaignId, scope.ownerUserId])).rows.map((row) => eventSchema.parse(row));
+  const retractedObservationIds = activeRetractedObservationIds(events.filter(event => event.effective_turn_number <= boundary.turnNumber));
   const attachmentProjection = projectCastAttachments(events, boundary.turnNumber);
   const observations = (await client.query(`SELECT id,character_id AS "characterId",field,value,mode,
     speaker_character_id AS "speakerCharacterId",evidence,supersedes_observation_id AS "supersedesObservationId"
@@ -297,7 +302,7 @@ async function projectJournal(client: DatabaseClient, scope: CastScope, campaign
     if (person.origin.kind === "protagonist") continue;
     const ownOverrides = [...(overrides.get(person.id)?.values() ?? [])];
     if (person.campaignProfile) {
-      const resolved = resolveSeededCastProfile({ profile: characterProfileSchema.parse(person.campaignProfile), observations: own, overrides: ownOverrides,
+      const resolved = resolveSeededCastProfile({ profile: characterProfileSchema.parse(person.campaignProfile), observations: own, overrides: ownOverrides, retractedObservationIds,
         ...(goalCutoffs.has(person.id) ? { restoreGoalsAfterTurn: goalCutoffs.get(person.id)! } : {}) });
       person.profile = resolved.profile; person.fieldSources = resolved.sources;
       for (const path of castAuthoredPathSchema.options) {
@@ -308,10 +313,10 @@ async function projectJournal(client: DatabaseClient, scope: CastScope, campaign
         } else person.fieldSources[path] ??= "none";
       }
     } else {
-      person.profile = projectCastProfile({ observations: own, overrides: ownOverrides });
+      person.profile = projectCastProfile({ observations: own, overrides: ownOverrides, retractedObservationIds });
       if (person.activeMerges?.length && !ownOverrides.some(item => item.field === "appearance.description")) {
         const superseded = new Set(own.map(item => item.supersedesObservationId).filter(Boolean));
-        const latest = own.filter(item => item.field === "appearance.description" && item.mode === "fact" && !superseded.has(item.id))
+        const latest = own.filter(item => item.field === "appearance.description" && item.mode === "fact" && !superseded.has(item.id) && !retractedObservationIds.has(item.id))
           .sort((a, b) => { const left = castEvidenceOrder(a.evidence), right = castEvidenceOrder(b.evidence); return left[0] - right[0] || left[1] - right[1]; }).at(-1);
         if (latest) person.profile["appearance.description"] = latest.value;
       }
@@ -321,7 +326,7 @@ async function projectJournal(client: DatabaseClient, scope: CastScope, campaign
     validateCastFiction(person.name);
     person.aliases.forEach(validateCastFiction);
   }
-  return { people, details, authoredEvidenceByCharacter, observationOrder: new Map(observations.map((item, index) => [item.id, index])), goalCutoffs, journal: events };
+  return { people, details, retractedObservationIds, authoredEvidenceByCharacter, observationOrder: new Map(observations.map((item, index) => [item.id, index])), goalCutoffs, journal: events };
 }
 
 async function snapshotProjection(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State | null, boundary: CastBoundary) {
@@ -379,9 +384,14 @@ async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Camp
   return (await snapshotProjection(client, scope, campaign, state, boundary)).snapshot;
 }
 
+function eligibleDraftObservations(observations: CastObservation[], retractedObservationIds: ReadonlySet<string>): CastObservation[] {
+  const superseded = new Set(observations.flatMap(item => item.supersedesObservationId ? [item.supersedesObservationId] : []));
+  return observations.filter(item => !superseded.has(item.id) && !retractedObservationIds.has(item.id));
+}
+
 async function collectDraftEvidence(client: DatabaseClient, scope: CastScope, boundary: CastBoundary, character: CastCharacter,
-  observations: CastObservation[]): Promise<import("../../contracts/src/campaign-cast.js").CastDraftPreviewResponse["evidence"]> {
-  const candidates = [...observations].reverse().filter(item => item.evidence.kind === "turn" && item.mode === "fact" && item.speakerCharacterId === null).slice(0, 40);
+  observations: CastObservation[], retractedObservationIds: ReadonlySet<string>): Promise<import("../../contracts/src/campaign-cast.js").CastDraftPreviewResponse["evidence"]> {
+  const candidates = eligibleDraftObservations(observations, retractedObservationIds).reverse().filter(item => item.evidence.kind === "turn" && item.mode === "fact" && item.speakerCharacterId === null).slice(0, 40);
   const events = (await client.query("SELECT id,effective_turn_number,payload,receipt,attachment FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND effective_turn_number <= $3 ORDER BY sequence DESC", [scope.campaignId, scope.ownerUserId, boundary.turnNumber])).rows.map(row => eventSchema.parse(row));
   const attachments = projectCastAttachments([...events].reverse(), boundary.turnNumber);
   const mentions: { eventId: string; evidence: Extract<CastEvidence, { kind: "turn" }>; range?: import("../../contracts/src/campaign-cast.js").CastSourceRange; allRanges?: import("../../contracts/src/campaign-cast.js").CastSourceRange[] }[] = [];
@@ -403,6 +413,15 @@ async function collectDraftEvidence(client: DatabaseClient, scope: CastScope, bo
   const byTurn = new Map(rows.map(row => [row.turn_id, row]));
   const evidence: import("../../contracts/src/campaign-cast.js").CastDraftPreviewResponse["evidence"] = [];
   let size = 0;
+  const overlapsRetraction = (source: Extract<CastEvidence, { kind: "turn" }>, paragraph: string, span: { start: number; end: number }) => observations.some(observation => {
+    const retracted = observation.evidence;
+    if (!retractedObservationIds.has(observation.id) || retracted.kind !== "turn" || retracted.turnId !== source.turnId
+      || retracted.narrationRevision !== source.narrationRevision || retracted.sourceHash !== source.sourceHash || retracted.paragraphId !== source.paragraphId || !retracted.quote) return false;
+    for (let start = paragraph.indexOf(retracted.quote); start >= 0; start = paragraph.indexOf(retracted.quote, start + 1)) {
+      if (start < span.end && start + retracted.quote.length > span.start) return true;
+    }
+    return false;
+  });
   for (const observation of candidates) {
     const e = observation.evidence;
     if (e.kind !== "turn") continue;
@@ -412,7 +431,7 @@ async function collectDraftEvidence(client: DatabaseClient, scope: CastScope, bo
     const paragraph = source.paragraphs.find(item => item.id === e.paragraphId)?.text;
     if (!paragraph || !supportsCastDraftFact({ paragraph, quote: e.quote, names: [character.name, ...character.aliases], field: observation.field, value: observation.value })) continue;
     const start = paragraph.indexOf(e.quote);
-    if (start < 0 || size + e.quote.length > 24000) continue;
+    if (start < 0 || size + e.quote.length > 24000 || overlapsRetraction(e, paragraph, { start, end: start + e.quote.length })) continue;
     evidence.push({ evidenceId: observation.id, characterId: character.id, turnId: e.turnId, turnNumber: e.turnNumber, narrationRevision: e.narrationRevision, sourceHash: e.sourceHash, paragraphId: e.paragraphId, start, end: start + e.quote.length, quote: e.quote });
     size += e.quote.length;
   }
@@ -425,6 +444,7 @@ async function collectDraftEvidence(client: DatabaseClient, scope: CastScope, bo
     if (!paragraph || (mention.range ? !paragraph.slice(mention.range.start, mention.range.end).trim() : !paragraph.includes(e.quote))) continue;
     const span = extractCastDraftFactSpan(paragraph, [character.name, ...character.aliases]);
     if (!span || span.quote.length > 1000 || size + span.quote.length > 24000 || evidence.some(item => item.evidenceId === mention.eventId)) continue;
+    if (overlapsRetraction(e, paragraph, span)) continue;
     evidence.push({ evidenceId: mention.eventId, characterId: character.id, turnId: e.turnId, turnNumber: row.turn_number, narrationRevision: e.narrationRevision, sourceHash: e.sourceHash, paragraphId: e.paragraphId, ...span });
     size += span.quote.length;
   }
@@ -458,7 +478,8 @@ export async function captureCastGenerationSnapshotWithClient(client: DatabaseCl
       const override = detail.overrides.find(item => item.field === field);
       const source: string = person.fieldSources?.[field as keyof typeof person.fieldSources] ?? (override ? "override" : "observation");
       const value = raw;
-      const observation = detail.observations.filter(item => item.field === field && item.value === value && item.mode === "fact")
+      const superseded = new Set(detail.observations.flatMap(item => item.supersedesObservationId ? [item.supersedesObservationId] : []));
+      const observation = detail.observations.filter(item => !superseded.has(item.id) && !projected.retractedObservationIds.has(item.id) && item.field === field && item.value === value && item.mode === "fact")
         .sort((a, b) => castEvidenceOrder(b.evidence)[0] - castEvidenceOrder(a.evidence)[0])[0];
       const evidence = source === "override" ? override?.evidence : source === "observation" ? observation?.evidence : undefined;
       const evidenceId = sourceId(evidence?.kind === "user" ? evidence.editId : source === "observation" ? observation?.id : authoredEvidence?.get(field), field);
@@ -488,7 +509,7 @@ export async function captureCastGenerationSnapshotWithClient(client: DatabaseCl
         : person.origin;
     return { ...rest, origin, name: projectCastFictionText(person.name, 200) || "Unnamed character", aliases: person.aliases.map(alias => projectCastFictionText(alias, 200)).filter(Boolean), profile };
   }) : visible;
-  const value = castGenerationSnapshotSchema.parse({ ...projected.snapshot, characters, ...(fiction ? { fiction } : {}), version: options.version ?? "cast-context-v1", scope,
+  const value = castGenerationSnapshotSchema.parse({ ...projected.snapshot, characters, ...(fiction ? { fiction } : {}), ...(!modern ? { retractedObservationIds: [...projected.retractedObservationIds].sort() } : {}), version: options.version ?? "cast-context-v1", scope,
     worldVersionId: campaign.world_version_id, coverageStartTurn, trackedThroughTurn,
     discoveryStatus: !options.discoveryEnabled ? "off" : trackedThroughTurn === boundary.turnNumber ? "current"
       : status.state === "failed" && status.firstGap && status.firstGap.turnNumber <= boundary.turnNumber ? "failed" : "pending",
@@ -505,6 +526,15 @@ async function cacheSnapshot(client: DatabaseClient, scope: CastScope, value: Ca
     await client.query(`INSERT INTO campaign_cast_profiles(owner_user_id,campaign_id,character_id,revision,profile)
       VALUES($1,$2,$3,$4,$5)`, [scope.ownerUserId, scope.campaignId, person.id, value.revision, JSON.stringify(person.profile)]);
   }
+}
+
+/** Project current cast without taking locks or initializing state, for read-only review views. */
+export async function readCastSnapshotWithClient(client: DatabaseClient, scope: CastScope): Promise<CastSnapshot> {
+  const row = (await client.query(`SELECT active_turn_number,world_version_id,selected_character_id,selected_character_world_id,character_profile,character_snapshot
+    FROM campaigns WHERE id=$1 AND owner_user_id=$2`, [scope.campaignId, scope.ownerUserId])).rows[0];
+  if (!row) throw new CampaignCastError("cast_not_found");
+  const campaign = campaignSchema.parse(row), state = await readState(client, scope);
+  return snapshot(client, scope, campaign, state, { turnNumber: campaign.active_turn_number, timelineRevision: state?.timeline_revision ?? 0 });
 }
 
 /** Lifecycle callers already own a transaction; never open a nested pool transaction. */
@@ -609,7 +639,9 @@ async function applyCommand(client: DatabaseClient, scope: CastScope, campaign: 
 }
 
 async function persistBatch(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State,
-  batch: CastBatch, requestHash: string, publicCharacterId?: string, deferMetadataRefresh = false, attachmentInput?: { characterId: string; basis: "unique_name" | "unique_world_name"; sourceRanges: import("../../contracts/src/campaign-cast.js").CastSourceRange[] }, trustedAuthored = false, eventId = randomUUID()): Promise<CastBatchReceipt> {
+  batch: CastBatch, requestHash: string, publicCharacterId?: string, deferMetadataRefresh = false, attachmentInput?: { characterId: string; basis: "unique_name" | "unique_world_name"; sourceRanges: import("../../contracts/src/campaign-cast.js").CastSourceRange[] }, trustedAuthored = false, eventId = randomUUID(), validatedObservationDecision = false): Promise<CastBatchReceipt> {
+  if (!validatedObservationDecision && batch.commands.some(command => command.kind === "retract_observation" || command.kind === "restore_observation"))
+    throw new Error("Observation decisions require the dedicated workflow.");
   const payload: StoredCommand[] = batch.commands.map((command) => ({ command,
     ...(command.kind === "create" ? { characterId: publicCharacterId ?? randomUUID() } : {}),
     ...(command.kind === "observe" ? { observationId: randomUUID() } : {}) }));
@@ -659,11 +691,35 @@ async function persistBatch(client: DatabaseClient, scope: CastScope, campaign: 
   return receipt;
 }
 
+// Filter only imported discovery evidence; explicit edits and confirmations retain their own semantics.
+function suppressRetractedDiscoveryFacts(batch: CastBatch, projected: Awaited<ReturnType<typeof snapshotProjection>>): CastBatch {
+  const effective = (id: string | null) => {
+    if (!id) return null;
+    const person = projected.snapshot.characters.find(item => item.id === id);
+    return person?.mergedIntoCharacterId ?? id;
+  };
+  const commands = batch.commands.filter(command => {
+    if (command.kind !== "observe" || command.mode !== "fact" || command.evidence.kind !== "turn") return true;
+    const characterId = effective(command.characterId);
+    const detail = projected.details.find(item => item.characterId === characterId);
+    return !detail?.observations.some(observation => projected.retractedObservationIds.has(observation.id)
+      && observation.field === command.field && observation.value === command.value && observation.mode === command.mode
+      && effective(observation.speakerCharacterId) === effective(command.speakerCharacterId)
+      && stableStringify(observation.evidence) === stableStringify(command.evidence));
+  });
+  return { ...batch, commands };
+}
+
+export async function retractedDiscoveryFactFilterWithClient(client: DatabaseClient, scope: CastScope, boundary: CastBoundary) {
+  const campaign = await lockCampaign(client, scope), state = await readState(client, scope);
+  const projected = await snapshotProjection(client, scope, campaign, state, boundary);
+  return (command: CastCommand) => suppressRetractedDiscoveryFacts({ boundary, idempotencyKey: "eligibility", commands: [command] }, projected).commands.length > 0;
+}
 /** Discovery publication and its receipt share the caller's transaction. */
 export async function applyCastBatchWithClient(client: DatabaseClient, rawScope: CastScope, rawBatch: CastBatch,
-  options: { deferMetadataRefresh?: boolean; attachment?: { characterId: string; basis: "unique_name" | "unique_world_name"; sourceRanges: import("../../contracts/src/campaign-cast.js").CastSourceRange[] } } = {}): Promise<CastBatchReceipt> {
+  options: { suppressRetractedFacts?: boolean; deferMetadataRefresh?: boolean; attachment?: { characterId: string; basis: "unique_name" | "unique_world_name"; sourceRanges: import("../../contracts/src/campaign-cast.js").CastSourceRange[] } } = {}): Promise<CastBatchReceipt> {
   const scope = castScopeSchema.parse(rawScope), batch = castBatchSchema.parse(rawBatch);
-  if (batch.commands.some(command => ["merge", "unmerge", "remove", "restore"].includes(command.kind)
+  if (batch.commands.some(command => ["merge", "unmerge", "remove", "restore", "retract_observation", "restore_observation"].includes(command.kind)
     || command.kind === "identity" && command.aliasChanges)) throw new Error("Lifecycle cast writes require the dedicated workflow.");
   const campaign = await lockCampaign(client, scope);
   const state = await initialize(client, scope, campaign);
@@ -679,7 +735,9 @@ export async function applyCastBatchWithClient(client: DatabaseClient, rawScope:
     const current = await snapshot(client, scope, campaign, state, batch.boundary);
     for (const command of manualCreates) if (command.kind === "create") assertNoRemovedNames(current.characters, [command.name, ...command.aliases]);
   }
-  return persistBatch(client, scope, campaign, state, batch, requestHash, undefined, options.deferMetadataRefresh, options.attachment);
+  const eligibleBatch = options.suppressRetractedFacts ? suppressRetractedDiscoveryFacts(batch, await snapshotProjection(client, scope, campaign, state, batch.boundary)) : batch;
+  if (!eligibleBatch.commands.length) throw new CampaignCastError("cast_invalid_request");
+  return persistBatch(client, scope, campaign, state, eligibleBatch, requestHash, undefined, options.deferMetadataRefresh, options.attachment);
 }
 
 /** Seed a roster entry in the caller's campaign transaction with one preallocated identity. */
@@ -718,18 +776,18 @@ export async function seedCampaignCastWithClient(client: DatabaseClient, rawScop
   return persistBatch(client, scope, campaign, state, batch, hash, input.characterId, false, attachment, true);
 }
 
-export function createPostgresCampaignCastRepository(pool: DatabasePool, options: { lifecycleEnabled?: boolean; castPresetsEnabled?: boolean; editingEnabled?: boolean; discoveryEnabled?: boolean; backfillEnabled?: boolean; castAutoMatchEnabled?: boolean; castContextEnabled?: boolean; storyMemoryCapability?: "r1" | "r2" | "r3" | null } = {}): CampaignCastRepositoryPort & CampaignCastWritePort {
+export function createPostgresCampaignCastRepository(pool: DatabasePool, options: { lifecycleEnabled?: boolean; castPresetsEnabled?: boolean; editingEnabled?: boolean; discoveryEnabled?: boolean; backfillEnabled?: boolean; castAutoMatchEnabled?: boolean; castContextEnabled?: boolean; storyMemoryCapability?: "r1" | "r2" | "r3" | null } = {}): CampaignCastRepositoryPort & CampaignCastWritePort & { previewObservationDecision(scope: CastScope, characterId: string, observationId: string, request: ObservationDecisionRequest): Promise<ObservationDecisionPreview>; applyObservationDecision(scope: CastScope, characterId: string, observationId: string, request: ObservationDecisionRequest): Promise<ObservationDecisionResult> } {
   async function verifyDraftFences(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State, boundary: CastBoundary,
     person: CastCharacter, fences: CastDraftEvidenceFence[] | undefined, edits: Record<string, unknown>): Promise<void> {
     if (!fences?.length) return;
     const fail = (): never => { throw new CampaignCastError("cast_draft_evidence_changed"); };
     const projected = await snapshotProjection(client, scope, campaign, state, boundary);
     const observations = projected.details.find(item => item.characterId === person.id)?.observations ?? [];
-    const eligible = await collectDraftEvidence(client, scope, boundary, person, observations);
+    const eligible = await collectDraftEvidence(client, scope, boundary, person, observations, projected.retractedObservationIds);
     if (new Set(fences.map(item => item.path)).size !== fences.length) fail();
     for (const fence of fences) {
       const allowed = person.campaignProfile ? castAuthoredPathSchema.safeParse(fence.path).success : castFieldSchema.safeParse(fence.path).success;
-      if (!allowed || edits[fence.path] !== fence.value || isCastUpdatingPath(fence.path) || observations.some(item => item.field === fence.path)
+      if (!allowed || edits[fence.path] !== fence.value || isCastUpdatingPath(fence.path) || eligibleDraftObservations(observations, projected.retractedObservationIds).some(item => item.field === fence.path)
         || !person.campaignProfile && fence.value.length > 2000) fail();
       try { validateCastFiction(fence.value); } catch { fail(); }
       const [section, key] = fence.path.split(".");
@@ -1056,7 +1114,53 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
     return { campaign, state, draft, person, content, preview };
   }
   const statusCache = new Map<string, { fingerprint: string; value: Awaited<ReturnType<NonNullable<CampaignCastWritePort["workspaceRead"]>>> }>();
+  async function observationDecision(rawScope: CastScope, rawId: string, rawObservationId: string, rawRequest: ObservationDecisionRequest, apply: boolean) {
+    const scope = castScopeSchema.parse(rawScope), id = z.uuid().parse(rawId), observationId = z.uuid().parse(rawObservationId), request = observationDecisionRequestSchema.parse(rawRequest);
+    return withTransaction(pool, async client => {
+      const campaign = await lockCampaign(client, scope);
+      if (!options.editingEnabled) throw new CampaignCastError("cast_editing_disabled");
+      const state = await readState(client, scope);
+      if (!state) throw new CampaignCastError("cast_not_found");
+      const hash = sha256(stableStringify({ operation: "observation-decision", id, observationId, request }));
+      if (apply) {
+        const prior = (await client.query("SELECT request_hash,receipt FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND idempotency_key=$3", [scope.campaignId, scope.ownerUserId, request.idempotencyKey])).rows[0];
+        if (prior) {
+          if (prior.request_hash !== hash) throw new CampaignCastError("cast_idempotency_conflict");
+          const receipt = castBatchReceiptSchema.parse(prior.receipt);
+          if (!receipt.result) throw new CampaignCastError("cast_idempotency_conflict");
+          return observationDecisionResultSchema.parse({ ...receipt.result, observationId, disposition: request.action === "retract" ? "retracted" : "restored", decisionEventId: receipt.eventId });
+        }
+      }
+      if (state.revision !== request.expectedCastRevision || state.timeline_revision !== request.expectedBoundary.timelineRevision || campaign.active_turn_number !== request.expectedBoundary.turnNumber) throw new CampaignCastError("cast_revision_conflict");
+      if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`, [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
+      const projected = await snapshotProjection(client, scope, campaign, state, request.expectedBoundary);
+      const person = projected.snapshot.characters.find(item => item.id === id);
+      if (!person) throw new CampaignCastError("cast_not_found");
+      if (person.removed) throw new CampaignCastError("cast_character_removed");
+      if (person.mergedIntoCharacterId) throw new CampaignCastError("cast_character_merged");
+      if (person.origin.kind === "protagonist") throw new CampaignCastError("cast_protagonist_read_only");
+      if (person.revision !== request.expectedCharacterRevision) throw new CampaignCastError("cast_revision_conflict");
+      const detail = projected.details.find(item => item.characterId === id)!;
+      const source = detail.observations.find(item => item.id === observationId);
+      if (!source || source.mode !== "fact" || source.evidence.kind !== "turn") throw new CampaignCastError("cast_invalid_request");
+      if (isSeededFixedCandidateHidden(person.campaignProfile && characterProfileSchema.parse(person.campaignProfile), source.field) || person.originProfile && !["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(source.field)) throw new CampaignCastError("cast_fixed_field_override");
+      const activeEvent = activeRetractionEvents(projected.journal.filter(event => event.effective_turn_number <= request.expectedBoundary.turnNumber)).get(observationId);
+      if (request.action === "retract" ? Boolean(activeEvent) : !activeEvent || activeEvent !== request.retractionEventId) throw new CampaignCastError("cast_invalid_request");
+      const command: CastCommand = request.action === "retract" ? { kind: "retract_observation", characterId: id, observationId } : { kind: "restore_observation", characterId: id, observationId, retractionEventId: request.retractionEventId };
+      const eventId = randomUUID(), hypothetical = eventSchema.parse({ id: eventId, effective_turn_number: request.expectedBoundary.turnNumber, payload: [{ command }], receipt: { eventId, revision: state.revision + 1, characterIds: [], observationIds: [] } });
+      const after = await projectJournal(client, scope, campaign, { ...state, revision: state.revision + 1 }, request.expectedBoundary, [...projected.journal, hypothetical]);
+      const changed = after.people.get(id)!;
+      const preview = observationDecisionPreviewSchema.parse({ field: source.field, currentValue: person.profile[source.field] ?? null, projectedValue: changed.profile[source.field] ?? null,
+        currentConflict: observationFieldConflicts(person, detail.observations, detail.overrides, projected.retractedObservationIds, source.field),
+        projectedConflict: observationFieldConflicts(changed, detail.observations, detail.overrides, after.retractedObservationIds, source.field), source, castRevision: state.revision, characterRevision: person.revision, boundary: request.expectedBoundary });
+      if (!apply) return preview;
+      const receipt = await persistBatch(client, scope, campaign, state, { boundary: request.expectedBoundary, idempotencyKey: request.idempotencyKey, commands: [command] }, hash, id, false, undefined, false, eventId, true);
+      return observationDecisionResultSchema.parse({ ...receipt.result, observationId, disposition: request.action === "retract" ? "retracted" : "restored", decisionEventId: eventId });
+    });
+  }
   return {
+    async previewObservationDecision(scope, characterId, observationId, request) { return observationDecision(scope, characterId, observationId, request, false) as Promise<ObservationDecisionPreview>; },
+    async applyObservationDecision(scope, characterId, observationId, request) { return observationDecision(scope, characterId, observationId, request, true) as Promise<ObservationDecisionResult>; },
     async promotionPreview(rawScope, rawId, rawWorldId) {
       if (!options.lifecycleEnabled) throw new CampaignCastError("cast_lifecycle_disabled");
       if (!options.editingEnabled) throw new CampaignCastError("cast_editing_disabled");
@@ -1151,9 +1255,9 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         if (character.origin.kind === "protagonist") throw new CampaignCastError("cast_protagonist_read_only");
         if (character.revision !== request.expectedCharacterRevision) throw new CampaignCastError("cast_revision_conflict");
         const observations = projected.details.find(item => item.characterId === id)?.observations ?? [];
-        const evidence = await collectDraftEvidence(client, scope, request.expectedBoundary, character, observations);
+        const evidence = await collectDraftEvidence(client, scope, request.expectedBoundary, character, observations, projected.retractedObservationIds);
         const source = (await client.query("SELECT c.text_provider_profile_id,w.content FROM campaigns c JOIN world_versions w ON w.id=c.world_version_id AND w.owner_user_id=c.owner_user_id WHERE c.id=$1 AND c.owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows[0];
-        return { character, boundary: request.expectedBoundary, evidence, observedPaths: [...new Set(observations.map(item => item.field))], textProviderProfileId: source?.text_provider_profile_id ?? null, worldContent: source?.content ?? null };
+        return { character, boundary: request.expectedBoundary, evidence, observedPaths: [...new Set(eligibleDraftObservations(observations, projected.retractedObservationIds).map(item => item.field))], textProviderProfileId: source?.text_provider_profile_id ?? null, worldContent: source?.content ?? null };
       });
     },
     editAuthoredProfile, fromWorldPreview, fromWorld,
@@ -1325,6 +1429,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
     edit: (scope, id, request) => write(scope, z.uuid().parse(id), request),
     discoveryStatus: (scope) => readCastDiscoveryStatus(pool, scope, options.discoveryEnabled === true),
     ...createCastCandidateRepository(pool, options.editingEnabled === true, options.castPresetsEnabled === true),
+    ...createCastReviewDecisionRepository(pool, options.editingEnabled === true),
     async workspaceRead(rawScope, statusOnly = false) {
       const scope = castScopeSchema.parse(rawScope);
       return withTransaction(pool, async (client) => {
@@ -1333,7 +1438,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         // operational revision; authority and source changes retain their own fences.
         const readFingerprint = async () => {
           const row = (await client.query(`SELECT c.active_turn_number,c.world_version_id,c.character_profile_revision,
-            c.selected_character_id,s.revision,s.timeline_revision,s.workspace_revision,e.capability
+            c.selected_character_id,s.revision,s.timeline_revision,s.workspace_revision,e.capability, (SELECT revision FROM campaign_cast_review_sequences r WHERE r.campaign_id=c.id AND r.owner_user_id=c.owner_user_id) AS review_revision
             FROM campaigns c LEFT JOIN campaign_cast_state s ON s.campaign_id=c.id AND s.owner_user_id=c.owner_user_id
             LEFT JOIN campaign_story_memory_enrollments e ON e.campaign_id=c.id AND e.owner_user_id=c.owner_user_id
             WHERE c.id=$1 AND c.owner_user_id=$2`, [scope.campaignId, scope.ownerUserId])).rows[0];
@@ -1355,11 +1460,11 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
           turnNumber: gap.turnNumber, jobId: gap.jobId, scanId: recoveryJob?.scan_id ?? null, scanStatus: recoveryJob?.scan_status ?? null } : undefined;
         const enrollment = (await client.query("SELECT capability FROM campaign_story_memory_enrollments WHERE campaign_id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows[0];
         const projected = await snapshotProjection(client, scope, campaign, state, boundary);
-        const rows = (await client.query(`SELECT p.proposal,p.resolution_receipt,p.detail_decisions,
+        const rows = (await client.query(`SELECT p.source,p.proposal,p.resolution_receipt,p.detail_decisions,
           ARRAY(SELECT (pending.item->>'index')::integer FROM (${pendingCastDetailSql}) pending) AS pending_indexes FROM campaign_cast_discovery_candidates p
           JOIN effective_turn_narrations n ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
           WHERE p.campaign_id=$1 AND p.owner_user_id=$2 AND p.status='pending'
-            AND (p.source->>'timelineRevision')::integer=$3 AND n.turn_number<=$4
+            AND (p.source->>'timelineRevision')::integer=$3 AND n.turn_number=(p.source->>'turnNumber')::integer AND n.turn_number<=$4
             AND n.correction_revision=(p.source->>'narrationRevision')::integer
             AND encode(digest(n.effective_narration,'sha256'),'hex')=p.source->>'sourceHash'`,
         [scope.campaignId, scope.ownerUserId, boundary.timelineRevision, boundary.turnNumber])).rows;
@@ -1371,12 +1476,14 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         };
         let identities = 0, details = 0, conflicts = 0;
         const byId = new Map(projected.snapshot.characters.map(person => [person.id, person]));
+        const activeReview = await readActiveReviewDismissals(client, scope, projected.snapshot.characters);
         for (const row of rows) {
+          if (!row.resolution_receipt && isReviewDismissed(activeReview, row.source, { kind: "identity", proposal: row.proposal })) continue;
           let id = row.resolution_receipt?.result?.character?.id ?? row.proposal?.existingCharacterId;
           let person = byId.get(id);
           while (person?.mergedIntoCharacterId) { id = person.mergedIntoCharacterId; person = byId.get(id); }
           if (person?.removed) continue;
-          const pendingIndexes = row.pending_indexes.filter((index: number) => !isSeededFixedCandidateHidden(
+          const pendingIndexes = row.pending_indexes.filter((index: number) => !isReviewDismissed(activeReview, row.source, { kind: "detail", proposal: row.proposal, observation: row.proposal.observations[index] }) && !isSeededFixedCandidateHidden(
             person?.campaignProfile && characterProfileSchema.parse(person.campaignProfile), row.proposal.observations[index].field));
           // Count the same actionable identity proposals that the review list returns.
           if (!row.resolution_receipt && person?.ignored) continue;
@@ -1392,32 +1499,21 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         const decisionCounts = (await client.query(`SELECT
           LEAST(10000,count(*) FILTER (WHERE p.resolution_receipt IS NOT NULL))::integer AS identities,
           LEAST(10000,COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p.detail_decisions) d WHERE d->'result'->>'disposition' IN ('confirm','accept'))),0))::integer AS confirmed,
-          LEAST(10000,COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p.detail_decisions) d WHERE d->'result'->>'disposition'='dismiss')),0))::integer AS dismissed
+          LEAST(10000,COALESCE(sum((SELECT count(*) FROM jsonb_array_elements(p.detail_decisions) d WHERE d->'result'->>'disposition'='dismiss')),0)
+            + COALESCE(sum((SELECT count(*) FROM campaign_cast_review_decisions d WHERE d.candidate_id=p.id AND d.campaign_id=p.campaign_id AND d.owner_user_id=p.owner_user_id AND d.action='dismiss' AND d.target_kind='detail')),0))::integer AS dismissed
           FROM campaign_cast_discovery_candidates p JOIN effective_turn_narrations n
             ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
           WHERE p.campaign_id=$1 AND p.owner_user_id=$2 AND p.status<>'cancelled'
-            AND (p.source->>'timelineRevision')::integer=$3 AND n.turn_number<=$4
+            AND (p.source->>'timelineRevision')::integer=$3 AND n.turn_number=(p.source->>'turnNumber')::integer AND n.turn_number<=$4
             AND n.correction_revision=(p.source->>'narrationRevision')::integer
             AND encode(digest(n.effective_narration,'sha256'),'hex')=p.source->>'sourceHash'`,
         [scope.campaignId, scope.ownerUserId, boundary.timelineRevision, boundary.turnNumber])).rows[0];
         for (const detail of projected.details) {
           const person = projected.snapshot.characters.find(item => item.id === detail.characterId);
           if (person?.removed || person?.mergedIntoCharacterId) continue;
-          const superseded = new Set(detail.observations.map(item => item.supersedesObservationId).filter(Boolean));
-          const fields = new Map<string, Set<string>>();
-          for (const item of detail.observations) {
-            if (item.mode !== "fact" || superseded.has(item.id) || item.field.startsWith("state.") || item.field === "story.goals") continue;
-            const values = fields.get(item.field) ?? new Set<string>(); values.add(item.value); fields.set(item.field, values);
-          }
-          const seeded = projected.snapshot.characters.find((person) => person.id === detail.characterId)?.campaignProfile;
-          for (const [field, values] of fields) {
-            if (seeded && field === "appearance.description") continue;
-            if (seeded && field !== "story.goals") {
-              const [section, key] = field.split(".");
-              const authored = (seeded as Record<string, any>)[section!]?.[key!];
-              if (typeof authored === "string" && authored.trim()) continue;
-            }
-            if (values.size > 1 && !detail.overrides.some(item => item.field === field)) { conflicts++; reviewIds.add(detail.characterId); conflictIds.add(detail.characterId); addAttention(detail.characterId, 1, 1); }
+          const fields = new Set(detail.observations.map(item => item.field));
+          for (const field of fields) if (observationFieldConflicts(person!, detail.observations, detail.overrides, projected.retractedObservationIds, field)) {
+            conflicts++; reviewIds.add(detail.characterId); conflictIds.add(detail.characterId); addAttention(detail.characterId, 1, 1);
           }
         }
         const levels = ["r1", "r2", "r3"];
@@ -1453,7 +1549,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         if (!character) throw new CampaignCastError("cast_not_found");
         const projected = await snapshotProjection(client, scope, campaign, state, boundary);
         const observations = projected.details.find((item) => item.characterId === id)?.observations ?? [];
-        const draftFromStoryEligible = character.origin.kind !== "protagonist" && (await collectDraftEvidence(client, scope, boundary, character, observations)).length > 0;
+        const draftFromStoryEligible = character.origin.kind !== "protagonist" && (await collectDraftEvidence(client, scope, boundary, character, observations, projected.retractedObservationIds)).length > 0;
         /* Retained events provide identity and attachment provenance. */
         const activeOverrides = projected.details.find(item => item.characterId === id)?.overrides ?? [];
         const identityEvents: CastDetail["identityEvents"] = [];
@@ -1493,8 +1589,25 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
               set: command.set, reset: command.reset });
           }
         }
+        const activeRetractions = activeRetractionEvents(events);
+        const retained = (await client.query(`SELECT id,character_id AS "characterId",field,value,mode,
+          speaker_character_id AS "speakerCharacterId",evidence,supersedes_observation_id AS "supersedesObservationId"
+          FROM campaign_cast_observations WHERE campaign_id=$1 AND owner_user_id=$2 AND id=ANY($3::uuid[]) ORDER BY sequence`,
+          [scope.campaignId, scope.ownerUserId, [...activeRetractions.keys()]])).rows.map(row => castObservationSchema.parse(row));
+        const retractedObservationHistory = retained.filter(item => {
+          const owner = value.characters.find(person => person.id === item.characterId);
+          return (character.mergedIntoCharacterId ? item.characterId : owner?.mergedIntoCharacterId ?? item.characterId) === id;
+        });
+        const currentIds = new Set(observations.map(item => item.id));
+        const history = [...observations, ...retractedObservationHistory.filter(item => !currentIds.has(item.id))];
+        const observationDecisionStatus: NonNullable<CastDetail["observationDecisionStatus"]> = history.map(item => {
+          const retractionEventId = activeRetractions.get(item.id) ?? null;
+          const reason = !currentIds.has(item.id) ? "source_invalid" : character.removed ? "removed" : character.mergedIntoCharacterId ? "merged"
+            : character.origin.kind === "protagonist" ? "protagonist" : isSeededFixedCandidateHidden(character.campaignProfile && characterProfileSchema.parse(character.campaignProfile), item.field) || character.originProfile && !["story.goals", "state.location", "state.condition", "state.clothing", "appearance.description"].includes(item.field) ? "fixed_field" : item.mode !== "fact" || item.evidence.kind !== "turn" ? "not_turn_fact" : null;
+          return { observationId: item.id, state: reason ? "read_only" : retractionEventId ? "retracted" : "eligible", retractionEventId, reason };
+        });
         const unresolvedCandidateIds = (await currentCastReviewCandidates(client, scope, value)).filter(item => item.characterId === id).map(item => item.id);
-        return { character, revision: value.revision, boundary, draftFromStoryEligible, observations, overrides: activeOverrides, autoMatches, identityEvents, authoredHistory, unresolvedCandidateIds,
+        return { character, revision: value.revision, boundary, draftFromStoryEligible, observations, observationDecisionStatus, retractedObservationHistory, overrides: activeOverrides, autoMatches, identityEvents, authoredHistory, unresolvedCandidateIds,
           editorDestination: character.origin.kind === "protagonist" ? `/api/v1/campaigns/${scope.campaignId}/character-profile` : null };
       });
     },

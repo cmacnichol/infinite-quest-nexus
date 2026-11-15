@@ -1,3 +1,5 @@
+import { observationDecisionRequestSchema, observationDecisionPreviewSchema, observationDecisionResultSchema, type ObservationDecisionRequest } from "@infinite-quest/contracts";
+import { reviewDecisionRequestSchema, reviewDecisionResultSchema, dismissedReviewQuerySchema, dismissedReviewPageSchema, type ReviewDecisionRequest } from "@infinite-quest/contracts";
 import { castLifecycleChangeSchema, castMergeRequestSchema, castMergePreviewSchema, castUnmergePreviewSchema, castUnmergeRequestSchema,
   castPromotionPreviewSchema, castPromoteSchema, castPromoteResultSchema, type CastLifecycleChange, type CastMergeRequest,
   type CastUnmergeRequest, type CastPromote } from "@infinite-quest/contracts";
@@ -21,7 +23,7 @@ import { readerTurnResponseSchema, readerTurnNumberSchema } from "@infinite-ques
 import { castBackfillRequestSchema, castBackfillPreviewSchema, castBackfillProgressSchema, castBackfillRetrySchema,
   type CastBackfillRequest, type CastBackfillRetry } from "@infinite-quest/contracts";
 
-const capabilities = z.object({ castEditing: z.boolean(), castPresets: z.boolean().optional(), castLifecycle: z.boolean().optional() });
+const capabilities = z.object({ castEditing: z.boolean(), castPresets: z.boolean().optional(), castLifecycle: z.boolean().optional(), castReviewDecisions: z.boolean().optional(), castObservationDecisions: z.boolean().optional(), castReviewDecisionReadVersion: z.literal(1).optional() });
 export const castListResponseSchema = castSnapshotSchema.extend({ characters: z.array(castRosterCharacterSchema), nextCursor: z.uuid().nullable(), recentWindow: z.number().int().positive().optional(), capabilities,
   attention: z.array(z.object({ characterId: z.uuid(), review: z.boolean(), conflict: z.boolean(), reviewCount: z.number().int().nonnegative().optional(), conflictCount: z.number().int().nonnegative().optional() }).strict()).max(50).optional() });
 export const castDetailResponseSchema = castDetailSchema.extend({ capabilities });
@@ -107,6 +109,25 @@ export function createCampaignCastApi(options: NexusHttpClientOptions = {
       const path = `${pathFor(campaignId)}/candidates`, query = validatedRequest(castCandidateQuerySchema, input, "GET", path);
       const search = new URLSearchParams({ limit: String(query.limit), view: query.view, ...(query.cursor ? { cursor: query.cursor } : {}) });
       return http.request({ method: "GET", path: `${path}?${search}`, responseSchema: castCandidateListSchema });
+    },
+    async previewObservationDecision(campaignId: string, characterId: string, observationId: string, input: ObservationDecisionRequest) {
+      const path = `${pathFor(campaignId)}/characters/${encodeURIComponent(characterId)}/observations/${encodeURIComponent(observationId)}/decision-preview`;
+      const value = validatedRequest(observationDecisionRequestSchema, input, "POST", path);
+      return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: observationDecisionPreviewSchema });
+    },
+    async applyObservationDecision(campaignId: string, characterId: string, observationId: string, input: ObservationDecisionRequest) {
+      const path = `${pathFor(campaignId)}/characters/${encodeURIComponent(characterId)}/observations/${encodeURIComponent(observationId)}/decision`;
+      const value = validatedRequest(observationDecisionRequestSchema, input, "POST", path);
+      return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: observationDecisionResultSchema });
+    },
+    reviewDecision: (campaignId: string, id: string, input: ReviewDecisionRequest) => {
+      const path = `${pathFor(campaignId)}/candidates/${encodeURIComponent(id)}/review-decisions`, value = validatedRequest(reviewDecisionRequestSchema, input, "POST", path);
+      return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: reviewDecisionResultSchema });
+    },
+    dismissedReview: async (campaignId: string, input: { cursor?: string; limit?: number } = {}) => {
+      const path = `${pathFor(campaignId)}/review-decisions`, query = validatedRequest(dismissedReviewQuerySchema, input, "GET", path);
+      const search = new URLSearchParams({ view: "dismissed", limit: String(query.limit), ...(query.cursor ? { cursor: query.cursor } : {}) });
+      return http.request({ method: "GET", path: `${path}?${search}`, responseSchema: dismissedReviewPageSchema });
     },
     resolveCandidate: (campaignId: string, id: string, input: ResolveCastCandidate) => {
       const path = `${pathFor(campaignId)}/candidates/${encodeURIComponent(id)}/resolve`, value = validatedRequest(resolveCastCandidateSchema, input, "POST", path);

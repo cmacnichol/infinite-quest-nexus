@@ -95,6 +95,37 @@ integration("campaign cast lifecycle", () => {
       expect(a.activeMerges?.[0]?.mergeEventId).not.toBe(merged.character.activeMerges?.[0]?.mergeEventId);
     }
   });
+
+  it("preserves retracted facts through actual branch and cross-world transfer", async () => {
+    const { scope } = await fixture();
+    const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const initial = await repo.current(scope);
+    const person = await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: randomUUID(), name: "Mara", aliases: [], profile: {} });
+    const turn = (await pool.query("SELECT turn_id,turn_number,correction_revision,effective_narration FROM effective_turn_narrations WHERE campaign_id=$1 ORDER BY turn_number LIMIT 1", [scope.campaignId])).rows[0];
+    const fact = await repo.applyBatch(scope, { boundary: initial.boundary, idempotencyKey: randomUUID(), commands: [{ kind: "observe", characterId: person.character.id,
+      field: "state.location", value: "harbor", mode: "fact", speakerCharacterId: null, supersedesObservationId: null,
+      evidence: { kind: "turn", turnId: turn.turn_id, turnNumber: turn.turn_number, narrationRevision: turn.correction_revision, sourceHash: sha256(turn.effective_narration), paragraphId: "p1", quote: turn.effective_narration.slice(0, 10) } }] });
+    const detail = await repo.detail(scope, person.character.id);
+    await repo.applyObservationDecision(scope, person.character.id, fact.observationIds[0]!, { action: "retract", expectedCastRevision: detail.revision,
+      expectedCharacterRevision: detail.character.revision, expectedBoundary: detail.boundary, idempotencyKey: randomUUID() });
+    const branch = await branchCampaign(pool, scope.campaignId, { targetTurnNumber: initial.boundary.turnNumber, title: "Correction branch" });
+    const destination = await fixture();
+    const version = (await pool.query("SELECT world_version_id FROM campaigns WHERE id=$1", [destination.scope.campaignId])).rows[0].world_version_id;
+    const request = campaignTransferPreviewRequestSchema.parse({ targetWorldVersionId: version });
+    const preview = await previewCampaignWorldTransfer(pool, scope.campaignId, request);
+    const transfer = await transferCampaignWorld(pool, scope.campaignId, campaignTransferCommitRequestSchema.parse({ ...request, idempotencyKey: randomUUID(),
+      expectedActiveTurnNumber: preview.expectedActiveTurnNumber, expectedStateRevision: preview.expectedStateRevision, sourceFingerprint: preview.sourceFingerprint }));
+    const { exportCampaignCast } = await import("../../packages/database/src/campaign-cast-portability.js");
+    for (const campaignId of [branch.id, transfer.targetCampaignId]) {
+      const copiedScope = { ownerUserId, campaignId };
+      const copied = (await repo.current(copiedScope)).characters.find(character => character.name === "Mara")!;
+      expect(copied.profile["state.location"]).toBeUndefined();
+      const archive = await withTransaction(pool, client => exportCampaignCast(client, copiedScope));
+      expect(archive?.formatVersion).toBe(5);
+      const copiedDetail = await repo.detail(copiedScope, copied.id);
+      expect(copiedDetail.observations[0]?.id).not.toBe(fact.observationIds[0]);
+    }
+  });
   it("replays remove and restore and discards later lifecycle events on rewind with presets disabled", async () => {
     const { scope } = await fixture();
     const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true, castPresetsEnabled: false });

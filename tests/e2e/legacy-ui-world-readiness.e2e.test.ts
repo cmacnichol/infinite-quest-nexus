@@ -297,7 +297,7 @@ test("failed readiness can be retried without losing current draft or character 
   await page.locator("#worldTitle").fill("Unsaved title during readiness retry");
   await page.locator('[data-world-author-step="character"]').click();
   await page.getByRole("button", { name: "Edit Mira Vale" }).click();
-  await page.locator("#characterStoryDetails > summary").click();
+  await page.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: /^History and notes ·/ }).click();
   await page.locator("#characterOtherGuidance").fill("Unsaved character guidance during readiness retry.");
   await page.locator("#saveCharacter").click();
   await page.locator('[data-world-author-step="review"]').click();
@@ -309,6 +309,7 @@ test("failed readiness can be retried without losing current draft or character 
   await page.locator('[data-world-author-step="character"]').click();
   await expect(page.getByRole("button", { name: "Edit Mira Vale" })).toBeVisible();
   await page.getByRole("button", { name: "Edit Mira Vale" }).click();
+  await page.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: /^History and notes ·/ }).click();
   await expect(page.locator("#characterOtherGuidance")).toHaveValue("Unsaved character guidance during readiness retry.");
   await page.locator("#cancelCharacter").click();
   await expect(page.locator("#characterDialog")).toBeHidden();

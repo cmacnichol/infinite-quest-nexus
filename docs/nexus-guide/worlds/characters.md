@@ -1,4 +1,4 @@
-# Author playable characters
+# Author world characters
 
 Campaign creation requires a published version with at least one complete playable character.
 
@@ -10,22 +10,28 @@ When the instance enables durable AI authoring, character proposals can be resum
 
 1. Open **Mechanics & Characters**.
 2. Select **+ Add character**.
-3. Enter **Character name** and **Character guidance**.
-4. Add **RPG statistics** with **+ Add statistic** where needed.
-5. Add **Starting trackers** with **+ Add tracker** where needed.
-6. Select **Add character**.
+3. In quick-create, enter **Character name**, choose **Use in campaigns**, and optionally add **Role** and **Personality**. Playable and Both characters need a story detail; Supporting characters can start with only a name.
+4. Select **Continue in detailed editor** for the full profile or mechanics. Continue keeps incomplete input and makes no save or provider request.
+5. Select **Add to world draft** or **Apply to world draft** when ready.
+6. Save the parent world form to persist the roster.
 
-Use **Edit character** to review and save changes or delete a draft character.
+Existing characters open in the detailed editor. Use the section navigation to edit identity, personality and voice, appearance, current situation, history and notes, or mechanics. On narrow screens, use the **Section** selector and previous/next actions. **Preview sheet** displays the local draft; it is not a narrator prompt preview.
+
+Statistics and starting trackers remain separate from fiction. Choosing Supporting hides mechanics without discarding them. If retained mechanics fail validation, the editor opens Mechanics and keeps it visible while you correct the fields. Imported source guidance remains read-only; **Organize notes with AI…** is in History and notes.
+
+Statistic notes, tracker starting values and update rules accept multiple lines. Remove controls name the affected row. **Undo removal** restores the most recent removed row, including its position and imported details; another removal replaces that Undo, and applying or closing the editor clears it.
+
+Cancel, Back and Escape use the unsaved-change decision. **Apply and leave** applies the character locally; the parent world still needs saving. Browser Back resolves the character draft before the parent world draft. After Apply, focus returns to the character’s roster action, or the roster heading if filters hide the character. Browser refresh or a crash does not recover unsaved manual edits.
 
 ## Generate a reviewed candidate
 
 When an effective default text model is configured:
 
-1. Select **Generate with default text model**.
+1. Expand **Draft a character with AI** in quick-create or the detailed editor's Overview.
 2. Enter a **Character concept or prompt**.
 3. Select **Generate character**.
 4. Review every populated field.
-5. Select **Add character** or **Save changes**.
+5. Select **Add to world draft** or **Apply to world draft**, then save the parent world.
 
 Generation never persists the candidate automatically. Unsaved premise and canon editor values may guide the candidate as bounded generation-only context. If either is empty, Nexus shows **World context is incomplete** and requires **Go back** or **Generate anyway**. If generation cannot be validated, your prompt and candidate fields remain available to review and retry; validated failures identify the affected stage or field and include a correlation ID. If the text provider is unavailable, use **Provider Setup** to open `/nexus/#providers` before retrying.
 
@@ -36,6 +42,8 @@ Published world characters are reusable starting canon. Story's **Characters** w
 
 
 Characters can be Playable, Supporting, or Both. Supporting characters need only a name and retain any mechanics if you later change their use. For Supporting and Both, choose whether they are selected by default in a new campaign and whether they are always included in narrator context. Duplicate a roster entry to create an independent copy, and use the move controls to set roster order. Existing characters remain Playable until changed. A world needs a playable character before a campaign can start.
+
+Search the roster by name, alias or role. The All, Playable, Supporting and Both filters match use exactly; they do not change the authored order. Clear filters to reorder characters. Summaries prefer personality, then background, then retained legacy guidance, and shorten only the displayed text. The roster limit remains 1,000 characters; a blocked addition keeps the new character draft open.
 
 ## Convert existing entities
 
@@ -48,3 +56,9 @@ Conversion adds Supporting characters to the local world draft and leaves the or
 In **Mechanics & Characters**, choose **Suggest cast**. Enter an optional direction and request three to eight character seeds. Review their names, roles and concepts, then choose **Expand selected**. The default text provider receives one seed request and one expansion per selected seed, plus any repair calls.
 
 You can stop after the current character, retry a single failed row, edit a finished suggestion in the character editor, or drop it. **Add selected to draft** adds the reviewed Supporting characters with their starting-cast option enabled. **Save world** persists the roster. Unadded suggestions last until the dialog closes or the page reloads. Manual character entry remains available when the provider is offline.
+
+## Review campaign discoveries and recorded facts
+
+In a campaign's Characters review, **Skip for now** defers an item for the current pass. Dismiss a discovery or an individual detail to suppress that exact source and proposal on later rescans. This does not ban a name: changed narration or evidence from another turn may appear again. Use **Dismissed** and Undo for dismissals made with this review workflow. Older detail dismissals still apply but are not listed or undoable there. Dismissals are operational and are not carried into branches or portable archives.
+
+For an eligible supporting-character fact, open its source history and choose **Retract fact**. Review the before-and-after preview and confirm; an older value or conflict can appear, and an override can remain unchanged. Retracted facts remain in history with **Restore fact**, which previews the current result before confirming. Source narration invalidated by correction or rewind cannot be restored as a fact. Retractions are campaign edits preserved by supported archive, branch and transfer workflows. Explicit supersession remains in force. If a stale review or preview conflicts, reload or reopen it before trying again. Character removal and restoration remain subject to the server's lifecycle capability.

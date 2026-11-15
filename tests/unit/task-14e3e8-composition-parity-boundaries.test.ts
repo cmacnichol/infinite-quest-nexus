@@ -218,7 +218,7 @@ describe("Task 14e3e8 private composition parity boundaries", () => {
 
   it("allows only the named e3g API composition to consume portable authority", () => {
     expect(check(readPrivateCompositionParitySources(process.cwd()))).toEqual([]);
-  });
+  }, 20_000); // Parses the full production source graph; CI runs tests concurrently.
 
   it("rejects System Archive bypassing the named e3g asset composition even for a type-only dependency", () => {
     expect(check(sources({

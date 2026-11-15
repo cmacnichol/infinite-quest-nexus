@@ -119,11 +119,13 @@ test("nested world character Cancel preserves parent edits and Apply changes onl
   await expect(page.locator("#discardChangesDialog")).toBeVisible();
   await page.locator('#discardChangesDialog button[value="discard"]').click();
   await expect(page.locator("#characterDialog")).toBeHidden();
+  await expect(page.locator("#addPlayableCharacter")).toBeFocused();
   await expect(page.locator("#worldTitle")).toHaveValue("Synthetic draft title");
   await expect(page.locator("#playableCharacterRoster")).not.toContainText("Discarded child character");
+  expect(writes).toEqual([]);
 
   await page.locator("#addPlayableCharacter").click();
-  await expect(page.locator("#saveCharacter")).toHaveText("Apply to world draft");
+  await expect(page.locator("#saveCharacter")).toHaveText("Add to world draft");
   await page.locator("#characterName").fill("Applied child character");
   await page.locator("#characterRole").fill("Synthetic guide");
   await page.locator("#saveCharacter").click();
@@ -155,7 +157,8 @@ test("applying a child character alone dirties an existing world draft and saves
   await page.locator("#characterRole").fill("Synthetic observer");
   await page.locator("#saveCharacter").click();
   await expect(page.locator("#characterDialog")).toBeHidden();
-  await expect(page.locator("#addPlayableCharacter")).toBeFocused();
+  await expect(page.getByRole("button", { name: "Edit Applied child only", exact: true })).toBeFocused();
+  expect(writes).toEqual([]);
   await page.screenshot({ path: resolve(evidenceDirectory, "existing-world-after-child-apply.png") });
 
   await page.locator("#cancelWorldAuthor").click();

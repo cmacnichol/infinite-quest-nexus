@@ -1,7 +1,9 @@
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 import { tabTo } from "./helpers/keyboard.js";
-import { mkdir, readFile } from "node:fs/promises";
-import { expect, test, type Page, type Route, type Locator } from "@playwright/test";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chromium, expect, test, type Page, type Route, type Locator } from "@playwright/test";
+
+import { resolve } from "node:path";
 
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const worldId = "33333333-3333-4333-8333-333333333333";
@@ -9,6 +11,13 @@ const versionId = "44444444-4444-4444-8444-444444444444";
 const protagonistId = "66666666-6666-4666-8666-666666666666";
 const candidateId = "88888888-8888-4888-8888-888888888888";
 const screenshotRoot = process.env.CAST_SCREENSHOT_ROOT;
+
+async function selectEditorSection(dialog: Locator, id: string) {
+  await expect(dialog.locator(".character-workspace")).toBeVisible();
+  const selector = dialog.getByRole("combobox", { name: "Section", exact: true });
+  if (await selector.isVisible()) await selector.selectOption(id);
+  else { const labels: Record<string, string> = { situation: "Current situation", sources: "Sources and history", identity: "Identity", overview: "Overview", personality: "Personality and voice" }; await dialog.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: new RegExp("^" + labels[id] + " ·") }).click(); }
+}
 
 async function openReview(dialog: Locator) {
   if (await dialog.getAttribute("id") === "campaignCastDialog") {
@@ -272,10 +281,11 @@ test("replacement cast recovers a new character draft after a revision conflict"
   expect(api.characters.filter(person => person.name === "New guide")).toHaveLength(1);
 });
 
-async function fixture(page: Page, deferredDetails = false, conflictFixture = false, presetFixture = false, applyFixture = false, seededFixture = false, deepLink = false, eligible = false) {
+async function fixture(page: Page, deferredDetails = false, conflictFixture = false, presetFixture = false, applyFixture = false, seededFixture = false, deepLink = false, eligible = false, reviewFixture = false, observationFixture = false) {
   let stalePreset = presetFixture;
   let liveLock = false;
   let revision = 0, enabled = true, conflict = false, trackingComplete = false, trackingUnavailable = false, pendingMatch = true;
+  let reviewDismissed = false; let reviewRevision = 0; let retracted = false; let sourceInvalid = false;
   let resolvedCharacterId: string | undefined;
   const characters: any[] = [{ id: protagonistId, name: "Iven", aliases: [], origin: { kind: "protagonist", selectedCharacterId: null },
     profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 0, lastObservedTurn: 1 }];
@@ -316,17 +326,19 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
         if (!applyFixture) characters.push(person); revision++; return send(route, { character: person, revision, boundary });
       }
       if (id === "context-preview") return send(route, { mode: "estimate", boundary, castRevision: revision, budgetTokens: 500, usedTokens: 25, coverage: { fromTurn: 1, throughTurn: 1, baseTurn: 1, current: true }, selected: [{ characterId: protagonistId, name: "Iven", reason: "pinned" }], omitted: [{ characterId: candidateId, reason: "budget" }], disabledReason: null });
-      if (id === "workspace-status") return send(route, { revision, boundary, capabilities: { editing: enabled, discovery: true, autoMatch: true, backfill: true, context: true }, contextDisabledReason: null, counts: { identities: pendingMatch ? 1 : 0, details: 0, conflicts: 1 }, tracking: { enabled: true, state: trackingComplete ? "complete" : "catching_up", activeTurnNumber: 1, coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: pendingMatch ? 1 : 0, firstGap: trackingComplete ? null : { turnNumber: 1, jobId: null, status: "missing", diagnosticCode: null } } });
+      if (id === "workspace-status") return send(route, { revision, boundary, capabilities: { editing: enabled, discovery: true, autoMatch: true, backfill: true, context: true, ...(reviewFixture ? { reviewDecisions: true, reviewDecisionReadVersion: 1 } : {}), ...(observationFixture ? { observationDecisions: true } : {}) }, contextDisabledReason: null, counts: { identities: pendingMatch ? 1 : 0, details: 0, conflicts: 1 }, tracking: { enabled: true, state: trackingComplete ? "complete" : "catching_up", activeTurnNumber: 1, coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: pendingMatch ? 1 : 0, firstGap: trackingComplete ? null : { turnNumber: 1, jobId: null, status: "missing", diagnosticCode: null } } });
       if (id === "discovery") return trackingUnavailable ? send(route, {}, 503) : send(route, {
         enabled: true, state: trackingComplete ? "complete" : "catching_up", activeTurnNumber: 1,
         coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: pendingMatch ? 1 : 0,
         firstGap: trackingComplete ? null : { turnNumber: 1, jobId: null, status: "missing", diagnosticCode: null } });
-      if (id === "candidates") return send(route, { revision, boundary, nextCursor: null, candidates: pendingMatch && !(url.searchParams.get("view") === "matches" && resolvedCharacterId) ? [{ id: candidateId,
+      if (reviewFixture && id === "review-decisions") return send(route, { revision, boundary, reviewRevision, nextCursor: null, decisions: reviewDismissed ? [{ decisionId: versionId, candidateId, canRestore: true, source: { scope: { campaignId, ownerUserId: worldId }, turnId: turn.id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), timelineRevision: 0, paragraphs: [{ id: "p1", text: turn.narration }] }, target: { kind: "identity", proposal: { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote: turn.narration }], observations: [] } } }] : [] });
+      if (reviewFixture && id === `candidates/${candidateId}/review-decisions`) { const input = request.postDataJSON(); writes.push(input); reviewDismissed = input.action !== "restore"; reviewRevision++; return send(route, { decisionId: versionId, candidateId, reviewRevision, revision, boundary, disposition: input.action }); }
+      if (id === "candidates") return send(route, { revision, boundary, nextCursor: null, candidates: pendingMatch && !reviewDismissed && !(url.searchParams.get("view") === "matches" && resolvedCharacterId) ? [{ id: candidateId,
         ...(resolvedCharacterId ? { resolvedCharacterId, details: [{ observationIndex: 0, field: "story.role", value: "gatekeeper", quote: turn.narration, reason: "claim_not_fact", sourceHash: "a".repeat(64) }] } : {}),
-        reason: "identity_needs_review", proposal: { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null,
+        reason: "identity_needs_review", ...(reviewFixture ? { reviewRevision, reviewDetails: [] } : {}), proposal: { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null,
           identityEvidence: [{ paragraphId: "p1", quote: turn.narration }], observations: deferredDetails ? [{ field: "story.role", value: "gatekeeper",
             mode: "fact", speakerCharacterId: null, paragraphId: "p1", quote: turn.narration }] : [] },
-        source: { turnId: turn.id, turnNumber: 1, narrationRevision: 0 } }] : [] });
+        source: { turnId: turn.id, turnNumber: 1, narrationRevision: 0, ...(reviewFixture ? { sourceHash: "a".repeat(64) } : {}) } }] : [] });
       if (id === `candidates/${candidateId}/resolve`) {
         const input = request.postDataJSON(); writes.push(input);
         if (!enabled) return send(route, { code: "cast_editing_disabled" }, 503);
@@ -339,6 +351,12 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
         resolvedCharacterId = person.id;
         return send(route, { candidateId, character: person, revision, boundary, observationIds: [],
           ...(deferredDetails ? { pendingObservations: [{ index: 0, reason: "claim_not_fact" }] } : {}) });
+      }
+      if (observationFixture && id?.startsWith(`characters/${candidateId}/observations/`)) {
+        const observation = { id: protagonistId, characterId: candidateId, field: "story.role", value: "guide", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: turn.id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: turn.narration } };
+        if (id.endsWith("decision-preview")) return send(route, { field: observation.field, currentValue: retracted ? null : "guide", projectedValue: retracted ? "guide" : null, currentConflict: false, projectedConflict: false, source: observation, castRevision: revision, characterRevision: 0, boundary });
+        const input = request.postDataJSON(); writes.push(input); retracted = input.action === "retract";
+        return send(route, { character: characters.find(c => c.id === candidateId), revision, boundary, observationId: protagonistId, decisionEventId: versionId, disposition: retracted ? "retracted" : "restored" });
       }
       if (request.method() !== "GET") {
         const input = request.postDataJSON(); writes.push(input);
@@ -359,8 +377,9 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
       }
       if (id) {
         const person = characters.find((c) => c.id === id);
+        if (observationFixture && id === candidateId) return send(route, { character: person, revision, boundary, capabilities: { castEditing: true, castObservationDecisions: true }, observations: sourceInvalid ? [] : [{ id: protagonistId, characterId: candidateId, field: "story.role", value: "guide", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: turn.id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: turn.narration } }], observationDecisionStatus: [{ observationId: protagonistId, state: sourceInvalid ? "read_only" : retracted ? "retracted" : "eligible", retractionEventId: retracted ? versionId : null, reason: sourceInvalid ? "source_invalid" : null }], retractedObservationHistory: sourceInvalid ? [{ id: protagonistId, characterId: candidateId, field: "story.role", value: "guide", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: turn.id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: turn.narration } }] : [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null });
         if (conflictFixture && id === candidateId) return send(route, { character: person, draftFromStoryEligible: eligible, revision, boundary, capabilities: { castEditing: enabled }, observations: ["guide", "guard"].map((value, index) => ({ id: index ? "77777777-7777-4777-8777-777777777778" : "77777777-7777-4777-8777-777777777777", characterId: id, field: "story.role", value, mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: turn.id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: turn.narration } })), overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null });
-        return send(route, { character: person, revision, boundary, capabilities: { castEditing: enabled }, observations: id === protagonistId ? [] : [{
+        return send(route, { character: person, revision, boundary, capabilities: { castEditing: enabled, ...(reviewFixture ? { castLifecycle: false } : {}) }, observations: id === protagonistId ? [] : [{
           id: "77777777-7777-4777-8777-777777777777", characterId: id, field: "story.role", value: "gatekeeper", mode: "claim",
           speakerCharacterId: protagonistId, supersedesObservationId: null,
           evidence: { kind: "turn", turnId: turn.id, turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: turn.narration }
@@ -373,7 +392,7 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
       const cursor = url.searchParams.get("cursor"), offset = cursor ? matches.findIndex((person) => person.id === cursor) + 1 : 0;
       const page = matches.slice(offset, offset + 2);
       return send(route, { revision, boundary, characters: page, attention: page.filter((person) => person.id === protagonistId).map((person) => ({ characterId: person.id, review: true, conflict: true, reviewCount: 2, conflictCount: 1 })),
-        nextCursor: offset + page.length < matches.length ? page.at(-1).id : null, capabilities: { castEditing: enabled, castPresets: presetFixture } });
+        nextCursor: offset + page.length < matches.length ? page.at(-1).id : null, capabilities: { castEditing: enabled, castPresets: presetFixture, ...(observationFixture ? { castObservationDecisions: true } : {}), ...(reviewFixture ? { castReviewDecisions: true, castReviewDecisionReadVersion: 1 } : {}) } });
     }
     if (path === "/api/v1/session") return send(route, { user: { id: worldId, displayName: "Fixture owner", settings: { autoSubmitTurnChoices: true, continuousReading: false, defaultTurnControlStyle: "flexible_action" } }, authentication: "deferred" });
     if (path === "/api/v1/meta") return send(route, { application: { name: "Nexus", version: "test", commit: null, builtAt: null }, capabilities: { castEditing: enabled, systemArchive: false } });
@@ -398,7 +417,7 @@ async function fixture(page: Page, deferredDetails = false, conflictFixture = fa
   await page.route(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/story/${campaignId}*`, (route) => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/story/${campaignId}${deepLink ? `?character=${candidateId}` : ""}`);
   await expect(page.locator("#storyTitle")).toHaveText("Cast fixture");
-  return { characters, writes, profileWrites, advanceRevision: () => { revision++; }, setLock: (value: boolean) => { liveLock = value; }, conflict: () => { conflict = true; }, disable: () => { enabled = false; },
+  return { characters, writes, profileWrites, setInvalidSource: () => { sourceInvalid = true; retracted = true; }, advanceRevision: () => { revision++; }, setLock: (value: boolean) => { liveLock = value; }, conflict: () => { conflict = true; }, disable: () => { enabled = false; },
     publishDiscovery: () => {
       revision++; trackingComplete = true; pendingMatch = false;
       let person = characters.find((character) => character.origin.kind === "discovered");
@@ -877,7 +896,7 @@ for (const surface of ["legacy", "next"] as const) test(`review paginates and gr
   await dialog.getByRole("button", { name: "Source turn 1", exact: true }).click();
   await expect(dialog.locator("mark")).toHaveText("Earlier evidence."); await expect(dialog).toContainText("Before. Earlier evidence. After.");
   await expect(dialog).toContainText("1 item remaining"); await expect(dialog.getByRole("button", { name: "Open full turn in story" })).toBeVisible();
-  const count = requests.length; await dialog.getByRole("button", { name: "Skip for this pass", exact: true }).click();
+  const count = requests.length; await dialog.getByRole("button", { name: "Skip for now", exact: true }).click();
   await expect(dialog).toContainText("Review complete for this pass."); expect(requests).toHaveLength(count); expect(writes).toHaveLength(0);
 });
 
@@ -1007,7 +1026,7 @@ test("supporting character warns on a roster alias without blocking save", async
   await dialog.locator("#cast-name").fill("the watcher");
   await expect(dialog).toContainText("A character with this name already exists");
   await expect(dialog.locator("#cast-save")).toBeEnabled();
-  await dialog.locator("#cast-save").click();
+  await dialog.getByRole("button", { name: "Save character", exact: true }).click();
   await expect.poll(() => api.writes.length).toBe(1);
   expect(api.writes[0]).toMatchObject({ name: "the watcher" });
   await expect(dialog.getByRole("button", { name: "Edit character", exact: true })).toBeVisible();
@@ -1055,8 +1074,8 @@ test("live generation locks character editing and preserves the unsaved draft", 
   await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue("Draft companion");
 });
 
-test("world profile badges and reset, clear and restore focus", async ({ page }) => {
-  await fixture(page, false, true, false, false, true); await open(page);
+for (const surface of ["Story", "Nexus"]) test(`${surface} world profile badges and reset, clear and restore focus`, async ({ page }) => {
+  await fixture(page, false, true, false, false, true); if (surface === "Story") await open(page); else await openNexusCampaignCharacters(page);
   const dialog = page.locator("#campaignCastDialog");
   await dialog.getByRole("button", { name: "Mara", exact: true }).click();
   await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
@@ -1068,6 +1087,7 @@ test("world profile badges and reset, clear and restore focus", async ({ page })
   const personality = dialog.locator("#cast-story-personality");
   await personality.locator("..").getByRole("button", { name: "Clear", exact: true }).click();
   await expect(personality).toHaveValue(""); await expect(personality).toBeFocused();
+  if (surface === "Nexus") await selectEditorSection(dialog, "situation");
   const goals = dialog.locator("#cast-story-goals");
   await goals.locator("..").getByRole("button", { name: "Restore authored goals" }).click();
   await expect(goals).toHaveValue("Find home"); await expect(goals).toBeFocused();
@@ -1081,25 +1101,27 @@ test("Story opens the character named by the deep link", async ({ page }) => {
   await expect(dialog.getByRole("button", { name: "Edit character", exact: true })).toBeVisible();
 });
 
-test("world profile conflict preserves and reapplies the draft", async ({ page }) => {
-  const api = await fixture(page, false, true, false, false, true); await open(page);
+for (const surface of ["Story", "Nexus"]) test(`${surface} world profile conflict preserves and reapplies the draft`, async ({ page }) => {
+  const api = await fixture(page, false, true, false, false, true); if (surface === "Story") await open(page); else await openNexusCampaignCharacters(page);
   const dialog = page.locator("#campaignCastDialog");
   await dialog.getByRole("button", { name: "Mara", exact: true }).click();
   await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
   await dialog.locator("#cast-story-role").fill("Navigator");
   api.conflict();
-  await dialog.locator("#cast-save").click();
+  await dialog.getByRole("button", { name: "Save character", exact: true }).click();
   await expect(dialog.locator("#cast-story-role")).toHaveValue("Navigator");
+  if (surface === "Nexus") await selectEditorSection(dialog, "sources");
   await dialog.getByRole("button", { name: "Compare latest" }).click();
   await dialog.getByRole("button", { name: "Reapply my changes" }).click();
   await expect(dialog.locator("#cast-story-role")).toHaveValue("Navigator");
-  await dialog.locator("#cast-save").click();
+  await dialog.getByRole("button", { name: "Save character", exact: true }).click();
   expect(api.writes.at(-1).set["story.role"]).toBe("Navigator");
 });
 
-for (const seeded of [false, true]) test(`Story reviews fenced facts in the ${seeded ? "preset" : "supporting"} editor`, async ({ page }) => {
+for (const surface of ["Story", "Nexus"]) for (const seeded of [false, true]) test(`${surface} reviews fenced facts in the ${seeded ? "preset" : "supporting"} editor`, async ({ page }) => {
   if (!seeded) await page.setViewportSize({ width: 390, height: 844 });
-  const api = await fixture(page, false, true, false, false, seeded, true, true);
+  const api = await fixture(page, false, true, false, false, seeded, surface === "Story", true);
+  if (surface === "Nexus") { await openNexusCampaignCharacters(page); await page.locator("#campaignCastDialog").getByRole("button", { name: "Mara", exact: true }).click(); }
   const quote = "Mara was raised at the lighthouse.", path = "story.background", value = "raised at the lighthouse";
   const span = { evidenceId: worldId, characterId: candidateId, turnId: versionId, turnNumber: 1, narrationRevision: 0,
     sourceHash: "a".repeat(64), paragraphId: "p1", start: 0, end: quote.length, quote };
@@ -1121,10 +1143,11 @@ for (const seeded of [false, true]) test(`Story reviews fenced facts in the ${se
   });
   const dialog = page.locator("#campaignCastDialog");
   await dialog.getByRole("button", { name: "Edit character", exact: true }).click();
+  if (surface === "Nexus") await selectEditorSection(dialog, "sources");
   const direction = dialog.getByLabel("Direction (optional)"); await direction.fill("Early years");
   const draft = dialog.getByRole("button", { name: "Draft from story", exact: true });
-  api.setLock(true); await expect(draft).toBeDisabled({ timeout: 8000 });
-  api.setLock(false); await expect(draft).toBeEnabled({ timeout: 8000 }); await draft.click();
+  if (surface === "Story") { api.setLock(true); await expect(draft).toBeDisabled({ timeout: 8000 }); api.setLock(false); }
+  await expect(draft).toBeEnabled({ timeout: 8000 }); await draft.click();
   await expect(dialog.getByText(quote, { exact: true })).toBeVisible(); await expect(dialog.getByRole("button", { name: "Turn 1", exact: true }).first()).toBeVisible();
   await expect(dialog.getByText("Current: Blank", { exact: true }).first()).toBeVisible();
   if (seeded) await expect(dialog.getByText("Creative guidance: Let the tide set the mood.")).toBeVisible();
@@ -1132,7 +1155,7 @@ for (const seeded of [false, true]) test(`Story reviews fenced facts in the ${se
   await page.screenshot({ path: `test-results/review-assets/unified-character-editor-phase-5/story-draft-${seeded ? "preset" : "supporting"}.png` });
   await dialog.getByRole("button", { name: "Apply selected suggestions" }).click(); expect(api.writes).toEqual([]);
   await expect(dialog.locator("#cast-story-background")).toHaveValue(value);
-  await dialog.locator("#cast-save").click(); await expect(dialog).toContainText("Run Draft from story again");
+  await dialog.getByRole("button", { name: "Save character", exact: true }).click(); await expect(dialog).toContainText("Run Draft from story again");
   await expect(dialog.locator("#cast-story-background")).toHaveValue(value); await draft.click();
   if (!seeded) {
     await expect(dialog).toContainText("Compare the latest values below");
@@ -1140,7 +1163,7 @@ for (const seeded of [false, true]) test(`Story reviews fenced facts in the ${se
     await draft.click();
   }
   await dialog.getByRole("button", { name: "Apply selected suggestions" }).click();
-  await dialog.locator("#cast-save").click();
+  await dialog.getByRole("button", { name: "Save character", exact: true }).click();
   await expect.poll(() => api.writes.length).toBe(1);
   expect(api.writes[0].draftEvidenceFences).toEqual([fence]); expect(previews).toBe(2);
   if (seeded) expect(api.writes[0].set["story.otherGuidance"]).toBe("Let the tide set the mood.");
@@ -1165,7 +1188,7 @@ for (const eligible of [false, true]) test(`Story keeps manual editing available
     await expect(draft).toBeDisabled(); await expect(dialog).toContainText("An eligible story citation is required");
   }
   await expect(field).toHaveValue("Written by hand"); expect(api.writes).toEqual([]);
-  await dialog.locator("#cast-save").click();
+  await dialog.getByRole("button", { name: "Save character", exact: true }).click();
   await expect.poll(() => api.writes.length).toBe(1); expect(api.writes[0].draftEvidenceFences).toBeUndefined();
   expect(previews).toBe(Number(eligible));
 });
@@ -1264,9 +1287,11 @@ for (const width of [1280, 390]) test(`lifecycle review, merge, undo, remove and
   await expect(workspace.locator("#cast-save")).toBeDisabled();
   await capture("held-name");
   await workspace.getByLabel("Name", { exact: true }).fill("New person");
+  if (width === 390) { await workspace.getByRole("button", { name: "Continue in detailed editor" }).click(); await selectEditorSection(workspace, "identity"); }
   await workspace.getByLabel("Aliases (one per line)").fill("mara");
   await expect(workspace.getByText("A removed character holds this name. Restore them instead.")).toBeVisible();
   await workspace.getByLabel("Aliases (one per line)").fill("");
+  if (width === 390) await selectEditorSection(workspace, "overview");
   await workspace.getByLabel("Name", { exact: true }).fill("ＭＡＲＡ");
   await workspace.getByRole("button", { name: "Restore Mara" }).click();
   const unsaved = workspace.getByRole("alertdialog", { name: "Unsaved character changes" });
@@ -1341,4 +1366,372 @@ test("rollback keeps Removed readable while lifecycle actions are unavailable", 
   await expect(sheet.getByRole("button", { name: "Merge with another character" })).toHaveCount(0);
   await expect(sheet.getByRole("button", { name: "Edit character" })).toHaveCount(0);
   expect(writes).toBe(0);
+});
+
+for (const width of [1280, 390]) test(`Nexus campaign quick creation keeps one draft through detailed sections at ${width}px`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 900 });
+  const api = await fixture(page); await openNexusCampaignCharacters(page);
+  const dialog = page.locator('#campaignCastDialog');
+  await dialog.getByRole('button', { name: 'Add character', exact: true }).click();
+  await expect(dialog.locator('.character-quick-create')).toBeVisible();
+  await dialog.getByLabel('Name', { exact: true }).fill('Quick companion');
+  await dialog.getByLabel('Role', { exact: true }).fill('Guide');
+  await dialog.getByLabel('Personality', { exact: true }).fill('Patient');
+  await expect(dialog.getByLabel('Use in campaigns')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Continue in detailed editor' }).click();
+  await expect(dialog.locator('.character-workspace')).toBeVisible();
+  await expect(dialog.locator('.character-workspace-fields').getByRole('textbox').first()).toHaveAccessibleName('Name');
+  await expect(dialog.getByLabel('Name', { exact: true })).toHaveValue('Quick companion');
+  await expect(dialog.getByLabel('Role', { exact: true })).toHaveValue('Guide');
+  await dialog.getByRole('button', { name: 'Preview sheet', exact: true }).click();
+  await expect(dialog.locator('.character-workspace-preview')).toContainText('Role: Guide');
+  await expect(dialog.locator('.character-workspace-preview')).not.toContainText('story.role');
+  await dialog.getByRole('button', { name: 'Return to editing', exact: true }).click();
+  await page.screenshot({ path: process.env.CAST_SCREENSHOT_ROOT ? `${process.env.CAST_SCREENSHOT_ROOT}/campaign-supporting-detail-${width}.png` : info.outputPath(`campaign-supporting-detail-${width}.png`) });
+  await dialog.getByRole('button', { name: 'Save character', exact: true }).click();
+  await expect.poll(() => api.writes.length).toBe(1);
+  expect(api.writes[0]).toMatchObject({ name: 'Quick companion', profile: { 'story.role': 'Guide', 'story.personality': 'Patient' } });
+  await expect(dialog.locator('.character-workspace')).toHaveCount(0);
+  await expect(dialog.getByRole('heading', { name: 'Quick companion', exact: true })).toBeVisible();
+});
+
+
+test("Nexus dirty editor stages lifecycle entry and cancellation preserves its draft", async ({ page }) => {
+  const api = await fixture(page, false, true);
+  await page.route("**/cast?*", route => route.fulfill({ json: { revision: 0, boundary: { turnNumber: 1, timelineRevision: 0 }, characters: api.characters, nextCursor: null, capabilities: { castEditing: true, castLifecycle: true } } }));
+  await page.route(`**/cast/${candidateId}`, route => route.fulfill({ json: { revision: 0, boundary: { turnNumber: 1, timelineRevision: 0 }, character: api.characters.find(person => person.id === candidateId), observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null, capabilities: { castEditing: true, castLifecycle: true } } }));
+  await openNexusCampaignCharacters(page);
+  const dialog = page.locator('#campaignCastDialog');
+  await dialog.getByRole('button', { name: 'Mara', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Edit character', exact: true }).click();
+  await dialog.getByLabel('Name', { exact: true }).fill('Uncommitted Mara');
+  await selectEditorSection(dialog, "sources");
+  for (const name of ['Merge with another character', 'Remove from cast', 'Add to world draft']) {
+    await dialog.getByRole('button', { name, exact: true }).click();
+    const prompt = dialog.getByRole('alertdialog', { name: 'Unsaved character changes' });
+    await expect(prompt).toBeVisible();
+    await expect(page.locator('dialog.cast-lifecycle')).toHaveCount(0);
+    await prompt.getByRole('button', { name: 'Keep editing' }).click();
+    await expect(dialog.getByLabel('Name', { exact: true })).toHaveValue('Uncommitted Mara');
+  }
+});
+
+
+test("Nexus preset validation reveals identity without losing section draft", async ({ page }) => {
+  await fixture(page, false, true, false, false, true); await openNexusCampaignCharacters(page);
+  const dialog = page.locator('#campaignCastDialog');
+  await dialog.getByRole('button', { name: 'Mara', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Edit character', exact: true }).click();
+  await dialog.getByLabel('Name', { exact: true }).fill('');
+  await selectEditorSection(dialog, 'personality');
+  await dialog.getByRole('button', { name: 'Save character', exact: true }).click();
+  await expect(dialog.getByLabel('Name', { exact: true })).toBeVisible();
+  await expect(dialog.getByLabel('Name', { exact: true })).toBeFocused();
+  await dialog.getByLabel('Name', { exact: true }).fill('Repaired Mara');
+  await selectEditorSection(dialog, 'sources');
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Keep editing', exact: true }).click();
+  await expect(dialog.getByRole('navigation', { name: 'Character sections' }).getByRole('button', { name: /^Sources and history/ })).toHaveAttribute('aria-current', 'true');
+});
+
+
+for (const seeded of [false, true]) test(`Nexus ${seeded ? 'preset' : 'supporting'} ignores late story draft after switching character`, async ({ page }) => {
+  await fixture(page, false, true, false, false, seeded, false, true); await openNexusCampaignCharacters(page);
+  const dialog = page.locator('#campaignCastDialog');
+  await dialog.getByRole('button', { name: 'Mara', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Edit character', exact: true }).click();
+  await selectEditorSection(dialog, 'sources');
+  let release!: () => void; let started = false;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/draft-preview', async route => { started = true; await gate; await route.fulfill({ json: { boundary: { turnNumber: 1, timelineRevision: 0 }, characterRevision: 0, proposals: [{ path: 'story.otherGuidance', value: 'Late old-character advice', evidenceIds: [] }], evidence: [], omitted: [] } }); });
+  await dialog.getByRole('button', { name: 'Draft from story', exact: true }).click();
+  await expect.poll(() => started).toBe(true);
+  await dialog.getByRole('button', { name: 'Back', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Iven', exact: true }).click();
+  release();
+  await expect(dialog.getByRole('heading', { name: 'Iven', exact: true })).toBeVisible();
+  await expect(dialog).not.toContainText('Late old-character advice');
+  await expect(dialog.getByRole('button', { name: 'Apply selected suggestions', exact: true })).toHaveCount(0);
+});
+
+
+test("Nexus manual quick and detailed creation validate name and retain authored input without writes", async ({ page }) => {
+  const api = await fixture(page); await openNexusCampaignCharacters(page);
+  const dialog = page.locator('#campaignCastDialog');
+  await dialog.getByRole('button', { name: 'Add character', exact: true }).click();
+  await dialog.getByLabel('Role', { exact: true }).fill('Remember this guide');
+  await dialog.getByRole('button', { name: 'Create campaign character', exact: true }).click();
+  await expect(dialog).toContainText('Enter a character name.');
+  await expect(dialog.getByLabel('Role', { exact: true })).toHaveValue('Remember this guide');
+  expect(api.writes).toEqual([]);
+  await dialog.getByRole('button', { name: 'Continue in detailed editor' }).click();
+  await selectEditorSection(dialog, 'identity');
+  await dialog.getByRole('button', { name: 'Save character', exact: true }).click();
+  await expect(dialog.getByLabel('Name', { exact: true })).toBeVisible();
+  await expect(dialog.getByLabel('Name', { exact: true })).toBeFocused();
+  await expect(dialog).toContainText('Enter a character name.');
+  await expect(dialog.getByLabel('Role', { exact: true })).toHaveValue('Remember this guide');
+  expect(api.writes).toEqual([]);
+});
+
+
+for (const action of ['reset', 'clear', 'restore', 'discover']) test(`Nexus pristine ${action} policy action immediately enables visible Save`, async ({ page }) => {
+  const seeded = action !== 'discover';
+  const api = await fixture(page, false, true, false, false, seeded);
+  if (!seeded) await page.route(`**/cast/${candidateId}`, route => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    return route.fulfill({ json: { revision: 0, boundary: { turnNumber: 1, timelineRevision: 0 }, capabilities: { castEditing: true },
+      character: { ...api.characters.find(person => person.id === candidateId), profile: { 'story.role': 'Captain' } },
+      observations: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null,
+      overrides: [{ field: 'story.role', value: 'Captain', evidence: { kind: 'user', editId: protagonistId, effectiveTurnNumber: 1 } }] } });
+  });
+  await openNexusCampaignCharacters(page);
+  const dialog = page.locator('#campaignCastDialog');
+  await dialog.getByRole('button', { name: 'Mara', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Edit character', exact: true }).click();
+  const save = dialog.getByRole('button', { name: 'Save character', exact: true });
+  await expect(save).toBeDisabled();
+  if (action === 'restore') await selectEditorSection(dialog, 'situation');
+  const path = action === 'clear' ? 'personality' : action === 'restore' ? 'goals' : 'role';
+  const label = action === 'reset' ? 'Reset to world value' : action === 'clear' ? 'Clear' : action === 'restore' ? 'Restore authored goals' : 'Use discovered value for role';
+  await dialog.locator('#cast-story-' + path).locator('..').getByRole('button', { name: label, exact: true }).click();
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect.poll(() => api.writes.length).toBe(1);
+  if (action === 'reset') expect(api.writes[0].reset).toEqual(['story.role']);
+  if (action === 'clear') expect(api.writes[0].reset).toEqual(['story.personality']);
+  if (action === 'restore') expect(api.writes[0].restoreAuthoredGoals).toBe(true);
+  if (action === 'discover') expect(api.writes[0].clearOverrides).toEqual(['story.role']);
+});
+
+test('Nexus adjacent section navigation survives conflict and reapply rerenders at390', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  const api = await fixture(page, false, true, false, false, true); await openNexusCampaignCharacters(page);
+  const dialog = page.locator('#campaignCastDialog');
+  await dialog.getByRole('button', { name: 'Mara', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Edit character', exact: true }).click();
+  await dialog.locator('#cast-story-role').fill('Navigator');
+  await dialog.getByRole('button', { name: 'Next section', exact: true }).click();
+  const selector = dialog.getByRole('combobox', { name: 'Section', exact: true });
+  await expect(selector).toHaveValue('identity');
+  api.conflict(); await dialog.getByRole('button', { name: 'Save character', exact: true }).click();
+  await expect(dialog).toContainText('The campaign or character changed');
+  await expect(selector).toHaveValue('identity');
+  while (await selector.inputValue() !== 'sources') await dialog.getByRole('button', { name: 'Next section', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Compare latest', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: 'Reapply my changes', exact: true })).toBeVisible();
+  await expect(selector).toHaveValue('sources');
+  await dialog.getByRole('button', { name: 'Reapply my changes', exact: true }).click();
+  await expect(selector).toHaveValue('sources');
+});
+
+
+for (const surface of ["legacy", "next"] as const) for (const width of [1440, 390]) test(`recoverable review dismissal ${surface} ${width}`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 900 });
+  const api = await fixture(page, false, false, false, false, false, false, false, true);
+  api.characters.push({ id: candidateId, name: "Supporting", aliases: [], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 1, lastObservedTurn: 1 });
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace");
+  await dialog.getByRole("button", { name: "Supporting", exact: true }).click();
+  await expect(dialog).toContainText("Removing and restoring characters is disabled on this server.");
+  await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
+  await openReview(dialog);
+  await expect(dialog.getByRole("button", { name: "Dismiss discovery" })).toBeVisible();
+  await dialog.screenshot({ path: info.outputPath(`pending-${surface}-${width}.png`) });
+  await dialog.getByRole("button", { name: "Dismiss discovery" }).click();
+  await expect(dialog.getByText("Dismissed.", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Nothing needs review." })).toBeFocused();
+  await dialog.screenshot({ path: info.outputPath(`dismissed-${surface}-${width}.png`) });
+  await dialog.getByRole("button", { name: "Dismissed", exact: true }).click();
+  await expect(dialog).toContainText("Dismissals made with this review workflow");
+  const undoKeys: string[] = [];
+  await page.route(`**/cast/candidates/${candidateId}/review-decisions`, route => {
+    const input = route.request().postDataJSON(); undoKeys.push(input.idempotencyKey);
+    return undoKeys.length === 1 ? route.fulfill({ status: 503, json: { code: "unavailable" } }) : route.fallback();
+  });
+  await dialog.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(dialog).toContainText("Could not restore this dismissal.");
+  await dialog.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(dialog).toContainText("Dismissal undone.");
+  expect(undoKeys).toHaveLength(2); expect(undoKeys[0]).toBe(undoKeys[1]);
+  await expect(dialog.getByRole("heading", { name: "Identity: Mara" })).toBeFocused();
+  expect(api.writes.map((write: any) => write.action)).toEqual(["dismiss_identity", "restore"]);
+  await dialog.getByRole("button", { name: "Dismiss discovery" }).click();
+  await expect(dialog.getByRole("heading", { name: "Nothing needs review." })).toBeFocused();
+  await page.route(`**/cast/candidates/${candidateId}/review-decisions`, route => route.fulfill({ status: 409, json: { code: "cast_revision_conflict" } }));
+  await dialog.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(dialog).toContainText("The source or review changed. Reload before deciding.");
+  await expect(dialog.getByRole("button", { name: "Undo", exact: true })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Reload review", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "Nothing needs review." })).toBeFocused();
+});
+
+for (const surface of ["legacy", "next"] as const) test(`review waits for dismissal and keeps focus on the result ${surface}`, async ({ page }) => {
+  const api = await fixture(page, false, false, false, false, false, false, false, true);
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; }); let calls = 0;
+  await page.route(`**/cast/candidates/${candidateId}/review-decisions`, async route => {
+    calls++; if (calls > 1) return route.fallback(); await gate; return route.fulfill({ status: 503, json: { code: "unavailable" } });
+  });
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace");
+  await openReview(dialog);
+  const dismiss = dialog.getByRole("button", { name: "Dismiss discovery" }); await dismiss.click();
+  await expect.poll(() => calls).toBe(1);
+  await expect(dialog.getByRole("button", { name: "Dismissed", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Back to characters", exact: true })).toBeDisabled();
+  await expect(dismiss).toBeDisabled();
+  await expect(dialog).toContainText("Identity: Mara");
+  await dialog.getByRole("button", { name: "Dismissed", exact: true }).evaluate((button: HTMLButtonElement) => button.click());
+  await dismiss.evaluate((button: HTMLButtonElement) => { button.click(); button.click(); });
+  expect(calls).toBe(1); await expect(dialog).toContainText("Identity: Mara");
+  release(); await expect(dialog).toContainText("Could not confirm this decision");
+  await expect(dismiss).toBeEnabled(); await expect(dialog.getByRole("button", { name: "Dismissed", exact: true })).toBeEnabled();
+  expect(calls).toBe(1); expect(api.writes).toHaveLength(0);
+  await dismiss.click(); await expect(dialog.getByRole("heading", { name: "Nothing needs review." })).toBeFocused();
+  expect(calls).toBe(2); expect(api.writes).toHaveLength(1);
+});
+
+for (const surface of ["legacy", "next"] as const) test(`review focuses the next card after a keyboard dismissal ${surface}`, async ({ page }) => {
+  await fixture(page, false, false, false, false, false, false, false, true);
+  const secondId = "99999999-9999-4999-8999-999999999999", boundary = { turnNumber: 1, timelineRevision: 0 }, hash = "a".repeat(64);
+  let dismissed = false;
+  const makeCandidate = (id: string, name: string) => ({ id, reason: "identity_needs_review", reviewRevision: dismissed ? 1 : 0, reviewDetails: [], proposal: { localKey: name, name, aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote: `${name} waits.` }], observations: [] }, source: { turnId: "55555555-5555-4555-8555-555555555555", turnNumber: 1, narrationRevision: 0, sourceHash: hash } });
+  await page.route("**/cast/candidates?**", route => route.fulfill({ json: { revision: 0, boundary, nextCursor: null, candidates: dismissed ? [makeCandidate(secondId, "Bea")] : [makeCandidate(candidateId, "Ada"), makeCandidate(secondId, "Bea")] } }));
+  await page.route(`**/cast/candidates/${candidateId}/review-decisions`, route => { dismissed = true; return route.fulfill({ json: { decisionId: versionId, candidateId, reviewRevision: 1, revision: 0, boundary, disposition: "dismiss_identity" } }); });
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace"); await openReview(dialog);
+  await expect(dialog.getByRole("heading", { name: "Identity: Ada" })).toBeFocused();
+  const dismiss = dialog.getByRole("button", { name: "Dismiss discovery" }); await tabTo(page, dismiss); await page.keyboard.press("Enter");
+  await expect(dialog.getByRole("heading", { name: "Identity: Bea" })).toBeFocused();
+  await expect(dialog.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
+});
+
+
+test("review controls work at native Chromium 200 percent zoom", async ({}, info) => {
+  await mkdir(info.outputDir, { recursive: true });
+  const owned = await mkdtemp(resolve(info.outputDir, "review-native-zoom-"));
+  const extension = resolve(owned, "extension"); await mkdir(extension);
+  await writeFile(resolve(extension, "manifest.json"), JSON.stringify({ manifest_version: 3, name: "Review owned zoom probe", version: "1.0.0", permissions: ["tabs"], background: { service_worker: "worker.js" } }));
+  await writeFile(resolve(extension, "worker.js"), "chrome.runtime.onInstalled.addListener(() => {});\n");
+  const options = { channel: "chromium", headless: true, viewport: null, args: ["--window-size=1280,900", `--disable-extensions-except=${extension}`, `--load-extension=${extension}`] };
+  Reflect.set(options, "deviceScaleFactor", undefined);
+  const context = await chromium.launchPersistentContext(resolve(owned, "profile"), options);
+  try {
+    const page = context.pages()[0] ?? await context.newPage();
+    await fixture(page, false, false, false, false, false, false, false, true);
+    await open(page); const dialog = page.locator("#campaignCastDialog"); await openReview(dialog);
+    const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
+    const tabId = await worker.evaluate(async expectedOrigin => {
+      const chrome = (globalThis as any).chrome;
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      const matches = tabs.filter((tab: any) => tab.url && new URL(tab.url).origin === expectedOrigin);
+      if (matches.length !== 1) throw new Error("Owned review tab not found");
+      await chrome.tabs.setZoomSettings(matches[0].id, { mode: "automatic", scope: "per-tab" });
+      await chrome.tabs.setZoom(matches[0].id, 2); return matches[0].id;
+    }, new URL(page.url()).origin);
+    await expect.poll(() => worker.evaluate(id => (globalThis as any).chrome.tabs.getZoom(id), tabId)).toBe(2);
+    const dismiss = dialog.getByRole("button", { name: "Dismiss discovery" });
+    await dismiss.focus(); await expect(dismiss).toBeFocused(); await expect(dismiss).toBeInViewport();
+    const geometry = await dialog.evaluate(element => { const box = element.getBoundingClientRect(); return { left: box.left, right: box.right, viewportWidth: innerWidth, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth }; });
+    await writeFile(info.outputPath("review-native-zoom-200-geometry.json"), JSON.stringify(geometry, null, 2));
+    expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+    expect(geometry.left).toBeGreaterThanOrEqual(0);
+    expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth + 1);
+    const capture = async (name: string) => {
+      const cdp = await context.newCDPSession(page);
+      try { const shot = await cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false }); await writeFile(info.outputPath(name), Buffer.from(shot.data, "base64")); }
+      finally { await cdp.detach(); }
+    };
+    await capture("review-native-zoom-200.png");
+    await page.keyboard.press("Enter"); await expect(dialog.getByRole("heading", { name: "Nothing needs review." })).toBeFocused();
+    await dialog.getByRole("button", { name: "Dismissed", exact: true }).click();
+    const undo = dialog.getByRole("button", { name: "Undo", exact: true }); await undo.focus(); await expect(undo).toBeInViewport();
+    await capture("review-native-zoom-200-dismissed.png");
+    await page.keyboard.press("Enter"); await expect(dialog).toContainText("Dismissal undone.");
+  } finally { await context.close(); }
+});
+
+for (const surface of ["legacy", "next"] as const) for (const width of [1440, 390]) test(`fact correction preview ${surface} ${width}`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 900 });
+  const api = await fixture(page, false, true, false, false, false, false, false, false, true);
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace");
+  await dialog.getByRole("button", { name: "Mara", exact: true }).click();
+  await dialog.getByText("Sources and edit history").click();
+  await dialog.getByRole("button", { name: "Retract fact" }).click();
+  await expect(dialog).toContainText("Before: guide"); await expect(dialog).toContainText("After: Unknown");
+  await dialog.screenshot({ path: info.outputPath(`fact-preview-${surface}-${width}.png`) });
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click(); expect(api.writes).toHaveLength(0);
+  await dialog.getByRole("button", { name: "Retract fact" }).click();
+  await dialog.getByRole("button", { name: "Confirm retraction" }).click();
+  await expect(dialog.getByRole("button", { name: "Restore fact" })).toBeVisible();
+  await dialog.getByRole("button", { name: "Restore fact" }).click();
+  await dialog.getByRole("button", { name: "Confirm restore" }).click();
+  await expect(dialog.getByRole("button", { name: "Retract fact" })).toBeVisible();
+  expect(api.writes.map(w => w.action)).toEqual(["retract", "restore"]);
+});
+
+for (const surface of ["legacy", "next"] as const) test(`fact correction native zoom ${surface}`, async ({}, info) => {
+  await mkdir(info.outputDir, { recursive: true });
+  const owned = await mkdtemp(resolve(info.outputDir, "fact-zoom-"));
+  const extension = resolve(owned, "extension"); await mkdir(extension);
+  await writeFile(resolve(extension, "manifest.json"), JSON.stringify({ manifest_version: 3, name: "Fact zoom probe", version: "1.0", permissions: ["tabs"], background: { service_worker: "worker.js" } }));
+  await writeFile(resolve(extension, "worker.js"), "chrome.runtime.onInstalled.addListener(() => {});\n");
+  const options = { channel: "chromium", headless: true, viewport: null, args: ["--window-size=1280,900", `--disable-extensions-except=${extension}`, `--load-extension=${extension}`] };
+  Reflect.set(options, "deviceScaleFactor", undefined);
+  const context = await chromium.launchPersistentContext(resolve(owned, "profile"), options);
+  try {
+    const page = context.pages()[0] ?? await context.newPage(); await fixture(page, false, true, false, false, false, false, false, false, true);
+    if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+    const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace");
+    await dialog.getByRole("button", { name: "Mara", exact: true }).click(); await dialog.getByText("Sources and edit history").click();
+    const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker");
+    const tab = await worker.evaluate(async origin => { const chrome = (globalThis as any).chrome; const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true }); const found = tabs.find((item: any) => item.url && new URL(item.url).origin === origin); if (!found) throw new Error("Owned tab missing"); await chrome.tabs.setZoomSettings(found.id, { mode: "automatic", scope: "per-tab" }); await chrome.tabs.setZoom(found.id, 2); return found.id; }, new URL(page.url()).origin);
+    await expect.poll(() => worker.evaluate(id => (globalThis as any).chrome.tabs.getZoom(id), tab)).toBe(2);
+    await dialog.getByRole("button", { name: "Retract fact" }).click(); await expect(dialog.getByRole("button", { name: "Confirm retraction" })).toBeFocused();
+    const geometry = await dialog.evaluate(el => ({ scrollWidth: el.scrollWidth, clientWidth: el.clientWidth })); expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+    const cdp = await context.newCDPSession(page); const capture = await cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false }); await writeFile(info.outputPath(`fact-native-200-${surface}.png`), Buffer.from(capture.data, "base64"));
+  } finally { await context.close(); }
+});
+for (const surface of ["legacy", "next"] as const) test(`fact correction safeguards ${surface}`, async ({ page }, info) => {
+  const api = await fixture(page, false, true, false, false, false, false, false, false, true);
+  const boundary = { turnNumber: 1, timelineRevision: 0 };
+  const source = { id: protagonistId, characterId: candidateId, field: "story.role", value: "guide", mode: "fact", speakerCharacterId: null, supersedesObservationId: null, evidence: { kind: "turn", turnId: "55555555-5555-4555-8555-555555555555", turnNumber: 1, narrationRevision: 0, sourceHash: "a".repeat(64), paragraphId: "p1", quote: "Mara waits at the gate." } };
+  let previewCalls = 0; const keys: string[] = []; let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/decision-preview", route => {
+    previewCalls++; if (previewCalls === 1) return route.fulfill({ status: 409, json: { code: "cast_revision_conflict" } });
+    const restore = route.request().postDataJSON().action === "restore";
+    return route.fulfill({ json: { field: "story.role", currentValue: "captain", projectedValue: restore ? null : "captain", currentConflict: false, projectedConflict: restore, source, castRevision: 0, characterRevision: 0, boundary } });
+  });
+  await page.route("**/decision", async route => { const input = route.request().postDataJSON(); if (input.action === "restore") return route.fallback(); keys.push(input.idempotencyKey); if (keys.length === 1) { await gate; return route.fulfill({ status: 503, json: { code: "unavailable" } }); } if (keys.length === 2) return route.fulfill({ status: 409, json: { code: "cast_revision_conflict" } }); return route.fallback(); });
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace"); await dialog.getByRole("button", { name: "Mara", exact: true }).click(); await dialog.getByText("Sources and edit history").click();
+  await dialog.getByRole("button", { name: "Retract fact" }).click(); await expect(dialog).toContainText("Refresh before trying again"); await expect(dialog.getByRole("button", { name: "Confirm retraction" })).toHaveCount(0);
+  const reload = dialog.getByRole("button", { name: "Reload character" }); await expect(reload).toBeFocused();
+  await dialog.screenshot({ path: info.outputPath(`fact-stale-reload-${surface}.png`) });
+  await reload.click(); await expect(dialog.getByText("Sources and edit history")).toBeFocused();
+  await dialog.getByRole("button", { name: "Retract fact" }).click(); await expect(dialog).toContainText("displayed value will remain unchanged");
+  const confirm = dialog.getByRole("button", { name: "Confirm retraction" }); await confirm.click(); await expect.poll(() => keys.length).toBe(1); await expect(confirm).toBeDisabled(); await confirm.evaluate((el: HTMLButtonElement) => el.click()); expect(keys).toHaveLength(1); release();
+  await expect(dialog).toContainText("Retry to check the same request"); await confirm.click();
+  await expect(dialog.getByRole("button", { name: "Reload character" })).toBeFocused(); expect(keys[0]).toBe(keys[1]);
+  await dialog.getByRole("button", { name: "Reload character" }).click(); await expect(dialog.getByText("Sources and edit history")).toBeFocused();
+  await dialog.getByRole("button", { name: "Retract fact" }).click(); await dialog.getByRole("button", { name: "Confirm retraction" }).click();
+  await expect(dialog.getByRole("button", { name: "Restore fact" })).toBeVisible(); expect(keys[2]).not.toBe(keys[1]);
+  await dialog.getByRole("button", { name: "Restore fact" }).click(); await expect(dialog).toContainText("After: Conflicting observations"); await dialog.getByRole("button", { name: "Confirm restore" }).click(); await expect(dialog.getByRole("button", { name: "Retract fact" })).toBeVisible(); expect(api.writes.map(w => w.action)).toEqual(["retract", "restore"]);
+});
+
+for (const surface of ["legacy", "next"] as const) for (const invalid of [false, true]) test(`fact correction ${invalid ? "invalid history" : "old API"} ${surface}`, async ({ page }) => {
+  const api = await fixture(page, false, true, false, false, false, false, false, false, invalid); if (invalid) api.setInvalidSource();
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace"); await dialog.getByRole("button", { name: "Mara", exact: true }).click(); await dialog.getByText("Sources and edit history").click();
+  if (invalid) { await expect(dialog).toContainText("Retracted fact"); await expect(dialog).toContainText("no longer eligible for restoration"); }
+  await expect(dialog.getByRole("button", { name: "Restore fact" })).toHaveCount(0); await expect(dialog.getByRole("button", { name: "Retract fact" })).toHaveCount(0); expect(api.writes).toHaveLength(0);
+});
+for (const surface of ["legacy", "next"] as const) test(`pending retracted source keeps explicit override ${surface}`, async ({ page }) => {
+  const api = await fixture(page, false, true); const boundary = { turnNumber: 1, timelineRevision: 0 };
+  const candidate = { id: candidateId, reason: "detail_needs_review", resolvedCharacterId: candidateId, proposal: { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote: "Mara waits." }], observations: [] }, source: { turnId: "55555555-5555-4555-8555-555555555555", turnNumber: 1, narrationRevision: 0 }, details: [{ observationIndex: 4, field: "story.role", value: "guide", quote: "Mara waits.", reason: "unverified", canAcceptObservation: false, acceptDisabledReason: "retracted_source", allowedActions: ["confirm", "dismiss"], sourceHash: "a".repeat(64) }] };
+  await page.route("**/cast/candidates?**", route => route.fulfill({ json: { revision: 0, boundary, nextCursor: null, candidates: [candidate] } }));
+  if (surface === "legacy") await open(page); else { await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/story/${campaignId}`); await page.locator("[data-campaign-tools] summary").click(); await page.locator("[data-tool-action='open-characters']").click(); }
+  const dialog = page.locator(surface === "legacy" ? "#campaignCastDialog" : "dialog.characters-workspace"); await openReview(dialog);
+  await expect(dialog).toContainText("This source was retracted"); await expect(dialog.getByRole("button", { name: "Apply and next" })).toHaveCount(0); await dialog.getByText("Set an override", { exact: true }).click(); await expect(dialog.getByRole("button", { name: "Keep as override" })).toBeVisible(); expect(api.writes).toHaveLength(0);
 });

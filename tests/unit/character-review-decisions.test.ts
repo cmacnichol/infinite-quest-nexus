@@ -61,3 +61,65 @@ it("puts the selected candidate first when several sources share a field", async
   await vi.waitFor(() => expect(document.querySelectorAll("textarea")).toHaveLength(2));
   expect(document.querySelectorAll("textarea")[0]!.value).toBe("two");
 });
+
+it("dismisses an unresolved detail by its original index", async () => {
+  const { document } = parseHTML("<html><body></body></html>");
+  const boundary = { turnNumber: 1, timelineRevision: 0 };
+  const candidate = { id: "one", reviewRevision: 7, proposal: { name: "Ada", identityEvidence: [], observations: [{ field: "story.role", value: "old", quote: "old" }, { field: "story.role", value: "captain", quote: "captain" }] }, reviewDetails: [{ observationIndex: 1, observation: { field: "story.role", value: "captain", quote: "captain" } }], source: { turnNumber: 1, sourceHash: "hash" } };
+  Object.defineProperty(document.createElement("select").constructor.prototype, "value", { configurable: true, get() { return this._testValue ?? ""; }, set(value) { this._testValue = value; } });
+  const reviewDecision = vi.fn(async () => ({})); const resolveCandidate = vi.fn(async () => ({ character: { id: "guide" } }));
+  const api = { candidates: async () => ({ revision: 0, boundary, candidates: [candidate], nextCursor: null }), list: async () => ({ revision: 0, boundary, characters: [], nextCursor: null }), reviewDecision, resolveCandidate };
+  renderCastReview({ document, container: document.body, api: api as unknown as CampaignCastApi, campaign: "campaign", current: () => true, editing: () => true, navigate() {}, back() {}, key: () => "test", clearKeys() {}, reviewReadVersion: 1, reviewWrites: true } as Parameters<typeof renderCastReview>[0]);
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Dismiss detail"));
+  expect(document.body.textContent).not.toContain("Proposed Role: old");
+  [...document.querySelectorAll("button")].find(button => button.textContent === "Dismiss detail")!.click();
+  await vi.waitFor(() => expect(reviewDecision).toHaveBeenCalledWith("campaign", "one", expect.objectContaining({ action: "dismiss_detail", observationIndex: 1, expectedReviewRevision: 7 })));
+});
+
+it("shows workflow dismissals read-only and does not expose new controls on an old API", async () => {
+  const { document } = parseHTML("<html><body></body></html>");
+  const boundary = { turnNumber: 1, timelineRevision: 0 };
+  const api = { candidates: async () => ({ revision: 0, boundary, candidates: [], nextCursor: null }), dismissedReview: vi.fn(async () => ({ revision: 0, boundary, reviewRevision: 1, nextCursor: null, decisions: [{ decisionId: "receipt", candidateId: "candidate", canRestore: true, source: { turnNumber: 1, sourceHash: "hash" }, target: { kind: "identity", proposal: { name: "Ada", identityEvidence: [{ quote: "<b>Ada</b>" }] } } }] })) };
+  const common = { document, container: document.body, api: api as unknown as CampaignCastApi, campaign: "campaign", current: () => true, editing: () => false, navigate() {}, back() {}, key: () => "test", clearKeys() {} };
+  renderCastReview(common);
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Nothing needs review"));
+  expect(document.body.textContent).not.toContain("Dismissed");
+  renderCastReview({ ...common, reviewReadVersion: 1, reviewWrites: false });
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Dismissed"));
+  [...document.querySelectorAll("button")].find(button => button.textContent === "Dismissed")!.click();
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Dismissals made with this review workflow"));
+  expect(document.body.textContent).toContain("<b>Ada</b>");
+  expect(document.querySelector("blockquote b")).toBeNull();
+  expect([...document.querySelectorAll("button")].find(button => button.textContent === "Undo")!.disabled).toBe(true);
+});
+
+it("forwards the review revision when creating a character", async () => {
+  const { document } = parseHTML("<html><body></body></html>");
+  Object.defineProperty(document.createElement("select").constructor.prototype, "value", { configurable: true, get() { return this._testValue ?? ""; }, set(value) { this._testValue = value; } });
+  const boundary = { turnNumber: 1, timelineRevision: 0 };
+  const candidate = { id: "one", reviewRevision: 7, proposal: { name: "Ada", identityEvidence: [], observations: [] }, source: { turnNumber: 1 } };
+  const resolveCandidate = vi.fn(async () => ({ character: { id: "new" } }));
+  const api = { candidates: async () => ({ revision: 0, boundary, candidates: [candidate], nextCursor: null }), list: async () => ({ revision: 0, boundary, characters: [], nextCursor: null }), resolveCandidate };
+  renderCastReview({ document, container: document.body, api: api as unknown as CampaignCastApi, campaign: "campaign", current: () => true, editing: () => true, navigate() {}, back() {}, key: () => "test", clearKeys() {} });
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Create separate character"));
+  [...document.querySelectorAll("button")].find(button => button.textContent === "Create separate character")!.click();
+  await vi.waitFor(() => expect(resolveCandidate).toHaveBeenCalledWith("campaign", "one", expect.objectContaining({ action: "create", expectedReviewRevision: 7 })));
+});
+
+it("creates from remaining unresolved details after a detail dismissal", async () => {
+  const { document } = parseHTML("<html><body></body></html>");
+  Object.defineProperty(document.createElement("select").constructor.prototype, "value", { configurable: true, get() { return this._testValue ?? ""; }, set(value) { this._testValue = value; } });
+  const boundary = { turnNumber: 1, timelineRevision: 0 }; let revision = 2;
+  const observations = [{ field: "story.role", value: "old", quote: "old" }, { field: "story.role", value: "captain", quote: "captain" }];
+  const candidate = () => ({ id: "one", reviewRevision: revision, proposal: { name: "Ada", identityEvidence: [], observations }, reviewDetails: observations.map((observation, observationIndex) => ({ observation, observationIndex })).filter(item => revision === 2 || item.observationIndex !== 0), source: { turnNumber: 1, sourceHash: "hash" } });
+  const resolveCandidate = vi.fn(async () => ({ character: { id: "new" } }));
+  const api = { candidates: async () => ({ revision: 0, boundary, candidates: [candidate()], nextCursor: null }), list: async () => ({ revision: 0, boundary, characters: [], nextCursor: null }), resolveCandidate,
+    reviewDecision: vi.fn(async () => { revision++; return { candidateId: "one", decisionId: "receipt", reviewRevision: revision, revision: 0, boundary }; }) };
+  renderCastReview({ document, container: document.body, api: api as unknown as CampaignCastApi, campaign: "campaign", current: () => true, editing: () => true, navigate() {}, back() {}, key: () => "test", clearKeys() {}, reviewReadVersion: 1, reviewWrites: true });
+  await vi.waitFor(() => expect([...document.querySelectorAll("button")].filter(button => button.textContent === "Dismiss detail")).toHaveLength(2));
+  [...document.querySelectorAll("button")].find(button => button.textContent === "Dismiss detail")!.click();
+  await vi.waitFor(() => expect(document.body.textContent).not.toContain("Proposed Role: old"));
+  expect(document.body.textContent).toContain("Proposed Role: captain");
+  [...document.querySelectorAll("button")].find(button => button.textContent === "Create separate character")!.click();
+  await vi.waitFor(() => expect(resolveCandidate).toHaveBeenCalledWith("campaign", "one", expect.objectContaining({ action: "create", expectedReviewRevision: 3 })));
+});

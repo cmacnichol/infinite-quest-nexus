@@ -1,3 +1,4 @@
+import { buildCastDiscoverySource } from "../../packages/domain/src/campaign-cast-discovery.js";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import Fastify from "fastify";
@@ -87,6 +88,40 @@ integration("campaign cast editing API", () => {
     const write = { expectedCastRevision: 0, expectedBoundary: { turnNumber: 0, timelineRevision: 0 }, idempotencyKey: randomUUID() };
     return { app, base, campaignId, version, write };
   }
+  it("scopes, fences, replays and restores review decisions through the public API", async () => {
+    const { app, base, campaignId } = await fixture();
+    try {
+      const turnId = randomUUID(), id = randomUUID(), narration = "Mara has blue eyes.";
+      await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [campaignId]);
+      await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,1,$4)", [turnId, ownerUserId, campaignId, narration]);
+      const source = buildCastDiscoverySource({ scope: { ownerUserId, campaignId }, turnId, turnNumber: 1, timelineRevision: 0, narrationRevision: 0, narration });
+      const proposal = { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote: narration }], observations: [{ field: "appearance.description", value: "blue eyes", mode: "fact", speakerCharacterId: null, paragraphId: "p1", quote: narration }] };
+      await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason) VALUES($1,$2,$3,0,'mara',$4,$5,'identity_needs_review')", [id, ownerUserId, campaignId, JSON.stringify(source), JSON.stringify(proposal)]);
+      const list = (await app.inject({ url: `${base}/candidates?view=review` })).json();
+      const payload = { action: "dismiss_identity", expectedCastRevision: list.revision, expectedBoundary: list.boundary, expectedReviewRevision: 0, sourceHash: source.sourceHash, idempotencyKey: randomUUID() };
+      const url = `${base}/candidates/${id}/review-decisions`;
+      const first = await app.inject({ method: "POST", url, payload });
+      expect(first.statusCode).toBe(200);
+      expect((await app.inject({ method: "POST", url, payload })).json()).toEqual(first.json());
+      expect((await app.inject({ method: "POST", url, payload: { ...payload, action: "dismiss_detail", observationIndex: 0 } })).statusCode).toBe(409);
+      expect((await app.inject({ method: "POST", url, payload: { ...payload, idempotencyKey: randomUUID() } })).statusCode).toBe(409);
+      expect((await app.inject({ method: "POST", url: `/api/v1/campaigns/${randomUUID()}/cast/candidates/${id}/review-decisions`, payload })).statusCode).toBe(404);
+      const page = await app.inject({ url: `${base}/review-decisions?view=dismissed&limit=1` });
+      expect(page.statusCode).toBe(200); expect(page.json().decisions[0].decisionId).toBe(first.json().decisionId);
+      const readOnly = Fastify();
+      await readOnly.register(registerCampaignCastRoutes, { application: createCampaignCastApplication(createPostgresCampaignCastRepository(pool, { editingEnabled: false })), enabled: false, resolveOwner: async () => ({ ownerUserId }) });
+      try {
+        expect((await readOnly.inject({ url: `${base}/review-decisions?view=dismissed` })).json().decisions).toHaveLength(1);
+        expect((await readOnly.inject({ method: "POST", url, payload })).statusCode).toBe(503);
+        expect((await readOnly.inject({ url: base })).json().capabilities).toMatchObject({ castReviewDecisions: false, castReviewDecisionReadVersion: 1 });
+      } finally { await readOnly.close(); }
+      expect((await app.inject({ url: `${base}/review-decisions?view=dismissed&limit=51` })).statusCode).toBe(422);
+      const restored = await app.inject({ method: "POST", url, payload: { ...payload, action: "restore", decisionId: first.json().decisionId, expectedReviewRevision: 1, idempotencyKey: randomUUID() } });
+      expect(restored.statusCode).toBe(200);
+      expect((await app.inject({ url: `${base}/review-decisions?view=dismissed` })).json().decisions).toEqual([]);
+      expect((await app.inject({ url: base })).json().capabilities).toMatchObject({ castReviewDecisions: true, castObservationDecisions: true, castReviewDecisionReadVersion: 1 });
+    } finally { await app.close(); }
+  });
   it("maps corrected draft evidence to 409 without applying edits", async () => {
     const { app, base, campaignId, write } = await fixture();
     try {

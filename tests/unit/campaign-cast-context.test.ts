@@ -196,3 +196,32 @@ it("keeps dated lower-authority state through enrollment gaps and distinguishes 
   expect(off.notice).toContain("discovery is off");
   expect(off.characters[0].fields).toEqual(gap.characters[0].fields);
 });
+
+it("selects only unretracted context contributions without reviving superseded facts", () => {
+  const input = fixture();
+  const prior = input.details[0]!.observations[0]!;
+  const newer = { ...prior, id: id(13), value: "green eyes", supersedesObservationId: prior.id };
+  const snapshot = { ...input, details: [{ ...input.details[0]!, observations: [prior, newer] }] };
+  const selectWith = (ids: string[]) => selectCastContext({ snapshot: castGenerationSnapshotSchema.parse(snapshot), budgetTokens: 3000, direction: "Mara", currentScene: "", openThreads: [], retractedObservationIds: new Set(ids) });
+  expect(selectWith([]).content).toContain("green eyes");
+  expect(selectWith([newer.id]).content).not.toContain("green eyes");
+  expect(selectWith([newer.id]).content).not.toContain("blue eyes");
+  const captured = castGenerationSnapshotSchema.parse({ ...snapshot, retractedObservationIds: [newer.id] });
+  const replay = selectCastContext({ snapshot: captured, budgetTokens: 3000, direction: "Mara", currentScene: "", openThreads: [], retractedObservationIds: new Set() });
+  expect(replay.content).not.toContain("green eyes");
+  expect(replay.content).not.toContain("blue eyes");
+  expect(castGenerationSnapshotFingerprint(captured)).not.toBe(castGenerationSnapshotFingerprint(snapshot));
+});
+
+it("reinstates ordinary static conflict in context when a fact is restored", () => {
+  const input = fixture();
+  const prior = input.details[0]!.observations[0]!;
+  const newer = { ...prior, id: id(13), value: "brown eyes" };
+  const snapshot = castGenerationSnapshotSchema.parse({ ...input, details: [{ ...input.details[0]!, observations: [prior, newer] }] });
+  const context = (retractedObservationIds: ReadonlySet<string>) => selectCastContext({ snapshot, retractedObservationIds,
+    budgetTokens: 3000, direction: "Mara", currentScene: "", openThreads: [] }).content;
+  expect(context(new Set())).not.toContain("blue eyes");
+  expect(context(new Set())).not.toContain("brown eyes");
+  expect(context(new Set([newer.id]))).toContain("blue eyes");
+  expect(context(new Set())).not.toContain("blue eyes");
+});

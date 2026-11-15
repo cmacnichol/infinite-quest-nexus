@@ -16,12 +16,13 @@ describe("characters workspace refresh", () => {
     const session = createCharactersWorkspaceSession({ api: {
       workspaceStatus: async id => id === "old" ? pending : status(),
       list: async () => ({ revision, boundary, characters: [person], nextCursor: null }),
-      detail: async () => ({ revision, boundary, character: { ...person, revision }, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null })
+      detail: async () => ({ revision, boundary, capabilities: { castEditing: true, castLifecycle: false }, character: { ...person, revision }, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], autoMatches: [], editorDestination: null })
     }, onChange: state => states.push(state) });
     session.open("old"); session.open("new"); await vi.waitFor(() => expect(states.at(-1)?.status?.revision).toBe(1));
     release(status() as never); await Promise.resolve();
     expect(states.at(-1).campaignId).toBe("new");
     session.select(person.id); await vi.waitFor(() => expect(states.at(-1)?.detail).not.toBeNull());
+    expect(states.at(-1).detail.capabilities.castLifecycle).toBe(false);
     session.setDraft({ name: "Draft" }); revision = 2; await session.refresh();
     expect(states.at(-1).draft).toEqual({ name: "Draft" });
     expect(states.at(-1).draftBaseDetail.revision).toBe(1);

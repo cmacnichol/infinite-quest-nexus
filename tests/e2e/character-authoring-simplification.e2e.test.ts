@@ -10,8 +10,94 @@ const character = { id: "fixture-guide", name: "Mira", characterText: "Retained 
   profile: characterProfileSchema.parse({ story: { role: "Guide", personality: "Patient" }, appearance: { eyes: "Green" } }),
   rpgStats: [{ name: "Resolve", value: 12 }], defaultTriggers: [{ name: "Light", condition: "At dusk", effect: "Light a lantern" }], source: {} };
 
-for (const width of [1440, 390]) test(`legacy AI draft is the first creation step and preserves edits at ${width}px`, async ({ page }) => {
+for (const width of [1440, 390]) {
+  test(`Nexus roster displays the authored story role at ${width}px`, async ({ page }, info) => {
+    await installManualWorld(page, width);
+    await page.locator("#characterName").fill("Mira");
+    await page.locator("#characterRole").fill("Guide");
+    await page.locator("#saveCharacter").click();
+    await expect(page.getByRole("button", { name: "Edit Mira", exact: true })).toContainText("Playable · Guide");
+    await page.screenshot({ path: screenshots ? `${screenshots}/roster-role-${width}.png` : info.outputPath("roster-role.png") });
+  });
+
+  for (const existing of [false, true]) test(`Nexus keeps ${existing ? "edited" : "new"} mechanics through Supporting save and reopen at ${width}px`, async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    const saved = await installManualWorld(page, width);
+    await page.locator("#characterName").fill("Mira");
+    await page.locator("#characterRole").fill("Guide");
+    const dialog = page.locator("#characterDialog");
+    await section(page, "Mechanics");
+    await dialog.locator("#characterMechanics").evaluate((node: HTMLDetailsElement) => { node.open = true; });
+    await dialog.locator("#addCharacterStat").click();
+    await dialog.locator("#characterStats [data-character-field=name]").fill("Resolve");
+    await dialog.locator("#characterStats [data-character-field=value]").fill("12");
+    await dialog.locator("#addCharacterTracker").click();
+    await dialog.locator("#characterTrackers [data-character-field=name]").fill("Lantern");
+    await dialog.locator("#characterTrackers [data-character-field=value]").fill("old");
+    if (existing) {
+      await dialog.locator("#saveCharacter").click();
+      await page.getByRole("button", { name: "Edit Mira", exact: true }).click();
+      await section(page, "Mechanics");
+    await dialog.locator("#characterMechanics").evaluate((node: HTMLDetailsElement) => { node.open = true; });
+    }
+    await dialog.locator("#characterStats [data-character-field=value]").fill("55");
+    await dialog.locator("#characterTrackers [data-character-field=value]").fill("edited");
+    await section(page, "Overview");
+    await dialog.locator("#characterCampaignUse").selectOption("supporting");
+    await expect(dialog.locator("#characterMechanics")).toBeHidden();
+    await dialog.locator("#saveCharacter").click();
+    await page.getByRole("button", { name: "Edit Mira", exact: true }).click();
+    await section(page, "Overview");
+    await dialog.locator("#characterCampaignUse").selectOption("playable");
+    await section(page, "Mechanics");
+    await dialog.locator("#characterMechanics").evaluate((node: HTMLDetailsElement) => { node.open = true; });
+    await expect(dialog.locator("#characterStats [data-character-field=value]")).toHaveValue("55");
+    await expect(dialog.locator("#characterTrackers [data-character-field=value]")).toHaveValue("edited");
+    await page.screenshot({ path: screenshots ? `${screenshots}/mechanics-${existing ? "edited" : "new"}-${width}.png` : info.outputPath("mechanics.png") });
+    if (width === 390) {
+      await dialog.locator("#characterTrackers [data-character-field=value]").scrollIntoViewIfNeeded();
+      await page.screenshot({ path: screenshots ? `${screenshots}/tracker-${existing ? "edited" : "new"}-${width}.png` : info.outputPath("tracker.png") });
+    }
+    await section(page, "Overview");
+    await dialog.locator("#characterCampaignUse").selectOption("supporting");
+    await dialog.locator("#cancelCharacter").click();
+    await page.locator("#saveWorldDraft").click();
+    await expect.poll(() => saved.body).toBeTruthy();
+    expect(saved.body.content.playableCharacters[0]).toMatchObject({ campaignUse: "supporting",
+      rpgStats: [{ name: "Resolve", value: 55 }], defaultTriggers: [{ name: "Lantern", value: "edited" }] });
+    expect(errors).toEqual([]);
+  });
+}
+
+async function installManualWorld(page: import("@playwright/test").Page, width: number) {
+  const saved: { body?: any } = {};
+  await page.setViewportSize({ width, height: 900 });
+  await page.route("**/api/v1/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/session")) return route.fulfill({ json: quietLeafApiPayloads().session });
+    if (path.endsWith("/providers")) return route.fulfill({ json: { providers: [] } });
+    if (path.endsWith("/worlds") && route.request().method() === "POST") {
+      saved.body = route.request().postDataJSON();
+      return route.fulfill({ status: 201, json: { id: "10000000-0000-4000-8000-000000000001" } });
+    }
+    if (path.endsWith("/worlds")) return route.fulfill({ json: { worlds: [] } });
+    if (path.endsWith("/campaigns")) return route.fulfill({ json: { campaigns: [] } });
+    return route.fulfill({ json: {} });
+  });
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/nexus/index.html#world-library`);
+  await expect(page).toHaveTitle("Infinite Quest Nexus");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  await page.locator("#newWorld").click();
+  await page.locator("#worldTitle").fill("Mechanics preservation");
+  await page.locator('[data-world-author-step="character"]').click();
+  await page.locator("#addPlayableCharacter").click();
+  return saved;
+}
+
+for (const width of [1440, 390]) test(`legacy AI draft is a secondary creation tool and preserves edits at ${width}px`, async ({ page }) => {
   const writes: string[] = [], errors: string[] = [];
+  let authored: any;
   page.on("pageerror", error => errors.push(error.message));
   await page.setViewportSize({ width, height: 900 });
   await page.route("**/api/v1/**", route => {
@@ -20,6 +106,7 @@ for (const width of [1440, 390]) test(`legacy AI draft is the first creation ste
     if (path === "/api/v1/session") return route.fulfill({ json: quietLeafApiPayloads().session });
     if (path === "/api/v1/providers") return route.fulfill({ json: { providers: [{ id: "11111111-1111-4111-8111-111111111111", name: "Fixture text", providerType: "lm_studio", providerRole: "text", baseUrl: "http://fixture.invalid", defaultModel: "fixture-model", configuration: {}, enabled: true, isDefault: true, hasApiKey: false, healthStatus: "unknown" }] } });
     if (path === "/api/v1/worlds/playable-characters/generate-preview") return route.fulfill({ json: { character } });
+    if (path === "/api/v1/worlds" && route.request().method() === "POST") { authored = route.request().postDataJSON(); return route.fulfill({ status: 201, json: { id: "saved-world" } }); }
     if (path === "/api/v1/worlds") return route.fulfill({ json: { worlds: [] } });
     if (path === "/api/v1/campaigns") return route.fulfill({ json: { campaigns: [] } });
     return route.fulfill({ json: {} });
@@ -30,7 +117,9 @@ for (const width of [1440, 390]) test(`legacy AI draft is the first creation ste
   await page.locator('[data-world-author-step="character"]').click();
   await page.locator("#addPlayableCharacter").click();
   const dialog = page.locator("#characterDialog");
-  await expect(dialog.locator("#characterGenerator")).toHaveJSProperty("open", true);
+  const draftId = await dialog.getAttribute("data-character-draft-id");
+  await expect(dialog.locator("#characterGenerator")).toHaveJSProperty("open", false);
+  await dialog.locator("#characterGenerator > summary").click();
   await expect(dialog.locator("#characterGeneratorPrompt")).toBeVisible();
   await dialog.locator("#characterGeneratorPrompt").fill("A patient guide with green eyes");
   if (screenshots) await page.screenshot({ path: `${screenshots}/legacy-ai-character-${width}.png`, fullPage: true });
@@ -42,6 +131,18 @@ for (const width of [1440, 390]) test(`legacy AI draft is the first creation ste
   await dialog.locator("#generateCharacter").click();
   await expect(dialog.locator("#characterRole")).toHaveValue("My edited guide");
   expect(writes).toEqual(["/api/v1/worlds/playable-characters/generate-preview"]);
+  await page.getByRole("button", { name: "Continue in detailed editor" }).click();
+  expect(await dialog.getAttribute("data-character-draft-id")).toBe(draftId);
+  await section(page, "Appearance");
+  await expect(dialog.locator("#characterEyes")).toHaveValue("Green");
+  await page.screenshot({ path: `C:/Users/chris/.codex/visualizations/2026/11/14/01a1db9c-7f55-7bb1-86e2-0339be08b829/world-generated-detail-${width}.png` });
+  const actionBox = await dialog.locator("#saveCharacter").boundingBox();
+  expect(actionBox && actionBox.y + actionBox.height <= 900).toBe(true);
+  await dialog.locator("#saveCharacter").dblclick();
+  await page.locator("#saveWorldDraft").click();
+  await expect.poll(() => authored).toBeTruthy();
+  expect(authored.content.playableCharacters).toHaveLength(1);
+  expect(authored.content.playableCharacters[0]).toMatchObject({ id: draftId, profile: { story: { role: "My edited guide" }, appearance: { eyes: "Green" } } });
   expect(errors).toEqual([]);
 });
 
@@ -224,6 +325,7 @@ for (const existing of [false, true]) test(`Nexus Supporting generation preserve
   await page.locator('[data-world-author-step="character"]').click(); await page.locator("#addPlayableCharacter").click();
   const dialog = page.locator("#characterDialog");
   if (existing) {
+    await dialog.locator("#characterGenerator > summary").click();
     await dialog.locator("#characterGeneratorPrompt").fill("Initial guide");
     await dialog.locator("#generateCharacter").click();
     await expect(dialog.locator("#characterName")).toHaveValue("Mira");
@@ -231,7 +333,7 @@ for (const existing of [false, true]) test(`Nexus Supporting generation preserve
     await page.getByRole("button", { name: "Edit Mira" }).click();
   }
   await dialog.locator("#characterCampaignUse").selectOption("supporting");
-  if (existing) await dialog.locator("#characterGenerator > summary").click();
+  await dialog.locator("#characterGenerator").evaluate((node: HTMLDetailsElement) => { node.open = true; });
   await dialog.locator("#characterGeneratorPrompt").fill("A new guide");
   if (existing) page.once("dialog", confirm => confirm.accept());
   await dialog.locator("#generateCharacter").click();
@@ -243,3 +345,11 @@ for (const existing of [false, true]) test(`Nexus Supporting generation preserve
   expect(bodies.at(-1)).toMatchObject({ campaignUse: "supporting" });
   expect(saved.content.playableCharacters[0]).toMatchObject({ campaignUse: "supporting", rpgStats: existing ? character.rpgStats : [], defaultTriggers: existing ? character.defaultTriggers : [] });
 });
+
+async function section(page: import("@playwright/test").Page, name: string) {
+  const continueButton = page.getByRole("button", { name: "Continue in detailed editor", exact: true });
+  if (await continueButton.isVisible()) await continueButton.click();
+  const select = page.getByRole("combobox", { name: "Section", exact: true });
+  if (await select.isVisible()) await select.selectOption({ label: await select.locator("option").filter({ hasText: name }).first().textContent() as string });
+  else await page.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: new RegExp(`^${name} ·`) }).click();
+}

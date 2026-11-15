@@ -128,3 +128,51 @@ it("applies restored goals cutoff after resolving supersession, including same-t
   const later = observation(3, "Later", { field: "story.goals", supersedesObservationId: atRestore.id });
   expect(resolveSeededCastProfile({ profile, observations: [first, atRestore, later], overrides: [], restoreGoalsAfterTurn: 2 }).profile["story.goals"]).toBe("Later");
 });
+
+it("retracts contributions after validating the complete supersession graph", async () => {
+  const { resolveSeededCastProfile } = await import("../../packages/domain/src/campaign-cast.js");
+  const { characterProfileSchema } = await import("../../packages/contracts/src/world-library.js");
+  const old = observation(1, "forest", { field: "state.location" });
+  const newer = observation(2, "harbor", { field: "state.location" });
+  const profile = characterProfileSchema.parse({ story: { goals: "Authored" } });
+  const input = { observations: [old, newer], overrides: [], retractedObservationIds: new Set([newer.id]) };
+  expect(projectCastProfile(input)["state.location"]).toBe("forest");
+  expect(resolveSeededCastProfile({ ...input, profile }).profile["state.location"]).toBe("forest");
+  const superseding = { ...newer, supersedesObservationId: old.id };
+  expect(projectCastProfile({ ...input, observations: [old, superseding] })).toEqual({});
+  expect(resolveSeededCastProfile({ ...input, observations: [old, superseding], profile }).profile["state.location"]).toBeUndefined();
+  expect(() => projectCastProfile({ ...input, observations: [superseding] })).toThrow(/supersession/i);
+});
+
+it("removes static conflicts and preserves overrides and authored fallbacks", async () => {
+  const { resolveSeededCastProfile } = await import("../../packages/domain/src/campaign-cast.js");
+  const { characterProfileSchema } = await import("../../packages/contracts/src/world-library.js");
+  const one = observation(1, "blue"), two = observation(2, "brown");
+  const input = { observations: [one, two], overrides: [], retractedObservationIds: new Set([two.id]) };
+  expect(projectCastProfile(input)["appearance.description"]).toBe("blue");
+  expect(projectCastProfile({ ...input, retractedObservationIds: new Set() })).toEqual({});
+  expect(projectCastProfile({ ...input, overrides: [override("green")] })["appearance.description"]).toBe("green");
+  expect(projectCastProfile({ ...input, retractedObservationIds: new Set([one.id, two.id]) })).toEqual({});
+  const goal = observation(3, "Observed", { field: "story.goals" });
+  expect(resolveSeededCastProfile({ profile: characterProfileSchema.parse({ story: { goals: "Authored" } }), observations: [goal], overrides: [], retractedObservationIds: new Set([goal.id]) }).profile["story.goals"]).toBe("Authored");
+});
+
+it("retains each character's appearance policy across retraction and restoration", async () => {
+  const { resolveSeededCastProfile } = await import("../../packages/domain/src/campaign-cast.js");
+  const { characterProfileSchema } = await import("../../packages/contracts/src/world-library.js");
+  const profile = characterProfileSchema.parse({ story: { role: "Keeper", goals: "Authored goal" } });
+  const blue = observation(1, "blue eyes"), brown = observation(2, "brown eyes");
+  const inputs = { observations: [blue, brown], overrides: [] };
+  const retracted = { ...inputs, retractedObservationIds: new Set([brown.id]) };
+  expect(projectCastProfile(inputs)["appearance.description"]).toBeUndefined();
+  expect(projectCastProfile(retracted)["appearance.description"]).toBe("blue eyes");
+  expect(projectCastProfile({ ...inputs, retractedObservationIds: new Set() })["appearance.description"]).toBeUndefined();
+  expect(resolveSeededCastProfile({ ...inputs, profile }).profile["appearance.description"]).toBe("brown eyes");
+  expect(resolveSeededCastProfile({ ...retracted, profile }).profile["appearance.description"]).toBe("blue eyes");
+  expect(resolveSeededCastProfile({ ...inputs, profile, retractedObservationIds: new Set() }).profile["appearance.description"]).toBe("brown eyes");
+  for (const retractedObservationIds of [new Set<string>(), new Set([brown.id])]) {
+    const seeded = resolveSeededCastProfile({ ...inputs, profile, overrides: [override("green eyes")], retractedObservationIds });
+    expect(seeded.profile).toMatchObject({ "appearance.description": "green eyes", "story.role": "Keeper", "story.goals": "Authored goal" });
+    expect(projectCastProfile({ ...inputs, overrides: [override("green eyes")], retractedObservationIds })["appearance.description"]).toBe("green eyes");
+  }
+});

@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createDatabasePool, initialOwnerId } from "../../packages/database/src/pool.js";
@@ -10,16 +10,19 @@ it("installs the baseline once, preserves the owner, and applies subsequent migr
   const directory = resolve("database/migrations");
   const nextRelease = await mkdtemp(join(tmpdir(), "iq-after-baseline-"));
   try {
-    expect(await migrateDatabase(pool, directory)).toEqual(["0133_baseline"]);
+    await copyFile(join(directory, "0133_baseline.sql"), join(nextRelease, "0133_baseline.sql"));
+    expect(await migrateDatabase(pool, nextRelease)).toEqual(["0133_baseline"]);
     const owner = await initialOwnerId(pool);
+    expect(await pendingDatabaseMigrations(pool, directory)).toEqual(["0134_cast_review_decisions"]);
+    expect(await migrateDatabase(pool, directory)).toEqual(["0134_cast_review_decisions"]);
     expect(await pendingDatabaseMigrations(pool, directory)).toEqual([]);
     expect(await migrateDatabase(pool, directory)).toEqual([]);
     expect(await initialOwnerId(pool)).toBe(owner);
 
-    await copyFile(join(directory, "0133_baseline.sql"), join(nextRelease, "0133_baseline.sql"));
-    await writeFile(join(nextRelease, "0134_test.sql"), "CREATE TABLE baseline_test (id integer PRIMARY KEY);");
-    expect(await pendingDatabaseMigrations(pool, nextRelease)).toEqual(["0134_test"]);
-    expect(await migrateDatabase(pool, nextRelease)).toEqual(["0134_test"]);
+    for (const file of await readdir(directory)) await copyFile(join(directory, file), join(nextRelease, file));
+    await writeFile(join(nextRelease, "9999_test.sql"), "CREATE TABLE baseline_test (id integer PRIMARY KEY);");
+    expect(await pendingDatabaseMigrations(pool, nextRelease)).toEqual(["9999_test"]);
+    expect(await migrateDatabase(pool, nextRelease)).toEqual(["9999_test"]);
     expect(await migrateDatabase(pool, nextRelease)).toEqual([]);
   } finally {
     await pool.end();

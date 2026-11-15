@@ -68,6 +68,8 @@ export function createCastReferenceTranslator(maps: CastReferenceMaps, rules: Ca
         return { ...source, characterId: characterId(source.characterId), evidence: translatedEvidence,
           worldVersionId: translatedEvidence.kind === "world" ? translatedEvidence.worldVersionId : translatedEvidence.sourceWorldVersionId };
       }
+      case "retract_observation": return { ...source, characterId: characterId(source.characterId), observationId: observationId(source.observationId) };
+      case "restore_observation": return { ...source, characterId: characterId(source.characterId), observationId: observationId(source.observationId), retractionEventId: eventId(source.retractionEventId) };
       case "edit_authored_profile": return { ...source, characterId: characterId(source.characterId), seedEventId: eventId(source.seedEventId) };
       case "detach": return { ...source, characterId: characterId(source.characterId), eventId: eventId(source.eventId) };
       case "merge": return { ...source, characterId: characterId(source.characterId), sourceCharacterId: characterId(source.sourceCharacterId) };

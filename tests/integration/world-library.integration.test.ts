@@ -199,13 +199,12 @@ integration("World Library and campaign version integration", () => {
     const { createPostgresCampaignCastRepository } = await import("../../packages/database/src/campaign-cast-repository.js");
     const title = `Browser cast ${crypto.randomUUID()}`;
     const authored = content(title, "One");
-    authored.playableCharacters.push({ ...authored.playableCharacters[0]!, id: "browser-ally", name: "Browser Ally", campaignUse: "supporting",
-      profile: characterProfileSchema.parse({ story: { role: "World guide", goals: "World goal" } }) },
+    authored.playableCharacters.push(
       { ...authored.playableCharacters[0]!, id: "browser-invalid", name: "Score 9", campaignUse: "supporting" },
       { ...authored.playableCharacters[0]!, id: "browser-keeper", name: "Browser Keeper", campaignUse: "supporting", startingCastDefault: false,
         profile: characterProfileSchema.parse({ story: { role: "World keeper" } }) });
     const world = await createWorld(pool, worldCreateSchema.parse({ title, content: authored }));
-    const published = await publishWorld(pool, world.id, worldPublishSchema.parse({ expectedRevision: world.draftRevision }));
+    let published = await publishWorld(pool, world.id, worldPublishSchema.parse({ expectedRevision: world.draftRevision }));
     const config = { ...runtimeConfigFixture(), databaseUrl: databaseUrl!, role: "api" as const,
       castEditingEnabled: true, castLifecycleEnabled: true, castPresetsEnabled: true, castContextEnabled: true, storyMemoryCapability: "r3" as const,
       legacyWebRoot: resolve("apps/web/dist"), nextWebRoot: resolve("apps/web-next/dist") };
@@ -217,6 +216,19 @@ integration("World Library and campaign version integration", () => {
     const browser = await chromium.launch();
     onTestFinished(() => browser.close());
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const browserErrors: string[] = [];
+    page.on("pageerror", error => browserErrors.push(error.message));
+    const failedResponses: string[] = [], resourceErrors: string[] = [], failedRequests: string[] = [];
+    page.on("console", message => {
+      if (message.type() !== "error") return;
+      if (message.text().startsWith("Failed to load resource:")) {
+        const status = message.text().match(/status of (\d+)/)?.[1] ?? "unknown";
+        const url = message.location().url;
+        resourceErrors.push(`${status} ${url ? new URL(url).pathname : "unknown"}`);
+      } else browserErrors.push(message.text());
+    });
+    page.on("response", response => { if (response.status() >= 400) failedResponses.push(`${response.status()} ${new URL(response.url()).pathname}`); });
+    page.on("requestfailed", request => failedRequests.push(`${request.method()} ${new URL(request.url()).pathname}: ${request.failure()?.errorText}`));
     const webOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
     const screenshotRoot = resolve(process.env.CAST_SCREENSHOT_ROOT ?? "test-results/review-assets/unified-character-editor-phase-4");
     await page.route("**/api/v1/**", async route => {
@@ -230,6 +242,43 @@ integration("World Library and campaign version integration", () => {
     });
     await page.goto(`${webOrigin}/nexus/index.html#world-library`);
     await page.locator("#worldManagementCarousel").getByRole("button", { name: `Select ${title}` }).click();
+    // The same real-database path starts in quick-create and crosses both world save boundaries.
+    const beforeAuthoring = await getWorld(pool, world.id);
+    await page.locator("#editWorldDraft").click();
+    await page.locator('[data-world-author-step="character"]').click();
+    await page.locator("#addPlayableCharacter").click();
+    await browserExpect(page.locator(".character-quick-create")).toBeVisible();
+    await page.locator("#characterName").fill("Browser Ally");
+    await page.locator("#characterCampaignUse").selectOption("supporting");
+    await page.locator("#characterRole").fill("World guide");
+    await page.getByRole("button", { name: "Continue in detailed editor", exact: true }).click();
+    await browserExpect(page.locator(".character-workspace")).toBeVisible();
+    await browserExpect(page.locator("#characterName")).toHaveValue("Browser Ally");
+    await page.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: /^Current situation ·/ }).click();
+    await page.locator('[data-character-profile-path="story.goals"]').fill("World goal");
+    expect((await getWorld(pool, world.id)).draftContent).toEqual(beforeAuthoring.draftContent);
+    await (await import("node:fs/promises")).mkdir(screenshotRoot, { recursive: true });
+    await page.screenshot({ path: resolve(screenshotRoot, "composed-world-detail-1440.png") });
+    await page.locator("#saveCharacter").click();
+    await browserExpect(page.locator("#characterDialog")).toBeHidden();
+    expect((await getWorld(pool, world.id)).draftContent).toEqual(beforeAuthoring.draftContent);
+    await browserExpect(page.locator("#worldAuthorDialog")).toContainText("Save the world form to persist this change");
+    await page.locator("#saveWorldDraft").click();
+    await browserExpect(page.locator("#worldAuthorDialog")).toBeHidden();
+    const savedWorld = await getWorld(pool, world.id);
+    const savedAlly = savedWorld.draftContent!.playableCharacters.find(person => person.name === "Browser Ally")!;
+    expect(savedAlly.profile?.story).toMatchObject({ role: "World guide", goals: "World goal" });
+    expect(savedWorld.draftRevision).toBe(beforeAuthoring.draftRevision! + 1);
+    await page.locator("#publishWorld").click();
+    await browserExpect(page.locator("#worldStatus")).toContainText("Version 2 published");
+    const publishedRows = await pool.query("SELECT id,content FROM world_versions WHERE world_id=$1 ORDER BY version_number DESC", [world.id]);
+    published = { ...published, worldVersionId: publishedRows.rows[0].id };
+    const pinnedWorld = structuredClone(publishedRows.rows[0].content);
+    const otherCampaign = await createApiWorldCampaignApplication(pool, { credentialSecret: config.credentialEncryptionKey, castPresetsEnabled: true }).createCampaign({ ownerUserId: await initialOwnerId(pool) }, campaignCreateSchema.parse({ worldVersionId: published.worldVersionId,
+      title: "Isolation control", selectedCharacterId: authored.playableCharacters[0]!.id, startingCast: [{ characterId: savedAlly.id }] }));
+    const isolationRepository = createPostgresCampaignCastRepository(pool, { editingEnabled: true, castPresetsEnabled: true });
+    const otherScope = { ownerUserId: await initialOwnerId(pool), campaignId: otherCampaign.id };
+    const otherSnapshot = await isolationRepository.current(otherScope);
     await page.locator("#createCampaignModalBtn").click();
     await page.locator("#newCampaignTitle").fill("Browser cast campaign");
     await browserExpect(page.locator("#startingCastNotice")).toContainText("of 30");
@@ -258,7 +307,7 @@ integration("World Library and campaign version integration", () => {
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Ally", exact: true }).first().click();
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true }).click();
     await page.locator("#cast-story-role").fill("Campaign guide");
-    await page.locator("#cast-save").click();
+    await page.locator(".character-workspace").getByRole("button", { name: "Save character", exact: true }).click();
     await browserExpect(page.locator("#campaignCastDialog")).toContainText("Campaign guide");
     const storyLink = page.locator("#campaignCastDialog").getByRole("link", { name: "Open in Story" });
     const href = await storyLink.getAttribute("href");
@@ -279,22 +328,47 @@ integration("World Library and campaign version integration", () => {
     await page.screenshot({ path: resolve(screenshotRoot, "reset-restore-controls-1440.png") });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: resolve(screenshotRoot, "reset-restore-controls-390.png") });
+    await page.getByLabel("Section", { exact: true }).selectOption("situation");
     await page.locator("#cast-story-goals").locator("..").getByRole("button", { name: "Restore authored goals" }).scrollIntoViewIfNeeded();
     await page.screenshot({ path: resolve(screenshotRoot, "restore-goals-390.png") });
     await page.setViewportSize({ width: 1440, height: 900 });
+    await page.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: /^Overview ·/ }).click();
     const roleRow = page.locator("#cast-story-role").locator("..");
     await roleRow.getByRole("button", { name: "Reset to world value" }).click();
     await browserExpect(page.locator("#cast-story-role")).toHaveValue("World guide");
+    await page.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: /^Current situation ·/ }).click();
     await page.locator("#cast-story-goals").fill("Campaign goal");
-    await page.locator("#cast-save").click();
+    await page.locator(".character-workspace").getByRole("button", { name: "Save character", exact: true }).click();
     await browserExpect(page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true })).toBeVisible();
     await browserExpect(page.locator("#campaignCastDialog")).toContainText("World guide");
     await page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true }).click();
+    await page.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: /^Current situation ·/ }).click();
     await page.locator("#cast-story-goals").locator("..").getByRole("button", { name: "Restore authored goals" }).click();
     await browserExpect(page.locator("#cast-story-goals")).toHaveValue("World goal");
-    await page.locator("#cast-save").click();
+    await page.locator(".character-workspace").getByRole("button", { name: "Save character", exact: true }).click();
     await browserExpect(page.locator("#campaignCastDialog").getByRole("button", { name: "Edit character", exact: true })).toBeVisible();
     await browserExpect(page.locator("#campaignCastDialog")).toContainText("World goal");
+    const savedCast = await pool.query("SELECT payload,receipt FROM campaign_cast_events WHERE campaign_id=$1 ORDER BY sequence", [campaignId]);
+    expect(savedCast.rows.length).toBeGreaterThanOrEqual(4);
+    expect(savedCast.rows.every(event => typeof event.receipt.eventId === "string" && event.receipt.revision > 0)).toBe(true);
+    expect(JSON.stringify(savedCast.rows)).toContain(savedAlly.id);
+    expect(JSON.stringify(savedCast.rows)).toContain(published.worldVersionId);
+    expect((await pool.query("SELECT content FROM world_versions WHERE id=$1", [published.worldVersionId])).rows[0].content).toEqual(pinnedWorld);
+    expect((await getWorld(pool, world.id)).draftContent).toEqual(savedWorld.draftContent);
+    expect(await isolationRepository.current(otherScope)).toEqual(otherSnapshot);
+    await openCampaignCast("persisted-reset");
+    await page.locator("#campaignCastDialog").getByRole("button", { name: "Browser Ally", exact: true }).first().click();
+    await browserExpect(page.locator("#campaignCastDialog")).toContainText("World goal");
+    await page.screenshot({ path: resolve(screenshotRoot, "composed-saved-reset-1440.png") });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: resolve(screenshotRoot, "composed-saved-reset-390.png") });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await (await import("node:fs/promises")).writeFile(resolve(screenshotRoot, "composed-persistence-receipts.json"), JSON.stringify({
+      isolatedDatabase: new URL(databaseUrl!).pathname.slice(1), worldId: world.id, worldVersionId: published.worldVersionId,
+      savedDraftRevision: savedWorld.draftRevision, savedAlly, campaignId, otherCampaignId: otherCampaign.id,
+      campaignCast: await isolationRepository.current({ ownerUserId, campaignId }), events: savedCast.rows,
+      pinnedWorldUnchanged: true, otherCampaignUnchanged: true, worldDraftUnchanged: true
+    }, null, 2));
     const draft = await getWorld(pool, world.id);
     const nextDraft = await updateWorldDraft(pool, world.id, worldDraftUpdateSchema.parse({ expectedRevision: draft.draftRevision, content: { ...authored, world: { ...authored.world, premise: "Updated world premise" } } }));
     const nextVersion = await publishWorld(pool, world.id, worldPublishSchema.parse({ expectedRevision: nextDraft.revision }));
@@ -375,8 +449,147 @@ integration("World Library and campaign version integration", () => {
     expect(replaced.draftRevision).toBe(promoted.draftRevision! + 2);
     expect(replaced.draftContent?.playableCharacters).toHaveLength(renamedContent.playableCharacters.length);
     expect(replaced.draftContent?.playableCharacters.find(entry => entry.id === "browser-keeper")?.name).toBe("Renamed world keeper");
+    // Exercise real API writes and PostgreSQL receipts using a synthetic accepted turn.
+    const { buildCastDiscoverySource } = await import("../../packages/domain/src/campaign-cast-discovery.js");
+    const { withTransaction } = await import("../../packages/database/src/pool.js");
+    const { applyValidatedCastDiscovery, captureCastDiscoveryIdentities } = await import("../../packages/database/src/campaign-cast-discovery-publication.js");
+    const { createCastDiscoveryJobRepository, enqueueCastDiscoveryWithClient } = await import("../../packages/database/src/campaign-cast-job-repository.js");
+    const { deriveTextExecutionPlan, textExecutionRouteBasisHash } = await import("../../packages/contracts/src/text-execution-plan.js");
+    const { CAST_DISCOVERY_SYSTEM_PROMPT } = await import("../../packages/contracts/src/prompt-library.js");
+    const unrelatedWorld = await createWorld(pool, worldCreateSchema.parse({ title: `Review isolation ${crypto.randomUUID()}`, content: content("Review isolation", "Control") }));
+    const unrelatedWorldBefore = await getWorld(pool, unrelatedWorld.id);
+    const turnId = crypto.randomUUID(), candidateId = crypto.randomUUID();
+    const narration = "Review Mara has blue eyes.";
+    await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [campaignId]);
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,2,$4)", [turnId, ownerUserId, campaignId, narration]);
+    const source = buildCastDiscoverySource({ scope, turnId, turnNumber: 2, timelineRevision: (await isolationRepository.current(scope)).boundary.timelineRevision, narrationRevision: 0, narration });
+    const proposal = { localKey: "review-mara", name: "Review Mara", aliases: [], existingCharacterId: null,
+      identityEvidence: [{ paragraphId: "p1", quote: narration }], observations: [{ field: "appearance.description", value: "blue eyes", mode: "fact", speakerCharacterId: null, paragraphId: "p1", quote: narration }] };
+    await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason) VALUES($1,$2,$3,0,$4,$5,$6,'identity_needs_review')", [candidateId, ownerUserId, campaignId, proposal.localKey, JSON.stringify(source), JSON.stringify(proposal)]);
+    await openCampaignCast("review-detail");
+    const review = page.locator("#campaignCastDialog");
+    await review.getByRole("button", { name: "Needs attention", exact: true }).click();
+    await review.getByRole("button", { name: "Review identity questions and details", exact: true }).click();
+    await browserExpect(review).toContainText("Identity: Review Mara");
+    await review.screenshot({ path: resolve(screenshotRoot, "composed-review-pending.png") });
+    await review.getByRole("button", { name: "Dismiss detail", exact: true }).click();
+    await browserExpect(review).toContainText("Dismissed.");
+    await review.getByRole("button", { name: "Create separate character", exact: true }).click();
+    await browserExpect(review.getByRole("heading", { name: "Nothing needs review." })).toBeVisible();
+    const actual = await isolationRepository.current(scope), mara = actual.characters.find(person => person.name === "Review Mara")!;
+    expect(mara).toBeDefined();
+    expect((await isolationRepository.detail(scope, mara.id)).observations).toEqual([]);
+    const receipt = (await pool.query("SELECT action,target_kind,result_receipt FROM campaign_cast_review_decisions WHERE campaign_id=$1 ORDER BY revision", [campaignId])).rows;
+    expect(receipt).toHaveLength(1); expect(receipt[0].action).toBe("dismiss"); expect(receipt[0].target_kind).toBe("detail");
+    // Re-run automatic publication against the same turn and source after identity resolution.
+    const providerProfileId = crypto.randomUUID();
+    const basis = { version: 2 as const, selection: { kind: "model" as const, modelId: "fixture" }, preset: null,
+      candidates: [{ modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 }], presetSystemPrompt: "", parameters: {}, endpointReference: "fixture-endpoint", credentialReference: providerProfileId, profileRevision: "fixture", authorityRevision: "fixture", requestTimeoutMs: 30000, protocolVersion: "cast-discovery-v1", routeBasisHash: "0".repeat(64) };
+    const execution = { providerProfileId, plan: deriveTextExecutionPlan({ ...basis, routeBasisHash: textExecutionRouteBasisHash(basis) }, CAST_DISCOVERY_SYSTEM_PROMPT) };
+    await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope, turnId, execution, enabled: true }));
+    const job = (await createCastDiscoveryJobRepository(pool, () => true).claim("composed-review"))!;
+    job.output = { version: 1, characters: [{ ...proposal, existingCharacterId: mara.id }] } as typeof job.output;
+    job.execution.admission = { identityPolicy: "unique_name" } as NonNullable<typeof job.execution.admission>;
+    job.identities = await withTransaction(pool, client => captureCastDiscoveryIdentities(client, scope));
+    const rescanned = await withTransaction(pool, client => applyValidatedCastDiscovery(client, job));
+    expect(rescanned.validationSummary.accepted).toBe(1);
+    expect(rescanned.observationIds).toEqual([]);
+    expect((await isolationRepository.detail(scope, mara.id)).observations).toEqual([]);
+    await openCampaignCast("review-reload");
+    await review.getByRole("button", { name: "Needs attention", exact: true }).click();
+    await review.getByRole("button", { name: "Review identity questions and details", exact: true }).click();
+    await review.getByRole("button", { name: "Dismissed", exact: true }).click();
+    await browserExpect(review).toContainText("blue eyes");
+    await review.screenshot({ path: resolve(screenshotRoot, "composed-review-dismissed.png") });
+    await review.getByRole("button", { name: "Undo", exact: true }).click();
+    await browserExpect(review).toContainText("Dismissal undone.");
+    await browserExpect(review).toContainText("blue eyes");
+    const afterReceipts = (await pool.query("SELECT action,target_kind,result_receipt FROM campaign_cast_review_decisions WHERE campaign_id=$1 ORDER BY revision", [campaignId])).rows;
+    expect(afterReceipts.map(row => row.action)).toEqual(["dismiss", "restore"]);
+    expect((await isolationRepository.candidates(scope, { view: "review" })).candidates.find(item => item.id === candidateId)?.details?.[0]?.observationIndex).toBe(0);
+    // Accept the restored original detail through the real browser and API.
+    await review.getByRole("button", { name: "Apply and next" }).click();
+    await browserExpect(review.getByRole("heading", { name: "Nothing needs review." })).toBeVisible();
+    const accepted = await isolationRepository.detail(scope, mara.id);
+    const observation = accepted.observations.find(item => item.field === "appearance.description" && item.value === "blue eyes")!;
+    expect(observation).toBeDefined();
+    expect(accepted.character.profile["appearance.description"]).toBe("blue eyes");
+    const { captureCastGenerationSnapshotWithClient } = await import("../../packages/database/src/campaign-cast-repository.js");
+    const { selectCastContext } = await import("../../packages/domain/src/campaign-cast-context.js");
+    const contextField = async () => {
+      const captured = await withTransaction(pool, client => captureCastGenerationSnapshotWithClient(client, scope, { discoveryEnabled: false, version: "cast-context-v1" }));
+      return selectCastContext({ snapshot: captured.snapshot, direction: "Review Mara", currentScene: "", openThreads: [], budgetTokens: 3000 })
+        .records.find(record => record.characterId === mara.id)?.fields.find(field => field.field === "appearance.description");
+    };
+    expect((await contextField())?.evidenceId).toBe(observation.id);
+    await page.goto(`${webOrigin}/story/${campaignId}?character=${mara.id}`);
+    await browserExpect(review).toContainText("Review Mara");
+    await review.locator("#cast-sources summary").click();
+    await review.getByRole("button", { name: "Retract fact" }).click();
+    await browserExpect(review).toContainText("Before: blue eyes");
+    await browserExpect(review).toContainText("After: Unknown");
+    await review.getByRole("button", { name: "Confirm retraction" }).click();
+    await browserExpect(review.getByRole("button", { name: "Restore fact" })).toBeVisible();
+    await page.goto(`${webOrigin}/story/${campaignId}?character=${mara.id}`);
+    await browserExpect(review).toContainText("Review Mara");
+    await review.locator("#cast-sources summary").click();
+    await browserExpect(review).toContainText("Retracted fact");
+    const retracted = await isolationRepository.detail(scope, mara.id);
+    expect(retracted.character.profile["appearance.description"]).toBeUndefined();
+    expect(await contextField()).toBeUndefined();
+    const repeated = await withTransaction(pool, client => applyValidatedCastDiscovery(client, { ...job, id: crypto.randomUUID() }));
+    expect(repeated.observationIds).toEqual([]);
+    expect((await isolationRepository.detail(scope, mara.id)).character.profile["appearance.description"]).toBeUndefined();
+    // Archive import remaps turn, character, observation and decision IDs.
+    const { exportCampaignCast, importCampaignCast } = await import("../../packages/database/src/campaign-cast-portability.js");
+    const archive = await withTransaction(pool, client => exportCampaignCast(client, scope));
+    expect(archive?.formatVersion).toBe(5);
+    const archiveCampaign = crypto.randomUUID(), archiveTurn = crypto.randomUUID();
+    const archiveScope = { ownerUserId, campaignId: archiveCampaign };
+    await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title,active_turn_number,character_profile) VALUES($1,$2,$3,'Archive copy',2,'{}')", [archiveCampaign, ownerUserId, nextVersion.worldVersionId]);
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,2,$4)", [archiveTurn, ownerUserId, archiveCampaign, narration]);
+    await withTransaction(pool, client => importCampaignCast(client, archiveScope, archive, { turns: new Map([[turnId, archiveTurn]]), worlds: new Map() }));
+    const archivedMara = (await isolationRepository.current(archiveScope)).characters.find(person => person.name === "Review Mara")!;
+    expect(archivedMara.profile["appearance.description"]).toBeUndefined();
+    const archivedDetail = await isolationRepository.detail(archiveScope, archivedMara.id);
+    expect(archivedDetail.observationDecisionStatus?.some(status => status.state === "retracted" && status.observationId !== observation.id)).toBe(true);
+    expect((await withTransaction(pool, client => exportCampaignCast(client, archiveScope)))?.formatVersion).toBe(5);
+    await review.getByRole("button", { name: "Restore fact" }).click();
+    await browserExpect(review).toContainText("Refresh before trying again");
+    await page.goto(`${webOrigin}/story/${campaignId}?character=${mara.id}`);
+    await browserExpect(review).toContainText("Review Mara");
+    await review.locator("#cast-sources summary").click();
+    await review.getByRole("button", { name: "Restore fact" }).click();
+    await browserExpect(review).toContainText("After: blue eyes");
+    await review.getByRole("button", { name: "Confirm restore" }).click();
+    await browserExpect(review.getByRole("button", { name: "Retract fact" })).toBeVisible();
+    expect((await isolationRepository.detail(scope, mara.id)).character.profile["appearance.description"]).toBe("blue eyes");
+    expect((await contextField())?.evidenceId).toBe(observation.id);
+    expect(browserErrors).toEqual([]);
+    // The source-served test fixture omits the vendored stylesheet and discovery scan
+    // service; its earlier rewind also leaves Story requesting the absent first turn.
+    const expectedFailures = new Set([
+      "404 /vendor/photoswipe/photoswipe.css",
+      `503 /api/v1/campaigns/${campaignId}/cast/scans`,
+      `404 /api/v1/campaigns/${campaignId}/reader/turns/1`,
+      `409 /api/v1/campaigns/${campaignId}/cast/characters/${mara.id}/observations/${observation.id}/decision-preview`
+    ]);
+    expect(failedResponses.filter(failure => !expectedFailures.has(failure))).toEqual([]);
+    expect(failedResponses).toContain(`409 /api/v1/campaigns/${campaignId}/cast/characters/${mara.id}/observations/${observation.id}/decision-preview`);
+    // Navigation and panel changes abort these in-flight fixture loads.
+    const expectedAborts = new Set([
+      "GET /vendor/photoswipe/photoswipe.css: net::ERR_ABORTED",
+      `GET /api/v1/campaigns/${campaignId}/cast: net::ERR_ABORTED`
+    ]);
+    const abortedCastDetail = new RegExp(`^GET /api/v1/campaigns/${campaignId}/cast/[0-9a-f-]{36}: net::ERR_ABORTED$`);
+    expect(failedRequests.filter(failure => !expectedAborts.has(failure) && !abortedCastDetail.test(failure))).toEqual([]);
+    expect(resourceErrors.sort()).toEqual([...failedResponses].sort());
+    expect(await getWorld(pool, unrelatedWorld.id)).toEqual(unrelatedWorldBefore);
+    expect((await isolationRepository.current(otherScope))).toEqual(otherSnapshot);
+    expect((await pool.query("SELECT content FROM world_versions WHERE id=$1", [published.worldVersionId])).rows[0].content).toEqual(pinnedWorld);
+    await (await import("node:fs/promises")).writeFile(resolve(screenshotRoot, "composed-review-receipts.json"), JSON.stringify({ receipts: afterReceipts, rescanned, otherCampaignUnchanged: true, worldUnchanged: true }, null, 2));
     await page.unrouteAll({ behavior: "wait" });
-  }, 100_000);
+  }, 180_000);
 
   it("keeps published versions immutable while drafts advance by revision", async () => {
     const first = await publishedWorld("Immutable");

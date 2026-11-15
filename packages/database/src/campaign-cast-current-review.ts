@@ -1,12 +1,13 @@
 import { type CastScope, type CastSnapshot } from "../../contracts/src/campaign-cast.js";
 import { isSeededFixedCandidateHidden } from "../../domain/src/campaign-cast.js";
 import { characterProfileSchema } from "../../contracts/src/world-library.js";
+import { readActiveReviewDismissals, isReviewDismissed } from "./campaign-cast-review-decision-repository.js";
 import { pendingCastDetailSql } from "./campaign-cast-review-sql.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 
 /** Read only actionable candidates against their retained, current narration evidence. */
 export async function currentCastReviewCandidates(client: DatabaseClient | DatabasePool, scope: CastScope, snapshot: CastSnapshot, jobsOnly = false) {
-  const rows = (await client.query(`SELECT p.id,p.proposal,p.resolution_receipt,
+  const rows = (await client.query(`SELECT p.id,p.source,p.proposal,p.resolution_receipt,
     ARRAY(SELECT (pending.item->>'index')::integer FROM (${pendingCastDetailSql}) pending) AS pending_indexes
     FROM campaign_cast_discovery_candidates p
     JOIN effective_turn_narrations n ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
@@ -19,11 +20,13 @@ export async function currentCastReviewCandidates(client: DatabaseClient | Datab
       AND n.correction_revision=(p.source->>'narrationRevision')::integer
       AND encode(digest(n.effective_narration,'sha256'),'hex')=p.source->>'sourceHash'`,
   [scope.campaignId, scope.ownerUserId, snapshot.boundary.timelineRevision, snapshot.boundary.turnNumber, jobsOnly])).rows;
+  const active = await readActiveReviewDismissals(client, scope, snapshot.characters);
   return rows.flatMap(row => {
+    if (!row.resolution_receipt && isReviewDismissed(active, row.source, { kind: "identity", proposal: row.proposal })) return [];
     const originalId = row.resolution_receipt?.result?.character?.id ?? row.proposal?.existingCharacterId;
     const original = snapshot.characters.find(person => person.id === originalId);
     const person = snapshot.characters.find(item => item.id === (original?.mergedIntoCharacterId ?? original?.id));
-    const pending = (row.pending_indexes as number[]).filter(index => !isSeededFixedCandidateHidden(
+    const pending = (row.pending_indexes as number[]).filter(index => !isReviewDismissed(active, row.source, { kind: "detail", proposal: row.proposal, observation: row.proposal.observations[index] }) && !isSeededFixedCandidateHidden(
       person?.campaignProfile && characterProfileSchema.parse(person.campaignProfile), row.proposal.observations[index].field));
     if (person?.removed || row.resolution_receipt && !pending.length) return [];
     return [{ id: row.id as string, characterId: person?.id as string | undefined }];

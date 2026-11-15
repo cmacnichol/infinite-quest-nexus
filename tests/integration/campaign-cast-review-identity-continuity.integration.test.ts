@@ -1,0 +1,98 @@
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
+import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { createCastDiscoveryJobRepository, enqueueCastDiscoveryWithClient } from "../../packages/database/src/campaign-cast-job-repository.js";
+import { applyValidatedCastDiscovery, captureCastDiscoveryIdentities } from "../../packages/database/src/campaign-cast-discovery-publication.js";
+import { readActiveReviewDismissals, isReviewDismissed } from "../../packages/database/src/campaign-cast-review-decision-repository.js";
+import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
+import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../packages/contracts/src/prompt-library.js";
+import { buildCastDiscoverySource } from "../../packages/domain/src/campaign-cast-discovery.js";
+
+describe("cast review identity continuity", () => {
+  let pool: DatabasePool, ownerUserId: string;
+  beforeAll(async () => { pool = createDatabasePool(process.env.TEST_DATABASE_URL!, 8); await migrateDatabase(pool, resolve("database/migrations")); ownerUserId = await initialOwnerId(pool); }, 60000);
+  afterAll(async () => { await pool.end(); });
+  it.each(["create", "attach"] as const)("preserves dismissal through %s and same-source publication", async action => {
+    const worldId = randomUUID(), versionId = randomUUID(), campaignId = randomUUID(), turnId = randomUUID(), id = randomUUID(), providerProfileId = randomUUID();
+    await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Continuity')", [worldId, ownerUserId]);
+    await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) VALUES($1,$2,$3,1,'{}')", [versionId, worldId, ownerUserId]);
+    await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title,active_turn_number) VALUES($1,$2,$3,'Continuity',1)", [campaignId, ownerUserId, versionId]);
+    const narration = "Mara has blue eyes.";
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,1,$4)", [turnId, ownerUserId, campaignId, narration]);
+    const scope = { ownerUserId, campaignId }, repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true, lifecycleEnabled: true });
+    const initial = await repo.initialize(scope);
+    const target = action === "attach" ? await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: "target", name: "Mara", aliases: [], profile: {} }) : null;
+    const before = target ?? initial;
+    const source = buildCastDiscoverySource({ scope, turnId, turnNumber: 1, timelineRevision: 0, narrationRevision: 0, narration });
+    const proposal = { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote: narration }], observations: [{ field: "appearance.description" as const, value: "blue eyes", mode: "fact" as const, speakerCharacterId: null, paragraphId: "p1", quote: narration }] };
+    await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason) VALUES($1,$2,$3,0,'mara',$4,$5,'identity_needs_review')", [id, ownerUserId, campaignId, JSON.stringify(source), JSON.stringify(proposal)]);
+    const dismissed = await repo.reviewDecision(scope, id, { action: "dismiss_detail", observationIndex: 0, expectedCastRevision: before.revision, expectedBoundary: before.boundary, expectedReviewRevision: 0, sourceHash: source.sourceHash, idempotencyKey: "dismiss" });
+    const resolution = action === "attach" ? { action, characterId: target!.character.id } : { action };
+    const resolved = await repo.resolveCandidate!(scope, id, { ...resolution, expectedCastRevision: before.revision, expectedBoundary: before.boundary, expectedReviewRevision: 1, idempotencyKey: "resolve" });
+    const rescanned = { ...proposal, localKey: "rescanned", existingCharacterId: resolved.character.id };
+    const basis = { version: 2 as const, selection: { kind: "model" as const, modelId: "fixture" }, preset: null, candidates: [{ modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 }], presetSystemPrompt: "", parameters: {}, endpointReference: "fixture", credentialReference: providerProfileId, profileRevision: "fixture", authorityRevision: "fixture", requestTimeoutMs: 30000, protocolVersion: "cast-discovery-v1", routeBasisHash: "0".repeat(64) };
+    const execution = { providerProfileId, plan: deriveTextExecutionPlan({ ...basis, routeBasisHash: textExecutionRouteBasisHash(basis) }, CAST_DISCOVERY_SYSTEM_PROMPT) };
+    await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope, turnId, execution, enabled: true }));
+    const job = (await createCastDiscoveryJobRepository(pool, () => true).claim("continuity"))!;
+    job.execution.admission = { identityPolicy: "unique_name" } as NonNullable<typeof job.execution.admission>;
+    job.identities = await withTransaction(pool, client => captureCastDiscoveryIdentities(client, scope));
+    job.output = { version: 1, characters: [rescanned] };
+    const published = await withTransaction(pool, client => applyValidatedCastDiscovery(client, job));
+    expect(published.validationSummary.accepted).toBe(1);
+    expect(published.observationIds).toEqual([]);
+    let snapshot = await repo.current(scope);
+    let active = await readActiveReviewDismissals(pool, scope, snapshot.characters);
+    expect(isReviewDismissed(active, source, { kind: "detail", proposal: rescanned, observation: rescanned.observations[0]! })).toBe(true);
+    expect(isReviewDismissed(active, source, { kind: "detail", proposal: { ...rescanned, name: "Other", existingCharacterId: randomUUID() }, observation: rescanned.observations[0]! })).toBe(false);
+    expect(isReviewDismissed(active, source, { kind: "detail", proposal: { ...rescanned, existingCharacterId: randomUUID() }, observation: rescanned.observations[0]! })).toBe(false);
+    expect(isReviewDismissed(active, source, { kind: "detail", proposal: { ...rescanned, aliases: ["Other alias"] }, observation: rescanned.observations[0]! })).toBe(false);
+    expect(isReviewDismissed(active, { ...source, scope: { ...scope, campaignId: randomUUID() } }, { kind: "detail", proposal: rescanned, observation: rescanned.observations[0]! })).toBe(false);
+    const destination = await repo.create(scope, { expectedCastRevision: snapshot.revision, expectedBoundary: snapshot.boundary, idempotencyKey: "merge-target", name: "Mary", aliases: [], profile: {} });
+    const sourceCharacter = await repo.detail(scope, resolved.character.id);
+    await repo.merge!(scope, destination.character.id, { expectedCastRevision: destination.revision, expectedBoundary: destination.boundary,
+      expectedCharacterRevision: destination.character.revision, expectedSourceCharacterRevision: sourceCharacter.character.revision,
+      sourceCharacterId: resolved.character.id, reviewedAliases: ["Mara"], choices: {}, idempotencyKey: "merge" });
+    snapshot = await repo.current(scope);
+    active = await readActiveReviewDismissals(pool, scope, snapshot.characters);
+    const mergedProposal = { ...rescanned, existingCharacterId: destination.character.id };
+    expect(isReviewDismissed(active, source, { kind: "detail", proposal: mergedProposal, observation: mergedProposal.observations[0]! })).toBe(true);
+    expect((await repo.dismissedReview(scope, {})).decisions[0]?.canRestore).toBe(true);
+    const acceptedDuplicate = randomUUID();
+    await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason,resolution_receipt) VALUES($1,$2,$3,0,'accepted',$4,$5,'identity_needs_review',$6)", [acceptedDuplicate, ownerUserId, campaignId, JSON.stringify(source), JSON.stringify(mergedProposal), JSON.stringify({ result: { ...resolved, pendingObservations: [] } })]);
+    expect((await repo.dismissedReview(scope, {})).decisions[0]?.canRestore).toBe(false);
+    await expect(repo.reviewDecision(scope, id, { action: "restore", decisionId: dismissed.decisionId, expectedCastRevision: snapshot.revision, expectedBoundary: snapshot.boundary, expectedReviewRevision: 1, sourceHash: source.sourceHash, idempotencyKey: "stale-restore" })).rejects.toMatchObject({ code: "cast_invalid_request" });
+    await pool.query("DELETE FROM campaign_cast_discovery_candidates WHERE id=$1", [acceptedDuplicate]);
+    await repo.reviewDecision(scope, id, { action: "restore", decisionId: dismissed.decisionId, expectedCastRevision: snapshot.revision, expectedBoundary: snapshot.boundary, expectedReviewRevision: 1, sourceHash: source.sourceHash, idempotencyKey: "restore" });
+    expect((await repo.candidates(scope, { view: "review" })).candidates.find(item => item.id === id)?.details?.[0]?.observationIndex).toBe(0);
+  });
+  it("does not bridge an ambiguous original identity to either resolved person", async () => {
+    const worldId = randomUUID(), versionId = randomUUID(), campaignId = randomUUID(), turnId = randomUUID();
+    await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Ambiguous')", [worldId, ownerUserId]);
+    await pool.query("INSERT INTO world_versions(id,world_id,owner_user_id,version_number,content) VALUES($1,$2,$3,1,'{}')", [versionId, worldId, ownerUserId]);
+    await pool.query("INSERT INTO campaigns(id,owner_user_id,world_version_id,title,active_turn_number) VALUES($1,$2,$3,'Ambiguous',1)", [campaignId, ownerUserId, versionId]);
+    const narration = "Mara has blue eyes.";
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,1,$4)", [turnId, ownerUserId, campaignId, narration]);
+    const scope = { ownerUserId, campaignId }, repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const initial = await repo.initialize(scope);
+    const first = await repo.create(scope, { expectedCastRevision: initial.revision, expectedBoundary: initial.boundary, idempotencyKey: "first", name: "Mara", aliases: [], profile: {} });
+    const second = await repo.create(scope, { expectedCastRevision: first.revision, expectedBoundary: first.boundary, idempotencyKey: "second", name: "Mara", aliases: [], profile: {} });
+    const source = buildCastDiscoverySource({ scope, turnId, turnNumber: 1, timelineRevision: 0, narrationRevision: 0, narration });
+    const proposal = { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote: narration }], observations: [{ field: "appearance.description" as const, value: "blue eyes", mode: "fact" as const, speakerCharacterId: null, paragraphId: "p1", quote: narration }] };
+    const original = randomUUID();
+    await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason) VALUES($1,$2,$3,0,'original',$4,$5,'identity_needs_review')", [original, ownerUserId, campaignId, JSON.stringify(source), JSON.stringify(proposal)]);
+    await repo.reviewDecision(scope, original, { action: "dismiss_detail", observationIndex: 0, expectedCastRevision: second.revision, expectedBoundary: second.boundary, expectedReviewRevision: 0, sourceHash: source.sourceHash, idempotencyKey: "dismiss" });
+    for (const resolved of [first, second]) {
+      const id = randomUUID();
+      await pool.query("INSERT INTO campaign_cast_discovery_candidates(id,owner_user_id,campaign_id,chunk_ordinal,local_key,source,proposal,reason,resolution_receipt) VALUES($1,$2,$3,0,$4,$5,$6,'identity_needs_review',$7)", [id, ownerUserId, campaignId, id, JSON.stringify(source), JSON.stringify(proposal), JSON.stringify({ result: { ...resolved, candidateId: id, observationIds: [], pendingObservations: [] } })]);
+    }
+    const active = await readActiveReviewDismissals(pool, scope, (await repo.current(scope)).characters);
+    expect(isReviewDismissed(active, source, { kind: "detail", proposal, observation: proposal.observations[0]! })).toBe(true);
+    for (const person of [first.character, second.character]) {
+      expect(isReviewDismissed(active, source, { kind: "detail", proposal: { ...proposal, existingCharacterId: person.id }, observation: proposal.observations[0]! })).toBe(false);
+    }
+  });
+
+});

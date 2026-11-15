@@ -8,7 +8,7 @@ export const castNarratorStateSchema = z.enum(["installation_disabled", "enrollm
 export type CastNarratorState = z.infer<typeof castNarratorStateSchema>;
 export const charactersWorkspaceStatusSchema = z.object({
   revision: z.number().int().nonnegative(), boundary: castBoundarySchema,
-  capabilities: z.object({ editing: z.boolean().nullable(), discovery: z.boolean().nullable(), autoMatch: z.boolean().nullable(), backfill: z.boolean().nullable(), context: z.boolean().nullable() }),
+  capabilities: z.object({ editing: z.boolean().nullable(), discovery: z.boolean().nullable(), autoMatch: z.boolean().nullable(), backfill: z.boolean().nullable(), context: z.boolean().nullable(), reviewDecisions: z.boolean().optional(), observationDecisions: z.boolean().optional(), reviewDecisionReadVersion: z.literal(1).optional() }),
   contextDisabledReason: z.string().nullable(), narratorState: castNarratorStateSchema.optional(),
   counts: z.object({ identities: z.number().int().nonnegative().nullable(), details: z.number().int().nonnegative().nullable(), conflicts: z.number().int().nonnegative().nullable() }),
   reviewDecisions: z.object({ identities: z.number().int().min(0).max(10000), confirmed: z.number().int().min(0).max(10000), dismissed: z.number().int().min(0).max(10000) }).optional(),

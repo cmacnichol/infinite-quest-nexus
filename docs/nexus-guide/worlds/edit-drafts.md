@@ -15,4 +15,6 @@ Select **Save draft** to persist changes. Nexus uses an optimistic revision valu
 
 Saving a draft never edits a published version and never changes an existing campaign.
 
+Character editing has two steps: **Add/Apply to world draft** updates the roster in the open world form, and saving that parent form persists it. Applying a character does not publish or save the world. If the parent save fails or encounters a revision conflict, the edited roster remains in the form; review the error and reconcile before retrying. Do not reload to resolve a conflict until you have accounted for unsaved edits, because manual drafts are not recovered after reload.
+
 Generating or replacing a cover stores a world-level asset without changing the draft's content revision. A failed cover can be generated again; it does not prevent draft edits or publication.

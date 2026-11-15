@@ -133,3 +133,15 @@ describe("campaign cast reference translation", () => {
     expect(() => createCastReferenceTranslator({ ...maps, [missing]: new Map() }, rules).event(source)).toThrow("Missing");
   });
 });
+
+it("translates correction references and rejects missing provenance mappings", () => {
+  const translator = createCastReferenceTranslator(maps, rules);
+  const retract = { kind: "retract_observation" as const, characterId: ids.character, observationId: ids.observation };
+  const restore = { kind: "restore_observation" as const, characterId: ids.other, observationId: ids.observation, retractionEventId: ids.seed };
+  expect(translator.event({ id: ids.event, commands: [{ command: retract }, { command: restore }] }).commands).toEqual([
+    { command: { ...retract, characterId: target.character, observationId: target.observation } },
+    { command: { ...restore, characterId: target.other, observationId: target.observation, retractionEventId: target.seed } }
+  ]);
+  expect(() => createCastReferenceTranslator({ ...maps, observations: new Map() }, rules).event({ id: ids.event, commands: [{ command: retract }] })).toThrow("Missing observationId");
+  expect(() => createCastReferenceTranslator({ ...maps, events: new Map([[ids.event, target.event]]) }, rules).event({ id: ids.event, commands: [{ command: restore }] })).toThrow("Missing eventId");
+});

@@ -18,7 +18,8 @@ test("World character warns on another character's alias without blocking applic
   const dialog = page.locator("#characterDialog");
   await dialog.locator("#characterName").fill("Mara");
   await dialog.locator("#characterRole").fill("Guide");
-  await dialog.locator("#characterIdentityDetails summary").click();
+  await dialog.getByRole("button", { name: "Continue in detailed editor" }).click();
+  await dialog.getByRole("navigation", { name: "Character sections" }).getByRole("button", { name: /^Identity ·/ }).click();
   await dialog.locator("#characterAliases").fill("The Watcher");
   await dialog.locator("#saveCharacter").click();
   await expect(dialog).toBeHidden();

@@ -8,17 +8,17 @@ export async function registerCampaignCastRoutes(app: FastifyInstance, options: 
 }) {
   await registerCampaignCastScanRoutes(app, { ...(options.application.scans ? { application: options.application.scans } : {}), resolveOwner: options.resolveOwner });
   const base = "/api/v1/campaigns/:campaignId/cast";
-  const params = z.object({ campaignId: z.uuid(), characterId: z.uuid().optional(), candidateId: z.uuid().optional(), jobId: z.uuid().optional(), eventId: z.uuid().optional() });
+  const params = z.object({ campaignId: z.uuid(), characterId: z.uuid().optional(), candidateId: z.uuid().optional(), jobId: z.uuid().optional(), eventId: z.uuid().optional(), observationId: z.uuid().optional() });
   for (const [method, path] of [["GET", base], ["GET", `${base}/:characterId/merge-preview`], ["GET", `${base}/:characterId/unmerge-preview`],
     ["GET", `${base}/:characterId/promotion-preview`], ["POST", `${base}/:characterId/merge`], ["POST", `${base}/:characterId/unmerge`],
-    ["POST", `${base}/:characterId/remove`], ["POST", `${base}/:characterId/restore`], ["POST", `${base}/:characterId/promote`], ["GET", `${base}/from-world`], ["GET", `${base}/from-world-preview`], ["POST", `${base}/from-world`], ["POST", `${base}/:characterId/authored-profile`], ["POST", `${base}/:characterId/draft-preview`], ["POST", base], ["GET", `${base}/workspace-status`], ["GET", `${base}/discovery`], ["GET", `${base}/candidates`],
-    ["POST", `${base}/:characterId/attachments/:eventId/detach`], ["POST", `${base}/discovery/:jobId/retry`], ["POST", `${base}/candidates/:candidateId/details/resolve`], ["POST", `${base}/candidates/:candidateId/resolve`], ["GET", `${base}/:characterId`], ["PATCH", `${base}/:characterId`]] as const) {
+    ["POST", `${base}/:characterId/remove`], ["POST", `${base}/:characterId/restore`], ["POST", `${base}/:characterId/promote`], ["GET", `${base}/from-world`], ["GET", `${base}/from-world-preview`], ["POST", `${base}/from-world`], ["POST", `${base}/:characterId/authored-profile`], ["POST", `${base}/:characterId/draft-preview`], ["POST", base], ["GET", `${base}/workspace-status`], ["GET", `${base}/discovery`], ["GET", `${base}/candidates`], ["GET", `${base}/review-decisions`], ["POST", `${base}/candidates/:candidateId/review-decisions`],
+    ["POST", `${base}/characters/:characterId/observations/:observationId/decision-preview`], ["POST", `${base}/characters/:characterId/observations/:observationId/decision`], ["POST", `${base}/:characterId/observations/:observationId/decision-preview`], ["POST", `${base}/:characterId/observations/:observationId/decision`], ["POST", `${base}/:characterId/attachments/:eventId/detach`], ["POST", `${base}/discovery/:jobId/retry`], ["POST", `${base}/candidates/:candidateId/details/resolve`], ["POST", `${base}/candidates/:candidateId/resolve`], ["GET", `${base}/:characterId`], ["PATCH", `${base}/:characterId`]] as const) {
     app.route({ method, url: path, bodyLimit: path.endsWith("/authored-profile") ? 16 * 1024 * 1024
       : method === "PATCH" ? 4 * 1024 * 1024 : method === "POST" && path === base ? 320 * 1024 : 64 * 1024, handler: async (request, reply) => {
       try {
         const ids = params.parse(request.params);
         const scope = { ...await options.resolveOwner(), campaignId: ids.campaignId };
-        const capabilities = { castEditing: options.enabled, ...(options.lifecycleEnabled !== undefined ? { castLifecycle: options.enabled && options.lifecycleEnabled } : {}), ...(options.enabled && options.presetsEnabled ? { castPresets: true } : {}) };
+        const capabilities = { castEditing: options.enabled, castReviewDecisions: options.enabled, castObservationDecisions: options.enabled, castReviewDecisionReadVersion: 1, ...(options.lifecycleEnabled !== undefined ? { castLifecycle: options.enabled && options.lifecycleEnabled } : {}), ...(options.enabled && options.presetsEnabled ? { castPresets: true } : {}) };
         const operation = path.slice(path.lastIndexOf("/") + 1);
         if (ids.characterId && ["merge-preview", "unmerge-preview", "promotion-preview", "merge", "unmerge", "remove", "restore", "promote"].includes(operation)) {
           if (!options.enabled || !options.lifecycleEnabled) throw new CampaignCastError("cast_lifecycle_disabled");
@@ -31,7 +31,14 @@ export async function registerCampaignCastRoutes(app: FastifyInstance, options: 
           return await options.application.promote(scope, ids.characterId, request.body as never);
         }
         if (method === "GET" && path === `${base}/from-world`) return await options.application.worldChoices(scope);
-        if (path === `${base}/workspace-status`) return await options.application.workspaceStatus(scope);
+        if (path === `${base}/workspace-status`) {
+          const status = await options.application.workspaceStatus(scope);
+          return { ...status, capabilities: { ...status.capabilities, reviewDecisions: options.enabled, observationDecisions: options.enabled, reviewDecisionReadVersion: 1 } };
+        }
+        if (path === `${base}/review-decisions`) {
+          const query = z.object({ view: z.literal("dismissed"), cursor: z.uuid().optional(), limit: z.coerce.number().int().min(1).max(50).optional() }).strict().parse(request.query);
+          return await options.application.dismissedReview(scope, { ...(query.cursor ? { cursor: query.cursor } : {}), ...(query.limit !== undefined ? { limit: query.limit } : {}) });
+        }
         if (path === `${base}/discovery`) return await options.application.discoveryStatus(scope);
         if (path === `${base}/candidates`) return await options.application.candidates(scope, request.query as never);
         if (path === `${base}/from-world-preview`) return await options.application.fromWorldPreview(scope, request.query as never);
@@ -39,6 +46,9 @@ export async function registerCampaignCastRoutes(app: FastifyInstance, options: 
           ? { ...await options.application.detail(scope, ids.characterId), capabilities }
           : { ...await options.application.list(scope, request.query as never), capabilities };
         if (!options.enabled) throw new CampaignCastError("cast_editing_disabled");
+        if (ids.observationId) return path.endsWith("/decision-preview")
+          ? await options.application.previewObservationDecision(scope, ids.characterId!, ids.observationId, request.body as never)
+          : await options.application.applyObservationDecision(scope, ids.characterId!, ids.observationId, request.body as never);
         if (path === `${base}/from-world`) {
           const result = await options.application.fromWorld(scope, request.body as never);
           return reply.code((request.body as { targetCastCharacterId?: string }).targetCastCharacterId ? 200 : 201).send(result);
@@ -48,6 +58,7 @@ export async function registerCampaignCastRoutes(app: FastifyInstance, options: 
         if (ids.eventId) return await options.application.detachAttachment(scope, ids.characterId!, ids.eventId, request.body as never);
         if (ids.jobId) return await options.application.retryDiscovery(scope, ids.jobId, request.body as never);
         if (path === `${base}/candidates/:candidateId/details/resolve`) return await options.application.resolveDetail(scope, ids.candidateId!, request.body as never);
+        if (path === `${base}/candidates/:candidateId/review-decisions`) return await options.application.reviewDecision(scope, ids.candidateId!, request.body as never);
         if (ids.candidateId) return await options.application.resolveCandidate(scope, ids.candidateId, request.body as never);
         if (method === "POST") return reply.code(201).send(await options.application.create(scope, request.body as never));
         return await options.application.edit(scope, ids.characterId!, request.body as never);
