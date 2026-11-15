@@ -186,3 +186,42 @@ it("uses the authored profile endpoint for a Starting Cast Character", async () 
   const input = document.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!; input.value = "Guide"; input.dispatchEvent(new document.defaultView!.Event("input")); click("Save");
   await vi.waitFor(() => expect(editAuthoredProfile).toHaveBeenCalledOnce()); expect(editAuthoredProfile.mock.calls[0]![2]).toEqual({ expectedCastRevision: 1, expectedCharacterRevision: 1, expectedBoundary: boundary, idempotencyKey: expect.any(String), set: { "story.role": "Guide" } }); workspace.dispose();
 });
+
+it("expires Undo 30 seconds after the write even when refresh is delayed", async () => {
+  let current = { ...detail, character: { ...person, profile: { "story.role": "Guard" } } }, reads = 0;
+  let release!: () => void;
+  const delayed = new Promise<void>(resolve => { release = resolve; });
+  const edit = vi.fn(async (_campaign: string, _id: string, body: any) => {
+    current = { ...current, revision: 2, character: { ...current.character, revision: 2, profile: { "story.role": body.setOverrides["story.role"] } } };
+    return current;
+  });
+  const read = vi.fn(async () => { reads++; if (reads === 2) await delayed; return current; });
+  const { document, workspace, click } = setup({ detail: read, edit, workspaceStatus: async () => ({ ...status, revision: current.revision }), list: async () => ({ ...page, revision: current.revision, characters: [current.character] }) });
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("Edit Role"));
+    vi.useFakeTimers(); click("Edit Role"); const input = document.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!; input.value = "Captain"; input.dispatchEvent(new document.defaultView!.Event("input")); click("Save");
+    await vi.advanceTimersByTimeAsync(0); expect(read).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(20_000); release(); await vi.advanceTimersByTimeAsync(0);
+    const undo = [...document.querySelectorAll("button")].find(button => button.textContent === "Undo")!; expect(undo).toBeTruthy();
+    await vi.advanceTimersByTimeAsync(9_999); expect([...document.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(true);
+    await vi.advanceTimersByTimeAsync(1); expect([...document.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(false);
+    undo.click(); await vi.advanceTimersByTimeAsync(0); expect(edit).toHaveBeenCalledTimes(1); expect(document.body.textContent).toContain("Saved Role.");
+  } finally { workspace.dispose(); vi.useRealTimers(); }
+});
+
+it("keeps a Main Character save and its receipt when the profile refresh fails", async () => {
+  const main = { ...person, origin: { kind: "protagonist" as const } };
+  let profile = { name: "Mara", profile: characterProfileSchema.parse({ story: { role: "Scout" } }), revision: 1 }, reads = 0;
+  const getProfile = vi.fn(async () => { if (++reads === 2) throw new Error("offline"); return profile; });
+  const saveProfile = vi.fn(async (_campaign: string, body: any) => { profile = { name: body.name, profile: body.profile, revision: profile.revision + 1 }; return profile; });
+  const { document, workspace, click } = setup({ detail: async () => ({ ...detail, character: main }), list: async () => ({ ...page, characters: [main] }) }, { getProfile, saveProfile });
+  try {
+    workspace.open("one"); await vi.waitFor(() => expect(document.body.textContent).toContain("Mara")); click("Mara"); await vi.waitFor(() => expect(document.body.textContent).toContain("Edit Role"));
+    click("Edit Role"); const input = document.querySelector<HTMLTextAreaElement>('[data-path="story.role"] textarea')!; input.value = "Guide"; input.dispatchEvent(new document.defaultView!.Event("input")); click("Save");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Saved Role. Could not refresh this character."));
+    expect(saveProfile).toHaveBeenCalledTimes(1); expect([...document.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(false);
+    click("Reload"); await vi.waitFor(() => expect([...document.querySelectorAll("button")].some(button => button.textContent === "Undo")).toBe(true));
+    expect(saveProfile).toHaveBeenCalledTimes(1); click("Undo"); await vi.waitFor(() => expect(document.body.textContent).toContain("Undone"));
+    expect(saveProfile.mock.calls[1]![1]).toEqual({ name: "Mara", profile: characterProfileSchema.parse({ story: { role: "Scout" } }), expectedRevision: 2, editSource: "manual" });
+  } finally { workspace.dispose(); }
+});
