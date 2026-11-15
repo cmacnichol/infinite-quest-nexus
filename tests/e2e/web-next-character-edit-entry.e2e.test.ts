@@ -19,10 +19,15 @@ for (const width of [1280, 390]) test(`existing world character opens Review at 
   await expect(page.locator('[name="candidate.profile.story.role"]')).toBeFocused();
   await page.locator('[name="candidate.profile.story.role"]').fill("Guide");
   await page.locator('[data-character-stage="mechanics"]').click();
-  await page.getByRole("button", { name: "Add statistic" }).click();
+  await page.getByRole("button", { name: "Add statistic" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("textbox", { name: "Name for row 1" }).first()).toBeFocused();
   await page.getByRole("textbox", { name: "Name for row 1" }).first().fill("Resolve");
-  await page.getByRole("button", { name: "Remove Resolve" }).click();
-  await page.getByRole("button", { name: "Undo remove" }).click();
+  await page.getByRole("button", { name: "Remove Resolve" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Undo remove" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("textbox", { name: "Name for row 1" }).first()).toBeFocused();
   await expect(page.getByRole("textbox", { name: "Name for row 1" }).first()).toHaveValue("Resolve");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: info.outputPath(`mechanics-${width}.png`), fullPage: true });
@@ -47,4 +52,22 @@ for (const width of [1280, 390]) test(`existing world character opens Review at 
   await expect(page.locator('[data-character-use]')).toHaveCount(0);
   await expect(page.getByText("Describe changes and generate a replacement draft for review, or return to Review.")).toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test("mechanics pagination preserves keyboard focus and reports its range", async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  const draft = { schemaVersion: 5, world: { title: "Glass Atlas", genre: "", tone: "", premise: "", backgroundStory: "", firstAction: "", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} };
+  const candidate = { id: "hero", name: "Ilyra", characterText: "", campaignUse: "playable", startingCastDefault: true, alwaysInContext: false, rpgStats: Array.from({ length: 51 }, (_, i) => ({ name: `Stat ${i + 1}` })), defaultTriggers: [], source: {} };
+  await page.addInitScript((session) => sessionStorage.setItem("iqn:character-workspace:session:local", JSON.stringify(session)), { version: 1, key: "local", origin: "world-editor", mode: "edit", workflowId: "workflow-1", parentRoute: "/app/worlds/world-1?tab=characters", expectedWorldRevision: 4, parentDraft: draft, worldContext: draft, rosterSummaries: [], candidate, expiresAt: Date.now() + 60_000 });
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? 43174}/app/characters/local`);
+  await page.locator('[data-character-stage="mechanics"]').click();
+  await expect(page.getByRole("status").filter({ hasText: "Rows 1�50 of 51" })).toBeVisible();
+  await page.getByRole("button", { name: "Next rows" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("textbox", { name: "Name for row 51" })).toBeFocused();
+  await expect(page.getByRole("status").filter({ hasText: "Rows 51�51 of 51" })).toBeVisible();
+  await page.screenshot({ path: info.outputPath("mechanics-pagination-390.png") });
+  await page.getByRole("button", { name: "Previous rows" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("textbox", { name: "Name for row 1", exact: true })).toBeFocused();
 });

@@ -36,22 +36,23 @@ export function renderMechanicsTable(host: HTMLElement, options: { kind: "stat" 
         });
         cell.append(control); row.append(cell);
       }
-      remove.addEventListener("click", () => { if (disposed) return; removed = { item: items[index], index }; items.splice(index, 1); page = Math.min(page, Math.max(0, Math.ceil(items.length / pageSize) - 1)); options.onChange([...items]); render(); });
+      remove.addEventListener("click", () => { if (disposed) return; removed = { item: items[index], index }; items.splice(index, 1); page = Math.min(page, Math.max(0, Math.ceil(items.length / pageSize) - 1)); options.onChange([...items]); render(); host.querySelector<HTMLButtonElement>("[data-undo-remove]")?.focus(); });
       const cell = document.createElement("td"); cell.append(remove); row.append(cell); body.append(row);
     });
     table.append(body); host.append(table);
     if (items.length > pageSize) {
       const previous = document.createElement("button"); previous.type = "button"; previous.textContent = "Previous rows"; previous.disabled = page === 0;
-      previous.addEventListener("click", () => { page--; render(); });
+      previous.addEventListener("click", () => { if (disposed || page === 0) return; page--; render(); host.querySelector<HTMLInputElement>("tbody input")?.focus(); });
       const next = document.createElement("button"); next.type = "button"; next.textContent = "Next rows"; next.disabled = (page + 1) * pageSize >= items.length;
-      next.addEventListener("click", () => { page++; render(); });
-      host.append(previous, next);
+      next.addEventListener("click", () => { if (disposed || (page + 1) * pageSize >= items.length) return; page++; render(); host.querySelector<HTMLInputElement>("tbody input")?.focus(); });
+      const range = document.createElement("span"); range.setAttribute("role", "status"); range.textContent = `Rows ${page * pageSize + 1}–${Math.min((page + 1) * pageSize, items.length)} of ${items.length}`;
+      host.append(previous, range, next);
     }
     const add = document.createElement("button"); add.type = "button"; add.textContent = `Add ${singular}`; add.disabled = items.length >= options.max;
-    add.addEventListener("click", () => { if (disposed || items.length >= options.max) return; items.push({}); page = Math.floor((items.length - 1) / pageSize); options.onChange([...items]); render(); }); host.append(add);
+    add.addEventListener("click", () => { if (disposed || items.length >= options.max) return; items.push({}); page = Math.floor((items.length - 1) / pageSize); options.onChange([...items]); render(); host.querySelector<HTMLInputElement>(`input[aria-label="Name for row ${items.length}"]`)?.focus(); }); host.append(add);
     if (removed) {
-      const undo = document.createElement("button"); undo.type = "button"; undo.textContent = "Undo remove";
-      undo.addEventListener("click", () => { if (disposed || !removed || items.length >= options.max) return; items.splice(removed.index, 0, removed.item); page = Math.floor(removed.index / pageSize); removed = null; options.onChange([...items]); render(); });
+      const undo = document.createElement("button"); undo.type = "button"; undo.textContent = "Undo remove"; undo.dataset.undoRemove = "";
+      undo.addEventListener("click", () => { if (disposed || !removed || items.length >= options.max) return; const index = removed.index; items.splice(index, 0, removed.item); page = Math.floor(index / pageSize); removed = null; options.onChange([...items]); render(); host.querySelector<HTMLInputElement>(`input[aria-label="Name for row ${index + 1}"]`)?.focus(); });
       undo.disabled = items.length >= options.max; host.append(undo);
     }
     const describedBy = host.getAttribute("aria-describedby");
