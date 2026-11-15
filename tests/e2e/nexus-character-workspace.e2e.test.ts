@@ -273,3 +273,113 @@ test("workspace lock preserves adapter disabled policies without caching transie
   await expect(page.locator("#fixture-name")).toBeEnabled();
   await expect(page.locator("#fixture-policy")).toBeDisabled();
 });
+
+
+test("world character refinement explains when no default provider is configured", async ({ page }) => {
+  await page.route("**/api/v1/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    return route.fulfill({ json: path.endsWith("/providers") ? { providers: [] } : path.endsWith("/worlds") ? { worlds: [] } : { campaigns: [] } });
+  });
+  await page.goto(`${base}/nexus/index.html#world-library`);
+  await page.locator("#newWorld").click();
+  await page.locator('[data-world-author-step="character"]').click();
+  await page.locator("#addPlayableCharacter").click();
+  await page.getByRole("button", { name: "Continue in detailed editor" }).click();
+  await page.getByRole("button", { name: /^Appearance ·/ }).click();
+  await expect(page.getByText("To refine with AI, choose a default text provider and model in Provider Setup.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Refine with AI" })).toBeDisabled();
+});
+
+
+for (const width of [1280, 390]) test(`world appearance refinement preserves unsaved character at ${width}px`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 900 });
+  const fixture = legacyUiFixture({ turnCount: 0, worldCount: 0, campaignCount: 0 });
+  await installLegacyUiFixture(page, fixture);
+  const requests: any[] = [];
+  await page.route("**/api/v1/worlds/playable-characters/generate-preview", async route => {
+    const request = route.request().postDataJSON(); requests.push(request);
+    const current = request.content.playableCharacters.find((character: any) => character.id === request.characterId);
+    const character = structuredClone(current);
+    character.name = "Rejected name"; character.profile.story.role = "Rejected role";
+    character.profile.appearance.hair = '<img src=x onerror="alert(1)">'; character.rpgStats = [];
+    await route.fulfill({ json: { character } });
+  });
+  await page.goto(`${base}/nexus/index.html#world-library`);
+  await page.locator("#newWorld").click();
+  await page.locator("#worldTitle").fill("Test world");
+  await page.locator('[data-world-author-step="character"]').click();
+  await page.locator("#addPlayableCharacter").click();
+  await page.locator("#characterName").fill("Unsaved traveler");
+  await page.locator("#characterRole").fill("Guide");
+  await page.getByRole("button", { name: "Continue in detailed editor" }).click();
+  if (width === 390) await page.getByLabel("Section", { exact: true }).selectOption("mechanics");
+  else await page.getByRole("button", { name: /^Mechanics ·/ }).click();
+  await page.locator("#characterMechanics summary").click();
+  await page.locator("#addCharacterStat").click();
+  await page.locator('#characterStats [data-character-field="name"]').fill("Resolve");
+  await page.locator('#characterStats [data-character-field="value"]').fill("42");
+  if (width === 390) await page.getByLabel("Section", { exact: true }).selectOption("appearance");
+  else await page.getByRole("button", { name: /^Appearance ·/ }).click();
+  await page.locator("#characterHair").fill("Unsaved braid");
+  await page.getByRole("button", { name: "Refine with AI" }).click();
+  await page.getByLabel("What should change in Appearance?").fill("Change the hair");
+  await page.getByRole("button", { name: "Generate", exact: true }).click();
+  await expect(page.getByText('Proposed: <img src=x onerror="alert(1)">')).toBeVisible();
+  expect(await page.locator('[data-refine-panel] img').count()).toBe(0);
+  const sent = requests[0].content.playableCharacters.find((character: any) => character.id === requests[0].characterId);
+  expect(sent).toMatchObject({ name: "Unsaved traveler", profile: { story: { role: "Guide" }, appearance: { hair: "Unsaved braid" } } });
+  expect(sent.rpgStats).toMatchObject([{ name: "Resolve", value: 42 }]);
+  await page.getByRole("button", { name: "Apply", exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: info.outputPath(`refine-${width}.png`) });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await expect(page.locator("#characterHair")).toHaveValue('<img src=x onerror="alert(1)">');
+  await expect(page.locator("#characterName")).toHaveValue("Unsaved traveler");
+  await expect(page.locator("#characterRole")).toHaveValue("Guide");
+  await expect(page.locator('#characterStats [data-character-field="value"]')).toHaveValue("42");
+  await page.locator("#saveCharacter").click();
+  await page.getByRole("button", { name: "Edit Unsaved traveler" }).click();
+  if (width === 390) await page.getByLabel("Section", { exact: true }).selectOption("appearance");
+  else await page.getByRole("button", { name: /^Appearance ·/ }).click();
+  await page.locator("#characterHair").fill("Existing edit");
+  await page.getByRole("button", { name: "Refine with AI" }).click();
+  await page.getByLabel("What should change in Appearance?").fill("Change again");
+  await page.getByRole("button", { name: "Generate", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Apply", exact: true })).toBeVisible();
+  expect(requests[1].content.playableCharacters.find((character: any) => character.id === requests[1].characterId).profile.appearance.hair).toBe("Existing edit");
+  await page.locator("#characterHair").fill("Later local edit");
+  await expect(page.getByRole("button", { name: "Apply", exact: true })).toHaveCount(0);
+  await expect(page.locator("#characterHair")).toHaveValue("Later local edit");
+});
+
+test("world refinement discards a response after navigation or close", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 0, worldCount: 0, campaignCount: 0 });
+  await installLegacyUiFixture(page, fixture);
+  let release!: () => void; let requested = 0;
+  await page.route("**/api/v1/worlds/playable-characters/generate-preview", async route => {
+    const request = route.request().postDataJSON(); requested++;
+    await new Promise<void>(resolve => { release = resolve; });
+    const character = structuredClone(request.content.playableCharacters.find((item: any) => item.id === request.characterId));
+    character.profile.appearance.hair = "Late proposal";
+    await route.fulfill({ json: { character } }).catch(() => {});
+  });
+  await page.goto(`${base}/nexus/index.html#world-library`);
+  await page.locator("#newWorld").click(); await page.locator("#worldTitle").fill("Test world"); await page.locator('[data-world-author-step="character"]').click();
+  await page.locator("#addPlayableCharacter").click(); await page.locator("#characterName").fill("Traveler");
+  await page.locator("#characterRole").fill("Guide"); await page.getByRole("button", { name: "Continue in detailed editor" }).click();
+  await page.getByRole("button", { name: /^Appearance ·/ }).click();
+  await page.getByRole("button", { name: "Refine with AI" }).click(); await page.getByLabel("What should change in Appearance?").fill("Change hair");
+  await page.getByRole("button", { name: "Generate", exact: true }).click(); await expect.poll(() => requested).toBe(1);
+  await page.getByRole("button", { name: /^Identity ·/ }).click(); release();
+  await page.getByRole("button", { name: /^Appearance ·/ }).click();
+  await expect(page.getByRole("button", { name: "Apply", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Refine with AI" }).click(); await page.getByLabel("What should change in Appearance?").fill("Change hair");
+  await page.getByRole("button", { name: "Generate", exact: true }).click(); await expect.poll(() => requested).toBe(2);
+  await page.locator("#characterHair").fill("Later edit while pending"); release();
+  await expect(page.getByRole("button", { name: "Apply", exact: true })).toHaveCount(0);
+  await expect(page.locator("#characterHair")).toHaveValue("Later edit while pending");
+  await page.getByRole("button", { name: "Refine with AI" }).click(); await page.getByLabel("What should change in Appearance?").fill("Change hair");
+  await page.getByRole("button", { name: "Generate", exact: true }).click(); await expect.poll(() => requested).toBe(3);
+  await page.locator("#cancelCharacter").click(); await page.getByRole("button", { name: "Discard edits" }).click(); release();
+  await expect(page.locator("#characterDialog")).toBeHidden();
+});
