@@ -72,7 +72,7 @@ describe("OpenRouter preset metadata discovery", () => {
           slug: "night-shift", name: "Night Shift", status: "active",
           designated_version: {
             id: "version-2", version: 2, system_prompt: "Stay in character.",
-            config: { models: ["openai/gpt-4o"], temperature: 0.7 }
+            config: { models: ["openai/gpt-4o"], temperature: 0.7, provider: { order: null, sort: { by: "price", partition: null } } }
           }
         }
       }), { status: 200 })
@@ -80,7 +80,7 @@ describe("OpenRouter preset metadata discovery", () => {
 
     expect(result).toEqual({
       slug: "night-shift", name: "Night Shift", versionId: "version-2", version: 2,
-      systemPrompt: "Stay in character.", config: { models: ["openai/gpt-4o"], temperature: 0.7 },
+      systemPrompt: "Stay in character.", config: { models: ["openai/gpt-4o"], temperature: 0.7, provider: { sort: { by: "price" } } },
       configHash: expect.stringMatching(/^[a-f0-9]{64}$/)
     });
   });
@@ -136,7 +136,7 @@ describe("OpenRouter preset metadata discovery", () => {
     const detail = (config: unknown) => discoverOpenRouterPreset(profile, "night-shift", transport([new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "x", config } } }), { status: 200 })]));
     await expect(detail({ model: "openai/gpt-4o", models: ["openai/gpt-4o"], temperature: 1, top_p: 0.5, top_k: 20, frequency_penalty: 1, presence_penalty: -1, repetition_penalty: 1.1, min_p: 0.1, top_a: 0.2, seed: 42, max_tokens: 512, max_completion_tokens: 512, provider: { order: ["openai"], only: ["openai"], ignore: ["anthropic"], allow_fallbacks: true, require_parameters: true, data_collection: "allow", quantizations: ["fp16"], enforce_distillable_text: true, preferred_min_throughput: 1, preferred_max_latency: 2, max_price: { prompt: 1, completion: 2 } } })).resolves.toMatchObject({ slug: "night-shift" });
     for (const config of [
-      { temperature: "warm" }, { top_p: 2 }, { top_k: -1 }, { frequency_penalty: Infinity }, { presence_penalty: 3 }, { repetition_penalty: 0 }, { min_p: -0.1 }, { top_a: 2 }, { seed: 1.5 }, { max_tokens: 0 }, { models: [1] }, { provider: { allow_fallbacks: "yes" } }, { provider: { order: [1] } }, { provider: { data_collection: "unknown" } }, { provider: { sort: "unknown" } }, { provider: { order: ["openai"], sort: "price" } }, { provider: { max_price: 1 } }
+      { temperature: "warm" }, { top_p: 2 }, { top_k: -1 }, { frequency_penalty: Infinity }, { presence_penalty: 3 }, { repetition_penalty: 0 }, { min_p: -0.1 }, { top_a: 2 }, { seed: 1.5 }, { max_tokens: 0 }, { models: [1] }, { provider: { allow_fallbacks: "yes" } }, { provider: { order: [1] } }, { provider: { data_collection: "unknown" } }, { provider: { sort: "unknown" } }, { provider: { max_price: 1 } }
     ]) await expect(detail(config)).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported" });
   });
 

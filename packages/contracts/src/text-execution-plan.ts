@@ -16,11 +16,41 @@ export const textExecutionOverridesSchema = z.object({
   conservativeContextWindowTokens: positiveIntegerSchema.max(4_000_000).optional()
 }).strict();
 
+const providerSortSchema = z.enum(["price", "throughput", "latency", "exacto"]);
+const providerPerformancePreferenceSchema = z.union([
+  finiteNumberSchema.min(0),
+  z.object({
+    p50: finiteNumberSchema.min(0).optional(), p75: finiteNumberSchema.min(0).optional(),
+    p90: finiteNumberSchema.min(0).optional(), p99: finiteNumberSchema.min(0).optional()
+  }).strict()
+]);
+// Preserve decimal strings rather than rounding price limits through Number.
+const providerPriceSchema = z.union([
+  finiteNumberSchema.min(0),
+  z.string().max(128).regex(/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/u)
+    .refine((value) => Number.isFinite(Number(value)))
+]);
+
+/** Normalized routing values; preset discovery removes documented nullable defaults. */
 export const providerRoutingPolicySchema = z.object({
-  order: z.array(z.string().trim().min(1)).max(64).optional(), only: z.array(z.string().trim().min(1)).max(64).optional(), ignore: z.array(z.string().trim().min(1)).max(64).optional(), allow_fallbacks: z.boolean().optional(), require_parameters: z.boolean().optional(), data_collection: z.enum(["allow", "deny"]).optional(), sort: z.enum(["price", "throughput", "latency"]).optional(), quantizations: z.array(z.string().trim().min(1)).max(64).optional(), enforce_distillable_text: z.boolean().optional(), preferred_min_throughput: finiteNumberSchema.min(0).optional(), preferred_max_latency: finiteNumberSchema.min(0).optional(), max_price: z.object({ prompt: finiteNumberSchema.min(0).optional(), completion: finiteNumberSchema.min(0).optional(), image: finiteNumberSchema.min(0).optional(), request: finiteNumberSchema.min(0).optional() }).strict().refine((value) => Object.keys(value).length > 0).optional(), zdr: z.boolean().optional()
-}).strict().superRefine((value, context) => {
-  if (value.order && value.sort) context.addIssue({ code: "custom", path: ["sort"], message: "provider.sort cannot be combined with provider.order." });
-});
+  order: z.array(z.string().trim().min(1)).max(64).optional(),
+  only: z.array(z.string().trim().min(1)).max(64).optional(),
+  ignore: z.array(z.string().trim().min(1)).max(64).optional(),
+  allow_fallbacks: z.boolean().optional(), require_parameters: z.boolean().optional(),
+  data_collection: z.enum(["allow", "deny"]).optional(),
+  sort: z.union([providerSortSchema, z.object({
+    by: providerSortSchema.optional(), partition: z.enum(["model", "none"]).optional()
+  }).strict()]).optional(),
+  quantizations: z.array(z.string().trim().min(1)).max(64).optional(),
+  enforce_distillable_text: z.boolean().optional(),
+  preferred_min_throughput: providerPerformancePreferenceSchema.optional(),
+  preferred_max_latency: providerPerformancePreferenceSchema.optional(),
+  max_price: z.object({
+    prompt: providerPriceSchema.optional(), completion: providerPriceSchema.optional(),
+    image: providerPriceSchema.optional(), request: providerPriceSchema.optional(), audio: providerPriceSchema.optional()
+  }).strict().optional(),
+  zdr: z.boolean().optional()
+}).strict();
 
 export const textRouteCandidateSchema = z.object({ modelId: z.string().trim().min(1).max(500), providerPolicy: providerRoutingPolicySchema, contextWindowTokens: positiveIntegerSchema, maxOutputTokens: positiveIntegerSchema }).strict();
 
