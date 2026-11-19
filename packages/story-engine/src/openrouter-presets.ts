@@ -1,17 +1,17 @@
 import { createHash } from "node:crypto";
 import type { PresetPage, PresetSummary, ResolvedPreset, ProviderPresetDiagnosticCode } from "@infinite-quest/contracts";
+import { providerRoutingPolicySchema } from "../../contracts/src/text-execution-plan.js";
 import { stableStringify } from "../../domain/src/text.js";
 import type { ProviderTransport, ProviderTransportProfile } from "./provider-transport.js";
 
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_PROMPT_LENGTH = 200_000;
 const MAX_MODELS = 32;
-const MAX_PROVIDER_ARRAY = 64;
 const CACHE_PARAMETERS = new Set(["cache_enabled", "cache_ttl_seconds"]);
 const PRESET_PARAMETERS = new Set(["model", "models", "temperature", "top_p", "top_k", "frequency_penalty", "presence_penalty", "repetition_penalty", "min_p", "top_a", "seed", "max_tokens", "max_completion_tokens", "provider"]);
 const PUBLIC_UNSUPPORTED_PRESET_FIELDS = new Set(["tools", "stop", "transforms"]);
-const PROVIDER_PARAMETERS = new Set(["order", "only", "ignore", "allow_fallbacks", "require_parameters", "data_collection", "sort", "quantizations", "enforce_distillable_text", "preferred_min_throughput", "preferred_max_latency", "max_price", "zdr"]);
-const MAX_PRICE_PARAMETERS = new Set(["prompt", "completion", "image", "request"]);
+const PROVIDER_PARAMETERS = new Set(Object.keys(providerRoutingPolicySchema.shape));
+const MAX_PRICE_PARAMETERS = new Set(["prompt", "completion", "image", "request", "audio"]);
 
 type CancellableRequestSignal = Readonly<{
   aborted: boolean;
@@ -125,26 +125,32 @@ function providerConfig(value: unknown): Readonly<Record<string, unknown>> {
   if (!value || typeof value !== "object" || Array.isArray(value)) unsupported("provider");
   const source = value as Record<string, unknown>;
   for (const field of Object.keys(source)) if (!PROVIDER_PARAMETERS.has(field)) unsupported(`provider.${field}`);
-  if (source.order !== undefined && source.sort !== undefined) unsupported("provider.sort");
   const result: Record<string, unknown> = {};
   for (const [field, candidate] of Object.entries(source)) {
-    switch (field) {
-      case "order": case "only": case "ignore": case "quantizations": result[field] = stringList(candidate, `provider.${field}`, MAX_PROVIDER_ARRAY); break;
-      case "allow_fallbacks": case "require_parameters": case "enforce_distillable_text": case "zdr": if (typeof candidate !== "boolean") unsupported(`provider.${field}`); result[field] = candidate; break;
-      case "data_collection": if (candidate !== "allow" && candidate !== "deny") unsupported("provider.data_collection"); result[field] = candidate; break;
-      case "sort": if (candidate !== "price" && candidate !== "throughput" && candidate !== "latency") unsupported("provider.sort"); result[field] = candidate; break;
-      case "preferred_min_throughput": case "preferred_max_latency": result[field] = finiteNumber(candidate, `provider.${field}`, 0); break;
-      case "max_price": {
-        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) unsupported("provider.max_price");
-        const prices = candidate as Record<string, unknown>;
-        if (!Object.keys(prices).length) unsupported("provider.max_price");
-        for (const priceField of Object.keys(prices)) if (!MAX_PRICE_PARAMETERS.has(priceField)) unsupported(`provider.max_price.${priceField}`);
-        result[field] = Object.freeze(Object.fromEntries(Object.entries(prices).map(([priceField, price]) => [priceField, finiteNumber(price, `provider.max_price.${priceField}`, 0)])));
-        break;
-      }
-    }
+    // OpenRouter's optional routing fields use null for cleared UI controls.
+    // max_price is an optional object, but is not nullable in its API schema.
+    if (candidate === null && field !== "max_price") continue;
+    const nullableNestedFields = field === "sort" ? ["by", "partition"]
+      : field === "preferred_min_throughput" || field === "preferred_max_latency" ? ["p50", "p75", "p90", "p99"] : [];
+    result[field] = candidate && typeof candidate === "object" && !Array.isArray(candidate) && nullableNestedFields.length
+      ? Object.fromEntries(Object.entries(candidate).filter(([key, entry]) => entry !== null || !nullableNestedFields.includes(key)))
+      : candidate;
   }
-  return Object.freeze(result);
+  const parsed = providerRoutingPolicySchema.safeParse(result);
+  if (!parsed.success) {
+    const path = parsed.error.issues[0]?.path ?? [];
+    unsupported(path[0] === "max_price" && typeof path[1] === "string"
+      ? `provider.max_price.${path[1]}` : typeof path[0] === "string" ? `provider.${path[0]}` : "provider");
+  }
+  return freezeConfig(parsed.data);
+}
+
+function freezeConfig<T>(value: T): T {
+  if (value && typeof value === "object") {
+    Object.values(value).forEach(freezeConfig);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 /**
@@ -168,7 +174,7 @@ export function validateOpenRouterPresetConfig(value: unknown): Readonly<Record<
       case "repetition_penalty": result[field] = finiteNumber(candidate, field, Number.EPSILON); break;
       case "seed": result[field] = positiveInteger(candidate, field, 0); break;
       case "max_tokens": case "max_completion_tokens": result[field] = positiveInteger(candidate, field); break;
-      case "provider": result[field] = providerConfig(candidate); break;
+      case "provider": if (candidate !== null) result[field] = providerConfig(candidate); break;
     }
   }
   return Object.freeze(result);

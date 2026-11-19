@@ -9,7 +9,7 @@ import {
   publicTextExecutionPlanSummary,
   textExecutionPlanSchema as applicationTextExecutionPlanSchema
 } from "../../packages/application/src/providers/text-execution-plan.js";
-import { textExecutionPlanSchema as contractsTextExecutionPlanSchema } from "../../packages/contracts/src/text-execution-plan.js";
+import { readTextExecutionPlan, textExecutionPlanSchema as contractsTextExecutionPlanSchema } from "../../packages/contracts/src/text-execution-plan.js";
 
 const profile = {
   ownerUserId: "00000000-0000-4000-8000-000000000001",
@@ -153,11 +153,34 @@ describe("preset execution-plan resolution", () => {
     expect(resolved.prompt).toBe("Return the required Story JSON.");
   });
 
-  it("rejects unsupported config and conflicting provider sort/order without silent drops", async () => {
+  it("rejects unsupported config and invalid provider sorting without silent drops", async () => {
     const unsupportedPorts = { resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], stop: ["END"] } })), discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }]) };
     await expect(resolveTextExecutionPlan(input({ ports: unsupportedPorts }))).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "stop" });
     expect(unsupportedPorts.discoverModels).not.toHaveBeenCalled();
-    await expect(resolveTextExecutionPlan(input({ ports: { resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], provider: { order: ["openai"], sort: "price" } } })), discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }]) } }))).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "provider.sort" });
+    await expect(resolveTextExecutionPlan(input({ ports: { resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], provider: { sort: { by: "price", partition: "invalid" } } } })), discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }]) } }))).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "provider.sort" });
+  });
+
+  it.each(["local", "openrouter"])("admits cleared order and advanced sorting through %s routing and frozen-plan reload", async (routing) => {
+    const request = input();
+    const basis = await resolveTextExecutionRouteBasis({ ...request,
+      profile: { ...profile, ...(routing === "openrouter" ? { presetRouting: "openrouter" as const } : {}) },
+      ports: { ...request.ports, resolvePreset: async () => ({ ...preset, config: { ...preset.config,
+        provider: { order: null, sort: { by: "price", partition: "none" },
+          preferred_min_throughput: { p90: 50 }, max_price: { completion: "0.125" } }
+      } }) }
+    });
+    const plan = deriveTextExecutionPlan(JSON.parse(JSON.stringify(basis)), "Write the turn.");
+    const reloaded = readTextExecutionPlan(JSON.parse(JSON.stringify(plan)));
+    expect(reloaded.candidates[0]!.providerPolicy).toEqual(routing === "openrouter" ? {} : {
+      sort: { by: "price", partition: "none" }, preferred_min_throughput: { p90: 50 }, max_price: { completion: "0.125" }
+    });
+    expect(reloaded.candidates[0]!.modelId).toBe(routing === "openrouter" ? "@preset/night-shift" : "openai/gpt-4.1");
+    if (routing === "local") {
+      expect(Object.isFrozen(plan.candidates[0]!.providerPolicy.sort)).toBe(true);
+      const tampered = JSON.parse(JSON.stringify(plan));
+      tampered.candidates[0].providerPolicy.sort.partition = "model";
+      expect(() => readTextExecutionPlan(tampered)).toThrow("hash is invalid");
+    }
   });
 
   it.each([

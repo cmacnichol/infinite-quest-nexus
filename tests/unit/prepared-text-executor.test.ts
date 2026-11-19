@@ -110,12 +110,13 @@ function authority(execute: (request: ProviderRequest) => Promise<ProviderResult
 async function runPresetFixture(options: Readonly<{
   responseCache?: TextExecutionPlan["responseCache"];
   bypassResponseCache?: boolean;
+  providerPolicy?: TextExecutionPlan["candidates"][number]["providerPolicy"];
 }>) {
   const maxOutputTokens = 8_000;
   const routeDraft = {
     version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "review" },
     preset: { slug: "review", versionId: "v1", configHash: hash("preset") },
-    candidates: [{ modelId: "model-a", providerPolicy: { only: ["route-a"] }, contextWindowTokens: 65_536, maxOutputTokens }],
+    candidates: [{ modelId: "model-a", providerPolicy: options.providerPolicy ?? { only: ["route-a"] }, contextWindowTokens: 65_536, maxOutputTokens }],
     presetSystemPrompt: "Review instructions.", parameters: { temperature: 0.2 }, endpointReference: "endpoint-a",
     ...(options.responseCache === undefined ? {} : { responseCache: options.responseCache }),
     credentialReference: "profile-a", profileRevision: "profile-v1", authorityRevision: "authority-v1",
@@ -163,6 +164,19 @@ async function runPresetFixture(options: Readonly<{
 }
 
 describe("prepared text executor stream durability", () => {
+  it("preserves advanced provider routing in the actual prepared transport body", async () => {
+    const { prepared } = await runPresetFixture({ providerPolicy: {
+      only: ["route-a"], sort: { by: "price", partition: "none" },
+      preferred_min_throughput: { p50: 100, p90: 50 }, preferred_max_latency: { p99: 5 },
+      max_price: { prompt: "0.000000000000000001", completion: 2, audio: "0.25" }
+    } });
+    expect(JSON.parse(prepared.body).provider).toEqual({
+      only: ["route-a"], sort: { by: "price", partition: "none" }, require_parameters: true,
+      preferred_min_throughput: { p50: 100, p90: 50 }, preferred_max_latency: { p99: 5 },
+      max_price: { prompt: "0.000000000000000001", completion: 2, audio: "0.25" }
+    });
+  });
+
   it("retains rejected HTTP evidence and records no successful response start", async () => {
     const providerFailure = {
       version: 1 as const, source: "http_error" as const, observedAt: "2026-10-03T12:00:00.000Z",
