@@ -399,3 +399,19 @@ Before an older binary runs, verify shutdown/work termination, selectively recov
 ## Character review and fact correction compatibility
 
 Migration `0134_cast_review_decisions` adds operational review decisions. Roll out readers that understand cast journal format 5 before enabling writers that can persist fact retractions. After format-5 records exist, older readers are not a safe rollback target even if editing is disabled. Retain compatible readers or use a reviewed backup restore; do not run a destructive down-migration against retained correction journals. Operational dismissals are excluded from portable archives and branches; authoritative fact retractions are retained. Pre-journal detail dismissals continue suppressing matching evidence but are not available in the Dismissed/Undo list. See the [acceptance record](../review/character-review-dismissal-and-retraction-acceptance.md) for verification and limits.
+
+## OpenRouter routing format compatibility
+
+Migration `0135_provider_routing_formats` expands the SQL routing validator for
+object sorting, percentile preferences, numeric-string and audio prices, and
+combined Order/Sort. It is required before creating AI-refined illustration
+children from these preset snapshots. The normal migrator applies it; deploy
+compatible API and worker readers together. It changes validation functions
+only, without rewriting existing snapshots or the baseline migration.
+
+Retain the expanded validator on rollback. The down migration deliberately
+refuses to restore a validator that rejects retained snapshots. Older binaries
+also cannot read these routing shapes: stop intake, drain active work, and verify
+the rollback reader against retained jobs and archives; retain compatible readers
+if necessary. Do not rewrite frozen plans or hashes to force a downgrade. See the
+[routing compatibility evidence](../review/native-openrouter-presets/routing-format-compatibility.md).

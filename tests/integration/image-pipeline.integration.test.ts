@@ -41,6 +41,7 @@ import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider
 import { deriveTextExecutionPlan, textExecutionPlanHash, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import { sha256Hex } from "../../packages/contracts/src/hash.js";
 import { createWorkerProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
+import { prepareCampaignIllustrationTextExecution } from "../../services/runtime/src/illustration-segment-job-adapter.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -48,6 +49,11 @@ const secureGeneratedAssetsIt = it.runIf(supportsSecureGeneratedArchiveStaging()
 const credentialSecret = "synthetic-image-integration-secret";
 const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 let imageArtifactPayloads = [tinyPng];
+const advancedIllustrationRouting = {
+  order: ["synthetic-route"], sort: { by: "price", partition: "none" },
+  preferred_min_throughput: { p50: 100, p90: 50 }, preferred_max_latency: { p75: 2, p99: 5 },
+  max_price: { prompt: "0.000000000000000001", completion: "1e-3", audio: "0.25" }
+};
 
 function fullyShapedIllustrationTextSnapshot(ownerUserId: string, providerProfileId: string, edgeNumbers = false) {
   const hash = "a".repeat(64);
@@ -184,6 +190,15 @@ integration("independent illustration pipeline", () => {
           slug: "composed-illustration", name: "Composed illustration", status: "active",
           designated_version: { id: "composed-illustration-v1", version: 1,
             system_prompt: "PRIVATE_COMPOSED_ILLUSTRATION_PROMPT", config: { model: "synthetic-text-model", temperature: 0.21 } }
+        } }));
+        return;
+      }
+      if (request.method === "GET" && request.url?.endsWith("/presets/advanced-illustration")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "advanced-illustration", name: "Advanced illustration", status: "active",
+          designated_version: { id: "advanced-illustration-v1", version: 1, system_prompt: "Refine fiction only.",
+            config: { model: "synthetic-text-model", provider: advancedIllustrationRouting } }
         } }));
         return;
       }
@@ -2649,6 +2664,53 @@ integration("independent illustration pipeline", () => {
       nativeRefinementReportedCost = null;
       nativeRefinementReturnedModel = null;
     }
+  });
+
+  it("creates an illustration child from a parent's advanced-routing preset snapshot", async () => {
+    const imported = await campaign();
+    const ownerUserId = await initialOwnerId(pool);
+    const textProviderId = (await createProvider(pool, {
+      name: `Advanced illustration ${crypto.randomUUID()}`, providerType: "openrouter", providerRole: "text", baseUrl,
+      defaultModel: "@preset/advanced-illustration", textSelection: { kind: "openrouter_preset", slug: "advanced-illustration" },
+      contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.3, enabled: true, configuration: {}
+    }, credentialSecret)).id;
+    await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [imported.campaignId, textProviderId]);
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      sourcePolicy: "generate_only", providerProfileId: imageProviderId, model: "synthetic-image-model",
+      segmentPromptMode: "ai_refined", segmentWordCount: 100, imagesPerSegment: 1
+    }));
+    const graph = createWorkerProviderApplicationComposition(pool, {
+      credentialSecret, transport: currentIntegrationProviderTransport(), nativeTextExecutionPlanAdmission: true
+    });
+    const snapshot = await prepareCampaignIllustrationTextExecution(pool, ownerUserId, imported.campaignId, graph.illustration);
+    expect(snapshot).toMatchObject({ version: 3, state: "prepared", routeBasis: {
+      selection: { kind: "openrouter_preset", slug: "advanced-illustration" },
+      candidates: [expect.objectContaining({ providerPolicy: advancedIllustrationRouting })]
+    } });
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Cross the bridge.", providerProfileId: textProviderId, model: "historical-concrete-story-model",
+      idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    await pool.query(
+      `UPDATE generation_jobs SET status='generating',
+         streaming_segments_state=jsonb_build_object('illustrationTextExecutionSnapshot',$2::jsonb) WHERE id=$1`,
+      [generation.id, JSON.stringify(snapshot)]
+    );
+    const before = await pool.query("SELECT id,narration FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [imported.campaignId]);
+    const setId = await createProvisionalSet(pool, ownerUserId, imported.campaignId, generation.id);
+    expect(setId).toEqual(expect.any(String));
+    const config = await loadConfig(pool, ownerUserId, imported.campaignId);
+    const text = "A lantern shines above the quiet stone bridge.";
+    const segment = { ordinal: 0, startOffset: 0, endOffset: text.length, startWord: 0, endWord: 9, wordCount: 9, text };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(createNativeProvisionalSegment(pool, ownerUserId, imported.campaignId, generation.id,
+        setId!, segment, config, graph.illustration, undefined, snapshot)).resolves.toBe(true);
+    }
+    const children = await pool.query(
+      "SELECT status,text_plan_protocol,text_execution_snapshot,turn_id FROM illustration_prompt_jobs WHERE generation_job_id=$1", [generation.id]
+    );
+    expect(children.rows).toEqual([{ status: "queued", text_plan_protocol: 2, text_execution_snapshot: snapshot, turn_id: null }]);
+    expect((await pool.query("SELECT id,narration FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [imported.campaignId])).rows).toEqual(before.rows);
   });
 
   it("promotes provisional native plans and reconciles final segments with their frozen snapshot", async () => {

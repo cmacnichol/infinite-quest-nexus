@@ -31,10 +31,16 @@ passthrough. Unknown fields, provider-specific `options`, tools, stop sequences
 and transforms remain rejected. Existing bounds and finite-number validation
 remain in force. No prompts, credentials or private campaign fixtures are added.
 
-No database migration or prompt-protocol change is needed. Deploy compatible
-API and worker binaries together. Older binaries cannot read newly frozen
-advanced routing shapes; drain jobs using those shapes before rollback. Existing
-plans are not rewritten, and their hashes remain stable. This work does not
+Migration `0135_provider_routing_formats` updates the SQL routing validator used
+by the illustration snapshot fence. Without it, valid advanced routing in an
+AI-refined illustration snapshot fails child-job insertion. The forward migration
+accepts the same normalized shapes, retains strict key/type checks, and does not
+rewrite the baseline, existing plans or their hashes. No prompt-protocol change
+is needed. Apply the migration and deploy compatible API and worker binaries
+together. Keep the expanded validator on rollback; its down migration refuses
+to narrow validation against persisted snapshots. Older binaries cannot read
+newly frozen advanced routing shapes; retain compatible readers for those jobs
+and archives. This work does not
 diagnose the separate HTTP-200 streaming error or deploy to production.
 
 Sources checked November 18, 2026:
@@ -57,6 +63,13 @@ Verification on Windows:
   `preset-generation-workflow`, using the dedicated integration configuration
   and isolated per-file databases. This covers rejection non-mutation and
   owner/campaign boundaries with deterministic providers.
+- Migration, routing parity and illustration pipeline PostgreSQL regressions: 119 passed,
+  14 platform-specific skips on Windows. The upgrade test applies 0133/0134 first,
+  proves the old validator rejects advanced routing, then applies 0135 and checks
+  shared-schema parity and migration idempotence. A real preset resolves into a
+  parent snapshot and inserts exactly one protocol-2 illustration child through
+  the adapter on repeated creation, without changing accepted turns. Before the
+  migration, that regression reproduced the snapshot trigger error.
 - Root TypeScript check, TypeScript build compilation, repository boundary and
   data-safety checks, and `git diff --check` passed.
 - Independent review: no actionable findings.
