@@ -109,7 +109,8 @@ const fieldCues: Record<CastField, RegExp> = {
   "state.clothing": /\b(?:wears?|wore|wearing|clothes?|coat|cloak|shirt|dress|boots?|robe|armor|armour)\b/iu
 };
 const instructions = /\b(?:ignore (?:all |previous |prior )?instructions|system prompt|edit another campaign|override (?:the )?(?:system|developer))\b/iu;
-const prospective = /\b(?:hopes? to meet|plans? to meet|imagines?|imagined|hypothetical|if\b)\b/iu;
+// "as if" is a simile describing an actual event, not a hypothetical presence.
+const prospective = /\b(?:hopes? to meet|plans? to meet|imagines?|imagined|hypothetical|(?<!\bas\s+)if\b)\b/iu;
 const speech = /[“”"]|\b(?:says?|said|claims?|claimed|rumou?r|alleges?|believes?)\b/iu;
 /** Review can resolve attribution, but cannot turn unsafe or unsupported source into a fact. */
 export function canAcceptReviewedCastObservation(source: CastDiscoverySource, narration: string,

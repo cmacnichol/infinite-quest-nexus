@@ -223,6 +223,17 @@ describe("cast discovery evidence boundary", () => {
     const intention = validateCastDiscovery({ source: source(planned), output: { version: 1, characters: [candidate({ observations: [],
       identityEvidence: [{ paragraphId: "p1", quote: planned }] })] }, knownCharacters: [] });
     expect(intention.accepted).toEqual([]); expect(intention.unresolved[0]?.code).toBe("non_actual_identity");
+    const conditional = "If Mara arrives, Iven will open the gate.";
+    expect(validateCastDiscovery({ source: source(conditional), output: { version: 1, characters: [candidate({ observations: [],
+      identityEvidence: [{ paragraphId: "p1", quote: conditional }] })] }, knownCharacters: [] }).unresolved[0]?.code).toBe("non_actual_identity");
+  });
+  it("treats an 'as if' simile as actual presence when a reviewer attaches the identity", () => {
+    const person = known("44444444-4444-4444-8444-444444444444");
+    const quote = "Mara, who had materialized as if by teleportation.";
+    const narration = `Iven waited by the gate along with ${quote}`;
+    const result = resolveCastDiscoveryEvidence({ source: source(narration), knownCharacters: [person], characterId: person.id,
+      candidate: candidate({ observations: [], identityEvidence: [{ paragraphId: "p1", quote }], existingCharacterId: person.id }) });
+    expect(result.candidate?.existingCharacterId).toBe(person.id);
   });
   it("requires a unique supported identity match and never merges on a name alone", () => {
     const person = known("44444444-4444-4444-8444-444444444444");
